@@ -14,8 +14,6 @@ provenance:
   merge_commit: ba7c57c
 ---
 
-# Worktree Merge Commit To Main
-
 ## Problem
 
 `main` may already be checked out in another worktree, and that worktree may be dirty or far behind. A direct checkout from the feature worktree fails because Git prevents one branch from being checked out by multiple worktrees.

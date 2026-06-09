@@ -1,0 +1,44 @@
+# Rust formatting configuration for Claude-in-a-Box
+
+# Edition and versioning
+edition = "2021"
+version = "Two"
+
+# General formatting
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+
+# Function and method formatting
+fn_params_layout = "Tall"
+fn_single_line = false
+where_single_line = false
+
+# Imports and ordering
+imports_granularity = "Module"
+imports_layout = "Mixed"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+reorder_modules = true
+
+# Struct and enum formatting
+struct_field_align_threshold = 20
+enum_discrim_align_threshold = 20
+struct_lit_single_line = true
+
+# Chain formatting
+chain_width = 80
+single_line_if_else_max_width = 50
+
+# Comments
+comment_width = 80
+wrap_comments = true
+format_code_in_doc_comments = true
+normalize_comments = true
+normalize_doc_attributes = true
+
+# Spacing
+blank_lines_upper_bound = 1
+blank_lines_lower_bound = 0

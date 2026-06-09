@@ -39,6 +39,7 @@ pub enum SidebarItem {
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
+    Witr,      // Process causality (witr plugin)
     Skills,    // Browse per-agent skills
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
@@ -57,6 +58,7 @@ impl SidebarItem {
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
+            Self::Witr => "🌳",
             Self::Skills => "🧠",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
@@ -75,6 +77,7 @@ impl SidebarItem {
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
+            Self::Witr => "Witr",
             Self::Skills => "Skills",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
@@ -93,6 +96,7 @@ impl SidebarItem {
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
+            Self::Witr => "Process Causality",
             Self::Skills => "Per-Agent Skills",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
@@ -107,10 +111,11 @@ impl SidebarItem {
             Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
-            Self::Inbox => "I",
+            Self::Inbox => "b",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
+            Self::Witr => "w",
             Self::Skills => "k",
             Self::Changelog => "v",
             Self::Setup => "S",
@@ -129,6 +134,7 @@ impl SidebarItem {
             Self::Recovery,
             Self::Logs,
             Self::Stats,
+            Self::Witr,
             Self::Skills,
             Self::Changelog,
             Self::Setup,
@@ -501,12 +507,15 @@ mod tests {
         assert!(inbox_pos > 0, "Inbox shouldn't be first sidebar item");
         assert_eq!(SidebarItem::Inbox.icon(), "📥");
         assert_eq!(SidebarItem::Inbox.label(), "Inbox");
-        assert_eq!(SidebarItem::Inbox.shortcut(), "I");
+        assert_eq!(SidebarItem::Inbox.shortcut(), "b");
         assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
-        // 'I' must not collide with any other tile shortcut.
+        // 'b' must not collide with any other tile shortcut. Picked
+        // over 'I' (Shift+i) to avoid the case-pair confusion with
+        // Stats ('i') — both opening different screens off the same
+        // letter was a UX bug.
         let collisions =
-            all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I").count();
-        assert_eq!(collisions, 0, "sidebar shortcut 'I' collides");
+            all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b").count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
     }
 
     #[test]

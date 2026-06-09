@@ -17,6 +17,7 @@ components:
 
   skills:
     - agent-ops
+    - agentmail
     - ats-resume-matcher
     - attach-agent-worktree
     - autonomous-loops
@@ -26,7 +27,6 @@ components:
     - cleanup-agent-worktree
     - coding-agent
     - commit
-    - compound-docs
     - cost-aware-pipeline
     - critique
     - crypto-research
@@ -43,7 +43,6 @@ components:
     - frontend-slides
     - gh-issue
     - git-history-surgery
-    - global-learnings
     - handover
     - health-check
     - implement
@@ -91,6 +90,7 @@ components:
     - stitch-design
     - stitch-loop
     - swarm-agent-troubleshooting
+    - swarm-attach-watchdog
     - swarm-create
     - swarm-inbox
     - swarm-join
@@ -98,6 +98,7 @@ components:
     - swarm-shutdown
     - swarm-status
     - sync-learnings
+    - test-ainb
     - test-driven-development
     - tmux-message
     - tmux-monitor

@@ -1,6 +1,6 @@
 ---
 name: media-processing
-description: Process multimedia files with FFmpeg (video/audio encoding, conversion, streaming, filtering, hardware acceleration) and ImageMagick (image manipulation, format conversion, batch processing, effects, composition). Use when converting media formats, encoding videos with specific codecs (H.264, H.265, VP9), resizing/cropping images, extracting audio from video, applying filters and effects, optimizing file sizes, creating streaming manifests (HLS/DASH), generating thumbnails, batch processing images, creating composite images, or implementing media processing pipelines. Supports 100+ formats, hardware acceleration (NVENC, QSV), and complex filtergraphs.
+description: Process multimedia files with FFmpeg (video/audio encoding, conversion, streaming, filtering, hardware acceleration), ImageMagick (image manipulation, format conversion, batch processing, effects, composition), and vhs (headless terminal recording for CLI/TUI screenshots, GIFs, and MP4 demos, plus tmux-driven and asciinema capture of live sessions). Use when converting media formats, encoding videos with specific codecs (H.264, H.265, VP9), resizing/cropping images, extracting audio from video, applying filters and effects, optimizing file sizes, creating streaming manifests (HLS/DASH), generating thumbnails, batch processing images, creating composite images, capturing reproducible terminal/TUI/CLI screenshots or demos, recording a CLI command flow or live tmux session (vhs `.tape`, tmux capture-pane, asciinema), or implementing media processing pipelines. Supports 100+ formats, hardware acceleration (NVENC, QSV), and complex filtergraphs.
 license: MIT
 ---
 
@@ -21,6 +21,7 @@ Use when:
 - Optimizing file sizes and quality
 - Applying filters and effects
 - Creating composite images or videos
+- Capturing reproducible terminal / TUI screenshots, GIFs, or demo MP4s for docs / README assets
 
 ## Tool Selection Guide
 
@@ -46,6 +47,15 @@ Use ImageMagick for:
 - Color adjustments, filters
 - Thumbnail generation
 
+### vhs: Terminal / TUI Recording
+Use vhs for:
+- Reproducible terminal screenshots (PNG) for docs / README
+- Animated GIFs / MP4s / WebMs of TUI flows
+- Headless capture (no real terminal, no display server — CI-friendly)
+- Scripted keystroke sequences (Type / Tab / Enter / Escape / Ctrl+c / Sleep)
+- Theme-pinned, dimension-pinned output that's identical across machines
+- **Not** for: generic screen capture, recording arbitrary GUI apps, or anything outside a PTY
+
 ### Decision Matrix
 
 | Task | Tool | Why |
@@ -58,17 +68,22 @@ Use ImageMagick for:
 | GIF creation | FFmpeg or ImageMagick | FFmpeg for video source, ImageMagick for images |
 | Streaming | FFmpeg | Live streaming protocols |
 | Image effects | ImageMagick | Rich filter library |
+| TUI screenshot / GIF | vhs | Scripted PTY capture, theme-pinned, byte-deterministic |
+| Demo video of a CLI flow | vhs | `.tape` file as source of truth — re-runnable, diffable |
 
 ## Installation
 
 ### macOS
 ```bash
-brew install ffmpeg imagemagick
+brew install ffmpeg imagemagick vhs
 ```
 
 ### Ubuntu/Debian
 ```bash
 sudo apt-get install ffmpeg imagemagick
+# vhs — install via Go or release tarball, no apt package on most distros
+go install github.com/charmbracelet/vhs@latest
+# or download from https://github.com/charmbracelet/vhs/releases
 ```
 
 ### Windows
@@ -80,6 +95,7 @@ winget install ImageMagick.ImageMagick
 # Or download binaries
 # FFmpeg: https://ffmpeg.org/download.html
 # ImageMagick: https://imagemagick.org/script/download.php
+# vhs:        https://github.com/charmbracelet/vhs/releases
 ```
 
 ### Verify Installation
@@ -89,6 +105,7 @@ ffprobe -version
 magick -version
 # or
 convert -version
+vhs --version       # only if you'll be capturing terminal output
 ```
 
 ## Quick Start Examples
@@ -237,6 +254,125 @@ ffmpeg -y -loglevel error \
 - `format=yuv420p` — without it, players like QuickTime refuse to open.
 - `fps=30` keeps the output cadence smooth even when the input is 1/2 fps.
 
+## Terminal Recording with vhs
+
+[vhs](https://github.com/charmbracelet/vhs) (Charm) records a scripted terminal session inside its own virtual PTY and emits a PNG, GIF, MP4, or WebM. No real terminal, no display server, no screen-recording fragility — the `.tape` file is the source of truth, and re-running it yields the same output every time (modulo what the recorded command itself produces).
+
+**Use vhs for:** TUI screenshots in your README/docs, animated demo GIFs of a CLI flow, regression-style snapshots.
+
+**Don't use vhs for:** generic screen capture, GUI app recording, anything where the output isn't text-in-a-terminal.
+
+> **Recording a CLI command flow, a TUI without the cold-paint loader, or driving/asserting a live binary via tmux (or asciinema for a genuinely interactive session)?** Read [`references/terminal-recording.md`](references/terminal-recording.md) — `.tape` recipes for CLI and TUI (`Hide`/`Show`), the tmux `send-keys`/`capture-pane` driver, asciinema, and the field-tested traps (quoted `Output` paths, `send-keys` needs a separate `Enter`, env-isolation, mtime gaps). The minimal recipes below are a quick start.
+
+### Minimal `.tape` — single screenshot
+
+```tape
+# home.tape
+Output home.png
+
+Set Theme "Catppuccin Mocha"
+Set FontSize 16
+Set Width 1600
+Set Height 900
+Set Padding 20
+Set Shell bash
+
+Type "./target/debug/myapp tui"
+Enter
+
+# vhs Sleep is wall-clock — under-sleeping captures a loading state silently.
+# Give a generous margin for cold-start scans (workspace, cache, network).
+Sleep 30s
+
+Screenshot home.png
+
+Ctrl+c
+Sleep 200ms
+```
+
+Run it:
+
+```bash
+vhs home.tape       # writes home.png
+```
+
+### Animated GIF — keystroke flow
+
+```tape
+# demo.tape
+Output demo.gif
+
+Set Theme "Catppuccin Mocha"
+Set FontSize 16
+Set Width 1600
+Set Height 900
+Set Padding 20
+
+Type "./myapp"
+Enter
+Sleep 2s
+
+# Navigate the TUI — single nav keys take NO Enter.
+Type "j"
+Sleep 500ms
+Type "j"
+Sleep 500ms
+Tab
+Sleep 1s
+
+# Enter as a separate token only when committing a shell line.
+Type "q"
+Sleep 500ms
+```
+
+### Real `$HOME` vs seeded fixture
+
+Two legitimate modes — pick one per tape and document which:
+
+```tape
+# Mode A: real $HOME — authentic state, point-in-time snapshot of your machine
+# (good for personal-doc screenshots, README hero shots)
+Env AINB_DISABLE_PLUGINS "1"
+Type "exec ./target/debug/myapp tui"
+Enter
+Sleep 75s        # cold scan on a populated $HOME can take ~30-60s
+
+# Mode B: seeded fixture — reproducible across machines, CI-friendly
+# (good for tutorials, regression baselines)
+Env HOME "/tmp/myapp-screenshot-home"
+Type "./scripts/seed-and-run.sh"
+Enter
+Sleep 8s         # tiny seeded dataset, fast settle
+```
+
+### Pitfalls (load-bearing)
+
+- **`Sleep` is real wall-clock.** Under-sleeping silently captures a loading screen. When your binary does a heavy cold scan, time it once in a real tmux session and add ~30% margin to your sleep budget.
+- **`Type` does not press Enter.** Append `Enter` as a separate directive only when committing a shell line. Single-char TUI nav keys (`j`, `q`, `i`, etc.) take NO Enter.
+- **Theme names must match vhs's bundled list exactly** and stay quoted: `Set Theme "Catppuccin Mocha"`, not `Set Theme catppuccin-mocha`.
+- **`Width` / `Height` are pixels, not cells.** `FontSize` drives effective columns × rows; a 1600×900 frame at FontSize 16 yields roughly 160 cols × 35 rows on most fonts.
+- **`exec` your binary** to avoid leaving the wrapping shell prompt in the recording. `Type "exec ./bin"` instead of `Type "./bin"` makes the shell get replaced by your process.
+- **`Env HOME ...` does NOT inherit `~/.config` etc.** If you point at a fresh dir, seed it first; if you point at the real `$HOME`, accept that the screenshot is per-contributor.
+- **First-time `vhs` install on macOS** pulls `ttyd` + `ffmpeg` as dependencies — be patient on the first `brew install vhs`.
+
+### Combine with the existing skill
+
+vhs is just an output node — once you have a `.png` / `.gif` / `.mp4`, the rest of this skill kicks in:
+
+```bash
+# 1. Record the TUI to a GIF.
+vhs demo.tape                                          # → demo.gif
+
+# 2. Convert to MP4 for a README that doesn't auto-play GIFs.
+ffmpeg -i demo.gif -movflags +faststart -pix_fmt yuv420p demo.mp4
+
+# 3. Take a still frame for a thumbnail.
+ffmpeg -i demo.mp4 -ss 00:00:02 -vframes 1 thumb.png
+
+# 4. Side-by-side with a "before" screenshot using the Incident Composite recipe.
+magick before.png demo-thumb.png +append composite.png
+```
+
 ## Advanced Techniques
 
 ### Multi-Pass Video Encoding
@@ -335,6 +471,8 @@ Detailed guides in `references/`:
 - **imagemagick-editing.md** - Format conversion, effects, transformations
 - **imagemagick-batch.md** - Batch processing, mogrify, parallel operations
 - **format-compatibility.md** - Format support, codec recommendations
+
+For vhs `.tape` syntax beyond the patterns above, see the upstream reference: https://github.com/charmbracelet/vhs#vhs-command-reference
 
 ## Common Parameters
 

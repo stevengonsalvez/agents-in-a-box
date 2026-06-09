@@ -51,9 +51,10 @@ pub enum AppEvent {
     RestartSession,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
-    OpenInEditor,          // Open selected session's workspace in preferred editor
-    OpenQuickShell,        // Open shell in selected workspace/session directory
-    CleanupOrphaned,       // Clean up orphaned containers
+    ResumeSelectedSessions(String), // Resume all multi-selected Stopped interactive sessions (carries trigger key)
+    OpenInEditor,                   // Open selected session's workspace in preferred editor
+    OpenQuickShell,                 // Open shell in selected workspace/session directory
+    CleanupOrphaned,                // Clean up orphaned containers
     SwitchToLogs,
     SwitchToTerminal,
     GoToTop,
@@ -91,6 +92,7 @@ pub enum AppEvent {
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
     // host-level Esc handler for the `Creating` step.
     NewSessionCancel,
+    PickRepoPaste(String), // Append bracketed-paste text to the repo-picker filter (Cmd+V)
     // Notification events
     ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
@@ -151,6 +153,17 @@ pub enum AppEvent {
     GitViewToggleFolder, // Toggle folder expand/collapse
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
+    // Code Review surface events (Review tab)
+    GitReviewToggleCollapse, // Space/Enter — toggle folder or file's diff block
+    GitReviewExpandContext,  // z — reveal more context at the nearest gap
+    GitReviewNextHunk,       // n — jump to next hunk
+    GitReviewPrevHunk,       // N — jump to previous hunk
+    GitReviewNextReviewFile, // ] — select next file
+    GitReviewPrevReviewFile, // [ — select previous file
+    GitReviewSidebarUp,      // ↑ — move sidebar tree selection up
+    GitReviewSidebarDown,    // ↓ — move sidebar tree selection down
+    GitReviewExpandAllFolders, // e — expand all folders
+    GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
     AttachTmuxSession, // Attach to tmux session
     DetachTmuxSession, // Detach from tmux session
@@ -194,6 +207,7 @@ pub enum AppEvent {
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
+    GoToWitr,                // Navigate to the witr (process causality) plugin screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
@@ -253,6 +267,13 @@ pub enum AppEvent {
     ConfigPopupCancel,          // Cancel popup (Esc)
     ConfigPopupInputChar(char), // Input character in text/number input
     ConfigPopupBackspace,       // Backspace in text/number input
+    ConfigPopupPaste(String),   // Insert clipboard text at cursor (bracketed paste)
+    ConfigPopupPasteClipboard,  // Read OS clipboard and insert (Ctrl+V; no bracketed paste needed)
+    ConfigPopupDelete,          // Forward-delete char under cursor (Delete)
+    ConfigPopupCursorLeft,      // Move cursor left in text input
+    ConfigPopupCursorRight,     // Move cursor right in text input
+    ConfigPopupCursorHome,      // Move cursor to start (Home)
+    ConfigPopupCursorEnd,       // Move cursor to end (End)
     // Log history viewer events
     LogHistoryBack,          // Return to home screen (Esc)
     LogHistoryNextSession,   // Navigate to next session
@@ -352,6 +373,9 @@ pub enum AppEvent {
     ConfigureLaunch(crate::components::new_session::configure::LaunchSpec),
     ConfigureBack,              // Esc on Configure → return to PickRepo
     ConfigureOpenPresetManager, // ^P stub until Phase 7 polish
+    /// Enter on the Branch row's Source segment → seed the base-branch
+    /// popup from cached refs + kick the background fetch refresh.
+    ConfigureOpenBranchPicker,
 }
 
 /// Translate a `RepoSource` variant into the `(SourceType, source_string)`
@@ -384,7 +408,7 @@ fn source_provenance(
 /// Compute a stable display label for a `RepoSource` — drives the Configure
 /// screen's title bar and the persistence key in `session-defaults.yaml`.
 /// Phase 5 (new-session redesign).
-fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
+pub fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
     use crate::git::repo_source::RepoSource;
     match source {
         RepoSource::LocalPath(p) => p
@@ -404,6 +428,82 @@ fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
             host_part.split('/').next().unwrap_or(host_part).to_string()
         }
         RepoSource::Filter(s) => s.clone(),
+    }
+}
+
+/// Resolve the repo-picker's local candidate paths.
+///
+/// Prefers the `WorkspaceScanner` cache, filtered to directories that still
+/// exist so a repo deleted or moved since the last scan cannot appear as a
+/// selectable local-scan row. (Favorite and recent rows are built from
+/// separate stores by `build_rows` and are not existence-checked here.)
+/// Falls back to active-session workspace paths when no cache exists yet
+/// (first run) or when every cached entry has been filtered out.
+fn picker_local_paths(
+    cache: Option<crate::git::RepositoryCache>,
+    workspaces: &[crate::models::Workspace],
+) -> Vec<std::path::PathBuf> {
+    let cached_paths: Vec<std::path::PathBuf> = cache
+        .map(|c| c.repositories.into_iter().filter(|r| r.path.is_dir()).map(|r| r.path).collect())
+        .unwrap_or_default();
+    // An empty filtered cache (no cache file yet, or every cached repo has
+    // been deleted/moved) falls back to active-session workspaces rather than
+    // leaving New Session with no local rows.
+    if cached_paths.is_empty() {
+        workspaces.iter().map(|w| w.path.clone()).collect()
+    } else {
+        cached_paths
+    }
+}
+
+#[cfg(test)]
+mod picker_local_paths_tests {
+    use super::picker_local_paths;
+    use crate::git::RepositoryCache;
+    use crate::git::workspace_scanner::CachedRepository;
+    use crate::models::Workspace;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn cache_with(paths: Vec<PathBuf>) -> RepositoryCache {
+        RepositoryCache {
+            version: 1,
+            last_scan: chrono::Utc::now(),
+            scan_paths: Vec::new(),
+            scan_paths_mtime: HashMap::new(),
+            repositories: paths
+                .into_iter()
+                .map(|p| CachedRepository {
+                    name: p.file_name().and_then(|n| n.to_str()).unwrap_or("repo").to_string(),
+                    path: p,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn keeps_only_cache_entries_whose_dir_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().to_path_buf();
+        let gone = real.join("gone");
+        let out = picker_local_paths(Some(cache_with(vec![real.clone(), gone])), &[]);
+        assert_eq!(out, vec![real]);
+    }
+
+    #[test]
+    fn falls_back_to_workspace_paths_when_cache_absent() {
+        let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
+        assert_eq!(picker_local_paths(None, &ws), vec![PathBuf::from("/ws/p")]);
+    }
+
+    #[test]
+    fn falls_back_to_workspace_paths_when_cache_filters_to_empty() {
+        // Cache present but every entry filtered out (here: empty) -> fall back.
+        let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
+        assert_eq!(
+            picker_local_paths(Some(cache_with(vec![])), &ws),
+            vec![PathBuf::from("/ws/p")]
+        );
     }
 }
 
@@ -578,7 +678,31 @@ impl EventHandler {
     /// Configure prompt textarea. Both own their own paste handling via the
     /// component-local `handle_key` arms, so paste events never need to be
     /// dispatched at the host event-router level.
-    pub fn handle_paste_event(_text: String, _state: &AppState) -> Option<AppEvent> {
+    ///
+    /// The Config screen text popups (e.g. Default Workspace) are the
+    /// exception — they live behind the host router, so a bracketed paste
+    /// has to be forwarded here or it gets dropped silently (the bug where
+    /// you couldn't paste a path into the workspace folder field).
+    pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
+        if state.config_popup_state.is_text_entry() {
+            return Some(AppEvent::ConfigPopupPaste(text));
+        }
+        // New Session repo picker: the filter field accepts pasted
+        // owner/repo, URLs and paths. Like the config popup it lives behind
+        // the host router, so a bracketed paste must be forwarded here or it
+        // is dropped (Cmd+V appeared to do nothing). Gate on the visible
+        // screen too — `new_session_state` can linger after navigating away
+        // (e.g. via the sidebar), and a paste must not leak into a hidden
+        // picker.
+        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+            && state
+                .new_session_state
+                .as_ref()
+                .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
+                .unwrap_or(false);
+        if on_pick_repo {
+            return Some(AppEvent::PickRepoPaste(text));
+        }
         None
     }
 
@@ -1073,7 +1197,12 @@ impl EventHandler {
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // Enter starts every selected resumable session, not just the
+                // highlighted one.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -1092,10 +1221,17 @@ impl EventHandler {
                 }
             }
             KeyCode::Char('r') => {
-                // 'r' resumes a Stopped interactive session; otherwise it falls
-                // back to the existing reauthenticate-credentials shortcut.
+                // 'r' resumes a Stopped interactive session only. It no longer
+                // doubles as the reauthenticate-credentials shortcut — that
+                // moved to 'A' so the menu bar's `r resume` hint matches what
+                // the key actually does (one key, one meaning). Pressing 'r'
+                // on a non-resumable selection is a no-op.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // 'r' resumes every selected resumable session.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("r".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -1107,12 +1243,15 @@ impl EventHandler {
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
-                        Some(AppEvent::ReauthenticateCredentials)
+                        None
                     }
                 } else {
-                    Some(AppEvent::ReauthenticateCredentials)
+                    None
                 }
             }
+            // Re-authenticate agent credentials. Lives on 'A' (was 'r') so the
+            // resume affordance can own 'r' unambiguously. See restart_affordance.
+            KeyCode::Char('A') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {
@@ -1135,6 +1274,11 @@ impl EventHandler {
             KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
             KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
             KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
+            // Inbox is advertised on the session-list menu bar (`b inbox`), so
+            // the key must work in this view too — not only on the home screen
+            // where `handle_home_screen_keys` also binds it. Without this arm
+            // the menu hint pointed at a dead key.
+            KeyCode::Char('b') => Some(AppEvent::GoToInbox),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1252,6 +1396,7 @@ impl EventHandler {
                 ConfigureOutcome::BackToPickRepo => Some(AppEvent::ConfigureBack),
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
                 ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
+                ConfigureOutcome::OpenBranchPicker => Some(AppEvent::ConfigureOpenBranchPicker),
             };
         }
 
@@ -1273,7 +1418,52 @@ impl EventHandler {
                 .unwrap_or(PickRepoOutcome::Stay);
 
             return match outcome {
-                PickRepoOutcome::Stay => None,
+                PickRepoOutcome::Stay => {
+                    // Check if the key handler set git_auth_status to
+                    // Checking (user pressed Enter to retry auth).
+                    use crate::components::new_session::pick_repo::GitAuthStatus;
+                    let needs_recheck = state
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                        .and_then(|p| p.git_auth_status.as_ref())
+                        == Some(&GitAuthStatus::Checking);
+                    if needs_recheck {
+                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                    }
+                    None
+                }
+                PickRepoOutcome::Notice { message, is_error } => {
+                    // Favorite added/removed or a refusal (e.g. starring a repo
+                    // with no remote). Surface it and stay on the picker.
+                    if is_error {
+                        state.add_error_notification(message);
+                    } else {
+                        state.add_info_notification(message);
+                    }
+                    None
+                }
+                PickRepoOutcome::PasteFromClipboard => {
+                    // Ctrl+V on the picker: read the OS clipboard here (app
+                    // layer owns clipboard access) and append to the filter.
+                    match Self::get_clipboard_text() {
+                        Ok(text) => {
+                            if let Some(pick) = state
+                                .new_session_state
+                                .as_mut()
+                                .and_then(|s| s.pick_repo_state.as_mut())
+                            {
+                                pick.append_filter(&text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
+                            state
+                                .add_error_notification(format!("Could not read clipboard: {}", e));
+                        }
+                    }
+                    None
+                }
                 PickRepoOutcome::BackToHome => {
                     // Persist session-defaults at the screen boundary
                     // (finding #3) so arrow/Esc no longer write on every
@@ -1300,64 +1490,39 @@ impl EventHandler {
                     state.current_screen = prev;
                     None
                 }
-                PickRepoOutcome::AdvanceTo(source) | PickRepoOutcome::StartClone(source) => {
-                    // Phase 5: transition into Configure. StartClone for now
-                    // skips the real async clone (Phase 6+ wires it) and
-                    // advances straight in — the tripwires don't depend on
-                    // network I/O. Build `configure_state` from `source` +
-                    // session-defaults, set step = Configure.
-                    //
-                    // The dispatcher (not the UI layer) computes:
-                    //   - the HEAD branch via `git::repo_source::head_branch`
-                    //     (finding #9 — keeps git2 out of components/);
-                    //   - the configured `branch_prefix` (finding #5);
-                    //   - the existing-branch list for collision-disamb
-                    //     (finding #16).
-                    // PickRepo persistence (finding #3): write
-                    // session-defaults ONCE here, not on every arrow keypress.
-                    use crate::components::new_session::configure::ConfigureState;
-                    use crate::config::session_defaults::SessionDefaults;
-                    use crate::git::repo_source::head_branch;
-                    use crate::git::worktree_manager::WorktreeManager;
-                    if let Some(pick) =
-                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
-                    {
-                        let path = SessionDefaults::default_path();
-                        if let Err(err) = pick.defaults.save_to(&path) {
-                            tracing::warn!(error = %err, "PickRepo advance: persist session-defaults failed");
+                PickRepoOutcome::AdvanceTo(source) => {
+                    state.advance_pick_repo_to_configure(source);
+                    None
+                }
+                PickRepoOutcome::StartClone(source) => {
+                    // For GitHub HTTPS / shorthand sources, pre-check auth
+                    // before advancing — git credential prompts hang the TUI.
+                    // Non-GitHub HTTPS (GitLab, self-hosted) is left alone: the
+                    // `gh auth status` probe is GitHub-specific and would put an
+                    // irrelevant failure screen in front of those clones.
+                    use crate::components::new_session::pick_repo::GitAuthStatus;
+                    let needs_auth_check = match &source {
+                        crate::git::repo_source::RepoSource::GithubShorthand { .. } => true,
+                        crate::git::repo_source::RepoSource::HttpsUrl(url) => {
+                            crate::git::repo_source::is_github_host(url)
                         }
-                    }
-                    let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
-                    let label = derive_repo_label(&source);
-                    let branch_source = match &source {
-                        crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
-                        _ => None,
+                        _ => false,
                     };
-                    let branch_prefix = state.app_config.workspace_defaults.branch_prefix.clone();
-                    // Use `list_all_worktrees` (scans by-session symlinks →
-                    // real git branch via head.shorthand()), NOT
-                    // `list_worktrees` which only finds legacy UUID-named
-                    // top-level dirs and misses every modern by-name worktree.
-                    // The latter returned empty → collision never detected
-                    // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let existing_branches: Vec<String> = WorktreeManager::new()
-                        .ok()
-                        .and_then(|m| m.list_all_worktrees().ok())
-                        .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
-                        .unwrap_or_default();
-                    let cfg = ConfigureState::from_pick_repo(
-                        source.clone(),
-                        label,
-                        &defaults,
-                        branch_source,
-                        &branch_prefix,
-                        existing_branches,
-                    );
-                    if let Some(ns) = state.new_session_state.as_mut() {
-                        ns.configure_state = Some(cfg);
-                        ns.step = NewSessionStep::Configure;
+                    if needs_auth_check {
+                        if let Some(pick) = state
+                            .new_session_state
+                            .as_mut()
+                            .and_then(|ns| ns.pick_repo_state.as_mut())
+                        {
+                            pick.git_auth_status = Some(GitAuthStatus::Checking);
+                            pick.pending_clone_source = Some(source);
+                        }
+                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                    } else {
+                        // SSH (key-based auth), local paths, and non-GitHub
+                        // HTTPS remotes skip the GitHub pre-check.
+                        state.advance_pick_repo_to_configure(source);
                     }
-                    tracing::debug!(?source, "PickRepo advance → Configure");
                     None
                 }
             };
@@ -1481,7 +1646,7 @@ impl EventHandler {
                 }
                 OnboardingStep::DependencyCheck => {
                     match key_event.code {
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Right => {
                             // If deps not checked yet, check them; otherwise advance
                             if onboarding_state.dependency_status.is_none() {
                                 Some(AppEvent::OnboardingCheckDeps)
@@ -1501,7 +1666,7 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::Authentication => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
@@ -1510,7 +1675,7 @@ impl EventHandler {
                     _ => None,
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                     KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
@@ -1520,7 +1685,7 @@ impl EventHandler {
                     _ => None,
                 },
                 OnboardingStep::Summary => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingFinish),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
@@ -1592,22 +1757,36 @@ impl EventHandler {
             }
         } else {
             // Normal git view navigation
+            let on_review = state
+                .git_view_state
+                .as_ref()
+                .is_some_and(|g| g.active_tab == crate::components::git_view::GitTab::Review);
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::GitViewBack),
                 KeyCode::Tab => Some(AppEvent::GitViewSwitchTab),
+                KeyCode::Up if on_review => Some(AppEvent::GitReviewSidebarUp),
+                KeyCode::Down if on_review => Some(AppEvent::GitReviewSidebarDown),
+                KeyCode::Char('n') if on_review => Some(AppEvent::GitReviewNextHunk),
+                KeyCode::Char('N') if on_review => Some(AppEvent::GitReviewPrevHunk),
+                KeyCode::Char(']') if on_review => Some(AppEvent::GitReviewNextReviewFile),
+                KeyCode::Char('[') if on_review => Some(AppEvent::GitReviewPrevReviewFile),
+                KeyCode::Char(' ') if on_review => Some(AppEvent::GitReviewToggleCollapse),
+                KeyCode::Char('z') if on_review => Some(AppEvent::GitReviewExpandContext),
+                KeyCode::Char('e') if on_review => Some(AppEvent::GitReviewExpandAllFolders),
+                KeyCode::Char('E') if on_review => Some(AppEvent::GitReviewCollapseAllFolders),
+                KeyCode::Enter if on_review => Some(AppEvent::GitReviewToggleCollapse),
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(ref git_state) = state.git_view_state {
                         match git_state.active_tab {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewNextFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollDown)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewNextCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollDown)
                             }
                         }
@@ -1621,13 +1800,12 @@ impl EventHandler {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewPrevFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollUp)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewPrevCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollUp)
                             }
                         }
@@ -1838,24 +2016,17 @@ impl EventHandler {
         tracing::debug!("HomeScreen V2 key handler: {:?}", key_event.code);
 
         // Global shortcuts that work regardless of focus (matches HomeTile shortcuts)
-        // Inbox shortcut FIRST so the Shift+i path beats the plain
-        // 'i' arm (GoToStats) on terminals where crossterm delivers
-        // shifted letters as KeyCode::Char('i') + SHIFT modifier
-        // instead of KeyCode::Char('I'). The Linux tmux runner on
-        // GitHub Actions hits the modifier path; macOS hits the
-        // uppercase code-point path. Both must reach the Inbox.
-        if let KeyCode::Char(c) = key_event.code {
-            let shift_pressed = key_event.modifiers.contains(KeyModifiers::SHIFT);
-            if c == 'I' || (c == 'i' && shift_pressed) {
-                return Some(AppEvent::GoToInbox);
-            }
-        }
+        // Inbox is bound to plain 'b' ("in-Box") to avoid the
+        // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
+        // unused across every screen handler.
         match key_event.code {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
+            KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
+            KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
@@ -2029,11 +2200,32 @@ impl EventHandler {
                 }
             }
             ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
-                // Text/Number input mode
+                // Text/Number input mode. Cursor-movement keys are no-ops on
+                // NumberInput (handled at the state layer) but let the text
+                // field behave like a normal editable line: arrows to move,
+                // Delete to forward-delete.
+                //
+                // Two paste routes: Cmd+V arrives as a bracketed-paste
+                // `Event::Paste` (handled in the main loop) when the terminal
+                // delivers it; Ctrl+V is a real keystroke we always receive, so
+                // it reads the OS clipboard directly via arboard. The second
+                // route works even when bracketed paste isn't passed through
+                // (e.g. some tmux / mouse-capture setups), which is why the
+                // Cmd+V-only path appeared to "do nothing".
                 match key_event.code {
+                    KeyCode::Char('v' | 'V')
+                        if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        Some(AppEvent::ConfigPopupPasteClipboard)
+                    }
                     KeyCode::Esc => Some(AppEvent::ConfigPopupCancel),
                     KeyCode::Enter => Some(AppEvent::ConfigPopupConfirm),
                     KeyCode::Backspace => Some(AppEvent::ConfigPopupBackspace),
+                    KeyCode::Delete => Some(AppEvent::ConfigPopupDelete),
+                    KeyCode::Left => Some(AppEvent::ConfigPopupCursorLeft),
+                    KeyCode::Right => Some(AppEvent::ConfigPopupCursorRight),
+                    KeyCode::Home => Some(AppEvent::ConfigPopupCursorHome),
+                    KeyCode::End => Some(AppEvent::ConfigPopupCursorEnd),
                     KeyCode::Char(c) => Some(AppEvent::ConfigPopupInputChar(c)),
                     _ => None,
                 }
@@ -2111,22 +2303,43 @@ impl EventHandler {
             }
             AppEvent::NewSession => {
                 // Phase 4 (new-session redesign): open the screen-1 unified
-                // picker synchronously. Initialise `pick_repo_state` from disk
-                // (favorites + session-defaults), set `step = PickRepo`, and
-                // route the user to the NEW_SESSION screen.
-                //
-                // Local-repo paths come from the already-loaded `state.workspaces`
-                // (populated async by `load_real_workspaces` on startup).
-                // Calling `WorkspaceScanner::scan()` here would block the event
-                // loop on slow filesystems — Stevie hit a freeze on first `n`
-                // when this was synchronous (2026-05-22).
-                //
-                // Track `previous_screen` so Esc on PickRepo returns to wherever
-                // the user invoked `n` from (Home, Sessions, etc.) rather than
-                // hardcoding HOME.
+                // picker synchronously, then route the user to the
+                // NEW_SESSION screen. Track `previous_screen` so Esc on
+                // PickRepo returns to wherever the user invoked `n` from
+                // (Home, Sessions, etc.) rather than hardcoding HOME.
                 use crate::components::new_session::pick_repo::PickRepoState;
-                let local_paths: Vec<std::path::PathBuf> =
-                    state.workspaces.iter().map(|w| std::path::PathBuf::from(&w.path)).collect();
+                use crate::git::{RepositoryCache, WorkspaceScanner};
+
+                // Local-repo candidates come from the WorkspaceScanner cache
+                // (a cheap JSON read of
+                // ~/.agents-in-a-box/cache/repositories.json), NOT a
+                // synchronous filesystem walk — reading the cache surfaces
+                // every scanned repo to the fuzzy filter without the
+                // event-loop freeze that motivated dropping the inline scan
+                // here (2026-05-22). `picker_local_paths` also drops entries
+                // whose directory no longer exists, so a repo deleted since
+                // the last scan can't appear as a selectable dead row.
+                let local_paths = picker_local_paths(RepositoryCache::load(), &state.workspaces);
+
+                // Refresh the cache off the UI thread so a newly-created repo
+                // surfaces on a later open. `scan()` is read-through: instant
+                // while the cache is valid, full walk + atomic persist only
+                // once it goes stale. (A repo created directly under a scan
+                // root bumps that root's mtime and invalidates the cache
+                // immediately; one nested deeper is picked up on the 1h TTL.)
+                // `spawn_blocking` keeps this on tokio's managed blocking pool
+                // — consistent with every other blocking offload, and unlike a
+                // detached `std::thread` it is not torn down mid-write at
+                // shutdown.
+                let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
+                let exclude_paths = state.app_config.workspace_defaults.exclude_paths.clone();
+                tokio::task::spawn_blocking(move || {
+                    let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
+                        .with_exclude_paths(exclude_paths);
+                    if let Err(err) = scanner.scan() {
+                        tracing::warn!(error = %err, "pick_repo: background repo rescan failed");
+                    }
+                });
                 let ns = crate::app::state::NewSessionState {
                     step: crate::app::state::NewSessionStep::PickRepo,
                     pick_repo_state: Some(PickRepoState::from_disk(&local_paths)),
@@ -2149,6 +2362,13 @@ impl EventHandler {
             }
             AppEvent::NewSessionCancel => {
                 state.cancel_new_session();
+            }
+            AppEvent::PickRepoPaste(text) => {
+                if let Some(pick) =
+                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                {
+                    pick.append_filter(&text);
+                }
             }
             AppEvent::ConfigureBack => {
                 // Phase 5: Esc on Configure persists the half-typed prompt to
@@ -2230,6 +2450,12 @@ impl EventHandler {
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
                 tracing::warn!("ConfigureOpenPresetManager — stub until Phase 7");
+            }
+            AppEvent::ConfigureOpenBranchPicker => {
+                // Seed from cached refs (instant), kick background refresh.
+                // Git stays in the app layer — components/ never touch git2
+                // (finding #9).
+                state.open_branch_picker();
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
@@ -2485,7 +2711,7 @@ impl EventHandler {
                     state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
-                        "{} session(s) selected — Shift+D to delete",
+                        "{} session(s) selected — Enter to start, Shift+D to delete",
                         count
                     ));
                 }
@@ -2525,6 +2751,34 @@ impl EventHandler {
                         Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
+                }
+            }
+            AppEvent::ResumeSelectedSessions(trigger) => {
+                // Checked rows win over cursor resume: when sessions are
+                // multi-selected, start every resumable one, not just the
+                // highlighted row. Running selections are skipped so we never
+                // kill+recreate a live tmux session.
+                let total_selected = state.selected_sessions.len();
+                let ids = state.selected_resumable_session_ids();
+                if ids.is_empty() {
+                    state.add_warning_notification(format!(
+                        "No stopped interactive sessions among {} selected to resume",
+                        total_selected
+                    ));
+                } else {
+                    tracing::info!(
+                        "[ACTION] Bulk-resuming {} of {} selected session(s) (trigger={})",
+                        ids.len(),
+                        total_selected,
+                        trigger
+                    );
+                    state.add_success_notification(format!(
+                        "Resuming {} selected session(s)...",
+                        ids.len()
+                    ));
+                    state.pending_async_action =
+                        Some(AsyncAction::BulkResumeSessions(ids, trigger));
+                    state.selected_sessions.clear();
                 }
             }
             AppEvent::OpenInEditor => {
@@ -2651,8 +2905,59 @@ impl EventHandler {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
+                            crate::app::state::ConfirmAction::InstallNotifyHooks => {
+                                // Install the ainb-hooks plugin for both agents.
+                                // Codex + the canonical hook script are written
+                                // in-process; Claude is registered by shelling
+                                // out to `claude plugin install`. The daemon
+                                // lazy-spawns on the first hook event.
+                                use ainb_plugin_notifyd::ClaudeRegister;
+                                match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
+                                    ainb_plugin_notifyd::install_for(
+                                        &p,
+                                        ainb_plugin_notifyd::Agent::ALL,
+                                    )
+                                }) {
+                                    Ok(report) => match &report.claude {
+                                        Some(ClaudeRegister::Failed(e)) => {
+                                            state.add_error_notification(format!(
+                                                "Codex hooks installed, but the Claude plugin \
+                                                 failed to register: {e}"
+                                            ));
+                                        }
+                                        Some(ClaudeRegister::ClaudeCliMissing) => {
+                                            state.add_error_notification(
+                                                "Codex hooks installed, but `claude` CLI was not \
+                                                 found — Claude notifications not enabled. Install \
+                                                 it, then re-run."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        _ => {
+                                            state.add_info_notification(
+                                                "Notifications enabled (Claude + Codex). Restart \
+                                                 your agent sessions to load the hooks; the Inbox \
+                                                 (b) lights up when a session needs you."
+                                                    .to_string(),
+                                            );
+                                        }
+                                    },
+                                    Err(e) => {
+                                        state.add_error_notification(format!(
+                                            "Failed to install notification hooks: {e}"
+                                        ));
+                                    }
+                                }
+                            }
+                            crate::app::state::ConfirmAction::DismissNotifyPrompt => {
+                                if let Ok(paths) = ainb_plugin_notifyd::Paths::from_home() {
+                                    let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
+                                }
+                            }
                             crate::app::state::ConfirmAction::Cancel => {
-                                // Explicit Cancel: dialog already taken; nothing to do.
+                                // Explicit Cancel ("Not now"): dialog already
+                                // taken; nothing persisted, so we re-ask next
+                                // launch.
                             }
                         }
                     }
@@ -2808,6 +3113,9 @@ impl EventHandler {
             AppEvent::GitViewScrollUp => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_up(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_up(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_up()
@@ -2819,12 +3127,65 @@ impl EventHandler {
             AppEvent::GitViewScrollDown => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_down(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_down(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_down()
                         }
                         _ => {}
                     }
+                }
+            }
+            AppEvent::GitReviewToggleCollapse => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_toggle_collapse();
+                }
+            }
+            AppEvent::GitReviewExpandContext => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_context();
+                }
+            }
+            AppEvent::GitReviewNextHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_hunk();
+                }
+            }
+            AppEvent::GitReviewPrevHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_hunk();
+                }
+            }
+            AppEvent::GitReviewNextReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_file();
+                }
+            }
+            AppEvent::GitReviewPrevReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_file();
+                }
+            }
+            AppEvent::GitReviewSidebarUp => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_up();
+                }
+            }
+            AppEvent::GitReviewSidebarDown => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_down();
+                }
+            }
+            AppEvent::GitReviewExpandAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_all_folders();
+                }
+            }
+            AppEvent::GitReviewCollapseAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_collapse_all_folders();
                 }
             }
             AppEvent::GitViewNextCommit => {
@@ -3077,6 +3438,15 @@ impl EventHandler {
                         // now (Phase 3 cutover); host no longer
                         // pre-populates state for the analytics screen.
                     }
+                    SidebarItem::Witr => {
+                        tracing::info!(
+                            "Launching witr -i (process-causality browser) from sidebar"
+                        );
+                        // Hand the terminal to witr's own interactive TUI
+                        // (see AppEvent::GoToWitr) rather than a
+                        // plugin-rendered screen.
+                        state.pending_async_action = Some(AsyncAction::AttachWitr);
+                    }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
                         state.current_screen = screen_ids::SKILLS.to_string();
@@ -3100,144 +3470,100 @@ impl EventHandler {
             AppEvent::StarSelectedWorkspace => {
                 tracing::info!("StarSelectedWorkspace event triggered");
                 if let Some(workspace_idx) = state.selected_workspace_index {
-                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        let workspace_name = workspace.name.clone();
-
-                        // Load favorites store
+                    // Clone the bits we need so the immutable borrow of `state`
+                    // ends before we notify (which borrows `state` mutably).
+                    if let Some((workspace_name, workspace_path)) = state
+                        .workspaces
+                        .get(workspace_idx)
+                        .map(|w| (w.name.clone(), w.path.clone()))
+                    {
                         let mut favorites_store = crate::config::FavoritesStore::load();
+                        let alias = workspace_name.to_lowercase().replace(' ', "-");
 
-                        // Try to get the remote URL from the git repository
-                        // This allows favoriting the REMOTE repo, not just the local path
-                        let (source, source_type, display_source) = if let Ok(git_repo) =
-                            crate::git::RepositoryManager::open(&workspace.path)
-                        {
-                            if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                                // Parse the remote URL to get owner/repo.
-                                // `from_input` is deprecated for new
-                                // free-form input (finding #14), but the
-                                // URL here is already validated by
-                                // `get_remote_url()` so the legacy
-                                // fallible contract is fine.
-                                #[allow(deprecated)]
-                                if let Ok(repo_source) =
-                                    crate::git::RepoSource::from_input(&remote_url)
-                                {
-                                    if let Ok(parsed) = repo_source.parse_components() {
-                                        // Use GitHub shorthand if it's a GitHub repo
-                                        if parsed.host == "github.com" {
-                                            let shorthand =
-                                                format!("{}/{}", parsed.owner, parsed.repo_name);
-                                            (
-                                                shorthand.clone(),
-                                                crate::config::FavoriteSourceType::GithubShorthand,
-                                                shorthand,
-                                            )
-                                        } else {
-                                            // For other hosts, use the full URL
-                                            let source_type = if remote_url.starts_with("git@") {
-                                                crate::config::FavoriteSourceType::SshUrl
-                                            } else {
-                                                crate::config::FavoriteSourceType::HttpsUrl
-                                            };
-                                            let display =
-                                                format!("{}/{}", parsed.owner, parsed.repo_name);
-                                            (remote_url, source_type, display)
-                                        }
+                        // A star ALWAYS records the remote indicator. Derive it
+                        // from the repo's `origin`; refuse (no local-path
+                        // fallback) when there is no resolvable remote.
+                        match crate::config::favorite_from_local_repo(
+                            alias.clone(),
+                            &workspace_path,
+                        ) {
+                            Ok(fav) => {
+                                // Toggle off if already favorited — match on the
+                                // derived remote source, or a legacy local-path
+                                // entry for the same repo. NOT on alias: the alias
+                                // is folder-derived, so two distinct repos sharing
+                                // a folder name must not toggle each other off.
+                                let local_path_str = workspace_path.display().to_string();
+                                let existing = favorites_store
+                                    .favorites
+                                    .iter()
+                                    .find(|f| f.source == fav.source || f.source == local_path_str)
+                                    .map(|f| f.alias.clone());
+
+                                if let Some(existing_alias) = existing {
+                                    favorites_store.remove(&existing_alias);
+                                    if let Err(e) = favorites_store.save() {
+                                        tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not update favorites: {e}"
+                                        ));
                                     } else {
-                                        // Couldn't parse, use raw URL
-                                        let source_type = if remote_url.starts_with("git@") {
-                                            crate::config::FavoriteSourceType::SshUrl
-                                        } else {
-                                            crate::config::FavoriteSourceType::HttpsUrl
-                                        };
-                                        (remote_url.clone(), source_type, remote_url)
+                                        tracing::info!(
+                                            "Removed from favorites: {}",
+                                            existing_alias
+                                        );
+                                        state.add_success_notification(format!(
+                                            "★ Removed '{}' from favorites",
+                                            workspace_name
+                                        ));
                                     }
                                 } else {
-                                    // Fallback to local path
-                                    let path_str = workspace.path.display().to_string();
-                                    (
-                                        path_str.clone(),
-                                        crate::config::FavoriteSourceType::LocalPath,
-                                        path_str,
-                                    )
+                                    let display_source = fav.source.clone();
+                                    // Suffix the alias on collision so distinct
+                                    // repos with the same folder name coexist.
+                                    let added = if favorites_store.add(fav.clone()).is_ok() {
+                                        true
+                                    } else {
+                                        let mut suffixed = fav;
+                                        suffixed.alias = format!(
+                                            "{}-{}",
+                                            alias,
+                                            chrono::Utc::now().timestamp() % 1000
+                                        );
+                                        favorites_store.add(suffixed).is_ok()
+                                    };
+                                    if !added {
+                                        tracing::warn!(
+                                            alias = %alias,
+                                            "could not add favorite (alias collision)"
+                                        );
+                                        state.add_error_notification(format!(
+                                            "★ Could not favorite '{}': alias already in use",
+                                            workspace_name
+                                        ));
+                                    } else if let Err(e) = favorites_store.save() {
+                                        tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not save favorite: {e}"
+                                        ));
+                                    } else {
+                                        tracing::info!("Added to favorites: {}", display_source);
+                                        state.add_success_notification(format!(
+                                            "⭐ Added '{}' to favorites",
+                                            display_source
+                                        ));
+                                    }
                                 }
-                            } else {
-                                // No remote, use local path
-                                let path_str = workspace.path.display().to_string();
-                                (
-                                    path_str.clone(),
-                                    crate::config::FavoriteSourceType::LocalPath,
-                                    path_str,
-                                )
                             }
-                        } else {
-                            // Not a git repo, use local path
-                            let path_str = workspace.path.display().to_string();
-                            (
-                                path_str.clone(),
-                                crate::config::FavoriteSourceType::LocalPath,
-                                path_str,
-                            )
-                        };
-
-                        // Toggle: remove if exists, add if not
-                        // Check both source and local path for existing favorites
-                        let local_path_str = workspace.path.display().to_string();
-                        let existing = favorites_store
-                            .favorites
-                            .iter()
-                            .find(|f| f.source == source || f.source == local_path_str);
-
-                        if let Some(existing) = existing {
-                            let alias = existing.alias.clone();
-                            let removed_source = existing.source.clone();
-                            favorites_store.remove(&alias);
-                            if let Err(e) = favorites_store.save() {
-                                tracing::error!("Failed to save favorites: {}", e);
-                            }
-                            tracing::info!("Removed from favorites: {}", removed_source);
-                            state.add_success_notification(format!(
-                                "★ Removed '{}' from favorites",
-                                workspace_name
-                            ));
-                        } else {
-                            // Generate alias from workspace name
-                            let alias = workspace_name.to_lowercase().replace(' ', "-");
-                            let favorite = crate::config::Favorite::new(
-                                alias.clone(),
-                                source.clone(),
-                                source_type.clone(),
-                            );
-                            if favorites_store.add(favorite).is_ok() {
-                                if let Err(e) = favorites_store.save() {
-                                    tracing::error!("Failed to save favorites: {}", e);
-                                }
-                                tracing::info!("Added to favorites: {} as {}", source, alias);
-                                state.add_success_notification(format!(
-                                    "⭐ Added '{}' to favorites",
-                                    display_source
-                                ));
-                            } else {
-                                // Alias already exists, try with a suffix
-                                let alias_with_suffix =
-                                    format!("{}-{}", alias, chrono::Utc::now().timestamp() % 1000);
-                                let favorite = crate::config::Favorite::new(
-                                    alias_with_suffix.clone(),
-                                    source.clone(),
-                                    source_type,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %workspace_path.display(),
+                                    "refusing to favorite: no remote indicator"
                                 );
-                                let _ = favorites_store.add(favorite);
-                                if let Err(e) = favorites_store.save() {
-                                    tracing::error!("Failed to save favorites: {}", e);
-                                }
-                                tracing::info!(
-                                    "Added to favorites: {} as {}",
-                                    source,
-                                    alias_with_suffix
-                                );
-                                state.add_success_notification(format!(
-                                    "⭐ Added '{}' to favorites",
-                                    display_source
+                                state.add_error_notification(format!(
+                                    "★ Can't favorite '{}': {}",
+                                    workspace_name, e
                                 ));
                             }
                         }
@@ -3291,6 +3617,18 @@ impl EventHandler {
                 state.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
+            }
+            AppEvent::GoToWitr => {
+                tracing::info!("Launching witr -i (process-causality browser)");
+                // witr's value is its own interactive all-process browser
+                // (sortable list + ancestry pane), which has no JSON/
+                // WireBuffer equivalent — it lives only in `witr -i`. So
+                // instead of a plugin-rendered screen we hand the terminal
+                // to witr's native TUI full-screen (suspend/attach, like an
+                // agent session) and resume ainb when the user quits it.
+                // The witr plugin still owns the `ainb witr` CLI + `/witr`
+                // slash; only the screen is the embedded binary.
+                state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
@@ -3957,6 +4295,24 @@ impl EventHandler {
                             }
                         }
                     }
+
+                    // Auto-persist: apply the edited settings to the live
+                    // config and write config.toml immediately, so the change
+                    // *becomes* the config (and survives a reopen/restart)
+                    // without the user having to remember `S` save-all. `S`
+                    // remains as an explicit save-all; `Esc` still cancels the
+                    // single edit before it reaches here.
+                    state.config_screen_state.apply_to_app_config(&mut state.app_config);
+                    match state.app_config.save() {
+                        Ok(()) => {
+                            state.add_success_notification(
+                                "Setting saved to config.toml".to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            state.add_error_notification(format!("Failed to save setting: {}", e));
+                        }
+                    }
                 }
                 state.config_popup_state.close();
             }
@@ -3969,6 +4325,35 @@ impl EventHandler {
             }
             AppEvent::ConfigPopupBackspace => {
                 state.config_popup_state.backspace();
+            }
+            AppEvent::ConfigPopupPaste(text) => {
+                state.config_popup_state.insert_str(&text);
+            }
+            AppEvent::ConfigPopupPasteClipboard => {
+                // Ctrl+V: read the OS clipboard directly (works regardless of
+                // whether the terminal delivers bracketed-paste events).
+                match Self::get_clipboard_text() {
+                    Ok(text) => state.config_popup_state.insert_str(&text),
+                    Err(e) => {
+                        tracing::warn!("Clipboard paste failed: {}", e);
+                        state.add_error_notification(format!("Could not read clipboard: {}", e));
+                    }
+                }
+            }
+            AppEvent::ConfigPopupDelete => {
+                state.config_popup_state.delete_forward();
+            }
+            AppEvent::ConfigPopupCursorLeft => {
+                state.config_popup_state.cursor_left();
+            }
+            AppEvent::ConfigPopupCursorRight => {
+                state.config_popup_state.cursor_right();
+            }
+            AppEvent::ConfigPopupCursorHome => {
+                state.config_popup_state.cursor_home();
+            }
+            AppEvent::ConfigPopupCursorEnd => {
+                state.config_popup_state.cursor_end();
             }
             // Log history viewer events
             AppEvent::LogHistoryBack => {
@@ -4651,6 +5036,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CONFIG
             | ids::CATALOG
             | ids::ANALYTICS
+            | ids::WITR
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY
@@ -4708,6 +5094,7 @@ mod navigate_to_tests {
             ids::CONFIG,
             ids::CATALOG,
             ids::ANALYTICS,
+            ids::WITR,
             ids::SESSION_LIST,
             ids::LOGS,
             ids::LOG_HISTORY,
@@ -4857,6 +5244,49 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H in Config navigation must dispatch ToggleHelp");
         assert!(matches!(evt, AppEvent::ToggleHelp));
+    }
+
+    /// Ctrl+V in a Config text popup must route to the direct-clipboard
+    /// paste (arboard), not type a literal `v`. This is the reliable paste
+    /// path that does not depend on the terminal delivering bracketed
+    /// `Event::Paste` — the reason Cmd+V "did nothing" in some setups.
+    #[test]
+    fn ctrl_v_in_config_text_popup_routes_to_clipboard_paste() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::CONFIG.to_string();
+        state.config_popup_state.open_text(
+            "Default Workspace",
+            "Default directory for new sessions",
+            "default_workspace",
+            "/Users/me/git",
+        );
+
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        let evt = EventHandler::handle_key_event(ctrl_v, &mut state)
+            .expect("Ctrl+V in a text popup must dispatch a paste event");
+        assert!(matches!(evt, AppEvent::ConfigPopupPasteClipboard));
+
+        // A bare `v` (no modifier) must still type normally.
+        let evt = EventHandler::handle_key_event(char_key('v'), &mut state)
+            .expect("plain 'v' must dispatch a char input");
+        assert!(matches!(evt, AppEvent::ConfigPopupInputChar('v')));
+    }
+
+    /// A bracketed paste (Cmd+V) on the New Session repo picker must be
+    /// forwarded to the filter, not dropped. Regression: `handle_paste_event`
+    /// only routed the config popup, so Cmd+V on PickRepo did nothing.
+    #[test]
+    fn bracketed_paste_on_pick_repo_routes_to_filter() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::PickRepo,
+            ..NewSessionState::default()
+        });
+
+        let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
+            .expect("paste on PickRepo must dispatch a filter paste");
+        assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
     }
 
     /// Esc inside a text input while help is visible must close help,

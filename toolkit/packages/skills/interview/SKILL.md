@@ -177,7 +177,7 @@ Interview categories:
 
 Continue the interview iteratively:
 
-1. Ask 2-4 questions per round (use multiSelect if appropriate)
+1. **MANDATORY: Always batch 2-4 questions per AskUserQuestion call.** NEVER send a single question per round unless it is the final yes/no approval gate. Filling the question budget reduces round-trips and respects the user's time. Use `multiSelect: true` when the user can pick multiple valid answers.
 2. Analyze responses for follow-up opportunities
 3. Go deeper on areas of uncertainty or complexity
 4. Continue until all major areas are covered

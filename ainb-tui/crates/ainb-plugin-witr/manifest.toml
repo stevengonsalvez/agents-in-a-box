@@ -1,0 +1,43 @@
+# ainb plugin manifest — witr (subprocess plugin, ABI v2).
+#
+# Loaded by ainb-plugin-runtime at host startup (discovery) and again at
+# plugin/init for validation. Schema lives in
+# `ainb-plugin-protocol::manifest::Manifest` — keep field names in sync
+# with that type.
+#
+# witr is an external binary the user installs separately. The plugin
+# detects it at startup (cfx.2) and exec's `witr --json` on demand
+# (cfx.3) under the `spawn_subprocess` capability.
+
+[plugin]
+name = "witr"
+version = "0.1.0"
+abi_version = 2
+description = "Process causality tracing. Wraps witr (>= 0.3.2) on PATH."
+
+[capabilities]
+# List form for future per-binary enforcement; the v1 runtime treats
+# this as audit metadata only (see research/2026-05-19_12-13-09 Q1).
+spawn_subprocess  = ["witr"]
+# Required so we can publish witr.snapshot via host/snapshot/publish.
+event_bus         = true
+read_sessions     = false
+read_claude_logs  = false
+read_codex_logs   = false
+write_plugin_data = false
+network           = false
+
+[provides]
+screens        = ["witr"]
+commands       = ["/witr"]
+cli_namespaces = ["witr"]
+snapshots      = ["witr.snapshot"]
+
+[subscribes]
+snapshots = []
+
+[lifecycle]
+# Lazy — witr is on-demand. Don't spawn until the user opens the screen,
+# runs `ainb witr`, or types `/witr`.
+spawn          = "lazy"
+idle_reap_secs = 600

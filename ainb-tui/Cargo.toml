@@ -11,6 +11,7 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-plugin-witr",
     "crates/ainb-hangar-core",
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",
@@ -25,7 +26,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.1.0"
+version = "1.5.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"
@@ -87,8 +88,13 @@ url = "2.5"
 
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"
-syntect = "5.0"
+syntect = "5.2"
 ansi-to-tui = "4"
+# Code Review diff surface: structured + word-level diff (similar),
+# Dracula theme + extra grammars (two-face). syntect→ratatui span conversion
+# is inlined (ainb pins ratatui 0.26; syntect-tui targets a newer ratatui).
+similar = { version = "2", features = ["inline"] }
+two-face = "0.5"
 
 # Persistent usage analytics cache
 # Bumped 0.31 -> 0.32 so `libsqlite3-sys` (links = "sqlite3") resolves to a

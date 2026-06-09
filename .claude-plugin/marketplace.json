@@ -12,7 +12,7 @@
     {
       "name": "reflect",
       "source": "./plugins/reflect",
-      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
+      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect:cost, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
       "strict": false,
       "keywords": [
         "self-improvement",
@@ -37,6 +37,21 @@
         "control-plane",
         "broadcast",
         "multi-session"
+      ]
+    },
+    {
+      "name": "ainb-hooks",
+      "source": "./plugins/ainb-hooks",
+      "description": "Emit actionable Claude Code lifecycle events to the ainb notification inbox: Notification (awaiting-input / permission) and Stop (turn finished) are delivered to ainb-notifyd over a Unix socket, surfacing as native OS banners, the ainb-tui Inbox screen, and the per-session waiting marker. Telemetry events are intentionally not hooked. Install via `/plugin install ainb-hooks@agents-in-a-box` (Claude); Codex wiring is handled by `ainb notifyd install`.",
+      "strict": false,
+      "keywords": [
+        "ainb",
+        "notifications",
+        "hooks",
+        "inbox",
+        "notifyd",
+        "claude-code",
+        "awaiting-input"
       ]
     }
   ]

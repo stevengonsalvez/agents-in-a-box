@@ -9,6 +9,9 @@
 pub mod attach;
 pub mod auth;
 pub mod config_cmd;
+pub mod deps;
+pub mod diff_review;
+pub mod doctor;
 pub mod favorites;
 pub mod fleet;
 pub mod git_cmd;
@@ -19,6 +22,7 @@ pub mod logs;
 pub mod plugin;
 pub mod presets;
 pub mod recover;
+pub mod reflect;
 pub mod registry;
 pub mod run;
 pub mod status;
@@ -53,7 +57,11 @@ EXAMPLES:
 pub fn root_clap_command() -> Command {
     Command::new("ainb")
         .author(env!("CARGO_PKG_AUTHORS"))
+        // `-V` shows the bare semver; `--version` shows build identity
+        // (commit + date + origin) stamped by build.rs so a binary is traceable
+        // to a commit — the plain number is stale between releases.
         .version(env!("CARGO_PKG_VERSION"))
+        .long_version(env!("AINB_VERSION_LONG"))
         .about("AI agents in a box - spawn and manage AI coding sessions")
         .after_help(EXAMPLES)
         .arg(

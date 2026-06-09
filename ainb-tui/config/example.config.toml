@@ -132,3 +132,28 @@ show_git_status = true
 # args = ["-y", "@context7/mcp-server"]
 # environment = {}
 # init_strategy = "lazy"  # Options: "lazy", "eager", "none"
+
+# =============================================================================
+# Plugins
+# =============================================================================
+# Screens such as Analytics/Usage (burndown) are provided by subprocess
+# plugins, discovered and loaded at startup. All discovered plugins are
+# enabled by default; the keys below let you persist a per-plugin filter.
+#
+# Precedence (most specific wins):
+#   1. AINB_DISABLE_PLUGINS=1   env — kill switch, skips all discovery
+#   2. AINB_ONLY_PLUGINS=a,b    env — allowlist, overrides config
+#   3. AINB_DISABLE_PLUGIN=a,b  env — denylist, overrides config below
+#   4. [plugins].enabled        config allowlist (this file)
+#   5. [plugins].disabled       config denylist (this file)
+#   6. default                  all discovered plugins loaded
+#
+# `enabled` and `disabled` are mutually exclusive in intent: if `enabled`
+# is set (non-empty), only those plugins load and `disabled` is ignored.
+#
+# [plugins]
+# Load ONLY these plugins (allowlist). Leave unset to load all.
+# enabled = ["burndown"]
+#
+# Load everything EXCEPT these (denylist). Ignored when `enabled` is set.
+# disabled = ["burndown"]

@@ -39,7 +39,7 @@
 </p>
 
 <p align="center">
-  <code>115 Rust Modules</code> · <code>71 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
+  <code>115 Rust Modules</code> · <code>91 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
 </p>
 
 ---
@@ -65,7 +65,7 @@ A terminal-native ecosystem for managing AI coding agents. Built around a Rust T
 | Component | What it does | Scale |
 |-----------|-------------|-------|
 | **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 115 modules |
-| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 71 skills, 37 agents |
+| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 91 skills, 37 agents |
 | **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/knowledge/overview.md) |
 
 ---
@@ -109,7 +109,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
+- **Scriptable CLI** — 20 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
 
 ### Feature Showcase
 
@@ -150,6 +150,13 @@ A Rust-based terminal application for managing AI coding sessions with git workt
       <em>See exactly which repos and worktrees consume your context budget. Input, cache, output, and session counts per project.</em>
     </td>
   </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <img src="docs/assets/screenshots/code-review-diff.gif" alt="Warp-style Code Review diff — file sidebar, per-file collapsible blocks, Dracula syntax highlighting, word-level emphasis, gutter with green/red change bars" width="100%"><br>
+      <strong>🔍 Warp-style Code Review diff</strong><br>
+      <em>Press <code>g</code> on a session (or run <code>ainb diff-review</code>) for a cohesive review surface — file sidebar, per-file collapsible blocks in one scroll, Dracula syntax highlighting, word-level intra-line emphasis, a line-number gutter with green/red change bars, expandable context, and <code>n</code>/<code>N</code> hunk navigation. <a href="docs/tui/code-review.md">Docs →</a></em>
+    </td>
+  </tr>
 </table>
 
 ### CLI — Scriptable Equivalent of Every TUI Feature
@@ -166,7 +173,7 @@ ainb config set authentication.default_model opus
 ainb completion zsh > ~/.zsh/completions/_ainb
 ```
 
-**15 top-level commands** — `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `completion`, `tui` — with nested subcommands for recover / config / git / favorites / presets.
+**20 top-level commands** — `tui`, `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `usage`, `claudecode`, `completion`, `plugin`, `fleet`, `help` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet.
 
 **[📘 Full CLI reference → docs/tui/cli.md](docs/tui/cli.md)**
 
@@ -219,6 +226,31 @@ brew untap stevengonsalvez/ainb   # only if you tapped this earlier
 brew install stevengonsalvez/agents-in-a-box/ainb
 ```
 </details>
+
+### Plugins
+
+`ainb` boots a plugin host at startup. Some screens — notably **Analytics / Usage (the burndown dashboard)** — are provided by subprocess plugins that the host discovers and loads automatically. **All plugins are enabled by default**; you only need the controls below to turn them off or scope which ones load.
+
+<p align="center">
+  <img src="docs/assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus" width="860">
+</p>
+
+**How it works (in brief):** a v2 plugin is a **native subprocess** that speaks **JSON-RPC 2.0 over Content-Length-framed stdio** — no wasm, no in-process linking. The host (`ainb-core`) discovers each plugin from `dist/plugins/<id>/`, spawns it, and exchanges messages: `plugin/render` (the plugin returns a `WireBuffer` of cells the host blits), `plugin/handle_key`, `plugin/cli_dispatch` (routes `ainb <namespace> …`), plus reverse `host/snapshot/publish` calls over an **event bus**. Each plugin declares its `[capabilities]` in `manifest.toml`; the runtime denies any ungranted host call with JSON-RPC `-32001`. A plugin screen can render **two ways**: in-process via a `WireBuffer` (host owns the terminal — e.g. **burndown**), or as a **host-embedded foreign TTY** where ainb suspends and hands the terminal to an external interactive program (e.g. **witr**'s `witr -i` browser). Full walkthrough: [`docs/plugins/`](docs/plugins/overview.md).
+
+There are four ways to filter plugins, with the following precedence (most specific wins):
+
+| Goal | How | Type |
+|------|-----|------|
+| All on (default) | *(nothing)* | — |
+| All off (kill switch) | `AINB_DISABLE_PLUGINS=1 ainb` | env |
+| Load only these | `AINB_ONLY_PLUGINS=burndown ainb` | env allowlist |
+| Load all except these | `AINB_DISABLE_PLUGIN=burndown ainb` | env denylist |
+| Persistent allowlist | `[plugins].enabled = ["burndown"]` in `config.toml` | config |
+| Persistent denylist | `[plugins].disabled = ["burndown"]` in `config.toml` | config |
+
+Resolution order: `AINB_DISABLE_PLUGINS` → `AINB_ONLY_PLUGINS` → `AINB_DISABLE_PLUGIN` → config `enabled` → config `disabled` → default all-on. **Env always beats config**, and an allowlist always beats a denylist.
+
+Config lives at `~/.agents-in-a-box/config/config.toml` under a `[plugins]` table — see [`example.config.toml`](ainb-tui/config/example.config.toml) for the annotated block. When a screen's plugin is disabled, the TUI shows a placeholder naming the exact variable that turned it off, rather than hanging.
 
 ### Keyboard Shortcuts
 
@@ -283,7 +315,7 @@ A portable AI coding agent toolkit: skills, agents, workflows, and configuration
 | **Roo** | Project root | Project directory |
 | **Clawdhub** | Project root | Project directory |
 
-### Skills (71)
+### Skills (91)
 
 Skills are reusable capabilities that any supported AI tool can invoke.
 
@@ -344,7 +376,7 @@ Skills are reusable capabilities that any supported AI tool can invoke.
 <details>
 <summary><b>Agent Architecture</b></summary>
 
-`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings` · `claude-developer-platform`
+`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings`
 </details>
 
 ### Agents (37)
@@ -380,21 +412,26 @@ The `/reflect` skill captures learnings. The `/research` and `/prime` skills ret
 
 ## Architecture
 
+<p align="center">
+  <img src="docs/assets/diagrams/ecosystem-architecture.svg" alt="agents-in-a-box ecosystem architecture — ainb TUI Rust workspace, JSON-RPC plugin host, fleet orchestration, portable toolkit deploying to 9+ tool homes, reflect GraphRAG memory, and the on-disk state that ties them together" width="900">
+</p>
+
 ```
 agents-in-a-box/
 │
-├── ainb-tui/                   # Rust TUI application
-│   ├── src/                    # 115 modules
-│   │   ├── app/                #   State machine & event handling
-│   │   ├── components/         #   TUI screen components
-│   │   ├── widgets/            #   Reusable UI widgets
-│   │   ├── docker/             #   Container management
-│   │   ├── tmux/               #   Session & PTY integration
-│   │   ├── git/                #   Worktree operations
-│   │   ├── claude/             #   Claude API client
-│   │   ├── models/             #   Data models
-│   │   └── config/             #   Configuration handling
-│   ├── Formula/                #   Homebrew formula
+├── ainb-tui/                   # Rust Cargo workspace
+│   ├── crates/
+│   │   ├── ainb-core/          #   TUI application (app, components, tmux, git, claude, config)
+│   │   ├── ainb-plugin-runtime/        #   Plugin host runtime
+│   │   ├── ainb-plugin-protocol/       #   Plugin JSON-RPC protocol
+│   │   ├── ainb-plugin-sdk-rust/       #   Rust plugin SDK
+│   │   ├── ainb-plugin-types-sessions/ #   Shared session types
+│   │   ├── ainb-plugin-burndown/       #   v2 analytics plugin
+│   │   ├── ainb-plugin-notifyd/        #   v2 notifications plugin
+│   │   ├── ainb-plugin-session-reader/ #   v2 data-backend plugin
+│   │   ├── ainb-plugin-cts-v2/         #   Conformance test suite (14 axes)
+│   │   └── ainb-plugin-testkit/        #   Plugin author test harness
+│   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
 │
 ├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
@@ -403,11 +440,13 @@ agents-in-a-box/
 │   └── pyproject.toml          #   Workspace member
 │
 ├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
-│   └── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+│   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+│   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
+│   └── ainb-hooks/             #   ainb lifecycle hooks
 │
 ├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
 │   ├── packages/
-│   │   ├── skills/             #   71 reusable skills
+│   │   ├── skills/             #   91 reusable skills
 │   │   ├── agents/             #   37 agent definitions
 │   │   │   ├── universal/      #     Cross-stack specialists
 │   │   │   ├── engineering/    #     Backend & infra agents
@@ -436,7 +475,8 @@ agents-in-a-box/
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
     ├── toolkit-validation.yml  #   Toolkit structure & install validation
-    └── release.yml             #   Cross-platform binary releases
+    ├── release.yml             #   Cross-platform binary releases
+    └── deploy-pages.yml        #   Build & deploy the website to GitHub Pages
 ```
 
 ---
@@ -508,8 +548,9 @@ node create-rule.js --tool=codex              # Deploy to ~/.codex/
 
 ## Links
 
+- [Website](https://stevengonsalvez.github.io/agents-in-a-box/)
 - [Releases](https://github.com/stevengonsalvez/agents-in-a-box/releases)
-- [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-ainb)
+- [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-agents-in-a-box)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
 - [Knowledge System Architecture](docs/knowledge/overview.md)
 - [Toolkit Documentation](toolkit/README.md)

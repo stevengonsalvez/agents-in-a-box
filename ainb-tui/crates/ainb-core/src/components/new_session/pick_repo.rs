@@ -16,7 +16,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::config::favorites_store::{Favorite, FavoritesStore, SourceType};
 use crate::config::session_defaults::SessionDefaults;
@@ -77,6 +79,19 @@ pub struct CloneProgress {
     pub error: Option<String>,
 }
 
+/// GitHub auth pre-check status shown inline on the picker when a remote
+/// URL requires authentication. The dispatcher runs `gh auth status` before
+/// advancing to Configure for HTTPS/GitHub sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitAuthStatus {
+    /// Async check in flight.
+    Checking,
+    /// `gh auth status` succeeded — the dispatcher auto-advances.
+    Authenticated,
+    /// Not authenticated — show inline instructions.
+    NotAuthenticated,
+}
+
 /// Outcome of a single key press on the picker. The caller (events.rs)
 /// translates this into the appropriate `AppEvent` / async action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +105,25 @@ pub enum PickRepoOutcome {
     /// Source needs an async clone before advancing. Phase 5 wires the
     /// spinner display; Phase 4 stops here.
     StartClone(RepoSource),
+    /// Ctrl+V pressed — the caller (events.rs) reads the OS clipboard and
+    /// appends it to the filter via `append_filter`. Clipboard access lives
+    /// in the app layer (`EventHandler::get_clipboard_text`), keeping this
+    /// component pure and testable.
+    PasteFromClipboard,
+    /// Surface a transient message to the user (favorite added/removed, or a
+    /// refusal) and stay on the picker. The dispatcher maps `is_error` to an
+    /// error vs. info notification.
+    Notice { message: String, is_error: bool },
+}
+
+/// Result of toggling a favorite — drives the `^F` notification.
+enum FavoriteToggle {
+    /// Newly favorited; carries the stored remote source for display.
+    Added(String),
+    /// Un-favorited; carries the row label for display.
+    Removed(String),
+    /// Refused because the row has no remote repository indicator.
+    Refused(String),
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -107,6 +141,11 @@ pub struct PickRepoState {
     pub selected: usize,
     /// Inline clone progress for the highlighted row (None when idle).
     pub clone_progress: Option<CloneProgress>,
+    /// GitHub auth pre-check status. Set by the dispatcher before allowing
+    /// HTTPS/GitHub clones. `None` = no check in progress or needed.
+    pub git_auth_status: Option<GitAuthStatus>,
+    /// Source that triggered the auth check, held until auth passes or user skips.
+    pub pending_clone_source: Option<RepoSource>,
     /// Snapshot of session-defaults — read on open, updated on `^R`.
     pub defaults: SessionDefaults,
     /// Snapshot of favorites — read on open, updated on `^F`.
@@ -129,6 +168,8 @@ impl PickRepoState {
             filtered_indices,
             selected,
             clone_progress: None,
+            git_auth_status: None,
+            pending_clone_source: None,
             defaults,
             favorites,
         }
@@ -144,6 +185,30 @@ impl PickRepoState {
     pub fn highlighted(&self) -> Option<&PickRepoRow> {
         let idx = *self.filtered_indices.get(self.selected)?;
         self.rows.get(idx)
+    }
+
+    /// Append pasted text to the filter (clipboard paste — Ctrl+V or
+    /// bracketed `Event::Paste`). Control characters are stripped because the
+    /// filter is a single-line field; a pasted `owner/repo\n` should filter,
+    /// not submit. Refilters so the list (and Enter's smart-parse) reflect it.
+    pub fn append_filter(&mut self, text: &str) {
+        // Cap total filter length so a pathological clipboard payload can't
+        // bloat the field / stall refilter. A repo URL or path is well under
+        // this; anything larger is not a sensible picker query.
+        const MAX_FILTER_LEN: usize = 4096;
+        let mut cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        let room = MAX_FILTER_LEN.saturating_sub(self.filter.chars().count());
+        if room == 0 {
+            return;
+        }
+        if cleaned.chars().count() > room {
+            cleaned = cleaned.chars().take(room).collect();
+        }
+        self.filter.push_str(&cleaned);
+        self.refilter();
     }
 
     /// Recompute `filtered_indices` when filter or rows change. Preserves
@@ -313,6 +378,40 @@ fn pick_default_selection(
     0
 }
 
+/// A dimmed locator shown after the row name so identically-named repos are
+/// distinguishable. Derived from the row's `RepoSource`: a `~`-abbreviated path
+/// for local repos, the URL for remotes, `owner/repo` for shorthand. `Filter`
+/// rows carry no real source, so they get nothing.
+fn row_detail(source: &RepoSource) -> Option<Cow<'_, str>> {
+    match source {
+        RepoSource::LocalPath(p) => Some(Cow::Owned(abbreviate_home(p))),
+        RepoSource::HttpsUrl(u) | RepoSource::SshUrl(u) | RepoSource::SshSession(u) => {
+            Some(Cow::Borrowed(u))
+        }
+        RepoSource::GithubShorthand { owner, repo } => Some(Cow::Owned(format!("{owner}/{repo}"))),
+        RepoSource::Filter(_) => None,
+    }
+}
+
+/// Collapse the home-directory prefix to `~` for display. Returns `~` for the
+/// home dir itself and the unchanged full path when it lies outside home or
+/// when `dirs::home_dir()` is unavailable. The home lookup is cached for the
+/// process so it stays off the per-frame render path.
+fn abbreviate_home(path: &Path) -> String {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let home = HOME.get_or_init(dirs::home_dir);
+    if let Some(home) = home {
+        if let Ok(rest) = path.strip_prefix(home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            // `Path::join` so the platform's native separator is used.
+            return Path::new("~").join(rest).display().to_string();
+        }
+    }
+    path.display().to_string()
+}
+
 /// Render the picker into `area`. Layout: title bar → filter prompt → list →
 /// help bar at the bottom. `BorderType::Rounded` everywhere.
 #[allow(clippy::too_many_lines)]
@@ -390,14 +489,82 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             } else {
                 Style::default().fg(SOFT_WHITE)
             };
-            let spans = vec![arrow, marker, Span::styled(row.label.clone(), label_style)];
+            let mut spans = vec![arrow, marker, Span::styled(row.label.clone(), label_style)];
+            // Dimmed locator after the name so identically-named repos are
+            // distinguishable (e.g. two `Rosetta` rows in different folders).
+            if let Some(detail) = row_detail(&row.source) {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(detail, Style::default().fg(MUTED_GRAY)));
+            }
 
-            // Inline clone progress shown directly under the highlighted row
-            // by appending a second visual span. Simpler than a sub-list:
-            // works inside ListItem::new(vec![Line, Line]).
+            // Inline status shown directly under the highlighted row
+            // by appending extra lines. Works inside ListItem::new(vec![…]).
             let mut lines = vec![Line::from(spans)];
             if is_selected {
-                if let Some(progress) = &state.clone_progress {
+                if let Some(auth) = &state.git_auth_status {
+                    match auth {
+                        GitAuthStatus::Checking => {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{1f504} Checking GitHub auth...",
+                                    Style::default().fg(Color::Rgb(100, 200, 230)),
+                                ),
+                            ]));
+                        }
+                        GitAuthStatus::NotAuthenticated => {
+                            // The `gh`-specific copy is intentional: the auth
+                            // pre-check only fires for GitHub sources (see
+                            // `is_github_host` gating in events.rs StartClone),
+                            // so this branch never renders for GitLab /
+                            // self-hosted HTTPS remotes.
+                            let amber = Color::Rgb(255, 191, 0);
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{1f511} GitHub auth required. In another terminal run:",
+                                    Style::default().fg(amber),
+                                ),
+                            ]));
+                            lines.push(Line::from(vec![
+                                Span::raw("      "),
+                                Span::styled(
+                                    "gh auth login && gh auth setup-git",
+                                    Style::default()
+                                        .fg(SELECTION_GREEN)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "Enter",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("=Retry  ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled(
+                                    "s",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("=Skip auth  ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled(
+                                    "Esc",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("=Back", Style::default().fg(MUTED_GRAY)),
+                            ]));
+                        }
+                        GitAuthStatus::Authenticated => {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{2705} Authenticated",
+                                    Style::default().fg(SELECTION_GREEN),
+                                ),
+                            ]));
+                        }
+                    }
+                } else if let Some(progress) = &state.clone_progress {
                     if let Some(err) = &progress.error {
                         lines.push(Line::from(vec![
                             Span::raw("    "),
@@ -473,6 +640,47 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
 ///   2. `^F` (favorite toggle) — already writes `favorites.yaml`
 ///      synchronously inside `toggle_favorite`.
 pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
+    // When an auth check is in flight or failed, intercept keys before
+    // normal picker handling. Checking → only Esc; NotAuthenticated →
+    // Enter retries, s skips, Esc clears.
+    if let Some(ref auth) = state.git_auth_status {
+        match auth {
+            GitAuthStatus::Checking => {
+                if matches!(key.code, KeyCode::Esc) {
+                    state.git_auth_status = None;
+                    state.pending_clone_source = None;
+                }
+                return PickRepoOutcome::Stay;
+            }
+            GitAuthStatus::NotAuthenticated => {
+                match key.code {
+                    KeyCode::Enter => {
+                        state.git_auth_status = Some(GitAuthStatus::Checking);
+                        return PickRepoOutcome::Stay; // dispatcher sees Checking → re-runs check
+                    }
+                    KeyCode::Char('s' | 'S') => {
+                        let source = state.pending_clone_source.take();
+                        state.git_auth_status = None;
+                        if let Some(src) = source {
+                            return PickRepoOutcome::StartClone(src);
+                        }
+                        return PickRepoOutcome::Stay;
+                    }
+                    KeyCode::Esc => {
+                        state.git_auth_status = None;
+                        state.pending_clone_source = None;
+                        return PickRepoOutcome::Stay;
+                    }
+                    _ => return PickRepoOutcome::Stay,
+                }
+            }
+            GitAuthStatus::Authenticated => {
+                // Auto-advance handled by dispatcher; shouldn't linger here
+                state.git_auth_status = None;
+            }
+        }
+    }
+
     let defaults_path = SessionDefaults::default_path();
     // Ctrl-modified keys take precedence over plain chars so `^R` / `^F`
     // never get swallowed by the filter-input branch below.
@@ -495,11 +703,37 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
             KeyCode::Char('f' | 'F') => {
                 tracing::debug!("pick_repo: ^F toggle favorite on highlighted row");
                 if let Some(row) = state.highlighted().cloned() {
-                    toggle_favorite(state, &row);
-                    let local_repos = collect_local_repo_paths(state);
-                    state.rebuild_rows(&local_repos);
+                    return match toggle_favorite(state, &row) {
+                        FavoriteToggle::Refused(reason) => PickRepoOutcome::Notice {
+                            message: format!("★ Can't favorite: {reason}"),
+                            is_error: true,
+                        },
+                        FavoriteToggle::Added(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("⭐ Added '{display}' to favorites"),
+                                is_error: false,
+                            }
+                        }
+                        FavoriteToggle::Removed(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("★ Removed '{display}' from favorites"),
+                                is_error: false,
+                            }
+                        }
+                    };
                 }
                 return PickRepoOutcome::Stay;
+            }
+            KeyCode::Char('v' | 'V') => {
+                // Ctrl+V: ask the caller to read the OS clipboard and append
+                // it (Cmd+V / bracketed paste isn't delivered to this field
+                // in some terminals — tmux, mouse-capture).
+                tracing::debug!("pick_repo: ^V clipboard paste");
+                return PickRepoOutcome::PasteFromClipboard;
             }
             _ => {}
         }
@@ -594,37 +828,58 @@ fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
 /// (mutating `state.favorites`) AND the on-disk YAML so the change survives
 /// across TUI restarts.
 ///
-/// Finding #1 sub-issue: refuses to persist when the row's source is
-/// `Filter` — writing `SourceType::LocalPath` with the alias-string as the
-/// path silently corrupts `favorites.yaml`. Pre-fix this only mattered for
-/// recents (which used Filter as a leaky "unknown provenance" carrier);
-/// post-fix the picker always reconstructs a real variant via
-/// `recent_source`, so a Filter source here is genuinely unparseable input
-/// that should not be persisted.
-fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) {
+/// A favorite ALWAYS records a remote indicator. Remote rows store directly;
+/// a `LocalPath` row is resolved to its `origin` remote via
+/// [`favorite_from_local_repo`] (refused if it has none). `SshSession`
+/// (interactive, not a repo) and `Filter` (unparseable text) rows are refused
+/// outright — never persisted.
+fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteToggle {
     if state.favorites.has_alias(&row.id) {
         state.favorites.remove(&row.id);
-    } else {
-        let (source_str, source_type) = match &row.source {
-            RepoSource::HttpsUrl(u) => (u.clone(), SourceType::HttpsUrl),
-            RepoSource::SshUrl(u) => (u.clone(), SourceType::SshUrl),
-            RepoSource::GithubShorthand { owner, repo } => {
-                (format!("{owner}/{repo}"), SourceType::GithubShorthand)
-            }
-            RepoSource::LocalPath(p) => (p.display().to_string(), SourceType::LocalPath),
-            RepoSource::SshSession(s) => (s.clone(), SourceType::SshUrl),
-            RepoSource::Filter(s) => {
-                tracing::warn!(
-                    alias = %row.id,
-                    text = %s,
-                    "pick_repo: refusing to favorite a Filter row — no real source provenance",
-                );
-                return;
-            }
-        };
-        let fav = Favorite::new(row.id.clone(), source_str, source_type);
-        state.favorites.set(fav);
+        persist_favorites(state);
+        return FavoriteToggle::Removed(row.label.clone());
     }
+
+    let fav = match &row.source {
+        RepoSource::HttpsUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::HttpsUrl),
+        RepoSource::SshUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::SshUrl),
+        RepoSource::GithubShorthand { owner, repo } => Favorite::new(
+            row.id.clone(),
+            format!("{owner}/{repo}"),
+            SourceType::GithubShorthand,
+        ),
+        RepoSource::LocalPath(p) => {
+            match crate::config::favorite_from_local_repo(row.id.clone(), p) {
+                Ok(fav) => fav,
+                Err(e) => {
+                    tracing::warn!(
+                        alias = %row.id,
+                        path = %p.display(),
+                        error = %e,
+                        "pick_repo: refusing to favorite local row — no remote indicator",
+                    );
+                    return FavoriteToggle::Refused(e.to_string());
+                }
+            }
+        }
+        RepoSource::SshSession(s) | RepoSource::Filter(s) => {
+            tracing::warn!(
+                alias = %row.id,
+                text = %s,
+                "pick_repo: refusing to favorite — not a remote repository indicator",
+            );
+            return FavoriteToggle::Refused("not a remote repository".to_string());
+        }
+    };
+
+    let display = fav.source.clone();
+    state.favorites.set(fav);
+    persist_favorites(state);
+    FavoriteToggle::Added(display)
+}
+
+/// Persist the favorites store to disk, logging (but not failing) on error.
+fn persist_favorites(state: &PickRepoState) {
     if let Err(err) = state.favorites.save() {
         tracing::warn!(error = %err, "pick_repo: failed to persist favorites");
     }
@@ -657,6 +912,8 @@ mod tests {
             filtered_indices,
             selected: 0,
             clone_progress: None,
+            git_auth_status: None,
+            pending_clone_source: None,
             defaults: SessionDefaults::default(),
             favorites: FavoritesStore::default(),
         }
@@ -776,5 +1033,231 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(pick_default_selection(&rows, &filtered, &defaults), 0);
+    }
+
+    #[test]
+    fn row_detail_renders_locator_per_source() {
+        // A path outside home is shown unchanged (home collapsing is covered
+        // separately so this stays independent of the test environment).
+        assert_eq!(
+            row_detail(&RepoSource::LocalPath(PathBuf::from("/opt/repos/Rosetta"))).as_deref(),
+            Some("/opt/repos/Rosetta")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::HttpsUrl("https://github.com/o/r.git".into())).as_deref(),
+            Some("https://github.com/o/r.git")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::SshUrl("git@github.com:o/r.git".into())).as_deref(),
+            Some("git@github.com:o/r.git")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::SshSession("ssh://deploy@prod-1".into())).as_deref(),
+            Some("ssh://deploy@prod-1")
+        );
+        let shorthand = RepoSource::GithubShorthand {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        assert_eq!(row_detail(&shorthand).as_deref(), Some("o/r"));
+        // Unparseable filter text carries no real source — nothing to show.
+        assert_eq!(
+            row_detail(&RepoSource::Filter("rose".into())).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn abbreviate_home_collapses_home_prefix() {
+        let Some(home) = dirs::home_dir() else {
+            return; // No home dir in this environment — nothing to assert.
+        };
+        let nested = home.join("Code-Zero").join("Rosetta");
+        let expected = Path::new("~").join("Code-Zero").join("Rosetta");
+        assert_eq!(abbreviate_home(&nested), expected.display().to_string());
+        assert_eq!(abbreviate_home(&home), "~");
+        let outside = Path::new("/opt/elsewhere/Rosetta");
+        assert_eq!(abbreviate_home(outside), outside.display().to_string());
+    }
+
+    fn one_row() -> Vec<PickRepoRow> {
+        vec![PickRepoRow {
+            id: "shotclubhouse".into(),
+            label: "shotclubhouse".into(),
+            source: RepoSource::Filter("shotclubhouse".into()),
+            kind: RowKind::Favorite,
+        }]
+    }
+
+    #[test]
+    fn ctrl_v_requests_clipboard_paste() {
+        let mut s = mk_state_with_rows(one_row());
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut s, ctrl_v),
+            PickRepoOutcome::PasteFromClipboard
+        );
+        // The keystroke must NOT also type a literal 'v' into the filter.
+        assert_eq!(s.filter, "");
+    }
+
+    #[test]
+    fn plain_v_still_types_into_filter() {
+        let mut s = mk_state_with_rows(one_row());
+        let v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut s, v), PickRepoOutcome::Stay);
+        assert_eq!(s.filter, "v");
+    }
+
+    #[test]
+    fn append_filter_strips_control_chars_and_refilters() {
+        let mut s = mk_state_with_rows(one_row());
+        // Simulate a pasted "owner/repo" with a trailing newline.
+        s.append_filter("shotclub\n");
+        assert_eq!(s.filter, "shotclub");
+        // The single row still matches the prefix, so it stays visible.
+        assert_eq!(s.filtered_indices.len(), 1);
+        // A non-matching paste empties the filtered list.
+        s.append_filter("zzz");
+        assert_eq!(s.filter, "shotclubzzz");
+        assert_eq!(s.filtered_indices.len(), 0);
+    }
+
+    // ── GitHub auth pre-check: prompt UI + key FSM ──────────────────────────
+    //
+    // These exercise the inline "auth required" prompt entirely from in-memory
+    // state — no `gh`, no network, no real GitHub credentials. That's the
+    // sandbox harness for verifying the prompt renders and reacts correctly
+    // when `gh auth status` would have failed (the dispatcher sets
+    // `NotAuthenticated`; here we set it directly and assert behaviour).
+
+    fn github_source() -> RepoSource {
+        RepoSource::GithubShorthand {
+            owner: "stevengonsalvez".into(),
+            repo: "agents-in-a-box".into(),
+        }
+    }
+
+    /// Render the picker and flatten the terminal buffer to a single string so
+    /// tests can assert on visible copy without a real terminal.
+    fn render_to_string(state: &PickRepoState, w: u16, h: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                render(f, state, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn auth_prompt_renders_instructions_without_invoking_gh() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let text = render_to_string(&s, 100, 24);
+
+        // The amber instruction line + the exact remediation command.
+        assert!(
+            text.contains("auth required"),
+            "missing auth prompt in:\n{text}"
+        );
+        assert!(
+            text.contains("gh auth login"),
+            "missing gh remediation command in:\n{text}"
+        );
+        // The three key hints the user can act on.
+        assert!(text.contains("Retry"), "missing Retry hint in:\n{text}");
+        assert!(text.contains("Skip"), "missing Skip hint in:\n{text}");
+        assert!(text.contains("Back"), "missing Back hint in:\n{text}");
+    }
+
+    #[test]
+    fn checking_state_renders_spinner_line() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::Checking);
+        let text = render_to_string(&s, 100, 24);
+        assert!(
+            text.contains("Checking GitHub auth"),
+            "missing checking spinner in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn not_authenticated_enter_retries_the_check() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Enter flips back to Checking so the dispatcher re-runs `gh auth status`.
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, Some(GitAuthStatus::Checking));
+        // The source is preserved across the retry.
+        assert_eq!(s.pending_clone_source, Some(github_source()));
+    }
+
+    #[test]
+    fn not_authenticated_skip_starts_the_clone_anyway() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+
+        // `s` bypasses the gate and proceeds to clone with the pending source.
+        assert_eq!(out, PickRepoOutcome::StartClone(github_source()));
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
+    }
+
+    #[test]
+    fn not_authenticated_esc_cancels_the_prompt() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // Esc dismisses the prompt and clears the pending source.
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
+    }
+
+    #[test]
+    fn checking_state_swallows_keys_except_esc() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::Checking);
+        s.pending_clone_source = Some(github_source());
+
+        // A stray keypress while the check is in flight is ignored, state holds.
+        let out = handle_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, Some(GitAuthStatus::Checking));
+
+        // Esc aborts the in-flight check and drops the pending source.
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
     }
 }

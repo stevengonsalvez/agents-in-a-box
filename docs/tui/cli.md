@@ -2,13 +2,11 @@
 title: "ainb CLI Reference"
 ---
 
-# ainb CLI Reference
-
 `ainb` is both an interactive terminal UI and a scriptable CLI. Every session operation the TUI can perform is also exposed as a subcommand, so agents and automation can drive it end-to-end without opening the UI.
 
 Run `ainb` with no arguments to launch the TUI, or use any subcommand below for non-interactive work.
 
-> **Version documented:** `ainb 0.5.5-beta1`
+> **Version documented:** `ainb 1.2.0`
 > **Source of truth:** output of `ainb <cmd> --help`. If this doc drifts, trust `--help`.
 
 ---
@@ -34,8 +32,13 @@ Run `ainb` with no arguments to launch the TUI, or use any subcommand below for 
   - [`git`](#ainb-git) — worktree operations
   - [`favorites`](#ainb-favorites) — saved repositories
   - [`init`](#ainb-init) — first-time setup & factory reset
+  - [`doctor`](#ainb-doctor) — classified dependency check
+  - [`reflect`](#ainb-reflect) — reflect toolchain bootstrap installer
   - [`presets`](#ainb-presets) — session presets
+  - [`claudecode`](#ainb-claudecode) — Claude Code provider-specific commands (statusline)
   - [`completion`](#ainb-completion) — shell completions
+  - [`plugin`](#ainb-plugin) — manage ainb plugins
+  - [`fleet`](#ainb-fleet) — orchestrate the claude session fleet
   - [`usage`](#ainb-usage) — local usage analytics and export
 - [Scripting recipes](#scripting-recipes)
 
@@ -442,6 +445,34 @@ ainb init --reset --force           # Factory reset (dangerous)
 
 ---
 
+### `ainb doctor`
+
+Classified dependency check for the reflect / statusline toolchain. Reports every dependency grouped by what needs it (core / reflect / statusline / beads / usage), with version/variant detection (bash >= 4, `timeout` or `gtimeout`, `reflect-kb` via the `reflect` binary or a system import) and the exact install command for anything missing.
+
+```bash
+ainb doctor                 # text report, grouped by consumer
+ainb doctor --format json   # machine-readable for scripts / CI
+```
+
+Read-only; installs nothing. Use `ainb reflect bootstrap` to act on what it reports.
+
+---
+
+### `ainb reflect`
+
+Reflect plugin lifecycle. Today: `bootstrap`, the one-step installer for the reflect toolchain.
+
+```bash
+ainb reflect bootstrap          # install reflect-kb[graph]; print missing system tools
+ainb reflect bootstrap --yes    # don't prompt before installing the reflect-owned layer
+ainb reflect bootstrap --print-only   # detect + print every command, install nothing
+ainb reflect check              # dependency check (reflect-focused; same engine as `ainb doctor`)
+```
+
+`bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]` — the `reflect` CLI plus qmd + nano-graphrag — via `uv`) after one confirm, and only *prints* the `brew`/`apt` commands for system tools (bash >= 4, coreutils, jq) so it never touches your OS or PATH. If `uv` is missing it prints the uv installer line and stops. Verify the result with `ainb doctor`.
+
+---
+
 ### `ainb presets`
 
 Session presets bundle a provider + model + defaults that `ainb run` can apply in one step.
@@ -486,6 +517,92 @@ ainb completion <SHELL>
 ```
 
 Supported: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
+---
+
+### `ainb claudecode`
+
+Provider-namespaced commands for Claude Code. Other providers grow their own namespace; today only the statusline hook lives here.
+
+```bash
+ainb claudecode <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `statusline` | Claude Code statusline hook: reads session JSON on stdin, caches rate-limit windows for the TUI, and emits a powerline status string on stdout. |
+
+**`statusline` flags**
+
+| Flag | Description |
+|------|-------------|
+| `--cache-only` | Side-channel mode: write the rate-limit cache only and emit nothing on stdout. |
+
+Wire it into Claude Code's `settings.json` as the `statusLine` command so the TUI can surface live rate-limit windows.
+
+---
+
+### `ainb plugin`
+
+Manage ainb plugins — install from marketplaces, update, remove, and inspect runtime events.
+
+```bash
+ainb plugin <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `install <PLUGIN> [-y]` | Install a plugin from a marketplace. `<PLUGIN>` is a plugin id, e.g. `burndown` or `ainb-plugins/burndown@0.1.0`. `-y, --yes` skips the capability-approval prompt. |
+| `update <PLUGIN> [-y]` | Update an installed plugin to the latest matching version. `-y, --yes` skips prompts when new capabilities are requested. |
+| `remove <PLUGIN> [-y]` | Remove an installed plugin. `-y, --yes` skips the data-directory deletion prompt. |
+| `list` | List installed plugins. |
+| `search <QUERY>` | Search registered marketplaces by plugin name. |
+| `marketplace <SUBCOMMAND>` | Manage marketplace registries: `add <URL\|PATH>`, `remove <NAME>`, `list`. |
+| `lint <PLUGIN>` | Validate a plugin manifest + binary (ABI 2.0 sanity checks). Accepts a plugin id, staging dir, or `manifest.toml` path. |
+| `watch <PLUGIN> [--duration <SECS>]` | Live-tail lifecycle + snapshot events for a registered plugin. `--duration` defaults to 30s. |
+| `tail <PLUGIN> [--level <LVL>] [--since <TS>] [--duration <SECS>]` | Stream the host's tracing layer filtered to one plugin id. `--level` is `trace\|debug\|info\|warn\|error` (default `debug`); `--since` is an RFC-3339 timestamp; `--duration` defaults to 30s. |
+
+**Examples**
+
+```bash
+ainb plugin marketplace add https://github.com/stevengonsalvez/ainb-plugins
+ainb plugin search burndown
+ainb plugin install burndown -y
+ainb plugin list --format json
+ainb plugin watch burndown --duration 60
+```
+
+In-tree v2 reference plugins: `burndown` (analytics), `notifyd` (notifications), `session-reader` (data backend).
+
+---
+
+### `ainb fleet`
+
+Orchestrate every claude session running on the host — merged across ainb's registry, the claude-peers broker, and background jobs.
+
+```bash
+ainb fleet <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `standup [--text]` | Live fleet status: every claude session across ainb + peers + background jobs. `--text` forces text output even with `--format json`. |
+| `broadcast <PROMPT> (--all \| --filter <REGEX> \| --cwd <SUBSTR>)` | Send one prompt to selected sessions (peers-first, tmux fallback). Requires an explicit targeting flag — no implicit fan-out. `--filter` matches a regex against tmux/workspace name; `--cwd` matches a substring of the session cwd. |
+| `sequence <STEPS>... [--all] [--timeout <SECS>]` | Send ordered prompts with an ack between each step. `--timeout` is the per-step timeout in seconds (default `300`). |
+| `needs [--idle-min <MIN>]` | Center control panel — list sessions blocked on input / errors / idle / waiting. `--idle-min` is minutes of assistant silence before flagging IDLE (default 5, env `AINB_FLEET_IDLE_MIN`). |
+| `daemon [-v]` | Watcher: registers as the `ainb-fleet-cp` peer and auto-continues sessions hitting API errors. `-v, --verbose` for detailed logging. |
+
+**Examples**
+
+```bash
+ainb fleet standup --format json | jq '.[] | .workspace_name'
+ainb fleet needs --idle-min 10
+ainb fleet broadcast "git pull" --filter '^feat-'
+ainb fleet sequence "run tests" "commit" --all --timeout 600
+ainb fleet daemon -v
+```
+
+Backed by the in-tree `plugins/ainb-fleet/` plugin.
 
 ---
 

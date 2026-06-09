@@ -58,19 +58,31 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
             .args(&["commit", "--no-gpg-sign", "-m", commit_message])
             .output()?;
 
+        let mut created_commit = true;
         if !commit_output.status.success() {
             let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            // Check if it's "nothing to commit" which isn't really an error
+            // "nothing to commit" is not a hard error: a previous run may have
+            // committed locally but failed at `push` (auth not yet configured).
+            // Returning here would strand that ahead commit forever, since the
+            // retry always hits "nothing to commit" before reaching push. Skip
+            // the commit and fall through to push so ahead commits still ship.
             if stderr.contains("nothing to commit") || stderr.contains("no changes added") {
-                return Err(anyhow::anyhow!("Nothing to commit - no changes staged"));
+                debug!("Nothing to commit — proceeding to push any ahead commits");
+                created_commit = false;
+            } else {
+                return Err(anyhow::anyhow!("git commit failed: {}", stderr));
             }
-            return Err(anyhow::anyhow!("git commit failed: {}", stderr));
         }
 
-        // Push changes - let git use its configured credential helper
-        // Don't set GIT_TERMINAL_PROMPT=0 as it breaks credential helpers
+        // Suppress interactive credential prompts — token-based helpers
+        // (gh, osxkeychain) work fine. Without this, git hangs waiting for
+        // stdin inside the TUI's raw-mode terminal.
         debug!("Pushing changes...");
-        let push_output = Command::new("git").args(&["push"]).output()?;
+        let push_output = Command::new("git")
+            .args(&["push"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
+            .output()?;
 
         if !push_output.status.success() {
             let stderr = String::from_utf8_lossy(&push_output.stderr);
@@ -92,7 +104,11 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
         }
 
         debug!("CLI git push succeeded");
-        Ok(format!("Committed and pushed: {}", commit_message))
+        if created_commit {
+            Ok(format!("Committed and pushed: {}", commit_message))
+        } else {
+            Ok("Nothing new to commit — pushed existing commits".to_string())
+        }
     })();
 
     // Always restore original directory

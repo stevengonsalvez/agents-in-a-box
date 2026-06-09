@@ -1,7 +1,7 @@
 {
   "name": "reflect",
-  "version": "3.6.0",
-  "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings via SessionStart/UserPromptSubmit hooks. PostToolUse arms low-cost mini-learning capture; Stop enqueues short-session reflection. Philosophy: Correct once, never again; recall everything next time.",
+  "version": "4.0.0",
+  "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings via SessionStart/UserPromptSubmit hooks. PostToolUse arms low-cost mini-learning capture; Stop enqueues short-session reflection. v4 cost rearchitecture: a $0 skip-gate + cascade slice the drain so it runs on Sonnet under hard caps (8 turns / 180s / 2M-token poison), with cost observability (reflect cost) and a weekly Opus synthesis pass. Philosophy: Correct once, never again; recall everything next time.",
   "author": {
     "name": "stevengonsalvez"
   },

@@ -5,67 +5,140 @@ description: Read-only branch-scoped situation report for Stevie. Surfaces beads
 
 # Standup — Stevie's branch-scoped situation report
 
-## Purpose
+A standup is not a status dump. It is shaped so Stevie can act in 30 seconds: know the state of the branch, and know exactly what is waiting on **him**. Read-only — it reports, it never touches.
 
-One-shot snapshot of the current git worktree/branch. No writes. Tells Stevie:
-- what's been done since the last `/standup` on this branch
-- what's pending and ready
-- what's blocked
-- what swarms / coding-agents / subagents are running in this worktree
-- what specifically needs *his* input
+Always address the reader as **Stevie**. Output in **caveman mode** by default — drop articles, filler, hedging — unless he's already in normal mode in this conversation.
 
-Always address the reader as **Stevie** (per his global preference). Output in **caveman mode** by default — drop articles, filler, hedging — unless he's already in normal mode in this conversation.
+## What Stevie needs from a standup
 
-## Trigger
+Six facts drive every rule below. Every rule traces back to one of these.
 
-Manual `/standup` only in v1. Future flag (not implemented yet): `/standup --since <date>`.
+1. **He scans the left edge; he does not read prose.** Eyes drop down the first column looking for trouble. Anything important that isn't a ball or a cell in column one is invisible.
+2. **The headline is "what needs ME."** Shipped/pending/next are context. The Inputs section is the lede — it must surface even when every other section is empty.
+3. **A session running with unknown scope is a hidden blocker.** An agent burning tokens on something Stevie can't name is a risk, not a status line. The "working on" column is load-bearing.
+4. **He returns to worktrees cold.** Cross-session working memory is zero. State must be externalized to disk, and every report framed as "since the last standup."
+5. **Read-only is the trust contract.** A standup he can run on autopilot is one that never mutates. The moment it might `bd close` or `gh merge`, he has to babysit it — and then it's useless.
+6. **Speed is the product.** A standup that costs 30s of LLM churn is a standup he won't run. Under 10s, no fan-out, no API beyond `gh`/`bd`.
 
-## Output format
+## Output rules
 
-**Primary principle: easy readability.** Stevie scans, doesn't read. Optimise for that.
+Each rule names the fact it serves. Bad/Good shown so the shape is unambiguous.
 
-Rules, in priority order:
+### 1. Lead with counts, climax on Inputs (Fact 2)
 
-1. **Clean tables are the default shape.** Every section is a self-contained table the reader can act on without re-scanning earlier sections. No prose paragraphs. No nested bullet lists when a table fits. Per Stevie's `feedback_incident_report_table_format.md`.
-2. **Options / files affected → neat separators + one-line rationale per option.** When a section enumerates options, alternatives, or files affected, separate each with a horizontal rule (`---`) and give each ONE line of rationale (why-it-matters / what-changes). Never bullet-soup. Pattern:
-   ```markdown
-   **Option A — short label**
-   One line: what it does + the trade-off.
-   
-   ---
-   
-   **Option B — short label**
-   One line: what it does + the trade-off.
-   ```
-3. **ASCII diagrams preferred for architecture / flow / trade-off explanations.** When a comparison is structural (data flow, RLS chain, deploy sequence, who-calls-what), draw it. ASCII beats prose every time. Pattern:
-   ```
-   client ──▶ /functions/v1/foo ──▶ alex.* (RPC) ──▶ public.alex_audit_log
-                                       │
-                                       └─ Zod validate ─▶ tool dispatcher
-   ```
-   Use box-drawing chars (`──▶ ── │ ┌ ┐ └ ┘ ├ ┤`) sparingly. ASCII art for the sake of it = noise.
-4. **Inputs from Stevie at end of report → use `/interview` skill, not raw AskUserQuestion.** When the standup surfaces a decision Stevie needs to make (section 8 row flagged `needs your call`), invoke `/interview` to walk through it conversationally rather than firing a single AskUserQuestion. Reason: standup decisions are usually multi-faceted (which option, which scope, when) and `/interview` paces the dialogue. AskUserQuestion is fine for single binary picks.
+First shape is the one-row Counts table. Last shape is the Inputs table. Everything between is context the eye can skip.
 
-Section order is fixed (4 tables only — keep it tight):
+Bad: bury "PR #2535 ready to merge" as row 7 of the beads table.
+Good: Counts row up top, then context tables, then `### Inputs needed from Stevie 🔴` as the final, aggressively-surfaced section.
 
-1. **Summary** (1-row counts table: shipped / next / pending / blocked / inputs — each prefixed with its status ball)
-2. **Beads** — ONE unified table, columns: `id | title | status | PR`. Status enum prefixed with a coloured ball so the eye picks out trouble at a glance:
-   - 🟢 `shipped` — closed bead, PR merged
-   - 🔵 `pending` — in_progress
-   - 🟡 `next (P<n>)` — ready, priority annotated
-   - 🔴 `blocked (by …)` — blocker IDs in parentheses
-   PR column shows `#NNNN → merged|open|draft` or `—`. Don't split into 3 sub-tables — Stevie hates that.
-3. **PRs raised in this worktree** (one table — # / title / state / CI / labels / when). State ball: 🟢 merged · 🟡 open · ⚫ draft · 🔴 closed-unmerged.
-4. **Active swarms / coding-agents / subagents** (one table — name / source / working on / last activity / status). Status ball: 🟢 running · 🟡 idle (>5min no activity) · 🔴 stuck/errored. The "working on" column shows the actual bead or task they're driving, not just the session name.
-5. **Inputs needed from Stevie** 🔴 (THE headline section — surface aggressively). Priority column also coloured: 🔴 high · 🟡 medium · 🔵 low.
+### 2. One unified beads table — never sub-tables (Fact 1)
 
-**Why coloured balls:** in tables that grow past ~10 rows (especially the Beads union table when many things are blocked), Stevie scans the left edge of the status column to find the red. Plain text status loses that affordance.
+All four states (shipped / pending / next / blocked) render in ONE table. Splitting into in-progress/ready/blocked sub-tables forces re-scanning — Stevie hates that.
 
-Close the report with: `Anything else, Stevie?`
+Bad:
+```
+### In progress
+| id | title |
+### Ready
+| id | title |
+### Blocked
+| id | title |
+```
 
-## Execution sequence
+Good:
+```
+### Beads
+| id | title | status | PR |
+|---|---|---|---|
+| ag-xx | … | 🟢 shipped | #2535 → merged |
+| ag-yy | … | 🔵 pending | #2540 → open |
+| ag-zz | … | 🟡 next (P1) | — |
+| ag-ww | … | 🔴 blocked (by ag-vv) | — |
+```
+Sort: shipped → pending → next → blocked.
 
-Run these checks in order. Skip a section gracefully if its data source is missing — never fail the whole standup because beads or gh isn't installed.
+### 3. Status ball on the left edge of every status/priority cell (Fact 1)
+
+The ball is the scan target. Plain-text status loses the affordance the moment a table passes ~10 rows (common when many beads are blocked).
+
+Bad: `| ag-ww | … | blocked | — |`
+Good: `| ag-ww | … | 🔴 blocked (by ag-vv) | — |`
+
+Enum: 🟢 shipped · 🔵 pending · 🟡 next (P\<n>) · 🔴 blocked (by …). Priority column: 🔴 high · 🟡 medium · 🔵 low.
+
+### 4. Options → horizontal-rule separators + one line each (Fact 1)
+
+When a section enumerates options/alternatives/files-affected, separate each with `---` and give each ONE line of rationale. Never bullet-soup.
+
+Bad:
+```
+Options: we could add a policy (no FE change but leaves RPC open), or we could
+strip the policy and add an RPC (proper fix but needs a frontend migration and
+native rebuild), or we could…
+```
+
+Good:
+```
+**Option A — add hotfix policy**
+Unblocks users now, leaves RPC follow-up open.
+
+---
+
+**Option B — strip policy + RPC migration**
+Proper fix; needs frontend change + native rebuild.
+```
+
+### 5. Structural comparison → ASCII diagram, not prose (Fact 1)
+
+When the thing being explained is structural (data flow, RLS chain, deploy sequence, who-calls-what), draw it. ASCII beats prose every time. Box-drawing chars used sparingly — art for its own sake is noise.
+
+Bad: "The client hits the edge function, which validates with Zod and then dispatches to the RPC layer, which writes to the audit log…"
+
+Good:
+```
+client ──▶ /functions/v1/foo ──▶ alex.* (RPC) ──▶ public.alex_audit_log
+                                    │
+                                    └─ Zod validate ──▶ tool dispatcher
+```
+
+### 6. Decisions → /interview, not raw AskUserQuestion (Fact 2)
+
+When the Inputs section surfaces a decision Stevie must make (a row flagged `needs your call`), invoke `/interview` to pace the dialogue — standup decisions are usually multi-faceted (which option, which scope, when). A single `AskUserQuestion` is fine ONLY for a clean binary pick.
+
+Bad: fire one AskUserQuestion with "Merge PR #2535? yes/no" when the real decision is option-A-vs-B with scope and timing attached.
+Good: surface the row, render the option block (rule 4) + diagram (rule 5), then call `/interview`.
+
+### 7. Caveman prose, exact terms, tables stay tables (Fact 6)
+
+Surrounding prose obeys caveman mode: drop articles, filler, hedging, pleasantries. Keep technical terms exact. Do NOT caveman the column headers or cell content — tables stay readable.
+
+Bad: "I have gone ahead and checked all of the beads for you, and it looks like there might possibly be a few that could be blocked."
+Good: "22 blocked. Top 5 below."
+
+### 8. Emojis only carry status semantics (Fact 1)
+
+Emoji allowed ONLY where it encodes state: 🟢/🔵/🟡/🔴/⚫ status balls, 🔴 on the Inputs header, ✅/✘/⏳ in CI rollups. No decorative emoji anywhere else — it dilutes the scan signal.
+
+Bad: `### 🚀 Beads update! ✨`
+Good: `### Beads`
+
+### 9. Cap every list (Fact 1)
+
+Ranked-and-capped beats long-and-flat. Blocked beads cap at 5 + `_(+ N more 🔴 — see bd blocked)_`. Inputs cap at 10. Next cap at 5. If a list would run longer, it gets capped and the overflow noted, never dumped.
+
+## Section order (fixed — 4 tables + optional decision block)
+
+1. **Summary** — 1-row counts table: shipped / next / pending / blocked / inputs, each prefixed with its status ball.
+2. **Beads** — the ONE unified table (rule 2). Columns: `id | title | status | PR`. PR column: `#NNNN → merged|open|draft` for shipped, `—` otherwise.
+3. **PRs raised in this worktree** — one table: `# | title | state | CI | labels | when`. State ball: 🟢 merged · 🟡 open · ⚫ draft · 🔴 closed-unmerged.
+4. **Active swarms / coding-agents / subagents** — one table: `name | source | working on | last activity | status`. Status ball: 🟢 running · 🟡 idle (>5min) · 🔴 stuck. "working on" shows the actual bead/task, never just the session name (Fact 3).
+5. **Inputs needed from Stevie 🔴** — THE headline section (Fact 2). Surface aggressively, build even when everything else is empty.
+
+Close with: `Anything else, Stevie?`
+
+## How to gather the data (execution sequence)
+
+Run in order. Skip a section gracefully if its data source is missing — never fail the whole standup because `bd`/`gh`/`tmux` isn't present.
 
 ### 0. Guardrails
 
@@ -92,7 +165,7 @@ STATE_FILE="$STATE_DIR/${SAFE_BRANCH}.json"
 mkdir -p "$STATE_DIR"
 ```
 
-### 1. Establish "since" cutoff
+### 1. Establish "since" cutoff (Fact 4)
 
 ```bash
 # If state file exists, use last_run_at. Otherwise fall back to merge-base with main.
@@ -168,11 +241,7 @@ BLOCKED=$(bd blocked --json 2>/dev/null | jq '[.[] | {
 echo "$SHIPPED $PENDING $NEXT $BLOCKED" | jq -s 'add'
 ```
 
-**Render ONE table, columns: `id | title | status | PR`.** Sort: shipped first, then pending, then next, then blocked. Cap blocked at 5 rows + `_(+ N more 🔴 — see bd blocked)_`. The PR column populates `#NNNN → merged|open|draft` for shipped beads, `—` for everything else.
-
-**Status column always prefixed with a coloured ball** (🟢 shipped / 🔵 pending / 🟡 next / 🔴 blocked) — load-bearing for visual scanning when blocked count is high.
-
-DO NOT split into in-progress/ready/blocked sub-tables — Stevie's preference is one unified view.
+Render per **output rules 2 + 3 + 9**: one table, columns `id | title | status | PR`, balls on the left edge, blocked capped at 5 + overflow note. PR column populates `#NNNN → merged|open|draft` for shipped beads, `—` for everything else.
 
 ### 4. PRs raised in this worktree
 
@@ -193,9 +262,9 @@ Render:
 |---|---|---|---|---|---|
 | 2535 | fix(rls)... | no | ✅ 12 / ✘ 0 / ⏳ 0 | popashot-pr-comments-fixed, popashot-e2e-passed | 6h |
 
-`pr-signals` is **NOT** re-run — labels are the truth. If `comments_fixed` + all-green CI, flag this row in section 7.
+`pr-signals` is **NOT** re-run — labels are the truth. If `comments_fixed` + all-green CI, flag this row in the Inputs section.
 
-### 5. Active swarms / coding-agents / subagents (this worktree only)
+### 5. Active swarms / coding-agents / subagents (this worktree only) (Fact 3)
 
 ```bash
 # tmux sessions whose CWD == current worktree
@@ -231,16 +300,14 @@ Render ONE table:
 
 | name | source | working on | last activity | status |
 |---|---|---|---|---|
-| swarm-1778…-agent-1 | tmux | shotclubhouse-ag-z0nc | 2m ago | running |
-| Task agent | TaskList | "validate RLS probe" | 30s ago | running |
+| swarm-1778…-agent-1 | tmux | shotclubhouse-ag-z0nc | 2m ago | 🟢 running |
+| Task agent | TaskList | "validate RLS probe" | 30s ago | 🟢 running |
 
-The **`working on` column is load-bearing** — Stevie wants to see the actual bead/issue/file/task each agent is driving, not just the session name. If the column is empty for a row, mark it `?` and surface in section 7 as a "session running with unknown scope" input.
+The **`working on` column is load-bearing** (Fact 3). If empty for a row, mark it `?` and surface in the Inputs section as a "session running with unknown scope" input. If the whole section is empty, render `_(none active)_` rather than skipping.
 
-If empty, render `_(none active)_` rather than skipping the section.
+### 6. Inputs needed from Stevie 🔴 (Fact 2)
 
-### 6. Inputs needed from Stevie 🔴
-
-THIS is the highest-signal section. Build the table even if other sections are empty.
+THIS is the highest-signal section. Build the table even if every other section is empty.
 
 **Sources:**
 
@@ -276,30 +343,32 @@ d. **Decision points raised in CURRENT conversation that haven't been answered**
    Find the transcript:
    ```bash
    PROJECT_DIR=$(echo "$WORKTREE_PATH" | sed 's|/|-|g; s|^-||')
-   TRANSCRIPT=$(ls -t {{HOME_TOOL_DIR}}/projects/-${PROJECT_DIR}/*.jsonl 2>/dev/null | head -1)
+   TRANSCRIPT=$(ls -t ~/.claude/projects/-${PROJECT_DIR}/*.jsonl 2>/dev/null | head -1)
    ```
 
    Best-effort — if parsing fails, skip silently.
 
-e. **Explicit `// @stevie:` markers in branch diff**:
+e. **Sessions running with unknown scope** (from step 5): any agent row whose "working on" resolved to `?` is an input — Stevie can't see what it's burning tokens on (Fact 3).
+
+f. **Explicit `// @stevie:` markers in branch diff**:
    ```bash
    git diff $(git merge-base HEAD main)..HEAD -- ':!*.lock' \
      | grep -E "^\+.*(// @stevie:|#shame:blocked|TODO:.*stevie)" \
      | sed 's/^+//'
    ```
 
-**Render:**
+**Render** (per output rules 3 + 9):
 
 | source | item | action | priority |
 |---|---|---|---|
-| PR #2535 | popashot-pr-comments-fixed + CI green | admin-merge ready | high |
-| Bead -ag-xx | blocked: awaiting decision on caching strategy | needs your call | high |
-| tmux swarm-1778 | "(Y/n)" prompt unanswered for 12m | reply or kill | medium |
-| chat | Last assistant message ended with "Want me to ship option 2?" — no reply yet | answer in chat | high |
+| PR #2535 | popashot-pr-comments-fixed + CI green | admin-merge ready | 🔴 high |
+| Bead -ag-xx | blocked: awaiting decision on caching strategy | needs your call | 🔴 high |
+| tmux swarm-1778 | "(Y/n)" prompt unanswered for 12m | reply or kill | 🟡 medium |
+| chat | Last assistant message ended with "Want me to ship option 2?" — no reply yet | answer in chat | 🔴 high |
 
-Sort by priority (high first), cap at 10 rows. If empty, render: `Stevie — nothing waiting on you. Carry on.`
+Sort by priority (high first), cap at 10 rows. If a row needs a multi-faceted decision, follow output rules 4 + 5 + 6 (option block → diagram → `/interview`). If empty, render: `Stevie — nothing waiting on you. Carry on.`
 
-### 7. Persist state
+### 7. Persist state (Fact 4)
 
 After successful render:
 
@@ -352,20 +421,20 @@ Where `$BRIEF_SUMMARY` is one line like `shipped=1 next=5 pending=0 blocked=22 i
 Anything else, Stevie?
 ```
 
-### When a section needs the options/diagram pattern
+### Decision sub-block (when the Inputs section surfaces a >1-option choice)
 
-If section 8 surfaces a decision with >1 option, OR section 6 surfaces a PR with structural change worth explaining (RLS chain, deploy sequence), append a sub-block AFTER the table using the patterns above:
+If the Inputs section surfaces a decision with more than one option, OR a PR with a structural change worth explaining (RLS chain, deploy sequence), append a sub-block AFTER the Inputs table using output rules 4 + 5, then call `/interview`:
 
 ```markdown
 ### Option to decide — <one-line context>
 
 **Option A — ship hotfix policy**
-One line: unblocks users now, leaves RPC follow-up open.
+Unblocks users now, leaves RPC follow-up open.
 
 ---
 
 **Option B — ship RPC migration**
-One line: proper fix, requires frontend change + native rebuild.
+Proper fix, requires frontend change + native rebuild.
 
 Architecture:
 
@@ -378,7 +447,27 @@ Architecture:
     (no FE change)       (FE migration needed)
 ```
 
-Then call `/interview` to walk Stevie through the pick.
+## Pre-render check
+
+Before rendering, delete:
+
+1. Any prose paragraph that a table could carry instead (output rule 2).
+2. Any decorative emoji that doesn't encode status (output rule 8).
+3. Any hedging adverb in the surrounding prose — "perhaps," "might," "could possibly" (output rule 7).
+4. Any list past its cap; replace the tail with an overflow note (output rule 9).
+
+Then verify the one test: **if Stevie reads ONLY the Counts row and the Inputs table, does he know (a) the state of the branch and (b) exactly what is waiting on him?**
+
+If yes, render. If no, the Counts row or the Inputs section is under-built — fix that before anything else.
+
+## When to break the rules
+
+Override the defaults when:
+
+1. **Stevie asks to "explain" or "walk me through" a row.** Drop into full prose for that one item — still no preamble, still caveman, but the body runs as long as the topic needs. Add a header so he can skim back to the table.
+2. **A decision is genuinely binary.** Skip `/interview` (output rule 6) and fire a single `AskUserQuestion` — pacing a yes/no wastes his time.
+3. **Zero data everywhere.** If beads, PRs, agents, and inputs are all empty, skip the four context tables and render just: `Stevie — branch <X> is quiet. Nothing in flight, nothing waiting on you.`
+4. **He's already in normal mode this conversation.** Honour it — don't force caveman back on.
 
 ## Error handling
 
@@ -389,7 +478,15 @@ Then call `/interview` to walk Stevie through the pick.
 - TaskList tool unavailable in current session → skip todo + agent enumeration silently
 - Transcript parse failure for "decision points" → skip that sub-source silently
 
-## Cost
+## Hard rules
+
+- READ-ONLY (Fact 5). Never `bd update`, `bd close`, `gh pr merge`, `gh pr comment`, `git commit`, etc.
+- NEVER post to Slack / Discord / GH comments — output is stdout only
+- NEVER re-run `/pr-signals` — labels are the source of truth
+- NEVER claim a bead or change assignee
+- The state file is the only write — under `.agents/standup/` (tool-neutral location, same convention as `.agents/MEMORY.md` and `.agents/pr-signals/`). Add `.agents/standup/` to project `.gitignore` if you don't want per-branch state committed.
+
+## Cost (Fact 6)
 
 `/standup` should run in **<10 seconds** end-to-end. No LLM-heavy operations. No `/pr-signals` fan-out. No external API calls beyond `gh` and `bd`.
 
@@ -400,23 +497,10 @@ Then call `/interview` to walk Stevie through the pick.
 - `/standup --json` — emit machine-readable output
 - Cron / scheduled mode → wire into `/schedule`
 
-## Hard rules
-
-- READ-ONLY. Never `bd update`, `bd close`, `gh pr merge`, `gh pr comment`, `git commit`, etc.
-- NEVER post to Slack / Discord / GH comments — output is stdout only
-- NEVER re-run `/pr-signals` — labels are the source of truth
-- NEVER claim a bead or change assignee
-- The state file is the only write — under `.agents/standup/` (tool-neutral location, same convention as `.agents/MEMORY.md` and `.agents/pr-signals/`). Add `.agents/standup/` to project `.gitignore` if you don't want per-branch state committed.
-- Emojis allowed ONLY for status semantics: 🟢/🔵/🟡/🔴/⚫ status balls in status & priority columns, `🔴` on the Inputs section header, ✅/✘/⏳ in CI rollup. No decorative emoji elsewhere.
-
-## Caveman default
-
-Output text obeys Stevie's caveman mode: drop articles, filler, hedging, pleasantries. Keep technical terms exact. Tables stay as tables — don't caveman the column headers, just the prose surrounding them.
-
 ## When to use
 
 - Stevie types `/standup`, "give me a standup", "what's the state of this branch"
-- Stevie asks "what do you need from me?" — run /standup, especially section 7
+- Stevie asks "what do you need from me?" — run /standup, especially the Inputs section
 - Stevie returns to a worktree after time away — proactive trigger
 - Beginning of a working session in an unfamiliar worktree
 

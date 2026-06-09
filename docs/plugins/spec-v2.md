@@ -2,8 +2,6 @@
 title: "ainb plugin contract — v2 (subprocess)"
 ---
 
-# ainb plugin contract — v2 (subprocess)
-
 **Status:** stable.
 **Host versions covered:** `2.x.y` (additive minor bumps stay in v2).
 **Successor:** tracked in [CHANGELOG.md](./CHANGELOG.md). A new contract version (`v3`) ships only when an existing signature changes incompatibly.
@@ -294,6 +292,8 @@ Denied capability → `RpcError { code: -32001, message: "capability denied: <ca
 `ainb-plugin-cts-v2` covers 14 axes: manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot pub/sub, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, chunked publish ordering. Each axis has a canary plugin at `crates/ainb-plugin-cts-v2/tests/canaries/<axis>/` and a host-side `#[test]` in `tests/axes.rs`.
 
 Plugins MUST pass every axis their manifest's capability + provides surface implies. Axes for surface a plugin doesn't expose are skipped.
+
+> **Author tooling.** Two crates back this: `ainb-plugin-cts-v2` is the subprocess conformance runner described above (canary plugins + host-side `tests/axes.rs`), and `ainb-plugin-testkit` is an in-process harness that drives a `Plugin` trait impl over a `tokio::io::DuplexStream` pair — exercising the full JSON-RPC + Content-Length framing path without spawning a subprocess or staging a binary on disk. Use `testkit` for fast unit-style assertions while authoring; use `cts-v2` for the authoritative per-axis pass/fail gate.
 
 ## 11. Stability promise
 

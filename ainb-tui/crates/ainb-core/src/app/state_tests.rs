@@ -590,4 +590,418 @@ mod tests {
             "invalidation must drop the cached entry"
         );
     }
+
+    // ========================================================================
+    // Config "Default Workspace" round-trip
+    //
+    // Regression: editing Default Workspace appended to `workspace_scan_paths`
+    // while the field is displayed from `first()`, so the edit never showed on
+    // reopen ("back to the same folder"). It must replace the primary entry.
+    // ========================================================================
+
+    use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
+    use crate::config::AppConfig;
+
+    fn set_default_workspace(screen: &mut ConfigScreenState, value: &str) {
+        let settings = screen
+            .settings
+            .get_mut(&ConfigCategory::Workspace)
+            .expect("Workspace category present");
+        let setting = settings
+            .iter_mut()
+            .find(|s| s.key == "default_workspace")
+            .expect("default_workspace setting present");
+        setting.value = ConfigValue::Text(value.to_string());
+    }
+
+    fn displayed_default_workspace(screen: &ConfigScreenState) -> String {
+        screen
+            .settings
+            .get(&ConfigCategory::Workspace)
+            .unwrap()
+            .iter()
+            .find(|s| s.key == "default_workspace")
+            .unwrap()
+            .value
+            .display()
+    }
+
+    #[test]
+    fn default_workspace_edit_replaces_primary_and_round_trips() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths = vec![PathBuf::from("/a/git")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        set_default_workspace(&mut screen, "/a/projects");
+        screen.apply_to_app_config(&mut config);
+
+        // Primary scan path is the edited value, not appended to the tail.
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths.first(),
+            Some(&PathBuf::from("/a/projects"))
+        );
+        // Reopening the screen now shows the saved value.
+        let reopened = ConfigScreenState::from_app_config(&config);
+        assert_eq!(displayed_default_workspace(&reopened), "/a/projects");
+    }
+
+    #[test]
+    fn default_workspace_edit_preserves_other_scan_dirs() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        set_default_workspace(&mut screen, "/a/projects");
+        screen.apply_to_app_config(&mut config);
+
+        // Old primary replaced; the secondary scan dir is kept.
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths,
+            vec![PathBuf::from("/a/projects"), PathBuf::from("/a/work")]
+        );
+    }
+
+    #[test]
+    fn default_workspace_noop_confirm_keeps_secondary_dirs() {
+        // Opening the popup and confirming without changing the value must NOT
+        // drop other configured scan dirs (regression: a de-dup that stripped
+        // the unchanged primary then overwrote slot 0 lost the secondary).
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        // first() is /a/git — re-confirm it unchanged.
+        set_default_workspace(&mut screen, "/a/git");
+        screen.apply_to_app_config(&mut config);
+
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths,
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")]
+        );
+    }
+
+    #[test]
+    fn default_workspace_edit_does_not_duplicate_existing_path() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        // Promote an already-present path to primary.
+        set_default_workspace(&mut screen, "/a/work");
+        screen.apply_to_app_config(&mut config);
+
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths.first(),
+            Some(&PathBuf::from("/a/work"))
+        );
+        let dupes = config
+            .workspace_defaults
+            .workspace_scan_paths
+            .iter()
+            .filter(|p| *p == &PathBuf::from("/a/work"))
+            .count();
+        assert_eq!(dupes, 1, "edited path must not be duplicated");
+    }
+
+    // ========================================================================
+    // Per-session attention marker — derived from real ainb-hooks events
+    // (NeedsPermission `[!]` / WaitingOnUser `[?]` / Finished `[✓]`), not
+    // from "is the pane generating right now".
+    // ========================================================================
+
+    /// Build a notification record for the marker tests. `recent` slices
+    /// passed to `attention_for_session` must be newest-first.
+    fn rec(
+        agent: &str,
+        cwd: &str,
+        raw_event: &str,
+        ts: i64,
+    ) -> ainb_plugin_notifyd::NotificationRecord {
+        ainb_plugin_notifyd::NotificationRecord {
+            id: format!("id-{ts}"),
+            ts,
+            agent: agent.into(),
+            session_id: format!("s-{ts}"),
+            cwd: cwd.into(),
+            project: cwd.rsplit('/').next().unwrap_or("").into(),
+            raw_event: raw_event.into(),
+            payload_json: "{}".into(),
+            read: false,
+            dismissed: false,
+        }
+    }
+
+    const NOW: i64 = 1_000_000_000;
+    const CWD: &str = "/work/feat-x";
+
+    #[test]
+    fn attention_permission_event_marks_needs_permission() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::NeedsPermission),
+        );
+    }
+
+    #[test]
+    fn attention_notification_event_marks_waiting() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", CWD, "Notification:idle_prompt", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::WaitingOnUser),
+        );
+    }
+
+    #[test]
+    fn attention_fresh_stop_marks_finished_stale_stop_clears() {
+        use ainb_plugin_notifyd::AlertKind;
+        let fresh = vec![rec("claude", CWD, "Stop", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &fresh),
+            Some(AlertKind::Finished),
+        );
+        // Older than the 5-minute Finished TTL → retired, no marker.
+        let stale = vec![rec("claude", CWD, "Stop", NOW - 6 * 60 * 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &stale),
+            None,
+        );
+    }
+
+    #[test]
+    fn attention_suppressed_while_generating() {
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), true, 0, NOW, &recent),
+            None,
+            "a generating session shows the busy dot, not an attention marker",
+        );
+    }
+
+    #[test]
+    fn attention_blank_without_a_matching_event() {
+        // No events at all → blank (this is the common idle case the old
+        // "[?] on everything" behaviour got wrong).
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[]),
+            None,
+        );
+        // Events exist, but for a different cwd or a different agent —
+        // must not bleed across sessions.
+        let other = vec![
+            rec("codex", CWD, "Notification", NOW - 50),
+            rec("claude", "/work/other", "Notification", NOW - 100),
+        ];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &other),
+            None,
+        );
+    }
+
+    #[test]
+    fn attention_ignores_events_at_or_before_baseline() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", CWD, "Notification", 500)];
+        // Baseline at/after the event (e.g. user just attached) → cleared.
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 500, NOW, &recent),
+            None,
+        );
+        // Baseline just before the event → still marks.
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 499, NOW, &recent),
+            Some(AlertKind::WaitingOnUser),
+        );
+    }
+
+    #[test]
+    fn attention_newest_event_wins() {
+        use ainb_plugin_notifyd::AlertKind;
+        // Question asked, then the turn finished — newest (Stop) supersedes
+        // the older Notification.
+        let recent = vec![
+            rec("claude", CWD, "Stop", NOW - 1000),
+            rec("claude", CWD, "Notification", NOW - 5000),
+        ];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::Finished),
+        );
+    }
+
+    #[test]
+    fn attention_none_agent_never_marks() {
+        // Shell / SSH session (no hook agent) → never a marker, even with
+        // a permission event sitting in the same cwd.
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, None, false, 0, NOW, &recent),
+            None,
+        );
+    }
+
+    #[test]
+    fn attention_matches_cwd_ignoring_trailing_slash() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", "/work/feat-x/", "Notification", NOW - 100)];
+        assert_eq!(
+            AppState::attention_for_session("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::WaitingOnUser),
+        );
+    }
+
+    #[test]
+    fn agent_hook_name_maps_claude_and_codex_only() {
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Claude),
+            Some("claude")
+        );
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Codex),
+            Some("codex")
+        );
+        assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
+        assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
+    }
+
+    // ---- bulk-resume selection (Enter/r on multi-selected sessions) ----
+
+    fn resumable_session(
+        name: &str,
+        mode: SessionMode,
+        agent: SessionAgentType,
+        status: crate::models::SessionStatus,
+    ) -> crate::models::Session {
+        let mut s = crate::models::Session::new(name.to_string(), "/tmp/ws".to_string());
+        s.mode = mode;
+        s.agent_type = agent;
+        s.status = status;
+        s
+    }
+
+    /// Bulk resume must start every selected *stopped interactive* session and
+    /// exclude everything else — Running interactive (would kill+recreate a live
+    /// tmux), Boss-mode, and non-agent (Shell) sessions. Regression for the bug
+    /// where Enter only resumed the highlighted row.
+    #[test]
+    fn selected_resumable_session_ids_keeps_only_stopped_interactive() {
+        use crate::models::SessionStatus;
+
+        let stopped_claude = resumable_session(
+            "stopped-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let stopped_codex = resumable_session(
+            "stopped-codex",
+            SessionMode::Interactive,
+            SessionAgentType::Codex,
+            SessionStatus::Stopped,
+        );
+        let running_claude = resumable_session(
+            "running-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Running,
+        );
+        let boss_stopped = resumable_session(
+            "boss-stopped",
+            SessionMode::Boss,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let shell_stopped = resumable_session(
+            "shell-stopped",
+            SessionMode::Interactive,
+            SessionAgentType::Shell,
+            SessionStatus::Stopped,
+        );
+
+        let resumable_ids = [stopped_claude.id, stopped_codex.id];
+        let all_ids = [
+            stopped_claude.id,
+            stopped_codex.id,
+            running_claude.id,
+            boss_stopped.id,
+            shell_stopped.id,
+        ];
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        ws.add_session(stopped_claude);
+        ws.add_session(stopped_codex);
+        ws.add_session(running_claude);
+        ws.add_session(boss_stopped);
+        ws.add_session(shell_stopped);
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        // Mark all five as multi-selected.
+        for id in all_ids {
+            state.selected_sessions.insert(id);
+        }
+
+        let mut got = state.selected_resumable_session_ids();
+        got.sort();
+        let mut want = resumable_ids.to_vec();
+        want.sort();
+        assert_eq!(got, want, "only stopped interactive agent sessions resume");
+    }
+
+    #[test]
+    fn selected_resumable_session_ids_empty_when_nothing_selected() {
+        let state = AppState::new();
+        assert!(state.selected_resumable_session_ids().is_empty());
+    }
+
+    // ========================================================================
+    // Startup discovery: the fast loader must hand off to a full refresh so
+    // stopped sessions (which `load_workspaces_async` does not surface) appear
+    // without the user having to manually refresh.
+    // ========================================================================
+
+    #[test]
+    fn initial_background_load_enqueues_full_refresh_for_stopped_sessions() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        state.pending_async_action = None;
+
+        // Simulate the startup background load completing.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+
+        let updated = state.check_workspace_loading_complete();
+
+        assert!(updated, "applying the background result reports an update");
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::RefreshWorkspaces),
+            "fast startup load must enqueue a full refresh so stopped sessions surface"
+        );
+    }
+
+    #[test]
+    fn initial_background_load_does_not_clobber_a_queued_action() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A user-queued action is already pending when the load completes.
+        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        state.check_workspace_loading_complete();
+
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::CleanupOrphaned),
+            "an already-queued action must not be overwritten by the refresh hand-off"
+        );
+    }
 }

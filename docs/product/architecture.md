@@ -2,11 +2,17 @@
 title: "Whole-system architecture"
 ---
 
-# Whole-system architecture
-
 How the four components of agents-in-a-box fit together.
 
 > For component-level deep dives, see [TUI architecture](../tui/architecture.md), [plugin spec v2](../plugins/spec-v2.md), and [knowledge system overview](../knowledge/overview.md).
+
+---
+
+## Ecosystem map
+
+![agents-in-a-box ecosystem architecture — ainb TUI Rust workspace, JSON-RPC plugin host, fleet orchestration, portable toolkit deploying to 9+ tool homes, reflect GraphRAG memory, and the on-disk state that ties them together](../assets/diagrams/ecosystem-architecture.svg)
+
+Solid arrows are data/control flow, dashed arrows are writes and feedback, clay is fleet prompt delivery, and olive is the learning loop. The small hops where lines cross are jump-overs — the lines do not connect.
 
 ---
 

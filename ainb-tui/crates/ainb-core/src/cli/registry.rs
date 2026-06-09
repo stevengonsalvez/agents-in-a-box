@@ -97,6 +97,8 @@ impl CommandRegistry {
         r.register(GitCommand);
         r.register(FavoritesCommand);
         r.register(InitCommand);
+        r.register(DoctorCommand);
+        r.register(ReflectCommand);
         r.register(PresetsCommand);
         r.register(UsageCommand);
         r.register(StatuslineCommand);
@@ -105,6 +107,7 @@ impl CommandRegistry {
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
+        r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r
     }
@@ -391,6 +394,51 @@ impl CliCommand for InitCommand {
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::init::InitArgs::from_arg_matches(matches) {
             Ok(args) => Box::pin(async move { crate::cli::init::execute(args, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
+pub struct DoctorCommand;
+impl CliCommand for DoctorCommand {
+    fn name(&self) -> &'static str {
+        "doctor"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::doctor::DoctorArgs as clap::Args>::augment_args(
+                Command::new(self.name())
+                    .about("Classified dependency check for the reflect / statusline toolchain"),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::doctor::DoctorArgs::from_arg_matches(matches) {
+            Ok(args) => {
+                Box::pin(async move { crate::cli::doctor::execute(args, ctx.format).await })
+            }
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
+pub struct ReflectCommand;
+impl CliCommand for ReflectCommand {
+    fn name(&self) -> &'static str {
+        "reflect"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::reflect::ReflectCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Reflect plugin lifecycle: bootstrap installer + dependency check")
+                    .subcommand_required(true),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::reflect::ReflectCommands::from_arg_matches(matches) {
+            Ok(c) => Box::pin(async move { crate::cli::reflect::execute(c, ctx.format).await }),
             Err(e) => boxed_err(e),
         }
     }
@@ -865,6 +913,108 @@ impl CliCommand for TmuxCommand {
     }
 }
 
+/// `ainb notifyd {run,stop,install,uninstall,status}` — the ainb-hooks
+/// notification daemon, exposed as a hidden subcommand of the main
+/// binary.
+///
+/// The standalone `ainb-notifyd` binary remains the documented
+/// entrypoint, but `notify.sh`'s lazy-spawn fires `ainb notifyd` (the
+/// host binary is the one guaranteed to be on `PATH` after a normal
+/// install). This subcommand makes that path real: it delegates to the
+/// same `ainb_plugin_notifyd` functions the standalone binary uses, so
+/// both entrypoints share one implementation. Hidden from `--help`
+/// because end users should reach for `ainb-notifyd` or the TUI Inbox;
+/// this exists for the hook script's auto-start.
+pub struct NotifydCommand;
+impl CliCommand for NotifydCommand {
+    fn name(&self) -> &'static str {
+        "notifyd"
+    }
+    fn build(&self, app: Command) -> Command {
+        let agent_flags = |c: Command| {
+            c.arg(
+                clap::Arg::new("claude")
+                    .long("claude")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Claude Code"),
+            )
+            .arg(
+                clap::Arg::new("codex")
+                    .long("codex")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Codex CLI"),
+            )
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target every known agent"),
+            )
+        };
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "ainb-hooks notification daemon (alias of the ainb-notifyd \
+                     binary; used by notify.sh lazy-spawn).",
+                )
+                .hide(true)
+                .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
+                .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
+                .subcommand(agent_flags(
+                    Command::new("install").about("Install the ainb-hooks hook"),
+                ))
+                .subcommand(agent_flags(
+                    Command::new("uninstall").about("Uninstall the ainb-hooks hook"),
+                ))
+                .subcommand(Command::new("status").about("Report install + daemon status")),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        use ainb_plugin_notifyd::cli;
+
+        // The verb (and, for install/uninstall, the resolved agent set)
+        // is computed synchronously here so only owned values cross into
+        // the 'static future. Every body delegates to the shared
+        // `ainb_plugin_notifyd::cli` functions — the same ones the
+        // standalone `ainb-notifyd` binary calls — so the two
+        // entrypoints can never diverge in behaviour or output.
+        enum Verb {
+            Run,
+            Stop,
+            Install(Vec<ainb_plugin_notifyd::Agent>),
+            Uninstall(Vec<ainb_plugin_notifyd::Agent>),
+            Status,
+        }
+        let agents = |m: &ArgMatches| {
+            cli::agents_from_flags(m.get_flag("claude"), m.get_flag("codex"), m.get_flag("all"))
+        };
+        // No sub-verb → `run` (matches the standalone binary's default
+        // and the lazy-spawn call `ainb notifyd`).
+        let verb = match matches.subcommand() {
+            Some(("run", _)) | None => Verb::Run,
+            Some(("stop", _)) => Verb::Stop,
+            Some(("install", m)) => Verb::Install(agents(m)),
+            Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
+            Some(("status", _)) => Verb::Status,
+            Some((other, _)) => {
+                let other = other.to_string();
+                return Box::pin(async move {
+                    Err(anyhow::anyhow!("unknown notifyd subcommand: {other}"))
+                });
+            }
+        };
+        Box::pin(async move {
+            match verb {
+                Verb::Run => cli::cmd_run().await,
+                Verb::Stop => cli::cmd_stop(),
+                Verb::Install(a) => cli::cmd_install(&a),
+                Verb::Uninstall(a) => cli::cmd_uninstall(&a),
+                Verb::Status => cli::cmd_status(),
+            }
+        })
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -1145,13 +1295,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_commands() {
+    fn built_ins_registers_twenty_four_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + claudecode namespace + tmux namespace
-        // + plugin stub + fleet + hangar = 21. The TUI is NOT in the registry —
-        // main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 21, "expected 21 entries, got {names:?}");
+        // 16 user-facing built-ins + doctor + reflect + claudecode namespace
+        // + tmux namespace + plugin stub + fleet + hidden notifyd + hangar
+        // = 24. The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 24, "expected 24 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1165,6 +1316,8 @@ mod tests {
             "git",
             "favorites",
             "init",
+            "doctor",
+            "reflect",
             "presets",
             "usage",
             "statusline",
@@ -1173,6 +1326,7 @@ mod tests {
             "completion",
             "plugin",
             "fleet",
+            "notifyd",
             "hangar",
         ] {
             assert!(

@@ -1481,30 +1481,34 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                             const skillDir = `"\${HOME}/${config.targetSubdir}/${externalSkillsPath}/${skill.name}"`;
                             scriptLines.push(`# ${skill.name}${skill.purpose ? ' - ' + skill.purpose : ''}`);
                             scriptLines.push(`SKILL_DIR=${skillDir}`);
-                            if (skill['multi-subpath']) {
-                                // Repo bundles multiple sibling skills under <multi-subpath>/.
-                                // Clone repo to a temp dir, then for each subdir under
-                                // <multi-subpath>/ that contains SKILL.md, copy the whole
-                                // subdir into externalSkillsDir/<subdir-name>/ as a flat
-                                // sibling. Idempotent: skip any target that already has
-                                // SKILL.md.
+                            if (skill['multi-subpaths'] || skill['multi-subpath']) {
+                                // Repo bundles multiple sibling skills under one or more subpaths.
+                                // multi-subpaths: array of paths (new format — supports multiple plugin dirs)
+                                // multi-subpath: string (legacy — single path, backward compat)
+                                // Clone repo once, then for each subpath iterate SKILL.md-bearing
+                                // child dirs and copy (overwriting stale) into externalSkillsDir/.
+                                const subpaths = skill['multi-subpaths']
+                                    ? (Array.isArray(skill['multi-subpaths']) ? skill['multi-subpaths'] : [skill['multi-subpaths']])
+                                    : [skill['multi-subpath']];
                                 const extBase = `"\${HOME}/${config.targetSubdir}/${externalSkillsPath}"`;
-                                scriptLines.push(`echo "  Installing ${skill.name} bundle (multi-subpath: ${skill['multi-subpath']})..."`);
+                                const bundleLabel = skill['multi-subpaths']
+                                    ? `multi-subpaths: ${subpaths.join(', ')}`
+                                    : `multi-subpath: ${skill['multi-subpath']}`;
+                                scriptLines.push(`echo "  Installing ${skill.name} bundle (${bundleLabel})..."`);
                                 scriptLines.push(`TMP_CLONE=$(mktemp -d)`);
                                 scriptLines.push(`git clone --depth 1 ${skill.repo} "$TMP_CLONE/repo"`);
                                 scriptLines.push(`mkdir -p ${extBase}`);
-                                scriptLines.push(`for sub in "$TMP_CLONE/repo/${skill['multi-subpath']}"/*/; do`);
-                                scriptLines.push(`  sub_name=$(basename "$sub")`);
-                                scriptLines.push(`  if [ -f "$sub/SKILL.md" ]; then`);
-                                scriptLines.push(`    if [ -f ${extBase}/"$sub_name"/SKILL.md ]; then`);
-                                scriptLines.push(`      echo "    $sub_name already installed (skipping)"`);
-                                scriptLines.push(`    else`);
-                                scriptLines.push(`      mkdir -p ${extBase}/"$sub_name"`);
-                                scriptLines.push(`      cp -R "$sub"/. ${extBase}/"$sub_name"/`);
-                                scriptLines.push(`      echo "    Installed $sub_name"`);
-                                scriptLines.push(`    fi`);
-                                scriptLines.push(`  fi`);
-                                scriptLines.push(`done`);
+                                for (const sp of subpaths) {
+                                    scriptLines.push(`for sub in "$TMP_CLONE/repo/${sp}"/*/; do`);
+                                    scriptLines.push(`  sub_name=$(basename "$sub")`);
+                                    scriptLines.push(`  if [ -f "$sub/SKILL.md" ]; then`);
+                                    scriptLines.push(`    rm -rf ${extBase}/"$sub_name"`);
+                                    scriptLines.push(`    mkdir -p ${extBase}/"$sub_name"`);
+                                    scriptLines.push(`    cp -R "$sub"/. ${extBase}/"$sub_name"/`);
+                                    scriptLines.push(`    echo "    Installed/updated $sub_name"`);
+                                    scriptLines.push(`  fi`);
+                                    scriptLines.push(`done`);
+                                }
                                 scriptLines.push(`rm -rf "$TMP_CLONE"`);
                             } else if (skill.subpath) {
                                 // Repo contains the skill under a subdirectory. Clone to a temp
@@ -2209,8 +2213,9 @@ async function handleVerify(tool, overrideHomeDir) {
     if (agentSkillsApplicable.length > 0) {
         console.log(`${BOLD}agent-skills${RESET} (external git repos → ${externalSkillsPath}/)`);
         for (const skill of agentSkillsApplicable) {
-            if (skill['multi-subpath']) {
+            if (skill['multi-subpaths'] || skill['multi-subpath']) {
                 // Multi-skill bundle: expect sibling dirs in externalSkillsDir.
+                // Handles both multi-subpaths (array) and legacy multi-subpath (string).
                 // Each declared sub-skill name comes from manifest `skills:` list if
                 // present; otherwise we probe for any SKILL.md-bearing siblings.
                 const declaredSubs = Array.isArray(skill.skills)
@@ -2409,7 +2414,9 @@ async function handleVerify(tool, overrideHomeDir) {
             }
         }
     }
-    const agentSkillsForParity = (manifest['agent-skills'] || []).filter(s => !s['catalog-only'] && s.repo && !s['multi-subpath']);
+    // Exclude multi-subpath(s) bundles from the simple single-skill parity check;
+    // their sub-skills are verified by the agent-skills section above.
+    const agentSkillsForParity = (manifest['agent-skills'] || []).filter(s => !s['catalog-only'] && s.repo && !s['multi-subpath'] && !s['multi-subpaths']);
     parityCheck(agentSkillsForParity, '[agent-skill]', (home, cfg, entry) => {
         const ext = cfg.externalSkillsSubpath || 'skills';
         return path.join(home, cfg.targetSubdir, ext, entry.name);

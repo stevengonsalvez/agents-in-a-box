@@ -680,6 +680,8 @@ pub enum ConfirmAction {
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
+    InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
+    DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
@@ -1795,10 +1797,24 @@ impl ConfigScreenState {
                             } else {
                                 std::path::PathBuf::from(path)
                             };
-                            // Add to scan paths if not already present
-                            if !config.workspace_defaults.workspace_scan_paths.contains(&expanded) {
-                                config.workspace_defaults.workspace_scan_paths.push(expanded);
-                            }
+                            // "Default Workspace" is surfaced as
+                            // `workspace_scan_paths.first()` in `from_app_config`,
+                            // so it must be written back as the *primary* entry.
+                            // The old code pushed to the end, leaving `first()`
+                            // pointing at the stale path — editing the field then
+                            // appeared to do nothing on reopen.
+                            //
+                            // Rebuild as: edited path first, then every other
+                            // distinct scan dir. This replaces the old primary
+                            // (index 0), de-dups the edited path, and — crucially
+                            // — preserves the remaining scan dirs even on a no-op
+                            // confirm (drop the old primary, never the tail).
+                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                            let tail: Vec<std::path::PathBuf> =
+                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                            paths.clear();
+                            paths.push(expanded);
+                            paths.extend(tail);
                         }
                     }
                     "branch_prefix" => {
@@ -2370,6 +2386,17 @@ pub struct AppState {
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Viewport `(width, height)` the last `plugin/render` kick used for
+    /// each screen id. `tick_plugin_renders` forces a fresh render kick
+    /// whenever the live area (from `plugin_render_areas`) differs from
+    /// this — covering the first paint (the seed `(0, 0)` render becomes
+    /// the real allocated size once `PluginScreen::render` runs) and any
+    /// later resize. Without this, a plugin screen whose dirty flag was
+    /// already consumed at `(0, 0)` (e.g. one with no host-published
+    /// snapshot to re-mark it) would paint blank forever.
+    pub plugin_last_render_viewport:
+        std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
     /// installs that haven't completed bundled-plugin discovery yet).
@@ -2412,6 +2439,19 @@ pub struct AppState {
     /// Present only while a scan is in flight; `tick()` drains it.
     pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
 
+    /// Background base-branch refresh for the Configure picker. The fetch +
+    /// re-list runs on `spawn_blocking`; the result lands here and is applied
+    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
+    /// generation guard — results from a closed/reopened picker are dropped.
+    pub branch_refresh_receiver: Option<
+        mpsc::UnboundedReceiver<(
+            u64,
+            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
+        )>,
+    >,
+    /// Current branch-refresh generation (bumped on every picker open).
+    pub branch_refresh_seq: u64,
+
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
@@ -2424,6 +2464,13 @@ pub struct AppState {
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+
+    /// Per-session "cleared up to" timestamp (epoch ms). A hook event
+    /// only marks a session if its `ts` is newer than this. Defaults to
+    /// `0` (any event in the lookback window can mark); bumped to "now"
+    /// while the user is attached, so re-marking only happens for
+    /// activity that arrives after they look away.
+    pub attention_baseline: HashMap<Uuid, i64>,
 }
 
 /// Result of background workspace loading
@@ -2640,6 +2687,9 @@ struct ConfigureLaunchSnapshot {
     /// Codex model for Codex-agent sessions. Same omit-on-default semantics
     /// as `session_model`. Set only when `agent_type == Codex`.
     codex_model: Option<crate::models::CodexModel>,
+    /// The base-branch popup pick (2026-06). `None` = legacy base policy:
+    /// HEAD for local repos, origin/HEAD for remote/star launches.
+    base: Option<crate::components::new_session::configure::BaseSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2670,24 +2720,28 @@ pub enum AsyncAction {
     /// the dispatcher so the async path doesn't re-derive it from
     /// `configure_state` (finding #7).
     CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
-    DeleteSession(Uuid),           // New - delete session with container cleanup
-    StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
+    /// Pre-check GitHub auth via `gh auth status` before allowing remote clone.
+    CheckGitAuth,
+    DeleteSession(Uuid),         // New - delete session with container cleanup
+    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
-    BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,           // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),    // Fetch container logs for a session
-    AttachToContainer(Uuid),     // Attach to a container session
-    AttachToTmuxSession(Uuid),   // Attach to a tmux session
-    KillContainer(Uuid),         // Kill container for a session
-    AuthSetupOAuth,              // Run OAuth authentication setup
-    AuthSetupApiKey,             // Save API key authentication
-    ReauthenticateCredentials,   // Re-authenticate Claude credentials
-    RestartSession(Uuid),        // Restart a stopped session with new container
-    CleanupOrphaned,             // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
-    KillOtherTmux(String),       // Kill a non-agents-in-a-box tmux session by name
+    BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
+    BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    RefreshWorkspaces,                     // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),              // Fetch container logs for a session
+    AttachToContainer(Uuid),               // Attach to a container session
+    AttachToTmuxSession(Uuid),             // Attach to a tmux session
+    KillContainer(Uuid),                   // Kill container for a session
+    AuthSetupOAuth,                        // Run OAuth authentication setup
+    AuthSetupApiKey,                       // Save API key authentication
+    ReauthenticateCredentials,             // Re-authenticate Claude credentials
+    RestartSession(Uuid),                  // Restart a stopped session with new container
+    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
+    AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
-    ConfirmOtherTmuxRename,      // Confirm and execute rename for "Other tmux" session
+    ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
     // Shell session actions (one shell per workspace)
     OpenWorkspaceShell {
         workspace_index: usize,                 // Index of workspace to open shell for
@@ -2808,6 +2862,7 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 
             statusline_status_cache: None,
@@ -2817,6 +2872,10 @@ impl Default for AppState {
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
+
+            // Configure base-branch picker background refresh
+            branch_refresh_receiver: None,
+            branch_refresh_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -2829,6 +2888,9 @@ impl Default for AppState {
             workspace_load_error: None,
             workspace_load_started: None,
             workspace_load_receiver: None,
+
+            // Per-session attention markers, driven by ainb-hooks events.
+            attention_baseline: HashMap::new(),
         }
     }
 }
@@ -3287,6 +3349,11 @@ impl AppState {
         self.onboarding_state = None;
         self.current_screen = screen_ids::HOME.to_string();
 
+        // New-user path: now that onboarding is done, offer to install
+        // the ainb-hooks notification plugin (existing users get this at
+        // startup in main.rs instead). No-op if declined or up to date.
+        self.maybe_prompt_notify_install();
+
         Ok(())
     }
 
@@ -3651,6 +3718,26 @@ impl AppState {
                             }
 
                             self.add_success_notification("Workspaces loaded".to_string());
+
+                            // The fast startup loader (`load_workspaces_async`)
+                            // only surfaces LIVE boss/interactive sessions — it
+                            // skips the stopped-session second-pass that
+                            // `load_real_workspaces` runs (reading sessions.json
+                            // for dead-tmux entries whose worktree still exists).
+                            // Without this, stopped sessions stay hidden until
+                            // the user happens to trigger a full refresh (stop a
+                            // session, delete one, press `f`). Enqueue exactly one
+                            // full refresh so the complete picture (stopped
+                            // sessions included) appears right after first paint.
+                            // Fires once per launch: this branch runs a single
+                            // time (the receiver is cleared above), and
+                            // `load_real_workspaces` doesn't re-arm it — no loop.
+                            // Guard on `None` so a user-queued action is never
+                            // clobbered.
+                            if self.pending_async_action.is_none() {
+                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            }
+
                             return true;
                         }
                         WorkspaceLoadResult::Error(err) => {
@@ -3753,6 +3840,166 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// Open the Configure screen's base-branch popup: seed entries from
+    /// cached refs (disk-only — instant, offline-safe), then kick a
+    /// background fetch + re-list whose result is applied by
+    /// `check_branch_refresh_complete` on a later tick (interview pick
+    /// 2026-06-03: cached-first, async refresh).
+    pub fn open_branch_picker(&mut self) {
+        use crate::components::new_session::configure::{BranchPickerState, PickerBranchEntry};
+        use crate::git::branch_list::{self, BranchEntry};
+        use crate::git::repo_source::RepoSource;
+
+        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        else {
+            return;
+        };
+
+        // Where do cached refs live? The repo itself for local picks; the
+        // clone cache for remote/star sources (when already cloned). A
+        // not-yet-cloned remote has no cached refs — the popup opens empty
+        // with the spinner and the ls-remote refresh fills it.
+        let source = cfg.repo_source.clone();
+        let list_path: Option<std::path::PathBuf> = match &source {
+            RepoSource::LocalPath(p) => Some(p.clone()),
+            RepoSource::HttpsUrl(_)
+            | RepoSource::SshUrl(_)
+            | RepoSource::GithubShorthand { .. } => {
+                crate::git::RemoteRepoManager::new().ok().and_then(|m| {
+                    source
+                        .parse_components()
+                        .ok()
+                        .filter(|parsed| m.is_cached(parsed))
+                        .map(|parsed| m.get_cache_path(&parsed))
+                })
+            }
+            // SshSession / Filter never show the Branch row.
+            _ => None,
+        };
+
+        let existing = cfg.existing_branches.clone();
+        let mark_in_use = |entries: Vec<BranchEntry>| -> Vec<PickerBranchEntry> {
+            entries
+                .into_iter()
+                .map(|e| PickerBranchEntry {
+                    in_use: existing.iter().any(|b| b == &e.short_name),
+                    entry: e,
+                })
+                .collect()
+        };
+
+        let cached = list_path.as_deref().map(branch_list::list_repo_branches).unwrap_or_default();
+        // Feed the base-off "⚠ exists" guard: every branch the picker knows
+        // about (empty for a not-yet-cached remote — the refresh below fills
+        // it via ls-remote).
+        if !cached.is_empty() {
+            cfg.repo_branch_names = cached.iter().map(|e| e.short_name.clone()).collect();
+        }
+        cfg.branch_picker = Some(BranchPickerState::new(mark_in_use(cached), true));
+
+        // Background refresh — generation-guarded so a stale result can't
+        // repopulate a closed/reopened picker.
+        self.branch_refresh_seq += 1;
+        let seq = self.branch_refresh_seq;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.branch_refresh_receiver = Some(rx);
+        tokio::spawn(async move {
+            let join = tokio::task::spawn_blocking(move || -> Result<Vec<BranchEntry>, String> {
+                match list_path {
+                    Some(p) => Ok(branch_list::fetch_and_list(&p)),
+                    None => {
+                        // Remote source with no cache yet: ls-remote.
+                        let manager =
+                            crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
+                        let remote =
+                            manager.list_remote_branches(&source).map_err(|e| e.to_string())?;
+                        Ok(remote
+                            .into_iter()
+                            .map(|b| BranchEntry {
+                                display: format!("origin/{}", b.name),
+                                short_name: b.name,
+                                is_remote: true,
+                                is_default: b.is_default,
+                            })
+                            .collect())
+                    }
+                }
+            })
+            .await;
+            let payload = match join {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("branch refresh task panicked: {join_err}")),
+            };
+            let _ = tx.send((seq, payload));
+        });
+    }
+
+    /// Poll the background branch refresh. Applies the fresh list to the
+    /// popup (if still open) and stops the spinner. Refresh errors keep the
+    /// cached entries — offline-safe — and surface a non-blocking warning.
+    /// Returns true when state changed this tick.
+    pub fn check_branch_refresh_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::PickerBranchEntry;
+
+        let Some(ref mut receiver) = self.branch_refresh_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.branch_refresh_receiver = None;
+                return false;
+            }
+        };
+        self.branch_refresh_receiver = None;
+        if seq != self.branch_refresh_seq {
+            // A newer picker session superseded this refresh.
+            return false;
+        }
+
+        let mut warn_msg: Option<String> = None;
+        if let Some(cfg) =
+            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        {
+            let existing = cfg.existing_branches.clone();
+            // Capture the fresh branch names for the base-off "⚠ exists" guard
+            // before `result` is consumed below. Only on success — a failed
+            // refresh keeps whatever the guard already had.
+            let refreshed_names: Option<Vec<String>> = match &result {
+                Ok(entries) => Some(entries.iter().map(|e| e.short_name.clone()).collect()),
+                Err(_) => None,
+            };
+            if let Some(picker) = cfg.branch_picker.as_mut() {
+                picker.loading = false;
+                match result {
+                    Ok(entries) => {
+                        picker.entries = entries
+                            .into_iter()
+                            .map(|e| PickerBranchEntry {
+                                in_use: existing.iter().any(|b| b == &e.short_name),
+                                entry: e,
+                            })
+                            .collect();
+                        picker.clamp_selection();
+                    }
+                    Err(msg) => {
+                        // Keep the cached list usable; just warn.
+                        warn_msg = Some(msg);
+                    }
+                }
+            }
+            if let Some(names) = refreshed_names {
+                cfg.repo_branch_names = names;
+            }
+        }
+        if let Some(msg) = warn_msg {
+            warn!("branch refresh failed: {msg}");
+            self.add_warning_notification(format!("Branch refresh failed: {msg}"));
+        }
+        true
     }
 
     /// Load Boss mode sessions from Docker containers
@@ -4326,6 +4573,33 @@ impl AppState {
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
         }
+    }
+
+    /// Of the multi-selected managed sessions, return the IDs that can actually
+    /// be resumed: interactive agent sessions that are currently Stopped.
+    /// Running sessions are excluded so a bulk resume never kills+recreates a
+    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
+        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+        self.selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.find_session(*id)
+                    .map(|s| {
+                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
+                            && matches!(
+                                s.agent_type,
+                                SessionAgentType::Claude
+                                    | SessionAgentType::Codex
+                                    | SessionAgentType::Gemini
+                                    | SessionAgentType::Copilot
+                            );
+                        is_interactive && matches!(s.status, SessionStatus::Stopped)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -5286,6 +5560,74 @@ impl AppState {
         });
     }
 
+    /// First-run / post-upgrade prompt for the ainb-hooks notification
+    /// plugin. Reads `ainb_plugin_notifyd::prompt_state`: offers to
+    /// install when nothing is set up (and the user hasn't declined),
+    /// or to update when this binary embeds a newer manifest than what's
+    /// on disk. A no-op when there's nothing to prompt, so callers can
+    /// fire it unconditionally on startup / after onboarding.
+    ///
+    /// Never shown while a dialog is already up or the user is mid-
+    /// onboarding — callers gate on that.
+    pub fn maybe_prompt_notify_install(&mut self) {
+        use ainb_plugin_notifyd::{InstallPrompt, Paths, prompt_state};
+
+        if self.confirmation_dialog.is_some() {
+            return;
+        }
+        let Ok(paths) = Paths::from_home() else {
+            return;
+        };
+        let (title, message, install_label) = match prompt_state(&paths) {
+            InstallPrompt::OfferInstall => (
+                "Get notified when a session needs you?".to_string(),
+                "Install ainb-hooks so the Inbox (press b) and the per-session \
+                 badges light up when an agent is awaiting input ([?]) or has \
+                 finished ([✓]). Only actionable events are captured — no \
+                 activity-log noise. Works with Claude Code today (registered \
+                 via the claude CLI); Codex support is experimental."
+                    .to_string(),
+                "Install",
+            ),
+            InstallPrompt::OfferUpdate {
+                installed,
+                embedded,
+            } => (
+                "Update notification hooks?".to_string(),
+                format!(
+                    "ainb-hooks is installed at v{installed}, but this build \
+                     ships v{embedded}. Re-install to pick up the latest hook \
+                     set."
+                ),
+                "Update",
+            ),
+            InstallPrompt::None => return,
+        };
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title,
+            message,
+            // Binary mode is unused here; tri-option drives the choice.
+            confirm_action: ConfirmAction::InstallNotifyHooks,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: install_label.to_string(),
+                    action: ConfirmAction::InstallNotifyHooks,
+                },
+                DialogOption {
+                    label: "Not now".to_string(),
+                    action: ConfirmAction::Cancel,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissNotifyPrompt,
+                },
+            ]),
+            selected_index: 0,
+        });
+    }
+
     /// Show confirmation dialog for killing an SSH session (which is a tmux session)
     pub fn show_kill_ssh_session_confirmation(&mut self, session_name: String) {
         // Get the display name if available for a friendlier message
@@ -5587,6 +5929,11 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
+        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // toast immediately before cancelling (e.g. the worktree-create failure
+        // arm in `create_session_from_configure`) and rely on it surviving the
+        // teardown — clearing here would re-introduce the silent-flash bug
+        // (Stevie 2026-06-06).
         self.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
@@ -5653,7 +6000,19 @@ impl AppState {
             agent_type,
             session_model,
             codex_model,
+            base: spec.base.clone(),
         };
+
+        // Boss mode builds its own Docker workspace from `repo_path` and
+        // doesn't consume the worktree machinery — a picked base can't be
+        // honored there yet. Be honest about it rather than silently using
+        // the default.
+        if snapshot.base.is_some() && snapshot.mode == SessionMode::Boss {
+            self.add_warning_notification(
+                "Base-branch pick is not applied in Boss mode yet — session uses the default base"
+                    .to_string(),
+            );
+        }
 
         // ONLY check authentication for Boss mode (Docker-based sessions)
         if snapshot.mode == SessionMode::Boss {
@@ -5751,10 +6110,42 @@ impl AppState {
             snapshot.mode
         );
 
+        // Remote sources (every star is now remote, plus typed URLs / shorthand)
+        // branch their worktree off the remote's DEFAULT branch (origin/HEAD),
+        // freshly fetched — never a stale local `main` or the cache's checked-out
+        // HEAD. Local-path picks keep the legacy `get_default_branch` flow
+        // (`existing_worktree = None`).
+        //
+        // Gated to Interactive mode: only `create_interactive_session` consumes
+        // `existing_worktree`. Boss mode (`create_boss_session`) ignores it and
+        // builds its own Docker request from `repo_path`, so preparing a worktree
+        // there would orphan it on disk and leave a stray cache branch.
+        // Checkout-direct picks from the remote flow can land on a suffixed
+        // branch (`feature-x-ab12cd34`) when the branch already has a
+        // worktree — track the branch the worktree actually got.
+        let mut effective_branch = snapshot.branch_name.clone();
+        let existing_worktree =
+            if snapshot.repo_source.is_remote() && snapshot.mode == SessionMode::Interactive {
+                match self.prepare_remote_worktree(session_id, &repo_path, &snapshot).await {
+                    Ok((worktree_path, source_repo, branch)) => {
+                        effective_branch = branch;
+                        Some((worktree_path, source_repo))
+                    }
+                    Err(()) => return, // already notified + cancelled
+                }
+            } else {
+                None
+            };
+
+        // Local repos: hand the picked base ref (if any) to the worktree
+        // machinery. The display form is revparse-able for both kinds —
+        // `origin/feature-x` (remote pick) or `feature-x` (local pick).
+        let base_start_point = snapshot.base.as_ref().map(|b| b.display.clone());
+
         let result = self
             .create_session_with_logs(
                 &repo_path,
-                &snapshot.branch_name,
+                &effective_branch,
                 session_id,
                 snapshot.skip_permissions,
                 snapshot.mode,
@@ -5762,7 +6153,8 @@ impl AppState {
                 snapshot.agent_type,
                 snapshot.session_model,
                 snapshot.codex_model,
-                None, // existing_worktree — local-only path for now
+                existing_worktree,
+                base_start_point,
             )
             .await;
 
@@ -5781,7 +6173,113 @@ impl AppState {
             }
             Err(e) => {
                 error!("Failed to create session via configure flow: {}", e);
+                // Surface the real failure (e.g. "branch already used by
+                // worktree", "worktree already exists", invalid name) BEFORE
+                // tearing down the modal. Without this the error only hit the
+                // log and the modal closed silently — the user saw a flash and
+                // never learned why (Stevie 2026-06-06). cancel_new_session()
+                // leaves self.notifications intact, so the 5s toast survives.
+                self.add_error_notification(format!("Could not create session: {e}"));
                 self.cancel_new_session();
+            }
+        }
+    }
+
+    /// Build a worktree for a remote/star launch. Base policy:
+    ///   * no pick — NEW branch off the remote's default (`origin/HEAD`),
+    ///     freshly fetched (legacy star policy);
+    ///   * base-off pick — NEW branch off `origin/<picked>`;
+    ///   * checkout pick — the picked branch itself, as a local tracking
+    ///     branch (suffixed when the branch already has a worktree).
+    ///
+    /// Returns `(worktree_path, source_repo_path, effective_branch)` for
+    /// `create_session_with_logs`. On failure: notifies + cancels the
+    /// new-session flow and returns `Err(())`.
+    ///
+    /// Runs on `spawn_blocking` because the `git` CLI calls are synchronous.
+    async fn prepare_remote_worktree(
+        &mut self,
+        session_id: uuid::Uuid,
+        cache_path: &std::path::Path,
+        snapshot: &ConfigureLaunchSnapshot,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf, String), ()> {
+        use crate::components::new_session::configure::BaseMode;
+        use crate::git::{RemoteRepoManager, WorktreeManager};
+
+        let cache = cache_path.to_path_buf();
+        let branch = snapshot.branch_name.clone();
+        let source = snapshot.repo_source.clone();
+        let base = snapshot.base.clone();
+
+        let join = tokio::task::spawn_blocking(
+            move || -> Result<(std::path::PathBuf, std::path::PathBuf, String), String> {
+                let wt_manager =
+                    WorktreeManager::new().map_err(|e| format!("worktree manager init: {e}"))?;
+                let worktree_path = wt_manager
+                    .generate_worktree_path(session_id, &cache, &branch)
+                    .map_err(|e| format!("worktree path: {e}"))?;
+                let remote_manager =
+                    RemoteRepoManager::new().map_err(|e| format!("remote manager init: {e}"))?;
+                match base {
+                    Some(b) if b.mode == BaseMode::Checkout => {
+                        // `clone_repo` already fetched on cache reuse, so
+                        // origin/<branch> is fresh. Suffix-collision handling
+                        // lives inside checkout_existing_branch_worktree.
+                        match remote_manager
+                            .checkout_existing_branch_worktree(
+                                &cache,
+                                &worktree_path,
+                                &b.short_name,
+                            )
+                            .map_err(|e| format!("{e}"))?
+                        {
+                            Some((suffixed_path, suffixed_branch)) => {
+                                Ok((suffixed_path, cache, suffixed_branch))
+                            }
+                            None => Ok((worktree_path, cache, b.short_name.clone())),
+                        }
+                    }
+                    Some(b) => {
+                        remote_manager
+                            .create_worktree_off_remote_branch(
+                                &cache,
+                                &worktree_path,
+                                &branch,
+                                Some(&b.short_name),
+                                &source,
+                            )
+                            .map_err(|e| format!("{e}"))?;
+                        Ok((worktree_path, cache, branch))
+                    }
+                    None => {
+                        remote_manager
+                            .create_worktree_off_remote_default(
+                                &cache,
+                                &worktree_path,
+                                &branch,
+                                &source,
+                            )
+                            .map_err(|e| format!("{e}"))?;
+                        Ok((worktree_path, cache, branch))
+                    }
+                }
+            },
+        )
+        .await;
+
+        match join {
+            Ok(Ok(paths)) => Ok(paths),
+            Ok(Err(msg)) => {
+                tracing::error!(error = %msg, "prepare_remote_worktree failed");
+                self.add_error_notification(format!("Could not prepare worktree off main: {msg}"));
+                self.cancel_new_session();
+                Err(())
+            }
+            Err(join_err) => {
+                tracing::error!(error = %join_err, "prepare_remote_worktree task panicked");
+                self.add_error_notification(format!("Worktree task panicked: {join_err}"));
+                self.cancel_new_session();
+                Err(())
             }
         }
     }
@@ -5792,6 +6290,120 @@ impl AppState {
     /// terminal errors. On failure: notifies the user, calls
     /// `cancel_new_session()` so the picker reopens, returns `Err(())`.
     ///
+    /// Transition from PickRepo → Configure for a given source. Extracted so
+    /// both the events.rs dispatcher and the async auth-check handler can call it.
+    pub fn advance_pick_repo_to_configure(&mut self, source: crate::git::repo_source::RepoSource) {
+        use crate::components::new_session::configure::ConfigureState;
+        use crate::config::session_defaults::SessionDefaults;
+        use crate::git::repo_source::head_branch;
+
+        if let Some(pick) =
+            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+        {
+            let path = SessionDefaults::default_path();
+            if let Err(err) = pick.defaults.save_to(&path) {
+                tracing::warn!(error = %err, "advance_pick_repo_to_configure: persist session-defaults failed");
+            }
+        }
+        let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
+        let label = crate::app::events::derive_repo_label(&source);
+        let branch_source = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
+            _ => None,
+        };
+        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        // Every branch already checked out in any worktree (ainb's by-session
+        // worktrees + the repo's own checkout + manual worktrees). Single
+        // source of truth so the collision guard matches what `git worktree
+        // add` will accept — the legacy `list_worktrees()` alone missed by-name
+        // worktrees (Stevie 2026-05-27: feat/blog re-launch slipped through;
+        // review P1, PR #211 added the repo's own checkout; deduped in #232).
+        let repo_path = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.as_path()),
+            _ => None,
+        };
+        let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
+        // All existing branch names (local heads + remote-tracking) for the
+        // base-off "⚠ exists" guard. Cheap for a local repo; a remote pick
+        // fills this in later when the base picker lists/fetches branches.
+        let repo_branch_names: Vec<String> = repo_path
+            .map(|p| {
+                crate::git::branch_list::list_repo_branches(p)
+                    .into_iter()
+                    .map(|e| e.short_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = ConfigureState::from_pick_repo(
+            source.clone(),
+            label,
+            &defaults,
+            branch_source,
+            &branch_prefix,
+            existing_branches,
+            repo_branch_names,
+        );
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.configure_state = Some(cfg);
+            ns.step = NewSessionStep::Configure;
+        }
+        tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+        self.ui_needs_refresh = true;
+    }
+
+    /// Pre-check GitHub authentication via `gh auth status`. Updates the
+    /// `git_auth_status` field on PickRepoState. If authenticated and a
+    /// `pending_clone_source` is waiting, automatically advances to Configure.
+    async fn check_git_auth(&mut self) {
+        use crate::components::new_session::pick_repo::GitAuthStatus;
+
+        // Bound the probe: a hung `gh` (network stall, credential helper
+        // wedged) must not leave the picker stuck in `Checking` forever.
+        // Timeout and task-panic both fail closed → NotAuthenticated, with a
+        // warning so the cause is visible in the logs.
+        let auth_check = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "status", "--hostname", "github.com"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(join_err)) => {
+                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("GitHub auth check timed out after 5s");
+                false
+            }
+        };
+
+        if let Some(pick) =
+            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
+        {
+            if auth_ok {
+                tracing::info!("GitHub auth check passed");
+                pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                // Auto-advance: take the pending source and emit StartClone
+                // via the advance-to-configure path. We replicate the
+                // AdvanceTo → Configure transition inline here.
+                if let Some(source) = pick.pending_clone_source.take() {
+                    pick.git_auth_status = None;
+                    self.advance_pick_repo_to_configure(source);
+                }
+            } else {
+                tracing::warn!("GitHub auth check failed");
+                pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+            }
+        }
+        self.ui_needs_refresh = true;
+    }
+
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
     /// are synchronous and would otherwise block the async runtime.
     async fn clone_remote_for_configure(
@@ -6153,6 +6765,7 @@ impl AppState {
         model: Option<crate::models::ClaudeModel>,
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        base_start_point: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -6166,6 +6779,7 @@ impl AppState {
                     model,
                     codex_model,
                     existing_worktree,
+                    base_start_point,
                 )
                 .await
             }
@@ -6192,6 +6806,9 @@ impl AppState {
     /// * `agent_type` - Type of agent (Claude, Shell, etc.)
     /// * `model` - Claude model to use
     /// * `existing_worktree` - For remote repos: (worktree_path, source_repo_path)
+    /// * `base_start_point` - For local repos: revparse-able ref the new
+    ///   branch is cut from (`origin/feature-x` / `feature-x`); `None` keeps
+    ///   the legacy default-branch policy
     async fn create_interactive_session(
         &mut self,
         repo_path: &std::path::Path,
@@ -6202,6 +6819,7 @@ impl AppState {
         model: Option<crate::models::ClaudeModel>,
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        base_start_point: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -6272,7 +6890,7 @@ impl AppState {
                     workspace_name.clone(),
                     repo_path.to_path_buf(),
                     branch_name.to_string(),
-                    None, // base_branch
+                    base_start_point,
                     skip_permissions,
                     agent_type,
                     model,
@@ -7163,6 +7781,9 @@ impl AppState {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
                 }
+                AsyncAction::CheckGitAuth => {
+                    self.check_git_auth().await;
+                }
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {
                         error!("Failed to delete session {}: {}", session_id, e);
@@ -7179,6 +7800,31 @@ impl AppState {
                         error!("Failed to resume session {}: {}", session_id, e);
                         self.add_error_notification(format!("Resume failed: {}", e));
                     }
+                }
+                AsyncAction::BulkResumeSessions(session_ids, trigger) => {
+                    let total = session_ids.len();
+                    let mut resumed = 0;
+                    let mut failed = 0;
+                    for id in session_ids {
+                        if let Err(e) = self.resume_interactive_session(id, trigger.clone()).await {
+                            error!("Failed to resume session {}: {}", id, e);
+                            failed += 1;
+                        } else {
+                            resumed += 1;
+                        }
+                    }
+                    // resume_interactive_session refreshes per-session on success;
+                    // refresh once more so a final all-failed batch still repaints.
+                    self.load_real_workspaces().await;
+                    if failed > 0 {
+                        self.add_warning_notification(format!(
+                            "Resumed {}/{} sessions ({} failed)",
+                            resumed, total, failed
+                        ));
+                    } else {
+                        self.add_success_notification(format!("Resumed {} session(s)", resumed));
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
@@ -7290,6 +7936,10 @@ impl AppState {
                 // PUT THE ACTION BACK so main loop can handle it
                 action @ AsyncAction::AttachToOtherTmux(_) => {
                     debug!("AttachToOtherTmux action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::AttachWitr => {
+                    debug!("AttachWitr action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
@@ -7764,12 +8414,21 @@ impl AppState {
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
                     let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
-                    let existing_branches: Vec<String> =
-                        crate::git::worktree_manager::WorktreeManager::new()
-                            .ok()
-                            .and_then(|m| m.list_worktrees().ok())
-                            .map(|infos| infos.into_iter().map(|i| i.branch_name).collect())
-                            .unwrap_or_default();
+                    // Same complete in-use list the repo-picker path uses. The
+                    // legacy `list_worktrees()` here only saw legacy UUID dirs
+                    // and missed every by-name worktree, so a re-launch onto an
+                    // already-checked-out branch slipped the collision guard and
+                    // died at `git worktree add` (Stevie 2026-06-06: feat/ota).
+                    let existing_branches = crate::git::branch_list::in_use_branch_names(Some(
+                        workspace.path.as_path(),
+                    ));
+                    // All existing branch names for the base-off "⚠ exists"
+                    // guard (restart is always a local repo path).
+                    let repo_branch_names =
+                        crate::git::branch_list::list_repo_branches(&workspace.path)
+                            .into_iter()
+                            .map(|e| e.short_name)
+                            .collect();
                     let configure_state = ConfigureState::from_pick_repo(
                         repo_source,
                         repo_label,
@@ -7777,6 +8436,7 @@ impl AppState {
                         branch_source,
                         &branch_prefix,
                         existing_branches,
+                        repo_branch_names,
                     );
 
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
@@ -7843,6 +8503,8 @@ impl AppState {
                 tracing::error!("Failed to refresh git status: {}", e);
                 return;
             }
+            // Build the Warp-style Code Review model for the default Review tab.
+            git_state.refresh_review();
 
             self.git_view_state = Some(git_state);
             // Store current view so we can return to it
@@ -8044,6 +8706,165 @@ impl AppState {
         }
     }
 
+    /// The ainb-hooks `agent` string a session's events are recorded
+    /// under, or `None` for session types that don't emit hook events
+    /// (plain shell / SSH, and the not-yet-wired Gemini/Copilot/Kiro).
+    const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
+        match agent {
+            SessionAgentType::Claude => Some("claude"),
+            SessionAgentType::Codex => Some("codex"),
+            _ => None,
+        }
+    }
+
+    /// Decide a single session's attention marker from recent hook
+    /// events. Pure + deterministic (no clock / IO) so it is directly
+    /// unit-testable.
+    ///
+    /// `recent` MUST be newest-first (as [`Store::recent_since`] returns
+    /// it). The marker is the kind implied by the newest user-facing
+    /// event for this session's `(cwd, agent)` whose `ts` is strictly
+    /// newer than `baseline_ms` — unless the agent is currently
+    /// `generating` (suppressed; the `●` busy dot covers it) or the only
+    /// match is a `Finished` turn past its short TTL. Returns `None`
+    /// (blank — no marker) when nothing qualifies, which is the common
+    /// case for an idle session with no pending hook event.
+    fn attention_for_session(
+        session_cwd: &str,
+        agent: Option<&str>,
+        generating: bool,
+        baseline_ms: i64,
+        now_ms: i64,
+        recent: &[ainb_plugin_notifyd::NotificationRecord],
+    ) -> Option<ainb_plugin_notifyd::AlertKind> {
+        use ainb_plugin_notifyd::{AlertKind, classify_attention};
+        // A `[✓]` Finished marker is informational; retire it after this.
+        const FINISHED_TTL_MS: i64 = 5 * 60 * 1000;
+
+        if generating {
+            return None;
+        }
+        let agent = agent?;
+        let cwd = session_cwd.trim_end_matches('/');
+
+        for rec in recent {
+            // `recent` is newest-first and `ts`-sorted globally, so the
+            // first row at/under the baseline means none remain newer.
+            if rec.ts <= baseline_ms {
+                break;
+            }
+            if rec.agent != agent || rec.cwd.trim_end_matches('/') != cwd {
+                continue;
+            }
+            let Some(kind) = classify_attention(&rec.raw_event) else {
+                continue;
+            };
+            // Newest qualifying event wins. A long-finished turn isn't
+            // worth a marker — and it supersedes any older question, so
+            // we stop rather than fall back to a staler event.
+            if kind == AlertKind::Finished && now_ms.saturating_sub(rec.ts) > FINISHED_TTL_MS {
+                return None;
+            }
+            return Some(kind);
+        }
+        None
+    }
+
+    /// Recent user-facing hook events across the fleet, newest-first, or
+    /// `None` when the notifications store doesn't exist yet (daemon
+    /// never ran) or can't be read. Floored at app start so pre-existing
+    /// history never marks, and windowed so a long-lived TUI doesn't
+    /// accrue stale markers.
+    ///
+    /// Opens the store per call rather than holding a handle: the read
+    /// is microseconds, runs at most every preview-refresh interval
+    /// (~5s), and keeps the daemon as the DB's sole long-lived owner.
+    /// The `exists()` guard avoids `Store::open` creating an empty DB on
+    /// machines where notifications were never set up.
+    ///
+    /// The window is purely time-based (`now − LOOKBACK`), **not** floored
+    /// at app start — so opening ainb immediately surfaces sessions that
+    /// were already waiting before launch. Stale `[✓]` turns don't pile up
+    /// because the `Finished` marker self-retires on its own short TTL (see
+    /// [`Self::attention_for_session`]); only genuinely-pending `[?]` / `[!]`
+    /// from the window survive.
+    fn recent_attention_events(
+        &self,
+        now_ms: i64,
+    ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
+        // Only events within this rolling window can mark a session.
+        const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
+        // Bounds query cost; ample for any realistic active fleet.
+        const QUERY_LIMIT: u32 = 500;
+
+        let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
+        if !db.exists() {
+            return None;
+        }
+        let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
+        let floor = now_ms - LOOKBACK_MS;
+        match store.recent_since(floor, QUERY_LIMIT) {
+            Ok(rows) => Some(rows),
+            Err(e) => {
+                debug!("attention: notifications store read failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
+    /// from recent ainb-hooks events. Attached sessions never nag and
+    /// have their baseline advanced to "now", so re-marking only happens
+    /// for activity that arrives after the user looks away.
+    fn refresh_attention_markers(&mut self, now_ms: i64) {
+        let Some(recent) = self.recent_attention_events(now_ms) else {
+            return;
+        };
+
+        // Phase 1 — read-only compute (no mutable borrow of self).
+        let mut marks: Vec<(Uuid, Option<ainb_plugin_notifyd::AlertKind>, bool)> = Vec::new();
+        for ws in &self.workspaces {
+            for s in &ws.sessions {
+                if s.is_attached {
+                    marks.push((s.id, None, true));
+                    continue;
+                }
+                let generating = matches!(s.status, crate::models::SessionStatus::Running);
+                // Default 0: with no per-session clear point yet, any event in
+                // the lookback window can mark — so pre-launch waiters show up.
+                // Attaching advances this to "now" (see below).
+                let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
+                let kind = Self::attention_for_session(
+                    &s.workspace_path,
+                    Self::agent_hook_name(s.agent_type),
+                    generating,
+                    baseline,
+                    now_ms,
+                    &recent,
+                );
+                marks.push((s.id, kind, false));
+            }
+        }
+
+        // Phase 2 — apply. Bumping an attached session's baseline and
+        // writing its marker are separate self borrows, taken in turn.
+        let mut changed = false;
+        for (id, kind, attached) in marks {
+            if attached {
+                self.attention_baseline.insert(id, now_ms);
+            }
+            if let Some(s) = self.find_session_mut(id) {
+                if s.live_attention != kind {
+                    s.live_attention = kind;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.ui_needs_refresh = true;
+        }
+    }
+
     /// Update preview content for all tmux sessions (called from main update loop)
     pub async fn update_tmux_previews(&mut self) -> anyhow::Result<()> {
         use crate::tmux::ClaudeProcessDetector;
@@ -8060,9 +8881,11 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
-        // updates: (session_id, content, claude_running) for the selected session
+        // updates: (session_id, content, claude_running) for the selected session.
+        // Attention markers are derived separately from hook events in
+        // `refresh_attention_markers`, not from live pane state.
         let mut updates = Vec::new();
-        // status_updates: (session_id, claude_running) for non-selected sessions (status only)
+        // status_updates: (session_id, claude_running) for non-selected sessions
         let mut status_updates = Vec::new();
         let detector = ClaudeProcessDetector::new();
 
@@ -8120,6 +8943,10 @@ impl AppState {
 
         // Apply status-only updates for non-selected sessions
         for (session_id, claude_running) in status_updates {
+            // Accumulate the change flag inside the session borrow, then
+            // touch `self.ui_needs_refresh` only after it ends (avoids a
+            // borrow conflict between `find_session_mut` and `self`).
+            let mut changed = false;
             if let Some(session) = self.find_session_mut(session_id) {
                 use crate::models::SessionStatus;
                 let new_status = if claude_running {
@@ -8129,12 +8956,16 @@ impl AppState {
                 };
                 if session.status != new_status {
                     session.set_status(new_status);
-                    self.ui_needs_refresh = true;
+                    changed = true;
                 }
+            }
+            if changed {
+                self.ui_needs_refresh = true;
             }
         }
 
-        // Apply updates for the selected session
+        // Apply updates for the selected session (preview always changes,
+        // so this loop unconditionally requests a refresh).
         for (session_id, content, claude_running) in updates {
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_preview(content);
@@ -8149,10 +8980,16 @@ impl AppState {
                 if session.status != new_status {
                     session.set_status(new_status);
                 }
-
-                self.ui_needs_refresh = true;
             }
+
+            self.ui_needs_refresh = true;
         }
+
+        // Now that per-session running/idle status is current, recompute
+        // each session's attention marker (`[!]`/`[?]`/`[✓]`) from recent
+        // ainb-hooks events. Independent of pane capture, so it also
+        // covers sessions with no live pane (stopped / never-captured).
+        self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
         let selected_workspace_idx = self.selected_workspace_index;
@@ -8294,6 +9131,12 @@ pub struct App {
     /// on `state.plugin_runtime` so dispatchers reach it without needing
     /// access to `App`.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
+    /// Filesystem watcher that keeps the burndown usage snapshot live by
+    /// nudging session-reader to rescan on provider-dir changes. Held by
+    /// `App` so the watch (and its debounce task) stops when `App` drops.
+    /// `None` until [`App::init`] runs, or when no provider dir is
+    /// watchable — the burndown then keeps its press-`r` refresh behaviour.
+    usage_dir_watcher: Option<crate::models::usage_dir_watcher::UsageDirWatcher>,
 }
 
 impl App {
@@ -8301,6 +9144,7 @@ impl App {
         Self {
             state: AppState::new(),
             plugin_runtime_owner: None,
+            usage_dir_watcher: None,
         }
     }
 
@@ -8341,6 +9185,7 @@ impl App {
         // `state.current_screen`) with the plugin id that owns it.
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
+            (crate::app::screens::ids::WITR, "witr"),
             (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
 
@@ -8361,23 +9206,6 @@ impl App {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
             }
 
-            // Kick the next render ONLY when something has actually
-            // changed since the last paint — a keystroke landed
-            // (`send_key`), a snapshot event arrived (host or plugin
-            // `publish_snapshot`), or the screen has never painted
-            // yet (registration seeds the flag to `true`).
-            //
-            // Before this gate the loop fired a render kick every
-            // tick (~4/s at the 250 ms cadence) regardless of state
-            // changes, which compounded with the per-tick `event::poll`
-            // idle wait to produce ~250-300 ms of perceived lag per
-            // keystroke. With the gate the kick is event-driven, so
-            // each key arrives at the plugin within one tick interval
-            // and the response paints on the *next* tick.
-            if !handle.take_render_dirty(&pid) {
-                continue;
-            }
-
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`). Falls back to (0, 0)
             // before the first paint — the plugin treats that as "use
@@ -8385,6 +9213,42 @@ impl App {
             // sensible until the area cache fills in.
             let (width, height) =
                 self.state.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+
+            // Force a render kick whenever the live area differs from
+            // the one our last kick used. This is what carries a plugin
+            // screen from the seed `(0, 0)` render (which paints into the
+            // plugin's fallback size, off-screen for the real layout) to
+            // a render at the actual allocated viewport once
+            // `PluginScreen::render` has stashed it — and likewise on any
+            // resize. Plugins fed by a host-published snapshot get
+            // re-marked dirty by that publish, but a screen with no such
+            // feed (e.g. `witr` before a scan) would otherwise stay blank
+            // forever after its dirty flag was consumed at `(0, 0)`.
+            let last_viewport = self.state.plugin_last_render_viewport.get(*screen_id).copied();
+            let viewport_changed = last_viewport != Some((width, height));
+
+            // Kick the next render when something has actually changed
+            // since the last paint — a keystroke landed (`send_key`), a
+            // snapshot event arrived (host or plugin `publish_snapshot`),
+            // the screen has never painted yet (registration seeds the
+            // flag to `true`), or the allocated viewport changed.
+            //
+            // The dirty gate turns the loop from a fixed-cadence render
+            // storm (~4/s at the 250 ms tick) into an event-driven
+            // repaint: before it, the per-tick kick compounded with the
+            // `event::poll` idle wait to add ~250-300 ms of perceived lag
+            // per keystroke. `take_render_dirty` swaps the flag to false,
+            // so evaluate the viewport-change escape hatch first to avoid
+            // short-circuiting past it.
+            let dirty = handle.take_render_dirty(&pid);
+            if !dirty && !viewport_changed {
+                continue;
+            }
+
+            self.state
+                .plugin_last_render_viewport
+                .insert((*screen_id).to_string(), (width, height));
+
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // Returned oneshot is intentionally dropped — the cache
             // pickup happens via `try_recv_render` next tick.
@@ -8405,7 +9269,13 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.state.plugin_runtime = Some(handle);
+                self.state.plugin_runtime = Some(handle.clone());
+                // Keep the burndown usage snapshot live: watch provider
+                // session dirs and nudge session-reader to rescan on
+                // change, so "today" appears without the user pressing
+                // `r`. Best-effort — `None` when no dir is watchable.
+                self.usage_dir_watcher =
+                    crate::models::usage_dir_watcher::UsageDirWatcher::start(handle);
             }
             Err(e) => {
                 warn!(error = %e, "plugin runtime init failed — running plugin-free");
@@ -8581,6 +9451,11 @@ impl App {
 
         // Check for completed background skills scan
         if self.state.check_skills_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+
+        // Check for a completed base-branch refresh (Configure picker)
+        if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;
         }
 

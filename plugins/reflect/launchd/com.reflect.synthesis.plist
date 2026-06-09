@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template (W5): weekly Opus synthesis pass.
+
+  Runs reflect_synthesis.py once a week (Sunday 03:00 local) to cluster
+  near-duplicate learnings and propose merges — the one place a big model is
+  justified (bounded + periodic, not per transcript).
+
+  INSTALL (replace {{PLUGIN_ROOT}}):
+    sed "s|{{PLUGIN_ROOT}}|$HOME/.claude/.../reflect|g" \
+      com.reflect.synthesis.plist > ~/Library/LaunchAgents/com.reflect.synthesis.plist
+    launchctl load ~/Library/LaunchAgents/com.reflect.synthesis.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.reflect.synthesis</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>{{PLUGIN_ROOT}}/scripts/reflect_synthesis.py</string>
+        <string>--since</string>
+        <string>7d</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/reflect-synthesis-launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/reflect-synthesis-launchd.err</string>
+</dict>
+</plist>

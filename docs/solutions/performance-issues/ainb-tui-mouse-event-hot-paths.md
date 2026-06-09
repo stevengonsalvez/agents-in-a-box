@@ -14,8 +14,6 @@ provenance:
   merge_commit: ba7c57c
 ---
 
-# AINB TUI Mouse Event Hot Paths
-
 ## Problem
 
 Mouse-first TUI behavior can make the UI feel jittery if move or drag paths do heavy work, schedule async actions, persist configuration, or trigger subprocess/Docker/tmux calls.

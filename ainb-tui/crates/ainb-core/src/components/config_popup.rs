@@ -189,11 +189,35 @@ impl ConfigPopupState {
                 cursor_position,
             } => {
                 value.insert(*cursor_position, c);
-                *cursor_position += 1;
+                *cursor_position += c.len_utf8();
             }
             ConfigPopupType::NumberInput { input_buffer, .. } => {
                 if c.is_ascii_digit() || (c == '-' && input_buffer.is_empty()) {
                     input_buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Insert a string at the cursor (paste). Newlines and other control
+    /// characters are stripped because these popups are single-line fields —
+    /// a pasted path with a trailing `\n` should not break the layout.
+    pub fn insert_str(&mut self, s: &str) {
+        match &mut self.popup_type {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => {
+                let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+                value.insert_str(*cursor_position, &cleaned);
+                *cursor_position += cleaned.len();
+            }
+            ConfigPopupType::NumberInput { input_buffer, .. } => {
+                for c in s.chars() {
+                    if c.is_ascii_digit() || (c == '-' && input_buffer.is_empty()) {
+                        input_buffer.push(c);
+                    }
                 }
             }
             _ => {}
@@ -208,14 +232,88 @@ impl ConfigPopupState {
                 cursor_position,
             } => {
                 if *cursor_position > 0 {
-                    *cursor_position -= 1;
-                    value.remove(*cursor_position);
+                    // Step back to the previous char boundary so multibyte
+                    // characters are removed whole.
+                    let mut new_pos = *cursor_position - 1;
+                    while new_pos > 0 && !value.is_char_boundary(new_pos) {
+                        new_pos -= 1;
+                    }
+                    value.remove(new_pos);
+                    *cursor_position = new_pos;
                 }
             }
             ConfigPopupType::NumberInput { input_buffer, .. } => {
                 input_buffer.pop();
             }
             _ => {}
+        }
+    }
+
+    /// Forward-delete the character under the cursor (Delete key).
+    pub fn delete_forward(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position < value.len() {
+                value.remove(*cursor_position);
+            }
+        }
+    }
+
+    /// Move the cursor one character left (text input only).
+    pub fn cursor_left(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position > 0 {
+                let mut new_pos = *cursor_position - 1;
+                while new_pos > 0 && !value.is_char_boundary(new_pos) {
+                    new_pos -= 1;
+                }
+                *cursor_position = new_pos;
+            }
+        }
+    }
+
+    /// Move the cursor one character right (text input only).
+    pub fn cursor_right(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position < value.len() {
+                let mut new_pos = *cursor_position + 1;
+                while new_pos < value.len() && !value.is_char_boundary(new_pos) {
+                    new_pos += 1;
+                }
+                *cursor_position = new_pos;
+            }
+        }
+    }
+
+    /// Move the cursor to the start of the field (Home).
+    pub fn cursor_home(&mut self) {
+        if let ConfigPopupType::TextInput {
+            cursor_position, ..
+        } = &mut self.popup_type
+        {
+            *cursor_position = 0;
+        }
+    }
+
+    /// Move the cursor to the end of the field (End).
+    pub fn cursor_end(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            *cursor_position = value.len();
         }
     }
 
@@ -305,12 +403,22 @@ impl ConfigPopupComponent {
             ])
             .split(inner);
 
-        // Description
-        let desc = Paragraph::new(Line::from(vec![
+        // Description, plus a greyed paste hint on the second line for
+        // text-entry popups so the Ctrl+V clipboard paste is discoverable
+        // in the popup itself — not only in the bottom help bar.
+        let mut desc_lines = vec![Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(&state.description, Style::default().fg(MUTED_GRAY)),
-        ]))
-        .style(Style::default().bg(PANEL_BG));
+        ])];
+        // `is_text_entry()` already encodes "text or number popup" (show_popup
+        // is guaranteed true here, past the early return above).
+        if state.is_text_entry() {
+            desc_lines.push(Line::from(vec![Span::styled(
+                "  Ctrl+V to paste",
+                Style::default().fg(MUTED_GRAY),
+            )]));
+        }
+        let desc = Paragraph::new(desc_lines).style(Style::default().bg(PANEL_BG));
         frame.render_widget(desc, layout[0]);
 
         // Content based on type
@@ -458,7 +566,15 @@ impl ConfigPopupComponent {
             ConfigPopupType::Choice { .. } | ConfigPopupType::Boolean { .. } => {
                 vec![("↑↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")]
             }
-            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
+            ConfigPopupType::TextInput { .. } => {
+                vec![
+                    ("←→", "move"),
+                    ("^V", "paste"),
+                    ("Enter", "save"),
+                    ("Esc", "cancel"),
+                ]
+            }
+            ConfigPopupType::NumberInput { .. } => {
                 vec![("Enter", "save"), ("Esc", "cancel")]
             }
         };
@@ -486,5 +602,197 @@ impl ConfigPopupComponent {
 impl Default for ConfigPopupComponent {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_value(state: &ConfigPopupState) -> (&str, usize) {
+        match &state.popup_type {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => (value.as_str(), *cursor_position),
+            other => panic!("expected TextInput, got {other:?}"),
+        }
+    }
+
+    fn open_path() -> ConfigPopupState {
+        let mut s = ConfigPopupState::new();
+        s.open_text(
+            "Default Workspace",
+            "dir",
+            "default_workspace",
+            "/Users/me/git",
+        );
+        s
+    }
+
+    #[test]
+    fn open_text_places_cursor_at_end() {
+        let s = open_path();
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "/Users/me/git");
+        assert_eq!(cursor, value.len());
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor() {
+        let mut s = open_path();
+        // Cursor is at end; paste appends.
+        s.insert_str("/extra");
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "/Users/me/git/extra");
+        assert_eq!(cursor, value.len());
+    }
+
+    #[test]
+    fn paste_in_the_middle_after_cursor_move() {
+        let mut s = open_path();
+        s.cursor_home();
+        s.insert_str("~"); // user replaces leading segment manually later
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "~/Users/me/git");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn paste_strips_newlines_and_control_chars() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("Default Workspace", "dir", "default_workspace", "");
+        s.insert_str("/Users/me/projects\n");
+        s.insert_str("\t/more");
+        let (value, _) = text_value(&s);
+        assert_eq!(value, "/Users/me/projects/more");
+    }
+
+    #[test]
+    fn cursor_left_right_home_end() {
+        let mut s = open_path();
+        let end = "/Users/me/git".len();
+        s.cursor_home();
+        assert_eq!(text_value(&s).1, 0);
+        s.cursor_right();
+        assert_eq!(text_value(&s).1, 1);
+        s.cursor_end();
+        assert_eq!(text_value(&s).1, end);
+        s.cursor_left();
+        assert_eq!(text_value(&s).1, end - 1);
+    }
+
+    #[test]
+    fn backspace_and_delete_at_cursor() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "abc");
+        s.cursor_home();
+        s.delete_forward(); // removes 'a'
+        assert_eq!(text_value(&s), ("bc", 0));
+        s.cursor_end();
+        s.backspace(); // removes 'c'
+        assert_eq!(text_value(&s), ("b", 1));
+    }
+
+    #[test]
+    fn editing_respects_multibyte_chars() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "");
+        s.input_char('é'); // 2 bytes
+        s.input_char('x');
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "éx");
+        assert_eq!(cursor, value.len());
+        s.cursor_home();
+        s.cursor_right(); // should land after 'é', not mid-codepoint
+        assert_eq!(text_value(&s).1, "é".len());
+        s.backspace(); // removes whole 'é'
+        assert_eq!(text_value(&s), ("x", 0));
+    }
+
+    #[test]
+    fn delete_forward_removes_whole_multibyte_char() {
+        // Forward-delete must remove the entire codepoint under the cursor;
+        // a byte-only remove would panic on a non-boundary index.
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "é/x"); // 'é' is 2 bytes
+        s.cursor_home();
+        s.delete_forward(); // removes whole 'é'
+        assert_eq!(text_value(&s), ("/x", 0));
+        s.delete_forward(); // removes '/'
+        assert_eq!(text_value(&s), ("x", 0));
+    }
+
+    #[test]
+    fn number_input_paste_keeps_only_digits() {
+        let mut s = ConfigPopupState::new();
+        s.open_number("Max", "d", "max_repositories", 500);
+        s.insert_str("12ab3");
+        match &s.popup_type {
+            ConfigPopupType::NumberInput { input_buffer, .. } => {
+                assert_eq!(input_buffer, "500123");
+            }
+            other => panic!("expected NumberInput, got {other:?}"),
+        }
+    }
+
+    fn render_to_text(state: &ConfigPopupState, w: u16, h: u16) -> String {
+        let component = ConfigPopupComponent::new();
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| component.render(f, Rect::new(0, 0, w, h), state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn text_popup_renders_ctrl_v_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_text(
+            "Default Workspace",
+            "Default directory for new sessions",
+            "default_workspace",
+            "/Users/me/git",
+        );
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            text.contains("Ctrl+V to paste"),
+            "text popup must show the greyed paste hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn number_popup_renders_ctrl_v_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_number("Max Repositories", "Maximum repos", "max_repositories", 500);
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            text.contains("Ctrl+V to paste"),
+            "number popup must show the greyed paste hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn choice_popup_has_no_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_choice(
+            "Theme",
+            "Pick a theme",
+            "theme",
+            vec!["Dark".to_string(), "Light".to_string()],
+            0,
+        );
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            !text.contains("Ctrl+V to paste"),
+            "choice popup must NOT show the paste hint:\n{text}"
+        );
     }
 }

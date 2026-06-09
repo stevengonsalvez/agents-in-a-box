@@ -62,8 +62,11 @@ impl PluginScreen {
 /// authoritative list lives in one place.
 ///
 /// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
-pub const PLUGIN_SCREENS: &[(&str, &str)] =
-    &[(ids::ANALYTICS, "burndown"), (ids::HANGAR, "hangar-tui")];
+pub const PLUGIN_SCREENS: &[(&str, &str)] = &[
+    (ids::ANALYTICS, "burndown"),
+    (ids::WITR, "witr"),
+    (ids::HANGAR, "hangar-tui"),
+];
 
 /// Resolve the plugin id that owns `screen_id`, if any.
 #[must_use]
@@ -735,6 +738,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
     registry.register(Box::new(PluginScreen::new(ids::ANALYTICS)));
+    registry.register(Box::new(PluginScreen::new(ids::WITR)));
     registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
@@ -762,6 +766,8 @@ mod tests {
             ids::LOG_HISTORY,
             ids::CHANGELOG,
             ids::ANALYTICS,
+            ids::WITR,
+            ids::HANGAR,
             ids::SKILLS,
             ids::GIT_VIEW,
             ids::SESSION_RECOVERY,
@@ -904,6 +910,8 @@ mod tests {
     #[test]
     fn plugin_id_for_screen_resolves_analytics() {
         assert_eq!(plugin_id_for_screen(ids::ANALYTICS), Some("burndown"));
+        assert_eq!(plugin_id_for_screen(ids::WITR), Some("witr"));
+        assert_eq!(plugin_id_for_screen(ids::HANGAR), Some("hangar-tui"));
         // Non-plugin screens return None so the forwarder bails early.
         assert_eq!(plugin_id_for_screen(ids::HOME), None);
         assert_eq!(plugin_id_for_screen("nonsense"), None);
