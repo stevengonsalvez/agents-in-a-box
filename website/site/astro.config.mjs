@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightImageZoom from 'starlight-image-zoom';
 
 // https://astro.build/config
 export default defineConfig({
@@ -19,6 +20,7 @@ export default defineConfig({
           href: 'https://github.com/stevengonsalvez/agents-in-a-box',
         },
       ],
+      plugins: [starlightImageZoom()],
       customCss: ['./src/styles/tokens.css', './src/styles/crt.css'],
       editLink: {
         baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
