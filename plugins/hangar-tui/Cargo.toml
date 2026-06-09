@@ -13,6 +13,12 @@ description = "Hangar control plane TUI — subprocess plugin (ABI v2)"
 categories = ["command-line-utilities"]
 keywords = ["ainb", "hangar", "plugin", "tui", "control-plane"]
 
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`, so usage is invisible to it — same false positive
+# documented in ainb-plugin-burndown.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
 [lib]
 name = "ainb_plugin_hangar"
 path = "src/lib.rs"
