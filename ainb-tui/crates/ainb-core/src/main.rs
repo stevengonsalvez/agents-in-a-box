@@ -806,6 +806,108 @@ async fn run_tui_loop(
                         app.state.ui_needs_refresh = true;
                     }
 
+                    AsyncAction::AttachAbtop => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        const ABTOP_SESSION: &str = "ainb-abtop";
+                        info!(
+                            "[ACTION] Launching abtop in tmux session '{}'",
+                            ABTOP_SESSION
+                        );
+
+                        // Atomic create-or-reuse: `-A` attaches if the session exists,
+                        // creates it otherwise; `-d` keeps it detached so we drive the
+                        // attach (with TUI suspend/resume) ourselves below. tmux runs
+                        // the command in its OWN pty, so abtop gets a real TTY even
+                        // though ainb owns the alternate screen. `--exit-on-jump` makes
+                        // abtop quit (returning the terminal to ainb) after the user
+                        // jumps to an agent's pane with Enter. The command is passed as a
+                        // single string so tmux doesn't parse `--exit-on-jump` as a flag.
+                        let created = Command::new("tmux")
+                            .args([
+                                "new-session",
+                                "-A",
+                                "-d",
+                                "-s",
+                                ABTOP_SESSION,
+                                "abtop --exit-on-jump",
+                            ])
+                            .status()
+                            .await;
+                        match created {
+                            Ok(s) if s.success() => {
+                                let mut attach_handler =
+                                    AttachHandler::new_from_terminal(terminal)?;
+                                if let Err(e) =
+                                    attach_handler.attach_to_session(ABTOP_SESSION).await
+                                {
+                                    error!("[ACTION] abtop attach failed: {}", e);
+                                    app.state.add_error_notification(format!(
+                                        "Failed to open abtop: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(s) => {
+                                error!(
+                                    "[ACTION] failed to create abtop tmux session (exit {:?})",
+                                    s.code()
+                                );
+                                app.state.add_error_notification(
+                                    "Could not start abtop — is `abtop` installed and on PATH? Install: brew install graykode/tap/abtop · cargo install abtop"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                error!("[ACTION] tmux new-session for abtop errored: {}", e);
+                                app.state.add_error_notification(format!(
+                                    "Failed to open abtop: {}",
+                                    e
+                                ));
+                            }
+                        }
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::SetupAbtopRateLimits => {
+                        use tokio::process::Command;
+
+                        info!("[ACTION] Running abtop --setup (rate-limit StatusLine hook)");
+                        // `abtop --setup` writes a StatusLine hook into
+                        // ~/.claude/settings.json. Run it in its OWN detached
+                        // tmux pane so it gets a real TTY (abtop's CLI paths
+                        // expect one) without disturbing ainb's alternate
+                        // screen. We don't attach — it completes on its own.
+                        let setup = Command::new("tmux")
+                            .args([
+                                "new-session",
+                                "-d",
+                                "-s",
+                                "ainb-abtop-setup",
+                                "abtop --setup",
+                            ])
+                            .status()
+                            .await;
+                        match setup {
+                            Ok(s) if s.success() => {
+                                app.state.add_info_notification(
+                                    "Enabling abtop rate-limit tracking (abtop --setup)…"
+                                        .to_string(),
+                                );
+                            }
+                            _ => {
+                                app.state.add_error_notification(
+                                    "Could not run `abtop --setup` — is `abtop` on PATH? You can run it manually."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        // Open abtop regardless of the setup outcome.
+                        app.state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                        app.state.ui_needs_refresh = true;
+                    }
+
                     AsyncAction::KillOtherTmux(session_name) => {
                         use tokio::process::Command;
 

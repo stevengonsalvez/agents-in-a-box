@@ -25,6 +25,11 @@ pub mod ids {
     /// plugin-screen registration — no witr domain logic in the host;
     /// the same plumbing the `analytics` screen uses for `burndown`.
     pub const WITR: &str = "witr";
+    /// top-for-agents screen, owned by the `abtop` plugin. Generic
+    /// plugin-screen registration like `witr`; the live menu hands the
+    /// terminal to the external `abtop` binary full-screen, so this
+    /// screen only paints the plugin's install-hint / ready empty-state.
+    pub const ABTOP: &str = "abtop";
     pub const SESSION_LIST: &str = "session_list";
     pub const LOGS: &str = "logs";
     pub const LOG_HISTORY: &str = "log_history";
