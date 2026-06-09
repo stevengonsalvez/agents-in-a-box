@@ -1478,9 +1478,15 @@ pub fn browse(
     let mut hits = backend
         .search(args.query.trim())
         .with_context(|| format!("searching catalog for `{}`", args.query.trim()))?;
-    // Re-rank defensively — the contract says backends rank, but a
-    // misbehaving backend shouldn't produce an unordered table.
-    rank_by_stars(&mut hits);
+    // Re-rank defensively for skills.sh — the contract says backends rank,
+    // but a misbehaving one shouldn't produce an unordered table. The curated
+    // index is deliberately pre-sorted (owned-first, then by name) by
+    // `CatalogIndex::new`, so re-ranking it by stars would clobber that order
+    // (and diverge from the TUI, which never re-ranks) the moment external
+    // stars are populated. Leave the curated order intact.
+    if !args.is_curated() {
+        rank_by_stars(&mut hits);
+    }
 
     if args.json {
         writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
@@ -1492,14 +1498,28 @@ pub fn browse(
         return Ok(());
     }
 
-    // Tabular default: fixed-width columns, no external table dep.
-    writeln!(out, "{:<28}  {:>7}  {:<32}  install-uri", "name", "stars", "repo")?;
-    writeln!(out, "{:-<28}  {:->7}  {:-<32}  {:-<40}", "", "", "", "")?;
+    // Tabular default: fixed-width columns, no external table dep. The `kind`
+    // column distinguishes a `skill` (whose last column is a unit URI) from an
+    // npx/plugin/mcp entry (whose last column is the shell install command).
+    writeln!(
+        out,
+        "{:<26}  {:<7}  {:>6}  {:<28}  install / command",
+        "name", "kind", "stars", "repo"
+    )?;
+    writeln!(
+        out,
+        "{:-<26}  {:-<7}  {:->6}  {:-<28}  {:-<40}",
+        "", "", "", "", ""
+    )?;
     for h in &hits {
         writeln!(
             out,
-            "{:<28}  {:>7}  {:<32}  {}",
-            h.name, h.stars, h.repo, h.install_uri
+            "{:<26}  {:<7}  {:>6}  {:<28}  {}",
+            h.name,
+            h.kind.badge(),
+            h.stars,
+            h.repo,
+            h.install_uri
         )?;
     }
     let query = args.query.trim();
