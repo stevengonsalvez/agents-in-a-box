@@ -74,7 +74,12 @@ impl RemoteRepoManager {
 
     /// Check if a repo is already cached (standard clone with .git subdirectory)
     pub fn is_cached(&self, parsed: &ParsedRepo) -> bool {
-        let cache_path = self.get_cache_path(parsed);
+        Self::cache_path_is_populated(&self.get_cache_path(parsed))
+    }
+
+    /// The one definition of "this cache path holds a usable clone" — shared
+    /// by `is_cached` and `cached_source_path` so the rule can't drift.
+    fn cache_path_is_populated(cache_path: &Path) -> bool {
         cache_path.exists() && cache_path.join(".git").exists()
     }
 
@@ -88,11 +93,11 @@ impl RemoteRepoManager {
         match source {
             RepoSource::HttpsUrl(_)
             | RepoSource::SshUrl(_)
-            | RepoSource::GithubShorthand { .. } => source
-                .parse_components()
-                .ok()
-                .filter(|parsed| self.is_cached(parsed))
-                .map(|parsed| self.get_cache_path(&parsed)),
+            | RepoSource::GithubShorthand { .. } => {
+                let parsed = source.parse_components().ok()?;
+                let cache_path = self.get_cache_path(&parsed);
+                Self::cache_path_is_populated(&cache_path).then_some(cache_path)
+            }
             _ => None,
         }
     }
