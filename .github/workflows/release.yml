@@ -269,6 +269,9 @@ jobs:
 
       - name: Generate curated catalog index
         working-directory: ${{ env.WORKING_DIR }}
+        # The xtask reads NO env vars — these only feed the shell-quoted flag
+        # values below. Passing the workflow inputs via `env:` (not inline
+        # `${{ }}` in `run:`) is the injection-safe pattern for untrusted input.
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           OUT_DIR: ${{ github.workspace }}/artifacts
