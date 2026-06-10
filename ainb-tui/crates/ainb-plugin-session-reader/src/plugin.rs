@@ -16,11 +16,39 @@
 use ainb_plugin_sdk::{
     HandleEventParams, HostClient, Plugin, RenderParams, Result, SdkError, WireBuffer,
 };
-use ainb_plugin_types_sessions::{ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION};
+use ainb_plugin_types_sessions::{
+    RefreshRequest, ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION,
+};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::scanner::{self, ProviderRoots};
+
+/// Nanoseconds per day, for the incremental watermark arithmetic.
+#[cfg(not(target_arch = "wasm32"))]
+const NANOS_PER_DAY: u64 = 86_400_000_000_000;
+
+/// Decode the `sessions.refresh_request` payload. The topic was
+/// historically a bare ping, so an empty payload — what the host FS
+/// watcher and burndown's `r` key still send — decodes to the default
+/// (incremental). A malformed payload also degrades to incremental
+/// with a warn: a bad publisher must never block refreshes, and
+/// incremental is the safe (cheap) direction to fail in.
+fn decode_refresh_request(payload: &[u8]) -> RefreshRequest {
+    if payload.is_empty() {
+        return RefreshRequest::default();
+    }
+    match rmp_serde::from_slice(payload) {
+        Ok(req) => req,
+        Err(err) => {
+            tracing::warn!(
+                "session-reader: refresh_request payload undecodable ({err}); \
+                treating as incremental"
+            );
+            RefreshRequest::default()
+        }
+    }
+}
 
 /// Per-chunk msgpack byte budget. Each chunk's encoded msgpack stays
 /// below this size so the post-base64 + JSON-envelope frame fits
@@ -75,6 +103,15 @@ mod manifest_text {
 pub struct SessionReader {
     last_event: Option<UsageDataEvent>,
     roots: ProviderRoots,
+    /// Trailing recent-window size (days) from `[session_reader]`
+    /// config; bounds the incremental watermark.
+    #[cfg(not(target_arch = "wasm32"))]
+    window_days: u32,
+    /// In-memory copy of the persisted stable rollup so steady-state
+    /// refreshes don't re-deserialize the blob; loaded from the cache
+    /// on the first refresh, replaced whenever a rebuild runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    stable: Option<scanner::StableAggregate>,
     #[cfg(not(target_arch = "wasm32"))]
     cache: Option<crate::cache::UsageCache>,
     /// Set to `true` once we've attempted (and possibly failed) to open
@@ -91,6 +128,10 @@ impl SessionReader {
             last_event: None,
             roots: ProviderRoots::defaults(),
             #[cfg(not(target_arch = "wasm32"))]
+            window_days: crate::config::load().window_days(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stable: None,
+            #[cfg(not(target_arch = "wasm32"))]
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache_init: false,
@@ -104,6 +145,10 @@ impl SessionReader {
         Self {
             last_event: None,
             roots,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_days: crate::config::DEFAULT_INCREMENTAL_WINDOW_DAYS,
+            #[cfg(not(target_arch = "wasm32"))]
+            stable: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -125,6 +170,10 @@ impl SessionReader {
     /// regardless of how broken the previous cache was.
     #[cfg(not(target_arch = "wasm32"))]
     async fn flush_cache(&mut self, host: &HostClient) {
+        // The persisted stable rollup dies with the cache (clear()
+        // wipes both tables); the in-memory copy must die with it or
+        // the next refresh would resurrect stale history.
+        self.stable = None;
         self.ensure_cache();
         if let Some(cache) = self.cache.as_mut() {
             match cache.clear() {
@@ -251,8 +300,19 @@ impl SessionReader {
     #[cfg(not(target_arch = "wasm32"))]
     async fn scan_streaming(&mut self, host: &HostClient) -> ainb_plugin_types_sessions::UsageData {
         self.ensure_cache();
+        // First refresh of this process: hydrate the in-memory stable
+        // rollup from the cache (absent on cold start / after flush —
+        // the scan below then runs the one-time seeding rebuild).
+        if self.stable.is_none() {
+            if let Some(cache) = self.cache.as_ref() {
+                self.stable = cache.load_stable().unwrap_or_default();
+            }
+        }
+        let cold_start = self.stable.is_none();
         let roots = self.roots.clone();
         let cache = self.cache.take();
+        let stored = self.stable.take();
+        let window_days = self.window_days;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
 
@@ -264,9 +324,54 @@ impl SessionReader {
                 // we hold `rx` until `scan_handle` resolves).
                 let _ = tx.send(evt);
             });
-            let data = scanner::scan_with_cache_and_progress(&roots, &mut cache_opt, &mut reporter);
-            (data, cache_opt)
+            if cache_opt.is_some() {
+                // Incremental path: stable rollup + recent re-aggregate.
+                let watermark = now_ns().saturating_sub(u64::from(window_days) * NANOS_PER_DAY);
+                let outcome = scanner::scan_incremental(
+                    &roots,
+                    &mut cache_opt,
+                    stored,
+                    watermark,
+                    &mut reporter,
+                );
+                if outcome.stable_rebuilt {
+                    if let Some(cache) = cache_opt.as_mut() {
+                        if let Err(err) = cache.store_stable(&outcome.stable) {
+                            tracing::warn!(
+                                "session-reader: stable rollup persist failed ({err}); \
+                                next refresh rebuilds again"
+                            );
+                        }
+                    }
+                }
+                let c = outcome.counters;
+                tracing::info!(
+                    files_statted = c.files_statted,
+                    parsed = c.parsed,
+                    cache_hits = c.cache_hits,
+                    stable_skipped = c.stable_skipped,
+                    stable_reused = c.stable_reused,
+                    stable_rebuilt = outcome.stable_rebuilt,
+                    "session-reader: incremental refresh"
+                );
+                (outcome.data, Some(outcome.stable), cache_opt)
+            } else {
+                // No cache (path unresolved / open failed): nowhere to
+                // persist a rollup, so run the legacy full scan.
+                let data =
+                    scanner::scan_with_cache_and_progress(&roots, &mut cache_opt, &mut reporter);
+                (data, None, cache_opt)
+            }
         });
+
+        if cold_start {
+            let _ = host
+                .log_info(
+                    "session-reader: no stable rollup found — building full usage history \
+                    (one-time, heavier than a normal refresh)",
+                )
+                .await;
+        }
 
         // Drain progress events. `rx.recv()` returns `None` once the
         // scan task drops its `Sender` (i.e. when the closure +
@@ -293,8 +398,9 @@ impl SessionReader {
         }
 
         match scan_handle.await {
-            Ok((data, cache_opt)) => {
+            Ok((data, stable_out, cache_opt)) => {
                 self.cache = cache_opt;
+                self.stable = stable_out;
                 data
             }
             Err(err) => {
@@ -617,11 +723,25 @@ impl Plugin for SessionReader {
 
     async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         if params.topic == TOPIC_REFRESH_REQUEST {
-            tracing::info!("session-reader: refresh requested — rescanning");
+            let req = decode_refresh_request(&params.payload);
+            if req.hard {
+                // Hard refresh: distrust every cache layer. Wipe the
+                // parse cache + stable rollup, then rescan — the cold
+                // incremental path re-parses everything from source
+                // and seeds a fresh rollup.
+                tracing::info!(
+                    "session-reader: HARD refresh requested — wiping caches, rebuilding from source"
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                self.flush_cache(host).await;
+            } else {
+                tracing::info!("session-reader: refresh requested — incremental rescan");
+            }
             return self.publish(host).await;
         }
         if params.topic == TOPIC_FLUSH_CACHE_REQUEST {
             tracing::info!("session-reader: flush_cache requested — wiping cache + rescanning");
+            #[cfg(not(target_arch = "wasm32"))]
             self.flush_cache(host).await;
             return self.publish(host).await;
         }
@@ -640,6 +760,37 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_request_empty_payload_is_incremental() {
+        // The host FS watcher and burndown's `r` key publish bare
+        // pings (empty payload) — back-compat demands incremental.
+        let req = decode_refresh_request(&[]);
+        assert!(!req.hard);
+    }
+
+    #[test]
+    fn refresh_request_empty_map_is_incremental() {
+        // msgpack fixmap-0 (a publisher encoding `{}`) — `hard`
+        // defaults off via #[serde(default)].
+        let req = decode_refresh_request(&[0x80]);
+        assert!(!req.hard);
+    }
+
+    #[test]
+    fn refresh_request_hard_roundtrips() {
+        let bytes = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).expect("encode");
+        let req = decode_refresh_request(&bytes);
+        assert!(req.hard);
+    }
+
+    #[test]
+    fn refresh_request_garbage_degrades_to_incremental() {
+        // A broken publisher must never block refreshes; failing in
+        // the cheap (incremental) direction is the safe default.
+        let req = decode_refresh_request(&[0xC1, 0xFF, 0x00]);
+        assert!(!req.hard);
+    }
 
     #[test]
     fn manifest_toml_parses_as_abi_v2() {

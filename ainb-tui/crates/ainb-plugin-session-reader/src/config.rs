@@ -11,11 +11,6 @@
 //! incremental_window_days = 30
 //! ```
 
-// Consumed by the incremental scan path (`scan_incremental`, P4) and
-// cold-start seeding (P8) on this branch; until those land the module
-// is exercised only by its tests.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;

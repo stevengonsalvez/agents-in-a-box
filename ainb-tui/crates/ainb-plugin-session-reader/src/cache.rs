@@ -239,7 +239,6 @@ impl UsageCache {
 
     /// Persist the stable (older-than-watermark) aggregate. Single-row
     /// upsert; the previous rollup is replaced atomically.
-    #[allow(dead_code)] // wired in by scan_incremental (P4)
     pub fn store_stable(
         &mut self,
         stable: &crate::scanner::StableAggregate,
@@ -260,7 +259,6 @@ impl UsageCache {
     /// A decode failure (blob written by an incompatible build) is
     /// treated as absence — the caller rebuilds from the per-file
     /// cache, which self-heals the row on the next `store_stable`.
-    #[allow(dead_code)] // wired in by scan_incremental (P4)
     pub fn load_stable(&self) -> Result<Option<crate::scanner::StableAggregate>, CacheError> {
         let row: Option<Vec<u8>> = with_busy_retry(|| {
             self.conn

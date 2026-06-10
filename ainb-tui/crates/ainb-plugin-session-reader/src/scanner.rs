@@ -403,7 +403,6 @@ fn walk_providers(
 /// [`emit`]/[`fold`] with [`aggregate`] — the property tests pin the
 /// result byte-identical to a one-shot full scan of the same tree.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)] // wired into the plugin dispatch in P5
 pub(crate) fn scan_incremental(
     roots: &ProviderRoots,
     cache: &mut Option<crate::cache::UsageCache>,

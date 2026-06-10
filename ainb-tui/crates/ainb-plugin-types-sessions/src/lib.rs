@@ -78,6 +78,27 @@ pub struct ScanProgressEvent {
     pub current_project: String,
 }
 
+/// Optional payload for the `sessions.refresh_request` topic.
+///
+/// Historically the topic was a bare ping (empty payload) and most
+/// publishers — the host FS watcher, burndown s `r` key — still send
+/// exactly that, which decodes to the default: a normal incremental
+/// refresh. A `hard` refresh (msgpack `{hard: true}`) tells
+/// session-reader to distrust every cache layer and rebuild from
+/// source — the CPU-heavy path, so publishers gate it behind explicit
+/// user intent (`R` confirm in the TUI, `--hard` on the CLI).
+///
+/// Schema is intentionally unversioned, mirroring
+/// [`ScanProgressEvent`]: new fields arrive with `#[serde(default)]`
+/// so older publishers payloads keep decoding cleanly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    /// `true` = full rebuild from source (wipe parse cache + stable
+    /// rollup first). `false`/absent = incremental refresh.
+    #[serde(default)]
+    pub hard: bool,
+}
+
 /// Top-level envelope published on the `sessions.usage_data` topic.
 ///
 /// `published_ns` is filled in from the host's wall-clock at publish
