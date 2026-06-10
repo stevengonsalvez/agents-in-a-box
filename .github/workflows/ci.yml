@@ -113,9 +113,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "ainb-tui -> target"
-      - name: Install tmux (Linux only; macOS runner ships it)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      # macOS runner images do NOT ship tmux (actions/runner-images macos-15
+      # README) — without installing it here the macOS leg is vacuously green:
+      # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
+      - name: Install tmux (apt-get on Linux, brew on macOS)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
       - name: Build hangar daemon binary
         run: cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon
         working-directory: ${{ env.WORKING_DIR }}
