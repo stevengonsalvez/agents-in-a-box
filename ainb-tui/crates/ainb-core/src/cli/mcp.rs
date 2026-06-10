@@ -41,6 +41,53 @@ pub async fn execute(matches: &ArgMatches) -> Result<()> {
             println!("mcp daemon stopped");
             Ok(())
         }
+        Some(("import", sub)) => {
+            let report = mcp_pool::import::execute(sub.get_flag("user"))?;
+            if report.imported.is_empty() {
+                println!("nothing new to import");
+            } else {
+                println!("imported into {}: {}", report.target.display(), report.imported.join(", "));
+            }
+            if !report.skipped_existing.is_empty() {
+                println!("already configured (untouched): {}", report.skipped_existing.join(", "));
+            }
+            if !report.skipped_unresolvable.is_empty() {
+                println!("skipped (command not on host): {}", report.skipped_unresolvable.join(", "));
+            }
+            Ok(())
+        }
+        Some(("install", sub)) => {
+            let codex = sub.get_flag("codex");
+            let copilot = sub.get_flag("copilot");
+            if !codex && !copilot {
+                anyhow::bail!("pass --codex and/or --copilot");
+            }
+            let config = crate::config::AppConfig::load().unwrap_or_default();
+            let mut servers = mcp_pool::pooled_servers(&config);
+            // Include project .mcp.json stdio servers, same as session create.
+            if let Ok(cwd) = std::env::current_dir() {
+                let known: std::collections::HashSet<String> =
+                    servers.iter().map(|s| s.name.clone()).collect();
+                for s in mcp_pool::mcp_json::parse_stdio_servers(&cwd.join(".mcp.json")) {
+                    if !known.contains(&s.name) && s.resolvable_on_host() {
+                        servers.push(s);
+                    }
+                }
+            }
+            if servers.is_empty() {
+                anyhow::bail!("no poolable servers configured — define [mcp_servers.*] or run `ainb mcp import` first");
+            }
+            if codex {
+                let r = mcp_pool::install::install_codex(&servers)?;
+                println!("codex: wired {} into {}", r.wired.join(", "), r.target.display());
+            }
+            if copilot {
+                let r = mcp_pool::install::install_copilot(&servers)?;
+                println!("copilot: wired {} into {}", r.wired.join(", "), r.target.display());
+            }
+            println!("note: pool daemon must be running for these sessions (`ainb mcp daemon`, or any ainb Claude session starts it)");
+            Ok(())
+        }
         _ => unreachable!("clap subcommand_required"),
     }
 }
