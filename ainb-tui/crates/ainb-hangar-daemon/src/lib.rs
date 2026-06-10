@@ -59,6 +59,13 @@ pub mod health_stats;
 /// Gemini/Default/Copilot root inside `workdir`. Files are copied, never
 /// symlinked; `scripts/` files get the unix executable bit.
 pub mod materialise;
+/// `@handle` mention parsing over a comment body (e38.7).
+///
+/// [`mentions::parse_mentions`] extracts the distinct `@agent` handles from a
+/// comment body; the `comment_add` handler resolves each against the workspace's
+/// agents and enqueues a task for every match, so a user `@`-mentioning an agent
+/// in a comment spawns that agent's task.
+pub mod mentions;
 /// Daemon observability bootstrap (P8.1).
 ///
 /// Installs the `tracing` subscriber with the rolling JSONL sink under
