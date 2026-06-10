@@ -15,7 +15,7 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | `k` | Skills |
 | `w` | Witr (process causality) |
 | `t` | abtop (top-for-agents monitor) |
-| `I` (or `Shift`+`i`) | Inbox (notifications) |
+| `b` | Inbox (notifications) |
 | `c` | Catalog |
 | `C` | Config |
 | `v` | Changelog |
