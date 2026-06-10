@@ -29,6 +29,7 @@ use ainb_plugin_types_sessions::{
     SessionUsage, TokenBucket, UsageData,
 };
 use chrono::{Datelike, Duration, NaiveDate};
+use serde::{Deserialize, Serialize};
 
 /// Minimum gap between progress emits. Caps emission to 10 events/s and
 /// satisfies the "every 100 ms or every 10 files, whichever first"
@@ -324,13 +325,32 @@ fn count_jsonl_recursive(root: &Path) -> usize {
 }
 
 /// Pure aggregation: `Vec<ProviderCall>` → `UsageData`.
-#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
-    if calls.is_empty() {
-        return UsageData::default();
-    }
+///
+/// Implemented as [`fold`] (per-call accumulation) followed by [`emit`]
+/// (derive the sorted, deterministic snapshot). The incremental refresh
+/// path reuses the same two stages — it folds only recent calls, merges
+/// onto a persisted stable [`AggState`] via [`AggState::absorb`], and
+/// emits — so both paths share the exact code that determines the
+/// published bytes.
+pub fn aggregate(calls: Vec<ProviderCall>) -> UsageData {
+    emit(fold(calls))
+}
 
-    calls.sort_by_key(|c| c.timestamp);
+/// Fold stage: accumulate calls into mergeable per-dimension state.
+///
+/// Calls sort by `(timestamp, id)` — a total order (`id` is FNV-1a 64
+/// of `path:offset`, unique per call) — so the fold result is
+/// independent of input order and [`AggState::absorb`] reproduces
+/// exactly what one fold over the concatenated input would build.
+///
+/// Costs accumulate as integer nano-USD ([`usd_to_nanos`]) rather than
+/// `f64`: float addition is not associative, so summing in a different
+/// order (incremental merge vs one-shot fold) could drift in the last
+/// ulp and break the byte-identity contract. Integer addition is
+/// exact; [`emit`] materializes the `f64` once at the end.
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+pub(crate) fn fold(mut calls: Vec<ProviderCall>) -> AggState {
+    calls.sort_by_key(|c| (c.timestamp, c.id));
 
     let mut daily: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
     let mut weekly: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
@@ -342,9 +362,11 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
     let mut shell_commands: BTreeMap<String, usize> = BTreeMap::new();
     let mut model_project_counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut grand_total = TokenBucket::default();
+    let mut grand_cost_nanos: Option<i64> = None;
 
     for call in &calls {
         let bucket = call_bucket(call);
+        let cost = call.cost_usd.map(usd_to_nanos);
         let day = call.timestamp.date_naive();
         let week = week_start(day);
         let session_key = format!(
@@ -355,16 +377,23 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
         );
 
         merge(&mut grand_total, &bucket);
+        add_cost_nanos(&mut grand_cost_nanos, cost);
 
-        daily.entry(day).or_default().ingest(&bucket, &call.project, &session_key);
-        weekly.entry(week).or_default().ingest(&bucket, &call.project, &session_key);
-        models
-            .entry(call.model.clone())
+        daily.entry(day).or_default().ingest(&bucket, cost, &call.project, &session_key);
+        weekly
+            .entry(week)
             .or_default()
-            .ingest(&bucket, &call.project, &session_key);
+            .ingest(&bucket, cost, &call.project, &session_key);
+        models.entry(call.model.clone()).or_default().ingest(
+            &bucket,
+            cost,
+            &call.project,
+            &session_key,
+        );
         if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
             branches.entry(branch.to_string()).or_default().ingest(
                 &bucket,
+                cost,
                 &call.project,
                 &session_key,
             );
@@ -372,12 +401,16 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
 
         let project = projects.entry(call.project.clone()).or_insert_with(|| ProjectAccumulator {
             path: call.project_path.clone(),
+            last_path_key: (call.timestamp, call.id),
             bucket: TokenBucket::default(),
+            cost_nanos: None,
             sessions: HashSet::new(),
         });
         project.path = call.project_path.clone();
+        project.last_path_key = (call.timestamp, call.id);
         project.sessions.insert(session_key.clone());
         merge(&mut project.bucket, &bucket);
+        add_cost_nanos(&mut project.cost_nanos, cost);
 
         let session = sessions.entry(session_key.clone()).or_insert_with(|| SessionAccumulator {
             provider: call.provider,
@@ -386,6 +419,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             first_timestamp: call.timestamp,
             last_timestamp: call.timestamp,
             bucket: TokenBucket::default(),
+            cost_nanos: None,
         });
         if call.timestamp < session.first_timestamp {
             session.first_timestamp = call.timestamp;
@@ -394,6 +428,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             session.last_timestamp = call.timestamp;
         }
         merge(&mut session.bucket, &bucket);
+        add_cost_nanos(&mut session.cost_nanos, cost);
 
         for tool in &call.tools {
             *tools.entry(tool.clone()).or_insert(0) += 1;
@@ -408,9 +443,47 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .or_insert(0) += 1;
     }
 
+    AggState {
+        calls,
+        daily,
+        weekly,
+        projects,
+        sessions,
+        models,
+        branches,
+        tools,
+        shell_commands,
+        model_project_counts,
+        grand_total,
+        grand_cost_nanos,
+    }
+}
+
+/// Emit stage: derive the sorted, deterministic [`UsageData`] from a
+/// fold state. Shared verbatim by [`aggregate`] and the incremental
+/// merge path, so both produce byte-identical snapshots for the same
+/// underlying calls.
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+pub(crate) fn emit(state: AggState) -> UsageData {
+    let AggState {
+        calls,
+        daily,
+        weekly,
+        projects,
+        sessions,
+        models,
+        branches,
+        tools,
+        shell_commands,
+        model_project_counts,
+        mut grand_total,
+        grand_cost_nanos,
+    } = state;
+
     grand_total.call_count = calls.len();
     grand_total.session_count = sessions.len();
     grand_total.project_count = projects.len();
+    grand_total.cost_usd = grand_cost_nanos.map(nanos_to_usd);
 
     UsageData {
         daily: daily
@@ -418,6 +491,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .map(|(d, mut a)| {
                 a.bucket.session_count = a.sessions.len();
                 a.bucket.project_count = a.projects.len();
+                a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                 (d, a.bucket)
             })
             .collect(),
@@ -426,6 +500,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .map(|(d, mut a)| {
                 a.bucket.session_count = a.sessions.len();
                 a.bucket.project_count = a.projects.len();
+                a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                 (d, a.bucket)
             })
             .collect(),
@@ -435,6 +510,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(name, mut p)| {
                     p.bucket.session_count = p.sessions.len();
                     p.bucket.project_count = 1;
+                    p.bucket.cost_usd = p.cost_nanos.map(nanos_to_usd);
                     ProjectUsage {
                         name,
                         path: p.path,
@@ -446,17 +522,20 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             |p| p.bucket,
         ),
         grand_total,
-        calls: calls.clone(),
+        calls,
         sessions: sort_sessions_by_recency(
             sessions
                 .into_iter()
-                .map(|(_k, s)| SessionUsage {
-                    provider: s.provider,
-                    project: s.project,
-                    session_id: s.session_id,
-                    first_timestamp: s.first_timestamp,
-                    last_timestamp: s.last_timestamp,
-                    bucket: s.bucket,
+                .map(|(_k, mut s)| {
+                    s.bucket.cost_usd = s.cost_nanos.map(nanos_to_usd);
+                    SessionUsage {
+                        provider: s.provider,
+                        project: s.project,
+                        session_id: s.session_id,
+                        first_timestamp: s.first_timestamp,
+                        last_timestamp: s.last_timestamp,
+                        bucket: s.bucket,
+                    }
                 })
                 .collect(),
         ),
@@ -466,6 +545,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(model, mut a)| {
                     a.bucket.session_count = a.sessions.len();
                     a.bucket.project_count = a.projects.len();
+                    a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                     ModelUsage {
                         model,
                         bucket: a.bucket,
@@ -484,6 +564,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(branch, mut a)| {
                     a.bucket.session_count = a.sessions.len();
                     a.bucket.project_count = a.projects.len();
+                    a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                     BranchUsage {
                         branch,
                         bucket: a.bucket,
@@ -503,27 +584,166 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
     }
 }
 
-#[derive(Default)]
+/// Mergeable fold state — the output of [`fold`], the input of
+/// [`emit`], and the unit the incremental path persists as the stable
+/// (older-than-watermark) aggregate.
+///
+/// Every field merges associatively in [`Self::absorb`]: token sums
+/// add, distinct-id sets union, session first/last take min/max, and
+/// costs add as integer nano-USD. Distinct counts are NOT stored here —
+/// [`emit`] derives them from the set sizes, which is what makes the
+/// merge exact where naive `session_count` addition would over-count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AggState {
+    /// All calls, sorted by `(timestamp, id)`.
+    pub(crate) calls: Vec<ProviderCall>,
+    daily: BTreeMap<NaiveDate, BucketAccumulator>,
+    weekly: BTreeMap<NaiveDate, BucketAccumulator>,
+    projects: BTreeMap<String, ProjectAccumulator>,
+    sessions: BTreeMap<String, SessionAccumulator>,
+    models: BTreeMap<String, BucketAccumulator>,
+    branches: BTreeMap<String, BucketAccumulator>,
+    tools: BTreeMap<String, usize>,
+    shell_commands: BTreeMap<String, usize>,
+    model_project_counts: BTreeMap<String, BTreeMap<String, usize>>,
+    grand_total: TokenBucket,
+    grand_cost_nanos: Option<i64>,
+}
+
+impl AggState {
+    /// Merge `other` into `self` so that
+    /// `emit(fold(a) ⊕ fold(b)) == emit(fold(a ++ b))` byte-for-byte.
+    ///
+    /// On key collisions buckets merge and sets union; for the
+    /// project-path last-write the side with the greater
+    /// `(timestamp, id)` wins, mirroring fold's iteration order.
+    // Exercised by the byte-identity property tests today; production
+    // call site is `scan_incremental` (P4, same branch). Remove the
+    // allow when that lands.
+    #[allow(dead_code)]
+    pub(crate) fn absorb(&mut self, other: Self) {
+        // Merge two (timestamp, id)-sorted call vecs; `self` first on
+        // (impossible-in-practice) equal keys to mirror stable sort.
+        let mut merged = Vec::with_capacity(self.calls.len() + other.calls.len());
+        let mut a = std::mem::take(&mut self.calls).into_iter().peekable();
+        let mut b = other.calls.into_iter().peekable();
+        loop {
+            match (a.peek(), b.peek()) {
+                (Some(x), Some(y)) => {
+                    if (x.timestamp, x.id) <= (y.timestamp, y.id) {
+                        merged.push(a.next().expect("peeked"));
+                    } else {
+                        merged.push(b.next().expect("peeked"));
+                    }
+                }
+                (Some(_), None) => merged.push(a.next().expect("peeked")),
+                (None, Some(_)) => merged.push(b.next().expect("peeked")),
+                (None, None) => break,
+            }
+        }
+        self.calls = merged;
+
+        for (k, v) in other.daily {
+            merge_bucket_acc(self.daily.entry(k).or_default(), v);
+        }
+        for (k, v) in other.weekly {
+            merge_bucket_acc(self.weekly.entry(k).or_default(), v);
+        }
+        for (k, v) in other.models {
+            merge_bucket_acc(self.models.entry(k).or_default(), v);
+        }
+        for (k, v) in other.branches {
+            merge_bucket_acc(self.branches.entry(k).or_default(), v);
+        }
+        for (k, v) in other.projects {
+            match self.projects.entry(k) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb(v),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+        for (k, v) in other.sessions {
+            match self.sessions.entry(k) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb(&v),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+        for (k, n) in other.tools {
+            *self.tools.entry(k).or_insert(0) += n;
+        }
+        for (k, n) in other.shell_commands {
+            *self.shell_commands.entry(k).or_insert(0) += n;
+        }
+        for (model, inner) in other.model_project_counts {
+            let mine = self.model_project_counts.entry(model).or_default();
+            for (project, n) in inner {
+                *mine.entry(project).or_insert(0) += n;
+            }
+        }
+        merge(&mut self.grand_total, &other.grand_total);
+        add_cost_nanos(&mut self.grand_cost_nanos, other.grand_cost_nanos);
+    }
+}
+
+#[allow(dead_code)] // wired in by scan_incremental (P4)
+fn merge_bucket_acc(into: &mut BucketAccumulator, from: BucketAccumulator) {
+    merge(&mut into.bucket, &from.bucket);
+    add_cost_nanos(&mut into.cost_nanos, from.cost_nanos);
+    into.sessions.extend(from.sessions);
+    into.projects.extend(from.projects);
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BucketAccumulator {
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
     sessions: HashSet<String>,
     projects: HashSet<String>,
 }
 
 impl BucketAccumulator {
-    fn ingest(&mut self, bucket: &TokenBucket, project: &str, session_key: &str) {
+    fn ingest(
+        &mut self,
+        bucket: &TokenBucket,
+        cost: Option<i64>,
+        project: &str,
+        session_key: &str,
+    ) {
         merge(&mut self.bucket, bucket);
+        add_cost_nanos(&mut self.cost_nanos, cost);
         self.sessions.insert(session_key.to_string());
         self.projects.insert(project.to_string());
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectAccumulator {
     path: String,
+    /// `(timestamp, id)` of the call that last wrote `path` — fold's
+    /// last-write-wins replayed exactly during [`AggState::absorb`].
+    last_path_key: (chrono::DateTime<chrono::Utc>, u64),
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
     sessions: HashSet<String>,
 }
 
+impl ProjectAccumulator {
+    #[allow(dead_code)] // wired in by scan_incremental (P4)
+    fn absorb(&mut self, other: Self) {
+        if other.last_path_key >= self.last_path_key {
+            self.path = other.path;
+            self.last_path_key = other.last_path_key;
+        }
+        merge(&mut self.bucket, &other.bucket);
+        add_cost_nanos(&mut self.cost_nanos, other.cost_nanos);
+        self.sessions.extend(other.sessions);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionAccumulator {
     provider: Provider,
     project: String,
@@ -531,6 +751,46 @@ struct SessionAccumulator {
     first_timestamp: chrono::DateTime<chrono::Utc>,
     last_timestamp: chrono::DateTime<chrono::Utc>,
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
+}
+
+impl SessionAccumulator {
+    #[allow(dead_code)] // wired in by scan_incremental (P4)
+    fn absorb(&mut self, other: &Self) {
+        if other.first_timestamp < self.first_timestamp {
+            self.first_timestamp = other.first_timestamp;
+        }
+        if other.last_timestamp > self.last_timestamp {
+            self.last_timestamp = other.last_timestamp;
+        }
+        merge(&mut self.bucket, &other.bucket);
+        add_cost_nanos(&mut self.cost_nanos, other.cost_nanos);
+    }
+}
+
+/// Convert a per-call USD cost to integer nano-USD for exact,
+/// associative accumulation. Rounded once per call, so one-shot and
+/// incremental paths see identical integer inputs.
+fn usd_to_nanos(usd: f64) -> i64 {
+    (usd * 1e9).round() as i64
+}
+
+/// Materialize one accumulated nano-USD sum back to the published
+/// `f64`. Callers map over their `Option` cost.
+#[allow(clippy::cast_precision_loss)]
+fn nanos_to_usd(nanos: i64) -> f64 {
+    nanos as f64 / 1e9
+}
+
+/// `Option` cost addition with the same None-coalescing semantics as
+/// [`merge`]'s `cost_usd` arm: any `Some` survives, two `Some`s add.
+fn add_cost_nanos(into: &mut Option<i64>, from: Option<i64>) {
+    *into = match (*into, from) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
 }
 
 fn call_bucket(call: &ProviderCall) -> TokenBucket {
@@ -543,7 +803,9 @@ fn call_bucket(call: &ProviderCall) -> TokenBucket {
         session_count: 0,
         project_count: 0,
         call_count: 1,
-        cost_usd: call.cost_usd,
+        // Cost rides the accumulators as integer nano-USD (see `fold`);
+        // the bucket's f64 is materialized once in `emit`.
+        cost_usd: None,
     }
 }
 
@@ -886,6 +1148,178 @@ mod tests {
         assert_eq!(
             evts[0].total, 3,
             "pre-walk set total to count of progress-aware files"
+        );
+    }
+
+    // ── merge ≡ aggregate property tests ────────────────────────────
+    //
+    // The byte-identity contract: folding a partition of the calls and
+    // absorbing the parts must emit EXACTLY the bytes a one-shot
+    // aggregate over all calls emits. Seeded xorshift PRNG instead of
+    // a proptest dependency — reproducible, zero new deps, hundreds of
+    // randomized cases per run.
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn random_call(rng: &mut u64, id: u64) -> ProviderCall {
+        let providers = [Provider::Claude, Provider::Codex, Provider::Gemini];
+        let projects = ["alpha", "beta", "gamma", "delta"];
+        let sessions = ["s1", "s2", "s3"];
+        let models = ["m-small", "m-big", "m-think"];
+        let tool_pool = ["Read", "Edit", "Bash", "Grep"];
+        let cmd_pool = ["ls", "cargo test"];
+        let branch_pool = [None, Some("main"), Some("dev"), Some("")];
+
+        // Narrow timestamp range (~4 days) so daily/weekly/session
+        // buckets collide across partitions; allow exact-duplicate
+        // timestamps to exercise the (timestamp, id) tiebreak.
+        let ts = 1_700_000_000 + i64::try_from(xorshift(rng) % 350_000).unwrap();
+        let cost = match xorshift(rng) % 3 {
+            0 => None,
+            // Adversarial float costs: tiny + huge magnitudes in one
+            // sum is exactly where f64 association order would leak.
+            1 => Some((xorshift(rng) % 1_000_000) as f64 / 1e6),
+            _ => Some((xorshift(rng) % 97) as f64 + 0.000_001),
+        };
+        let n_tools = (xorshift(rng) % 3) as usize;
+
+        ProviderCall {
+            id,
+            provider: providers[(xorshift(rng) % 3) as usize],
+            model: models[(xorshift(rng) % 3) as usize].into(),
+            session_id: sessions[(xorshift(rng) % 3) as usize].into(),
+            project: projects[(xorshift(rng) % 4) as usize].into(),
+            project_path: format!("/tmp/{}", projects[(xorshift(rng) % 4) as usize]),
+            timestamp: DateTime::<Utc>::from_timestamp(ts, 0).unwrap(),
+            input_tokens: xorshift(rng) % 10_000,
+            cache_creation_tokens: xorshift(rng) % 1_000,
+            cache_read_tokens: xorshift(rng) % 50_000,
+            output_tokens: xorshift(rng) % 5_000,
+            reasoning_tokens: xorshift(rng) % 2_000,
+            cost_usd: cost,
+            tools: tool_pool[..n_tools].iter().map(|s| (*s).into()).collect(),
+            bash_commands: cmd_pool[..(xorshift(rng) % 2) as usize]
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            user_message: String::new(),
+            branch: branch_pool[(xorshift(rng) % 4) as usize].map(Into::into),
+        }
+    }
+
+    fn encode(data: &UsageData) -> Vec<u8> {
+        rmp_serde::to_vec_named(data).expect("encode UsageData")
+    }
+
+    #[test]
+    fn absorb_of_random_two_way_partition_is_byte_identical_to_aggregate() {
+        let mut rng: u64 = 0x5EED_CAFE_F00D_0001;
+        for case in 0..300 {
+            let n = (xorshift(&mut rng) % 60) as usize;
+            let calls: Vec<ProviderCall> =
+                (0..n).map(|i| random_call(&mut rng, 1_000 + i as u64)).collect();
+
+            let (mut left, mut right) = (Vec::new(), Vec::new());
+            for c in &calls {
+                if xorshift(&mut rng) % 2 == 0 {
+                    left.push(c.clone());
+                } else {
+                    right.push(c.clone());
+                }
+            }
+
+            let oracle = aggregate(calls);
+            let mut merged = fold(left);
+            merged.absorb(fold(right));
+            let incremental = emit(merged);
+
+            assert_eq!(
+                encode(&incremental),
+                encode(&oracle),
+                "case {case}: merged partition must emit identical bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn absorb_is_associative_across_three_way_partition() {
+        let mut rng: u64 = 0xDEAD_BEEF_0BAD_F00D;
+        for case in 0..150 {
+            let n = (xorshift(&mut rng) % 45) as usize;
+            let calls: Vec<ProviderCall> =
+                (0..n).map(|i| random_call(&mut rng, 5_000 + i as u64)).collect();
+
+            let mut parts: [Vec<ProviderCall>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+            for c in &calls {
+                parts[(xorshift(&mut rng) % 3) as usize].push(c.clone());
+            }
+            let [a, b, c] = parts;
+
+            let oracle = encode(&aggregate(calls));
+
+            // (A ⊕ B) ⊕ C
+            let mut left = fold(a.clone());
+            left.absorb(fold(b.clone()));
+            left.absorb(fold(c.clone()));
+            // A ⊕ (B ⊕ C)
+            let mut right_inner = fold(b);
+            right_inner.absorb(fold(c));
+            let mut right = fold(a);
+            right.absorb(right_inner);
+
+            assert_eq!(encode(&emit(left)), oracle, "case {case}: left-assoc");
+            assert_eq!(encode(&emit(right)), oracle, "case {case}: right-assoc");
+        }
+    }
+
+    #[test]
+    fn absorb_empty_is_identity() {
+        let mut rng: u64 = 0x1234_5678_9ABC_DEF0;
+        let calls: Vec<ProviderCall> = (0..25).map(|i| random_call(&mut rng, 9_000 + i)).collect();
+        let oracle = encode(&aggregate(calls.clone()));
+
+        let mut left = fold(calls.clone());
+        left.absorb(fold(Vec::new()));
+        assert_eq!(encode(&emit(left)), oracle, "X ⊕ ∅ == X");
+
+        let mut right = fold(Vec::new());
+        right.absorb(fold(calls));
+        assert_eq!(encode(&emit(right)), oracle, "∅ ⊕ X == X");
+
+        let mut both = fold(Vec::new());
+        both.absorb(fold(Vec::new()));
+        assert_eq!(
+            encode(&emit(both)),
+            encode(&UsageData::default()),
+            "∅ ⊕ ∅ == default"
+        );
+    }
+
+    #[test]
+    fn aggregate_empty_still_returns_default_usage_data() {
+        assert_eq!(aggregate(Vec::new()), UsageData::default());
+    }
+
+    #[test]
+    fn agg_state_roundtrips_through_bincode() {
+        // P3 persists AggState as the stable aggregate blob — prove the
+        // serde derives round-trip through the same codec the cache uses.
+        let mut rng: u64 = 0xFEED_FACE_CAFE_BEEF;
+        let calls: Vec<ProviderCall> = (0..30).map(|i| random_call(&mut rng, 7_000 + i)).collect();
+        let state = fold(calls);
+        let bytes = bincode::serialize(&state).expect("serialize AggState");
+        let back: AggState = bincode::deserialize(&bytes).expect("deserialize AggState");
+        assert_eq!(
+            encode(&emit(back)),
+            encode(&emit(state)),
+            "round-tripped state emits identical bytes"
         );
     }
 }
