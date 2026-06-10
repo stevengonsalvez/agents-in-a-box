@@ -244,7 +244,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
     kill_session(&session);
     assert!(
         back_home.is_some(),
-        "root Esc did not close burndown back to home within 10s. \
+        "root Esc did not close burndown back to home within 25s. \
          Final capture:\n---\n{final_cap}\n---"
     );
 }

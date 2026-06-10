@@ -310,6 +310,6 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
     assert!(
         resumed,
         "after quitting witr (opened from the session list) ainb did not resume on the \
-         session list within 15s. Final pane:\n---\n{final_cap}\n---"
+         session list within 30s. Final pane:\n---\n{final_cap}\n---"
     );
 }

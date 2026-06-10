@@ -169,7 +169,7 @@ fn skills_from_home_returns_home() {
     kill_session(&session);
     assert!(
         back.is_some(),
-        "Esc on skills (opened from home) did not return to home within 10s. \
+        "Esc on skills (opened from home) did not return to home within 25s. \
          Final capture:\n---\n{final_cap}\n---"
     );
 }
@@ -224,6 +224,6 @@ fn skills_from_session_list_returns_to_session_list() {
     assert!(
         back.is_some(),
         "Esc on skills (opened from session list) did not return to the session list \
-         within 10s. Final capture:\n---\n{final_cap}\n---"
+         within 25s. Final capture:\n---\n{final_cap}\n---"
     );
 }

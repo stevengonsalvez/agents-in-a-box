@@ -251,7 +251,7 @@ fn esc_on_burndown_returns_to_home() {
 
     assert!(
         back_home.is_some(),
-        "Esc on burndown did not return to home within 10s. \
+        "Esc on burndown did not return to home within 25s. \
          Final capture:\n---\n{final_cap}\n---"
     );
 }
@@ -349,6 +349,6 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
     assert!(
         back_on_sessions.is_some(),
         "Esc on burndown (opened from session list) did not return to the \
-         session list within 10s. Final capture:\n---\n{final_cap}\n---"
+         session list within 25s. Final capture:\n---\n{final_cap}\n---"
     );
 }
