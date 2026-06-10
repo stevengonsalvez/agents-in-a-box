@@ -92,6 +92,30 @@ update_agent_skills() {
       run "git clone --depth 1 '$url' '$dir'"
     fi
   done
+  # antv-infographic is multi-subpath (bundles 5 skills under skills/). A flat
+  # clone would bury them under skills/, so clone to a temp dir and flatten each
+  # SKILL.md-bearing child into ~/.claude/skills/ (mirrors bootstrap setup-external).
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  DRY: git clone --depth 1 https://github.com/antvis/Infographic + flatten skills/* into $AS_DIR"
+  else
+    local aig_tmp
+    aig_tmp=$(mktemp -d)
+    if git clone --depth 1 https://github.com/antvis/Infographic "$aig_tmp/repo" 2>/dev/null; then
+      for sub in "$aig_tmp/repo/skills"/*/; do
+        local sub_name
+        sub_name=$(basename "$sub")
+        if [ -f "$sub/SKILL.md" ]; then
+          rm -rf "$AS_DIR/$sub_name"
+          mkdir -p "$AS_DIR/$sub_name"
+          cp -R "$sub". "$AS_DIR/$sub_name/"
+          echo "    Installed/updated $sub_name"
+        fi
+      done
+    else
+      echo "    (antv-infographic clone failed — continuing)"
+    fi
+    rm -rf "$aig_tmp"
+  fi
   # scrapling-official has its own install path
   run "scrapling install --force"
   # mcporter ships its SKILL.md via the openclaw/mcporter repo above; the
