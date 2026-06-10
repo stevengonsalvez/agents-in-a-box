@@ -50,6 +50,89 @@ fn decode_refresh_request(payload: &[u8]) -> RefreshRequest {
     }
 }
 
+/// Everything one refresh's blocking scan produced — the glue between
+/// the async plugin and the scanner, factored out so the "cache
+/// present → incremental, else legacy full scan" decision is directly
+/// testable without a `HostClient`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct BlockingScanOutcome {
+    pub(crate) data: ainb_plugin_types_sessions::UsageData,
+    /// The (reused or rebuilt) stable rollup to keep in memory for the
+    /// next refresh. `None` on the cache-less full-scan path.
+    pub(crate) stable: Option<scanner::StableAggregate>,
+    /// Cache handle returned to the plugin for reuse.
+    pub(crate) cache: Option<crate::cache::UsageCache>,
+    /// Scan instrumentation — `Some` iff the incremental path ran.
+    pub(crate) counters: Option<scanner::ScanCounters>,
+    pub(crate) stable_rebuilt: bool,
+    /// `true` when no stable rollup existed in memory or on disk —
+    /// this refresh was the one-time seeding scan.
+    pub(crate) cold_start: bool,
+}
+
+/// The blocking half of a refresh: decide incremental-vs-full, run the
+/// scan, persist the rollup on rebuild.
+///
+/// - `stored` is the caller's in-memory rollup; when `None` (process
+///   restart, first refresh) the persisted rollup is hydrated from the
+///   cache before deciding cold start.
+/// - With a cache: run [`scanner::scan_incremental`] against
+///   `now - window_days` and persist the rollup whenever it was
+///   rebuilt.
+/// - Without a cache (path unresolved / open failed): nowhere to
+///   persist a rollup, so run the legacy full scan.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_blocking_scan(
+    roots: &ProviderRoots,
+    cache: Option<crate::cache::UsageCache>,
+    stored: Option<scanner::StableAggregate>,
+    window_days: u32,
+    reporter: &mut scanner::ProgressReporter,
+) -> BlockingScanOutcome {
+    let mut cache_opt = cache;
+
+    // Hydrate from the persisted rollup when memory is empty — this is
+    // what makes a plugin restart skip the seeding scan.
+    let stored = match stored {
+        Some(s) => Some(s),
+        None => cache_opt.as_ref().and_then(|c| c.load_stable().unwrap_or_default()),
+    };
+    let cold_start = stored.is_none();
+
+    if cache_opt.is_some() {
+        let watermark = now_ns().saturating_sub(u64::from(window_days) * NANOS_PER_DAY);
+        let outcome = scanner::scan_incremental(roots, &mut cache_opt, stored, watermark, reporter);
+        if outcome.stable_rebuilt {
+            if let Some(cache) = cache_opt.as_mut() {
+                if let Err(err) = cache.store_stable(&outcome.stable) {
+                    tracing::warn!(
+                        "session-reader: stable rollup persist failed ({err}); \
+                        next refresh rebuilds again"
+                    );
+                }
+            }
+        }
+        BlockingScanOutcome {
+            data: outcome.data,
+            stable: Some(outcome.stable),
+            cache: cache_opt,
+            counters: Some(outcome.counters),
+            stable_rebuilt: outcome.stable_rebuilt,
+            cold_start,
+        }
+    } else {
+        let data = scanner::scan_with_cache_and_progress(roots, &mut cache_opt, reporter);
+        BlockingScanOutcome {
+            data,
+            stable: None,
+            cache: cache_opt,
+            counters: None,
+            stable_rebuilt: false,
+            cold_start,
+        }
+    }
+}
+
 /// Per-chunk msgpack byte budget. Each chunk's encoded msgpack stays
 /// below this size so the post-base64 + JSON-envelope frame fits
 /// comfortably under the host framer's 16 MiB body cap (base64
@@ -300,15 +383,6 @@ impl SessionReader {
     #[cfg(not(target_arch = "wasm32"))]
     async fn scan_streaming(&mut self, host: &HostClient) -> ainb_plugin_types_sessions::UsageData {
         self.ensure_cache();
-        // First refresh of this process: hydrate the in-memory stable
-        // rollup from the cache (absent on cold start / after flush —
-        // the scan below then runs the one-time seeding rebuild).
-        if self.stable.is_none() {
-            if let Some(cache) = self.cache.as_ref() {
-                self.stable = cache.load_stable().unwrap_or_default();
-            }
-        }
-        let cold_start = self.stable.is_none();
         let roots = self.roots.clone();
         let cache = self.cache.take();
         let stored = self.stable.take();
@@ -317,61 +391,14 @@ impl SessionReader {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
 
         let scan_handle = tokio::task::spawn_blocking(move || {
-            let mut cache_opt = cache;
             let mut reporter = scanner::ProgressReporter::new(move |evt| {
                 // Send is unbounded + non-blocking; failures only happen
                 // when the receiver has been dropped (impossible here —
                 // we hold `rx` until `scan_handle` resolves).
                 let _ = tx.send(evt);
             });
-            if cache_opt.is_some() {
-                // Incremental path: stable rollup + recent re-aggregate.
-                let watermark = now_ns().saturating_sub(u64::from(window_days) * NANOS_PER_DAY);
-                let outcome = scanner::scan_incremental(
-                    &roots,
-                    &mut cache_opt,
-                    stored,
-                    watermark,
-                    &mut reporter,
-                );
-                if outcome.stable_rebuilt {
-                    if let Some(cache) = cache_opt.as_mut() {
-                        if let Err(err) = cache.store_stable(&outcome.stable) {
-                            tracing::warn!(
-                                "session-reader: stable rollup persist failed ({err}); \
-                                next refresh rebuilds again"
-                            );
-                        }
-                    }
-                }
-                let c = outcome.counters;
-                tracing::info!(
-                    files_statted = c.files_statted,
-                    parsed = c.parsed,
-                    cache_hits = c.cache_hits,
-                    stable_skipped = c.stable_skipped,
-                    stable_reused = c.stable_reused,
-                    stable_rebuilt = outcome.stable_rebuilt,
-                    "session-reader: incremental refresh"
-                );
-                (outcome.data, Some(outcome.stable), cache_opt)
-            } else {
-                // No cache (path unresolved / open failed): nowhere to
-                // persist a rollup, so run the legacy full scan.
-                let data =
-                    scanner::scan_with_cache_and_progress(&roots, &mut cache_opt, &mut reporter);
-                (data, None, cache_opt)
-            }
+            run_blocking_scan(&roots, cache, stored, window_days, &mut reporter)
         });
-
-        if cold_start {
-            let _ = host
-                .log_info(
-                    "session-reader: no stable rollup found — building full usage history \
-                    (one-time, heavier than a normal refresh)",
-                )
-                .await;
-        }
 
         // Drain progress events. `rx.recv()` returns `None` once the
         // scan task drops its `Sender` (i.e. when the closure +
@@ -398,10 +425,38 @@ impl SessionReader {
         }
 
         match scan_handle.await {
-            Ok((data, stable_out, cache_opt)) => {
-                self.cache = cache_opt;
-                self.stable = stable_out;
-                data
+            Ok(outcome) => {
+                self.cache = outcome.cache;
+                self.stable = outcome.stable;
+                if outcome.cold_start {
+                    let _ = host
+                        .log_info(
+                            "session-reader: no stable rollup found — built full usage \
+                            history (one-time, heavier than a normal refresh)",
+                        )
+                        .await;
+                }
+                // Host-visible counter line — the soak/observability
+                // contract. The plugin subprocess has no tracing
+                // subscriber of its own, so host.log() is the only
+                // sink that reliably lands in the host JSONL
+                // (~/.agents-in-a-box/logs/). scripts/soak-session-reader.sh
+                // greps for exactly this shape.
+                if let Some(c) = outcome.counters {
+                    let _ = host
+                        .log_info(format!(
+                            "session-reader: incremental refresh statted={} parsed={} \
+                            cache_hits={} stable_skipped={} stable_reused={} rebuilt={}",
+                            c.files_statted,
+                            c.parsed,
+                            c.cache_hits,
+                            c.stable_skipped,
+                            c.stable_reused,
+                            outcome.stable_rebuilt,
+                        ))
+                        .await;
+                }
+                outcome.data
             }
             Err(err) => {
                 let _ = host
@@ -760,6 +815,112 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── run_blocking_scan glue (plugin-level counter assertions) ────
+    //
+    // The scanner-level tests prove scan_incremental's behavior; these
+    // prove the PLUGIN's decision layer: cache present → incremental
+    // (counters populated, rollup persisted, restart rehydrates),
+    // cache absent → legacy full scan. Same oracle: byte-identity with
+    // a cache-less full scan of the same tree.
+
+    fn glue_claude_line(ts: &str, session: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"{session}","cwd":"/tmp/proj","gitBranch":"main","message":{{"model":"claude-3-5-sonnet","content":[{{"type":"text","text":"hi"}}],"usage":{{"input_tokens":10,"output_tokens":20}}}}}}"#
+        )
+    }
+
+    fn glue_fixture() -> (tempfile::TempDir, ProviderRoots, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tree tempdir");
+        let claude_root = tmp.path().join("claude/projects/proj-a");
+        std::fs::create_dir_all(&claude_root).expect("mkdir");
+        std::fs::write(
+            claude_root.join("one.jsonl"),
+            glue_claude_line("2026-05-01T10:00:00Z", "s1"),
+        )
+        .expect("write");
+        std::fs::write(
+            claude_root.join("two.jsonl"),
+            glue_claude_line("2026-06-01T10:00:00Z", "s2"),
+        )
+        .expect("write");
+        let roots = ProviderRoots {
+            claude_projects: Some(tmp.path().join("claude/projects")),
+            ..ProviderRoots::default()
+        };
+        let cache_dir = tempfile::tempdir().expect("cache tempdir");
+        // Let the filesystem clock tick past the writes so a
+        // `window_days = 0` watermark (now) puts both files on the
+        // stable side.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        (tmp, roots, cache_dir)
+    }
+
+    fn open_cache(dir: &tempfile::TempDir) -> Option<crate::cache::UsageCache> {
+        Some(crate::cache::UsageCache::open(&dir.path().join("usage.sqlite")).expect("cache"))
+    }
+
+    fn encode(data: &UsageData) -> Vec<u8> {
+        rmp_serde::to_vec_named(data).expect("encode")
+    }
+
+    #[test]
+    fn glue_runs_incremental_persists_rollup_and_rehydrates_on_restart() {
+        let (_tree, roots, cache_dir) = glue_fixture();
+        let oracle = encode(&scanner::scan(&roots));
+        let mut reporter = scanner::ProgressReporter::noop();
+
+        // First refresh: cold start seeds + persists the rollup.
+        let first = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        assert!(first.cold_start, "no rollup anywhere yet");
+        assert!(first.stable_rebuilt);
+        let c = first.counters.expect("incremental path ran");
+        assert_eq!(c.parsed, 2, "seed scan parses both files");
+        assert_eq!(encode(&first.data), oracle, "matches full-scan oracle");
+        assert!(
+            first.cache.expect("cache returned").load_stable().expect("load").is_some(),
+            "rollup persisted for the next process"
+        );
+
+        // Simulated plugin restart: in-memory rollup gone (stored =
+        // None), fresh cache handle on the same file. The glue must
+        // rehydrate from disk and reuse — zero parses.
+        let second = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        assert!(!second.cold_start, "rollup rehydrated from the cache");
+        assert!(!second.stable_rebuilt);
+        let c = second.counters.expect("incremental path ran");
+        assert_eq!(
+            c.parsed, 0,
+            "no-change refresh after restart parses ZERO files"
+        );
+        assert!(c.stable_reused);
+        assert_eq!(c.stable_skipped, 2, "both stable files skipped outright");
+        assert_eq!(
+            encode(&second.data),
+            oracle,
+            "still byte-identical to the oracle"
+        );
+    }
+
+    #[test]
+    fn glue_falls_back_to_full_scan_without_cache() {
+        let (_tree, roots, _cache_dir) = glue_fixture();
+        let oracle = encode(&scanner::scan(&roots));
+        let mut reporter = scanner::ProgressReporter::noop();
+
+        let out = run_blocking_scan(&roots, None, None, 0, &mut reporter);
+        assert!(
+            out.counters.is_none(),
+            "cache-less refresh takes the legacy full path"
+        );
+        assert!(out.stable.is_none(), "nothing to persist a rollup into");
+        assert!(!out.stable_rebuilt);
+        assert_eq!(
+            encode(&out.data),
+            oracle,
+            "full path matches the oracle trivially"
+        );
+    }
 
     #[test]
     fn refresh_request_empty_payload_is_incremental() {
