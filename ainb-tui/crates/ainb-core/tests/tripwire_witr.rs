@@ -68,6 +68,15 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the first keystroke (`s`/`w`) these tests
+    // send.
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -187,5 +196,120 @@ fn pressing_w_embeds_witr_interactive_browser() {
     assert!(
         browser_ok,
         "`{WITR_SESSION}` exists but isn't running witr's interactive browser:\n---\n{witr_pane}\n---"
+    );
+}
+
+/// Overlay-panels: witr opened FROM THE SESSION LIST returns to the
+/// session list when the user quits witr — not to home.
+///
+/// Witr is the odd panel out: instead of a wire-rendered screen it hands
+/// the terminal to `witr -i` (suspend/attach) and resumes ainb when witr
+/// quits. The overlay-panels contract is that resume lands on the ORIGIN
+/// screen, and it gets that for free precisely because `AttachWitr` never
+/// touches `current_screen`. This test proves the for-free guarantee
+/// holds end-to-end: a regression that navigated somewhere on the witr
+/// path (or reset `current_screen` on resume) would surface as ainb
+/// resuming on the wrong screen.
+///
+/// Harness note: inside tmux, ainb's attach to the `ainb-witr` session
+/// switches THIS pane's client to display witr (the nested-attach the
+/// header test documents). Quitting witr ends that session, ainb's
+/// attach returns, the main loop resumes, and the pane repaints
+/// `current_screen` — which is still the session list.
+#[test]
+fn witr_opened_from_session_list_resumes_on_session_list() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    if !witr_available() {
+        eprintln!("SKIP: real `witr` binary not on PATH — the embed runs `witr -i`");
+        return;
+    }
+
+    kill_session(WITR_SESSION);
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_home(home_tmp.path());
+
+    let session = format!("tripwire-witr-resume-{}", std::process::id());
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
+        .status()
+        .expect("tmux new-session");
+    assert!(status.success(), "tmux new-session failed");
+
+    let cmd = format!(
+        "HOME={} exec {} tui",
+        home_tmp.path().display(),
+        ainb_bin().display()
+    );
+    Command::new("tmux")
+        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .status()
+        .expect("tmux send launch cmd");
+
+    // Home → session list. `del-sel` is unique to the session-list
+    // legend. Plugins are enabled here (witr needs the real PATH), so
+    // cold start is slower — keep the deadline generous.
+    let home_ok = poll(Instant::now() + Duration::from_secs(45), || {
+        let c = capture_pane(&session);
+        c.contains("Stats") && c.contains("[i]")
+    });
+    if !home_ok {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
+    }
+    send_key(&session, "s");
+    let on_sessions = poll(Instant::now() + Duration::from_secs(20), || {
+        capture_pane(&session).contains("del-sel")
+    });
+    if !on_sessions {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+    }
+
+    // Press `w` → ainb spawns `ainb-witr` running `witr -i` and attaches.
+    send_key(&session, "w");
+    let spawned = poll(Instant::now() + Duration::from_secs(20), || {
+        has_session(WITR_SESSION)
+    });
+    if !spawned {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!(
+            "`w` from session list did not spawn `{WITR_SESSION}`; ainb pane:\n---\n{last}\n---"
+        );
+    }
+
+    // Quit witr (`q` is witr's quit binding). Once witr exits, its tmux
+    // session ends and ainb's attach returns.
+    send_key(WITR_SESSION, "q");
+    let witr_gone = poll(Instant::now() + Duration::from_secs(15), || {
+        !has_session(WITR_SESSION)
+    });
+    if !witr_gone {
+        // Some witr views need a second `q` to leave a detail pane first.
+        send_key(WITR_SESSION, "q");
+        let _ = poll(Instant::now() + Duration::from_secs(10), || {
+            !has_session(WITR_SESSION)
+        });
+    }
+
+    // Resume must land back on the SESSION LIST (origin), not home.
+    let resumed = poll(Instant::now() + Duration::from_secs(15), || {
+        let c = capture_pane(&session);
+        c.contains("del-sel") && !c.contains("Getting Started")
+    });
+    let final_cap = capture_pane(&session);
+    kill_session(WITR_SESSION);
+    kill_session(&session);
+
+    assert!(
+        resumed,
+        "after quitting witr (opened from the session list) ainb did not resume on the \
+         session list within 15s. Final pane:\n---\n{final_cap}\n---"
     );
 }
