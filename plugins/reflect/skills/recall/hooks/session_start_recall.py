@@ -67,7 +67,12 @@ except ImportError:
 # D2: conservative caps for auto-inject
 SESSION_START_LIMIT = 3
 SESSION_START_CONFIDENCE = "ANY"  # relaxed; rely on reranking
-SESSION_START_MAX_CHARS = 1500  # tighter than explicit /reflect:recall
+SESSION_START_MAX_CHARS = 1500
+# R7: OOD gate — suppress injection when even the best hit barely mentions the
+# query's terms (most sessions have NO relevant prior art; junk costs context).
+SESSION_START_MIN_OVERLAP = float(os.environ.get("REFLECT_RECALL_MIN_OVERLAP", "0.2"))
+# R4: optional token budget for the injected block (0 = keep max-chars only).
+SESSION_START_MAX_TOKENS = int(os.environ.get("REFLECT_RECALL_MAX_TOKENS", "0"))  # tighter than explicit /reflect:recall
 
 
 # --- Context extraction --------------------------------------------------
@@ -232,6 +237,8 @@ def _main_body() -> NoReturn:
                 "--confidence", SESSION_START_CONFIDENCE,
                 "--format", "markdown",
                 "--max-chars", str(SESSION_START_MAX_CHARS),
+                "--min-overlap", str(SESSION_START_MIN_OVERLAP),
+                "--max-tokens", str(SESSION_START_MAX_TOKENS),
                 "--tags", ",".join(tags),
             ],
             capture_output=True,
