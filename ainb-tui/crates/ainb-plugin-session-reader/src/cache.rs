@@ -79,7 +79,10 @@ fn with_busy_retry<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::
 
 /// Current on-disk schema version. Bumping this triggers the v0→vN
 /// migration block in [`UsageCache::migrate`].
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// v2: adds the single-row `stable_aggregate` table holding the
+/// bincode'd incremental-refresh rollup. Additive over v1.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Cache error surface.
 #[derive(Debug, thiserror::Error)]
@@ -217,10 +220,16 @@ impl UsageCache {
         Ok(())
     }
 
-    /// Drop every cached row. Schema row (PRAGMA user_version) is
-    /// preserved so re-opens don't trigger another migration.
+    /// Drop every cached row — the per-file parse cache AND the stable
+    /// aggregate. Schema row (PRAGMA user_version) is preserved so
+    /// re-opens don't trigger another migration.
+    ///
+    /// This is the hard-refresh / flush primitive: after a clear, the
+    /// next scan re-parses every file from source and the incremental
+    /// path sees no stable aggregate (cold start).
     pub fn clear(&mut self) -> Result<(), CacheError> {
         self.conn.execute("DELETE FROM file_cache", [])?;
+        self.conn.execute("DELETE FROM stable_aggregate", [])?;
         // VACUUM is a tidiness operation; failure here doesn't matter.
         if let Err(err) = self.conn.execute("VACUUM", []) {
             tracing::warn!("session-reader cache VACUUM after clear failed: {err}");
@@ -228,9 +237,57 @@ impl UsageCache {
         Ok(())
     }
 
-    /// Apply v0→v1 schema migration using `PRAGMA user_version`.
-    /// Future bumps append additional `if version < N` blocks before
-    /// the final `pragma_update`.
+    /// Persist the stable (older-than-watermark) aggregate. Single-row
+    /// upsert; the previous rollup is replaced atomically.
+    #[allow(dead_code)] // wired in by scan_incremental (P4)
+    pub fn store_stable(
+        &mut self,
+        stable: &crate::scanner::StableAggregate,
+    ) -> Result<(), CacheError> {
+        let blob = bincode::serialize(stable)?;
+        with_busy_retry(|| {
+            self.conn.execute(
+                "INSERT INTO stable_aggregate (id, blob) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET blob = excluded.blob",
+                params![blob],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Load the persisted stable aggregate, if any.
+    ///
+    /// A decode failure (blob written by an incompatible build) is
+    /// treated as absence — the caller rebuilds from the per-file
+    /// cache, which self-heals the row on the next `store_stable`.
+    #[allow(dead_code)] // wired in by scan_incremental (P4)
+    pub fn load_stable(&self) -> Result<Option<crate::scanner::StableAggregate>, CacheError> {
+        let row: Option<Vec<u8>> = with_busy_retry(|| {
+            self.conn
+                .query_row(
+                    "SELECT blob FROM stable_aggregate WHERE id = 1",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+        })?;
+        let Some(blob) = row else {
+            return Ok(None);
+        };
+        match bincode::deserialize(&blob) {
+            Ok(stable) => Ok(Some(stable)),
+            Err(err) => {
+                tracing::warn!(
+                    "session-reader cache: stable aggregate decode failed ({err}); rebuilding"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Apply schema migrations using `PRAGMA user_version`. Each bump
+    /// appends an additional `if version < N` block before the final
+    /// `pragma_update`.
     fn migrate(conn: &Connection) -> Result<(), CacheError> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap_or(0);
 
@@ -245,6 +302,19 @@ impl UsageCache {
                      cached_at   INTEGER NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_mtime ON file_cache(mtime);",
+            )?;
+        }
+
+        // v1→v2: single-row home for the bincode'd StableAggregate
+        // (incremental refresh rollup). Additive — `file_cache` rows
+        // survive, so the upgrade costs one stable rebuild, not a full
+        // re-parse.
+        if version < 2 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS stable_aggregate (
+                     id   INTEGER PRIMARY KEY CHECK (id = 1),
+                     blob BLOB    NOT NULL
+                 );",
             )?;
         }
 
@@ -390,13 +460,122 @@ mod tests {
     }
 
     #[test]
-    fn migrate_sets_user_version_to_one() {
+    fn migrate_sets_user_version_to_current() {
         let (_dir, cache) = open_in_tmp();
         let version: i64 = cache
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("pragma");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v1_db_migrates_to_v2_preserving_file_cache() {
+        // Hand-build a v1-schema DB (file_cache only, user_version=1)
+        // with one row, then open through UsageCache and assert the
+        // migration is additive: the parse row survives, the version
+        // bumps, and the stable_aggregate table exists (empty).
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("usage.sqlite");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            conn.execute_batch(
+                "CREATE TABLE file_cache (
+                     path        TEXT    PRIMARY KEY,
+                     mtime       INTEGER NOT NULL,
+                     size        INTEGER NOT NULL,
+                     fingerprint INTEGER NOT NULL,
+                     parsed      BLOB    NOT NULL,
+                     cached_at   INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_mtime ON file_cache(mtime);
+                 PRAGMA user_version = 1;",
+            )
+            .expect("create v1 schema");
+            let blob = bincode::serialize(&vec![fake_call(7)]).expect("blob");
+            conn.execute(
+                "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
+                 VALUES ('/tmp/v1.jsonl', 5, 6, 0, ?1, 0)",
+                params![blob],
+            )
+            .expect("seed v1 row");
+        }
+
+        let cache = UsageCache::open(&db).expect("open migrates");
+        let version: i64 = cache
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("pragma");
+        assert_eq!(version, 2, "v1 db migrated to v2");
+
+        let hit = cache.lookup("/tmp/v1.jsonl", 5, 6).expect("lookup").expect("hit");
+        assert_eq!(hit[0].id, 7, "pre-migration parse row survives");
+
+        assert!(
+            cache.load_stable().expect("load").is_none(),
+            "fresh v2 upgrade has no stable aggregate yet"
+        );
+    }
+
+    #[test]
+    fn stable_aggregate_roundtrips() {
+        let (_dir, mut cache) = open_in_tmp();
+        let stable = crate::scanner::StableAggregate {
+            watermark_nanos: 1_234_567,
+            folded: vec![
+                ("/tmp/a.jsonl".into(), 42, 100),
+                ("/tmp/b.jsonl".into(), 43, 7),
+            ],
+            state: crate::scanner::fold(vec![fake_call(1), fake_call(2)]),
+        };
+        cache.store_stable(&stable).expect("store");
+        let back = cache.load_stable().expect("load").expect("present");
+        assert_eq!(back.watermark_nanos, stable.watermark_nanos);
+        assert_eq!(back.folded, stable.folded);
+        assert_eq!(back.state.calls.len(), 2);
+
+        // Upsert replaces, not appends.
+        let stable2 = crate::scanner::StableAggregate {
+            watermark_nanos: 99,
+            folded: Vec::new(),
+            state: crate::scanner::fold(Vec::new()),
+        };
+        cache.store_stable(&stable2).expect("store 2");
+        let back2 = cache.load_stable().expect("load 2").expect("present");
+        assert_eq!(back2.watermark_nanos, 99);
+        assert!(back2.folded.is_empty());
+    }
+
+    #[test]
+    fn clear_drops_stable_aggregate_too() {
+        let (_dir, mut cache) = open_in_tmp();
+        let stable = crate::scanner::StableAggregate {
+            watermark_nanos: 1,
+            folded: vec![("/tmp/a.jsonl".into(), 1, 1)],
+            state: crate::scanner::fold(vec![fake_call(1)]),
+        };
+        cache.store_stable(&stable).expect("store");
+        cache.clear().expect("clear");
+        assert!(
+            cache.load_stable().expect("load").is_none(),
+            "clear() wipes the stable aggregate"
+        );
+    }
+
+    #[test]
+    fn corrupt_stable_blob_reads_as_absent() {
+        let (_dir, mut cache) = open_in_tmp();
+        cache
+            .conn
+            .execute(
+                "INSERT INTO stable_aggregate (id, blob) VALUES (1, X'DEADBEEF')",
+                [],
+            )
+            .expect("plant corrupt blob");
+        assert!(
+            cache.load_stable().expect("load must not error").is_none(),
+            "undecodable stable blob degrades to None (forces rebuild)"
+        );
     }
 
     #[test]

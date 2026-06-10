@@ -584,6 +584,27 @@ pub(crate) fn emit(state: AggState) -> UsageData {
     }
 }
 
+/// Persisted stable (older-than-watermark) aggregate: the fold state
+/// of every file whose mtime predates the watermark, plus the exact
+/// fingerprint set it was built from.
+///
+/// Validity contract: the stored state is reusable on a refresh iff
+/// the walk's stable file set — every `(path, mtime, size)` older than
+/// the watermark — equals `folded` exactly. Any aged-in, deleted, or
+/// touched file breaks equality and forces a rebuild, which is what
+/// makes an edited-then-aged or appended file impossible to
+/// double-count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct StableAggregate {
+    /// `now - incremental_window_days` (Unix nanos) at build time.
+    /// Bookkeeping only — validity is decided by `folded` equality.
+    pub(crate) watermark_nanos: u64,
+    /// Sorted `(path, mtime_nanos, size)` of every folded file.
+    pub(crate) folded: Vec<(String, u64, u64)>,
+    /// The fold state of the folded files' calls.
+    pub(crate) state: AggState,
+}
+
 /// Mergeable fold state — the output of [`fold`], the input of
 /// [`emit`], and the unit the incremental path persists as the stable
 /// (older-than-watermark) aggregate.
