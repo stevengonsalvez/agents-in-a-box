@@ -144,6 +144,22 @@ pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
 /// daemon pushes the matching [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 
+/// `hangar/comment_add` — append a comment to one issue (e38.5).
+///
+/// Params: [`crate::snapshots::CommentAddParams`]
+/// (`{ workspace_id, issue_id, author, body }`). Result: the persisted
+/// [`crate::events::CommentRow`], or an error. The `author` is a polymorphic
+/// actor-ref (`"agent:<id>"` / `"member:<id>"`); `body` is the comment text.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_UPDATE`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op), and the insert is scoped by `(issue_id, workspace_id)`
+/// through a join to `issue` so a foreign-tenant issue id writes no row (a
+/// not-found error, never a cross-tenant comment). After a committed insert the
+/// daemon pushes the matching [`crate::events::HangarEvent::CommentAdded`] so a
+/// subscribed task-detail screen re-renders the new comment.
+pub const HANGAR_COMMENT_ADD: &str = "hangar/comment_add";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -196,6 +212,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_ISSUE_UPDATE,
+    HANGAR_COMMENT_ADD,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -253,6 +270,7 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_COMMENT_ADD,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -286,6 +304,7 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_COMMENT_ADD,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,

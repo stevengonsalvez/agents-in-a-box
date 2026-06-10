@@ -269,6 +269,27 @@ pub struct IssueUpdateParams {
     pub due_date: FieldUpdate<i64>,
 }
 
+/// Params for [`crate::methods::HANGAR_COMMENT_ADD`] (e38.5): append one comment
+/// to an issue, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// rejects a foreign one, and scopes the insert by `(issue_id, workspace_id)` so
+/// a cross-tenant issue id writes no comment. `author` is the polymorphic
+/// actor-ref (`"agent:<id>"` / `"member:<id>"`) the daemon parses; `body` is the
+/// comment text. Both are mandatory (a comment with no author or empty body is
+/// rejected with `INVALID_PARAMS`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CommentAddParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to comment on (`issue.id`).
+    pub issue_id: String,
+    /// The comment author in canonical `member:<id>` / `agent:<id>` form.
+    pub author: String,
+    /// The comment body text.
+    pub body: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,5 +563,22 @@ mod tests {
         let p: IssueUpdateParams = serde_json::from_str(clear).unwrap();
         assert_eq!(p.assignee, FieldUpdate::Clear, "null assignee → clear");
         assert_eq!(p.due_date, FieldUpdate::Clear, "null due_date → clear");
+    }
+
+    /// `CommentAddParams` round-trips through JSON with all four mandatory fields
+    /// preserved (e38.5).
+    #[test]
+    fn e38_comment_add_params_roundtrip() {
+        let params = CommentAddParams {
+            workspace_id: "ws-1".into(),
+            issue_id: "issue-1".into(),
+            author: "member:alice".into(),
+            body: "looks good to me".into(),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CommentAddParams>(&s).unwrap(),
+            params
+        );
     }
 }
