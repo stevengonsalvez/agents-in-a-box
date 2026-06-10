@@ -51,7 +51,10 @@ fn enrich_cache_put_get_roundtrips_and_miss_fails() {
         "put failed: {}",
         String::from_utf8_lossy(&put.stderr)
     );
-    assert!(cache.exists(), "cache file not created at AINB_FLEET_ENRICH_CACHE");
+    assert!(
+        cache.exists(),
+        "cache file not created at AINB_FLEET_ENRICH_CACHE"
+    );
 
     // Get returns the stored suggestion verbatim.
     let hit = Command::new(ainb_bin())

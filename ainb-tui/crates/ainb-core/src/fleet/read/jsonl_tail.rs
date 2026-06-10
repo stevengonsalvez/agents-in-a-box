@@ -324,7 +324,11 @@ fn read_lines(path: &Path) -> Option<Vec<String>> {
 /// `window` JSONL rows (as raw text) for an API-error signal — used when the
 /// tmux pane capture misses the error (scrolled past the 80-line window, or
 /// the capture itself failed). Newest match wins. Returns `(pattern, raw)`.
-pub fn last_api_error_from_jsonl(path: &Path, window: usize, at_ms: i64) -> Option<(String, String)> {
+pub fn last_api_error_from_jsonl(
+    path: &Path,
+    window: usize,
+    at_ms: i64,
+) -> Option<(String, String)> {
     let lines = read_lines(path)?;
     if lines.is_empty() {
         return None;
@@ -512,8 +516,11 @@ mod tests {
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"all good"}}]}}}}"#
         )
         .unwrap();
-        writeln!(f, r#"{{"type":"system","content":"API Error: rate_limited please retry"}}"#)
-            .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"system","content":"API Error: rate_limited please retry"}}"#
+        )
+        .unwrap();
         drop(f);
         let hit = last_api_error_from_jsonl(&path, 40, 0);
         let _ = std::fs::remove_file(&path);

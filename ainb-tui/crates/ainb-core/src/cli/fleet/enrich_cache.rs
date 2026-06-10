@@ -16,9 +16,8 @@ use crate::fleet::enrich_cache;
 pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Result<()> {
     match matches.subcommand() {
         Some(("put", sub)) => {
-            let key = sub
-                .get_one::<String>("key")
-                .ok_or_else(|| anyhow::anyhow!("missing --key"))?;
+            let key =
+                sub.get_one::<String>("key").ok_or_else(|| anyhow::anyhow!("missing --key"))?;
             let suggestion = sub
                 .get_one::<String>("suggestion")
                 .ok_or_else(|| anyhow::anyhow!("missing --suggestion"))?;
@@ -27,9 +26,8 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
             Ok(())
         }
         Some(("get", sub)) => {
-            let key = sub
-                .get_one::<String>("key")
-                .ok_or_else(|| anyhow::anyhow!("missing --key"))?;
+            let key =
+                sub.get_one::<String>("key").ok_or_else(|| anyhow::anyhow!("missing --key"))?;
             match enrich_cache::lookup(key) {
                 Some(s) => {
                     println!("{s}");

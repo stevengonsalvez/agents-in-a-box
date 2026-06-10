@@ -39,7 +39,13 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
 /// off — the reader still attaches free cached suggestions, but no card is
 /// flagged `need_enrich`, so no producer (inline or agent) runs → 0 tokens.
 pub fn enrich_enabled(matches: &clap::ArgMatches) -> bool {
-    if matches.try_get_one::<bool>("no-enrich").ok().flatten().copied().unwrap_or(false) {
+    if matches
+        .try_get_one::<bool>("no-enrich")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+    {
         return false;
     }
     std::env::var("AINB_FLEET_ENRICH").map(|v| v != "0").unwrap_or(true)

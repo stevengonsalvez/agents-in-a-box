@@ -172,7 +172,10 @@ mod tests {
         for i in 0..(CACHE_CAP + 5) {
             cache.entries.insert(
                 format!("k{i}"),
-                Entry { suggestion: format!("s{i}"), last_used_ms: i as i64 },
+                Entry {
+                    suggestion: format!("s{i}"),
+                    last_used_ms: i as i64,
+                },
             );
         }
         evict_to_cap(&mut cache, CACHE_CAP);
