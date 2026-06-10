@@ -17,7 +17,8 @@
 //! | Env var | Meaning | Default |
 //! |---|---|---|
 //! | `HANGAR_DAEMON_RUNTIME_ID` | runtime this daemon claims for (**required** to claim) | — |
-//! | `HANGAR_CLAUDE_PATH` | provider binary path | `claude` (resolved on `PATH`) |
+//! | `HANGAR_CLAUDE_PATH` | `claude` provider binary path | `claude` (resolved on `PATH`) |
+//! | `HANGAR_CODEX_PATH` | `codex` provider binary path (e38.16) | `codex` (resolved on `PATH`) |
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | Multica default |
@@ -47,7 +48,7 @@ use sqlx::{Row, SqlitePool};
 use crate::events::EventSink;
 use crate::execenv::prepare_env;
 use crate::health_stats::HealthStats;
-use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
+use crate::runner::{Backend, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
     SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
     sweep_stale_running,
@@ -67,6 +68,8 @@ pub struct DaemonConfig {
     pub runtime_id: Option<String>,
     /// Path to the `claude` provider binary.
     pub claude_path: PathBuf,
+    /// Path to the `codex` provider binary (e38.16).
+    pub codex_path: PathBuf,
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Sweeper thresholds + cadence.
@@ -89,6 +92,8 @@ impl DaemonConfig {
         let runtime_id = std::env::var("HANGAR_DAEMON_RUNTIME_ID").ok().filter(|s| !s.is_empty());
         let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
             .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
+        let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
+            .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
 
@@ -109,6 +114,7 @@ impl DaemonConfig {
         Self {
             runtime_id,
             claude_path,
+            codex_path,
             poll_interval,
             sweeper,
             disable_claim,
@@ -177,6 +183,7 @@ pub async fn run(
 
     let runner = Runner::new(RunnerConfig {
         claude_path: cfg.claude_path.clone(),
+        codex_path: cfg.codex_path.clone(),
         max_runtime: PROVIDER_MAX_RUNTIME,
         tail_lines: TAIL_LINES,
         // e38.23: confine every provider spawn in the OS-level FS sandbox by
@@ -277,6 +284,13 @@ async fn execute_claimed(
     let home = hangar_home();
     let env = prepare_env(&task, &ws_slug, &home, clock)?;
 
+    // e38.16: resolve which provider exec path this task routes to (agent →
+    // runtime → provider) and the per-agent config (model / cli_args / agent_env)
+    // the runner threads into that provider's argv + env. A resolve fault
+    // defaults the dispatch to `claude` with empty config so a misconfigured
+    // agent still runs rather than stranding the task.
+    let dispatch = resolve_dispatch(pool, &task.agent_id).await.unwrap_or_default();
+
     // dispatched -> running. A lost race (another worker started it) surfaces as
     // an FSM error; bail without running a duplicate provider.
     StartTaskService::start(pool, &task.id, clock).await?;
@@ -319,10 +333,22 @@ async fn execute_claimed(
     // re-dispatch in the same session is suppressed, a fresh session re-warns.
     // The "session" is the resumed provider session id when present, else the
     // task id (a fresh run is a fresh warning surface). A warning-IO fault is
-    // non-fatal — never block a dispatch on it.
-    warn_danger_access(&task, runner.name());
+    // non-fatal — never block a dispatch on it. e38.16: keyed on the resolved
+    // backend, so a codex task warns under `codex` rather than always `claude`.
+    warn_danger_access(&task, dispatch.backend.name());
 
-    let outcome = runner.run_claude(&env, task_env).await?;
+    // e38.16: route to the resolved provider's exec path. `claude` takes the
+    // allowlist-filtered env and no argv; `codex` runs `codex exec` with the
+    // agent's model/cli_args on the argv and its `agent_env` layered onto the
+    // child env. Both spawn through the same OS sandbox (e38.23).
+    let outcome = match dispatch.backend {
+        Backend::Claude => runner.run_claude(&env, task_env).await?,
+        Backend::Codex => {
+            runner
+                .run_codex_with_env(&env, task_env, dispatch.agent_env, &dispatch.invocation)
+                .await?
+        }
+    };
 
     match outcome {
         RunOutcome::Success(result) => {
@@ -490,6 +516,53 @@ async fn materialise_skills(
             None
         }
     }
+}
+
+/// The resolved provider routing for one task (e38.16): which exec path to take
+/// plus the per-agent config to thread into it.
+///
+/// [`Default`] is the safe fallback (`claude`, no model/args/env) used when the
+/// agent/runtime resolve fails — a misconfigured agent still dispatches to the
+/// default provider rather than stranding the task.
+#[derive(Debug, Clone, Default)]
+struct ResolvedDispatch {
+    /// Which provider exec path [`execute_claimed`] routes to.
+    backend: Backend,
+    /// The `model` + `cli_args` the provider threads onto its argv.
+    invocation: ProviderInvocation,
+    /// The agent's per-agent env (`agent_env`), layered onto the child env after
+    /// the deny-by-default ambient allowlist.
+    agent_env: Vec<(String, String)>,
+}
+
+/// Resolve the provider routing for a task's agent (e38.16).
+///
+/// Reads the agent row (its migration-0015 `model`/`cli_args`/`agent_env`
+/// config) and its runtime's `provider` wire name, mapping the latter to a
+/// [`Backend`]. The agent's `model` and `cli_args` become the
+/// [`ProviderInvocation`]; its `agent_env` is carried separately.
+///
+/// # Errors
+///
+/// Returns an error if the agent id is malformed or the agent / runtime row is
+/// missing — the caller falls back to the [`ResolvedDispatch::default`].
+async fn resolve_dispatch(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<ResolvedDispatch> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
+    let agent = AgentRepo::get(pool, agent_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+    let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
+    Ok(ResolvedDispatch {
+        backend: Backend::from_provider(&runtime.provider),
+        invocation: ProviderInvocation {
+            model: agent.model,
+            cli_args: agent.cli_args,
+        },
+        agent_env: agent.agent_env,
+    })
 }
 
 /// Resolve the provider wire name and owning workspace for a task's agent

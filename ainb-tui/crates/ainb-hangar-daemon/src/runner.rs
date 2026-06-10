@@ -9,9 +9,12 @@
 //!
 //! # Provider abstraction
 //!
-//! Only `claude` ships in P1. The orchestration here (env build, JSONL tee,
-//! session pin, timeout) is provider-agnostic; P5 adds codex/copilot as new
-//! `Provider` impls rather than edits to [`Runner`] (see the [`Provider`] trait).
+//! `claude` shipped in P1. The orchestration here (env build, JSONL tee, session
+//! pin, timeout, OS sandbox) is provider-agnostic — captured once in
+//! [`Runner::run_provider`] and parameterised by a [`ProviderSpec`] (the wire
+//! name, the per-provider log file, and the argv to spawn). e38.16 adds the
+//! `codex` exec path ([`Runner::run_codex`]) as a second `ProviderSpec` rather
+//! than a fork of the run loop, so a third provider is one more spec.
 //!
 //! # Outcome classification
 //!
@@ -64,14 +67,29 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CURSOR_HOME",
 ];
 
-/// The provider-log file written under [`ExecEnv::logs`].
-const LOG_FILE: &str = "claude.jsonl";
+/// The provider-log file written under [`ExecEnv::logs`] for the `claude`
+/// provider.
+const CLAUDE_LOG_FILE: &str = "claude.jsonl";
+/// The provider-log file written under [`ExecEnv::logs`] for the `codex`
+/// provider (e38.16). Each provider streams to its own log so a workspace that
+/// runs both backends keeps their JSONL transcripts separate.
+const CODEX_LOG_FILE: &str = "codex.jsonl";
+/// The codex non-interactive subcommand. The real `codex` CLI runs a headless
+/// task as `codex exec …` (the established non-interactive shape — see the
+/// `coding-agent` skill); the runner always leads codex's argv with it.
+const CODEX_EXEC_SUBCOMMAND: &str = "exec";
+/// The codex model flag (`codex exec -m <model> …`).
+const CODEX_MODEL_FLAG: &str = "-m";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     /// Absolute path to the `claude` binary (or a test stand-in script).
     pub claude_path: PathBuf,
+    /// Absolute path to the `codex` binary (or a test stand-in script). Used by
+    /// [`Runner::run_codex`] (e38.16); a daemon that never dispatches a codex
+    /// task simply never spawns it.
+    pub codex_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
     /// ([`FailureReason::Timeout`]). Multica default: 2.5h.
     pub max_runtime: Duration,
@@ -137,11 +155,81 @@ struct SystemLine {
     session_id: Option<String>,
 }
 
+/// Which provider exec path the daemon routes a task to (e38.16).
+///
+/// Resolved from the task's agent → runtime → `provider` wire name. An
+/// unrecognised provider falls back to [`Self::Claude`] so a misconfigured or
+/// not-yet-implemented backend still dispatches (rather than stranding the
+/// task) — the same default-to-claude convention the rest of the daemon uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// The `claude` provider — [`Runner::run_claude`]. The default exec path: a
+    /// task whose provider is unrecognised or unresolvable still dispatches here.
+    #[default]
+    Claude,
+    /// The `codex` provider — [`Runner::run_codex`].
+    Codex,
+}
+
+impl Backend {
+    /// Resolve a provider wire name (`"claude"`, `"codex"`, …) to a backend.
+    ///
+    /// Matching is case-insensitive. Any name that is not a wired exec path maps
+    /// to [`Self::Claude`] (the safe default), mirroring
+    /// [`crate::materialise::ProviderSkillLayout::from_provider`]'s catch-all.
+    #[must_use]
+    pub fn from_provider(provider: &str) -> Self {
+        match provider.to_ascii_lowercase().as_str() {
+            "codex" => Self::Codex,
+            _ => Self::Claude,
+        }
+    }
+
+    /// The provider's wire name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// The per-agent provider config the runner threads into a provider's argv
+/// (e38.16). Sourced from the agent row's migration-0015 config columns.
+///
+/// `model` and `cli_args` flow onto the provider's command line; the agent's
+/// `agent_env` is threaded separately (it goes into the child env, not the
+/// argv) via the `extra_env` argument of [`Runner::run_codex_with_env`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderInvocation {
+    /// Optional model override (e.g. `gpt-5-codex`); `None` = provider default.
+    pub model: Option<String>,
+    /// Extra provider CLI arguments appended verbatim after the subcommand
+    /// (e.g. `["--full-auto"]`).
+    pub cli_args: Vec<String>,
+}
+
+/// A provider's per-run identity: its wire name, its log file, and the argv to
+/// append after the program (e38.16).
+///
+/// The orchestration in [`Runner::run_provider`] is identical across providers;
+/// only these three differ. A new provider is one more `ProviderSpec` builder
+/// (see [`Runner::claude_spec`] / [`Runner::codex_spec`]) rather than a new copy
+/// of the run loop.
+struct ProviderSpec {
+    /// The provider's wire name (`"claude"`, `"codex"`), for logs/tracing.
+    name: &'static str,
+    /// The provider-log file under [`ExecEnv::logs`].
+    log_file: &'static str,
+    /// The argv to append after the program path (subcommand + flags + args).
+    argv: Vec<String>,
+}
+
 /// A provider that can be exec'd as an agent CLI subprocess.
 ///
-/// P1 ships only [`Runner`] (claude). The trait exists so P5 providers
-/// (codex/copilot) land as new impls without touching the claim loop. Kept
-/// minimal — the daemon only needs to drive one run to an outcome.
+/// The trait exists so dispatch can name the active provider without reaching
+/// into [`Runner`]'s concrete exec methods. Kept minimal.
 pub trait Provider {
     /// The provider's wire name (`"claude"`, …).
     fn name(&self) -> &'static str;
@@ -166,37 +254,35 @@ impl Runner {
         Self { cfg }
     }
 
-    /// Build the (tokio) spawn command for the provider, wrapped in the OS-level
-    /// FS sandbox when [`RunnerConfig::sandbox`] is on.
+    /// Build the (tokio) spawn command for `program`, wrapped in the OS-level FS
+    /// sandbox when [`RunnerConfig::sandbox`] is on.
     ///
-    /// The confinement policy is derived from the task's [`ExecEnv`]: writes are
-    /// confined to the task root (`workdir`/`output`/`logs` all live under it) +
-    /// the process temp dir; reads are confined to the system roots a real agent
-    /// needs + the task root; network egress to the model API stays allowed.
-    /// With the sandbox off, or on an unsupported platform, the command is the
-    /// bare provider binary (the env allowlist + process-group kill still
-    /// apply).
+    /// `program` is the provider binary (claude or codex): every provider spawns
+    /// through this one wrapper, so the codex exec path gets exactly the same
+    /// confinement as claude (e38.16). The confinement policy is derived from the
+    /// task's [`ExecEnv`]: writes are confined to the task root
+    /// (`workdir`/`output`/`logs` all live under it) + the process temp dir;
+    /// reads are confined to the system roots a real agent needs + the task root;
+    /// network egress to the model API stays allowed. With the sandbox off, or on
+    /// an unsupported platform, the command is the bare provider binary (the env
+    /// allowlist + process-group kill still apply).
     ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] only if a *supported* sandbox primitive is
     /// expected but unavailable, or a sandbox setup IO fault occurs. An
     /// unsupported platform is NOT an error — it degrades to a passthrough.
-    fn build_command(&self, env: &ExecEnv) -> std::io::Result<Command> {
+    fn build_command(&self, program: &std::path::Path, env: &ExecEnv) -> std::io::Result<Command> {
         if !self.cfg.sandbox {
-            let cmd = ainb_hangar_sandbox::SandboxedCommand::passthrough(&self.cfg.claude_path)
-                .into_inner();
+            let cmd = ainb_hangar_sandbox::SandboxedCommand::passthrough(program).into_inner();
             return Ok(Command::from(cmd));
         }
 
         let policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
-        let sandboxed = ainb_hangar_sandbox::sandboxed_command(&self.cfg.claude_path, &policy)
+        let sandboxed = ainb_hangar_sandbox::sandboxed_command(program, &policy)
             .map_err(|e| std::io::Error::other(format!("sandbox setup: {e}")))?;
         if sandboxed.enforcement() == ainb_hangar_sandbox::Enforcement::None {
-            tracing::warn!(
-                provider = self.name(),
-                "OS sandbox unavailable on this platform; provider runs unconfined"
-            );
+            tracing::warn!("OS sandbox unavailable on this platform; provider runs unconfined");
         }
         // Convert the std command (with the inline Seatbelt wrapping on macOS /
         // the `pre_exec` Landlock hook on Linux already baked in) into a tokio
@@ -226,11 +312,132 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
-        let allowed: Vec<(String, String)> =
-            source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
+        // claude takes no extra argv at v1 (the task is handed to it via its
+        // materialised home + workdir, not the command line), so the spec argv is
+        // empty and there is no per-agent env beyond the allowlisted source env.
+        let spec = Self::claude_spec();
+        self.run_provider(
+            &self.cfg.claude_path,
+            env,
+            source_env,
+            std::iter::empty(),
+            spec,
+        )
+        .await
+    }
 
-        let log_path = env.logs.join(LOG_FILE);
+    /// Spawn `codex` in `env.workdir` via its non-interactive `exec` subcommand
+    /// (e38.16), stream its JSONL stdout to `{env.logs}/codex.jsonl`, pin the
+    /// first `session_id`, and enforce the configured deadline.
+    ///
+    /// `invocation` threads the agent's migration-0015 config onto the codex
+    /// argv: `codex exec [-m <model>] [<cli_args>…]`. The child env is the
+    /// allowlist-filtered `source_env` (no per-agent env on this overload — use
+    /// [`Self::run_codex_with_env`] to layer `agent_env`).
+    ///
+    /// The spawn goes through the same OS-level FS sandbox as
+    /// [`Self::run_claude`] (e38.23), so codex is confined to the task's isolated
+    /// roots identically.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.run_codex_with_env(env, source_env, std::iter::empty(), invocation).await
+    }
+
+    /// [`Self::run_codex`], plus a set of per-agent `extra_env` overrides layered
+    /// onto the child env *after* the allowlist filter (e38.16).
+    ///
+    /// `source_env` is the daemon's ambient env, filtered to [`ENV_ALLOWLIST`]
+    /// (deny-by-default — a leaked daemon secret never reaches codex). `extra_env`
+    /// is the agent's deliberate `agent_env` config: these are operator-set
+    /// per-agent values, not ambient secrets, so — like the keychain keys in
+    /// [`crate::dispatch::build_task_env`] — they bypass the ambient allowlist and
+    /// reach the child verbatim. The secret-leak boundary (the ambient filter)
+    /// is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let spec = Self::codex_spec(invocation);
+        self.run_provider(&self.cfg.codex_path, env, source_env, extra_env, spec).await
+    }
+
+    /// The `claude` provider spec: claude log file, no argv.
+    const fn claude_spec() -> ProviderSpec {
+        ProviderSpec {
+            name: "claude",
+            log_file: CLAUDE_LOG_FILE,
+            argv: Vec::new(),
+        }
+    }
+
+    /// The `codex` provider spec: codex log file + the non-interactive argv
+    /// `exec [-m <model>] [<cli_args>…]` (e38.16).
+    fn codex_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+        let mut argv = vec![CODEX_EXEC_SUBCOMMAND.to_string()];
+        if let Some(model) = &invocation.model {
+            argv.push(CODEX_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
+        ProviderSpec {
+            name: "codex",
+            log_file: CODEX_LOG_FILE,
+            argv,
+        }
+    }
+
+    /// The provider-agnostic run core shared by every provider (e38.16).
+    ///
+    /// Spawns `program` (through the OS sandbox) with `spec.argv` in
+    /// `env.workdir`, builds the child env from the allowlist-filtered
+    /// `source_env` plus the verbatim `extra_env` overrides, tees stdout to
+    /// `{env.logs}/{spec.log_file}` while pinning the first `session_id`, and
+    /// enforces the deadline — returning the same [`RunOutcome`] shape for any
+    /// provider. Only the program, argv, log file, and the env composition differ
+    /// per provider; the orchestration is identical.
+    async fn run_provider<I, E>(
+        &self,
+        program: &std::path::Path,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        spec: ProviderSpec,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
+        // Deny-by-default ambient filter, then layer the agent's explicit env
+        // overrides on top (so a per-agent value wins over an allowlisted ambient
+        // one of the same name, and arbitrary agent keys still reach the child).
+        let mut child_env: Vec<(String, String)> =
+            source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
+        child_env.extend(extra_env);
+
+        let log_path = env.logs.join(spec.log_file);
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -245,11 +452,12 @@ impl Runner {
         // The env allowlist + process-group kill below are unchanged — the
         // sandbox is an *additional* FS-confinement layer, not a replacement for
         // the secret-leak env boundary.
-        let mut command = self.build_command(env)?;
+        let mut command = self.build_command(program, env)?;
         let mut child = command
+            .args(&spec.argv)
             .current_dir(&env.workdir)
             .env_clear()
-            .envs(allowed)
+            .envs(child_env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -326,7 +534,7 @@ impl Runner {
         };
 
         let outcome = if timed_out {
-            tracing::warn!(reason = "timeout", "runner_claude_failed");
+            tracing::warn!(provider = spec.name, reason = "timeout", "runner_failed");
             RunOutcome::Failed {
                 reason: FailureReason::Timeout,
                 result,
@@ -334,7 +542,7 @@ impl Runner {
         } else if exit_code == Some(0) {
             RunOutcome::Success(result)
         } else {
-            tracing::warn!(reason = "agent_error", exit_code = ?exit_code, "runner_claude_failed");
+            tracing::warn!(provider = spec.name, reason = "agent_error", exit_code = ?exit_code, "runner_failed");
             RunOutcome::Failed {
                 reason: FailureReason::AgentError,
                 result,

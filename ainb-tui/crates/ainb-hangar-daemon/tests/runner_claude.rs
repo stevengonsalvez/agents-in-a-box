@@ -76,6 +76,9 @@ exit 0"#,
     );
     let cfg = RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         // Exercise the WIRED sandbox path: the stand-in script reads `$HOME`
@@ -114,6 +117,9 @@ async fn exec_captures_exit_code() {
     let script = fake_claude_happy(tmp.path());
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -137,6 +143,9 @@ exit 1"#,
     );
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -167,6 +176,9 @@ exit 0"#,
     );
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -195,6 +207,9 @@ exit 0"#,
     );
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -227,6 +242,9 @@ exit 0"#,
     );
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
+        // e38.16: the codex path is irrelevant to a claude run; a placeholder is
+        // fine since `run_claude` never spawns it.
+        codex_path: PathBuf::from("/nonexistent/codex"),
         max_runtime: Duration::from_millis(100),
         tail_lines: 50,
         sandbox: true,
