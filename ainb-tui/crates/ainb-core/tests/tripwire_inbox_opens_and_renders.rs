@@ -56,6 +56,15 @@ git_directories = []
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the `b` keystroke this tripwire sends.
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
+
     // Seed two synthetic notifications via the real Store API the
     // daemon uses. This proves the same code path produces rows
     // the Inbox screen will read.

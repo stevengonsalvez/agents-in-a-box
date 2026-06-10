@@ -111,6 +111,15 @@ git_directories = []
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the `i` keystroke this tripwire sends.
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
+
     let fixture = fixture_root();
     let claude_src = fixture.join("claude").join("projects");
     if claude_src.is_dir() {
@@ -350,8 +359,8 @@ fn burndown_interactive_keys_change_render() {
     // Backspace must be safe when no filter chip is set — a no-op
     // rather than crashing the plugin. We don't assert a delta; we
     // assert the burndown screen is still rendered after Backspace.
-    // (`Esc` is host-reserved — see `is_host_reserved_key` — so the
-    // navigation-back tripwire lives in its own test file
+    // (`Esc` at the root view asks the host to close the panel — that
+    // navigation tripwire lives in its own test file
     // `tripwire_burndown_esc_returns_home.rs`.)
     let cap_post_backspace = send_key_and_settle(&session, "BSpace");
 
