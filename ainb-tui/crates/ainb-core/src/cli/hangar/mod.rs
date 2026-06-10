@@ -418,6 +418,48 @@ pub enum IssueCommand {
     List(IssueListArgs),
     /// Show one issue by id.
     Show(IssueShowArgs),
+    /// Edit an existing issue's state, assignee, priority, or due date.
+    Update(IssueUpdateArgs),
+}
+
+/// Arguments for `hangar issue update`.
+///
+/// Edits a subset of one issue's mutable fields; every field is optional and an
+/// omitted field is left unchanged. The two nullable fields have an explicit
+/// "clear" flag (`--unassign`, `--clear-due`) so the caller can distinguish
+/// "leave as-is" from "set back to none". The edit is workspace-scoped: a
+/// `--workspace` selects the tenant (default: the bootstrapped `default`), and
+/// an issue id outside it touches no row.
+#[derive(Args, Debug)]
+pub struct IssueUpdateArgs {
+    /// Issue id (ULID) to edit.
+    pub id: String,
+    /// New lifecycle state (e.g. `in_progress`, `done`); omitted leaves it.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Reassign the issue to an agent (`agent.id`); omitted leaves the assignee.
+    ///
+    /// Mutually exclusive with `--unassign`.
+    #[arg(long, conflicts_with = "unassign")]
+    pub assign: Option<String>,
+    /// Clear the assignee (unassign the issue); omitted leaves it.
+    #[arg(long)]
+    pub unassign: bool,
+    /// New urgency 0..3 (P3..P0, HIGHER = MORE URGENT); omitted leaves it.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(0..=3))]
+    pub priority: Option<i64>,
+    /// New due date as `YYYY-MM-DD` (UTC midnight); omitted leaves it.
+    ///
+    /// Mutually exclusive with `--clear-due`.
+    #[arg(long, value_parser = parse_due_date, conflicts_with = "clear_due")]
+    pub due: Option<i64>,
+    /// Clear the due date (remove the deadline); omitted leaves it.
+    #[arg(long = "clear-due")]
+    pub clear_due: bool,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue create`.
@@ -1249,7 +1291,63 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Create(args) => run_issue_create(&store, args).await,
         IssueCommand::List(args) => run_issue_list(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
+        IssueCommand::Update(args) => run_issue_update(&store, args).await,
     }
+}
+
+/// `hangar issue update`: edit a subset of an issue's mutable fields,
+/// workspace-scoped.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else
+/// the bootstrapped `default`), maps the present flags onto an
+/// [`IssueFieldUpdate`], and drives the workspace-scoped store edit. An issue id
+/// that resolves to no row in the workspace (an unknown id or a foreign tenant's
+/// issue) is reported as an error — never a silent no-op. The mutually-exclusive
+/// `--assign`/`--unassign` and `--due`/`--clear-due` pairs are enforced by clap.
+async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::IssueFieldUpdate;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // Map the present flags onto the partial edit. The two nullable fields use
+    // the clear-flag to distinguish "clear to none" from "leave unchanged".
+    let assignee = if args.unassign {
+        Some(None)
+    } else {
+        args.assign
+            .as_deref()
+            .map(|id| ActorRef::new(ActorKind::Agent, id).context("assignee agent id was empty"))
+            .transpose()?
+            .map(Some)
+    };
+    let due_date = if args.clear_due {
+        Some(None)
+    } else {
+        args.due.map(Some)
+    };
+    let update = IssueFieldUpdate {
+        state: args.state,
+        assignee,
+        priority: args.priority,
+        due_date,
+    };
+
+    if update.is_empty() {
+        anyhow::bail!(
+            "nothing to update: pass at least one of --state / --assign / --unassign / \
+             --priority / --due / --clear-due"
+        );
+    }
+
+    let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
+        .await
+        .with_context(|| format!("update issue {}", args.id))?;
+    if touched {
+        println!("updated issue {}", args.id);
+    } else {
+        anyhow::bail!("no issue with id {} in this workspace", args.id);
+    }
+    Ok(())
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.

@@ -108,6 +108,134 @@ fn issue_list_json_format_emits_array() {
     );
 }
 
+/// The user-visible proof for e38.8: `ainb hangar issue update` edits an
+/// existing issue's state, priority, and due date through the daemon store, and
+/// the change is observable via `issue show` (a real-binary round-trip).
+#[test]
+fn issue_update_edits_persist_through_show() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Create a routine issue (priority 0, no due date).
+    let (ok, create_out) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "Editable issue"],
+    );
+    assert!(ok, "create failed: {create_out}");
+    let id = create_out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .map(|s| s.trim().to_string())
+        .expect("create output carries an id");
+
+    // Edit it: move it in_progress, bump priority to 3, set a due date.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "update",
+            &id,
+            "--state",
+            "in_progress",
+            "--priority",
+            "3",
+            "--due",
+            "2026-01-15",
+        ],
+    );
+    assert!(ok, "issue update should exit 0; out={out}");
+    assert!(out.contains("updated issue"), "missing update ack:\n{out}");
+
+    // The edit persisted: show the issue as JSON and assert the new fields.
+    let (ok, shown) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "issue show should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"state\":\"in_progress\""),
+        "state edit not persisted:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"priority\":3"),
+        "priority edit not persisted:\n{shown}"
+    );
+    // 2026-01-15 UTC midnight = 1768435200000 ms.
+    assert!(
+        shown.contains("\"due_date\":1768435200000"),
+        "due_date edit not persisted:\n{shown}"
+    );
+
+    // A partial edit leaves untouched fields alone (priority stays 3).
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "update", &id, "--state", "done"],
+    );
+    assert!(ok, "partial update should exit 0");
+    let (_, shown) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(
+        shown.contains("\"state\":\"done\"") && shown.contains("\"priority\":3"),
+        "partial edit must change only state:\n{shown}"
+    );
+
+    // Clearing the due date removes the deadline.
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "update", &id, "--clear-due"],
+    );
+    assert!(ok, "clear-due should exit 0");
+    let (_, shown) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(
+        shown.contains("\"due_date\":null"),
+        "clear-due must null the deadline:\n{shown}"
+    );
+}
+
+/// `ainb hangar issue update` on an unknown id is a hard error (exit non-zero),
+/// not a silent no-op — the mutating surface never lies about a write.
+#[test]
+fn issue_update_unknown_id_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Bootstrap a workspace so the failure is "no such issue", not "no db".
+    run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "Anchor"],
+    );
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "update", "no-such-id", "--state", "done"],
+    );
+    assert!(!ok, "updating an unknown id must fail:\n{out}");
+    assert!(
+        out.contains("no issue with id"),
+        "missing not-found message:\n{out}"
+    );
+}
+
+/// `ainb hangar issue update` with no field flags is rejected (nothing to do).
+#[test]
+fn issue_update_with_no_fields_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, create_out) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "Idle"],
+    );
+    let id = create_out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .map(|s| s.trim().to_string())
+        .expect("id");
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "update", &id]);
+    assert!(!ok, "an empty update must be rejected:\n{out}");
+    assert!(out.contains("nothing to update"), "missing reason:\n{out}");
+}
+
 #[test]
 fn daemon_status_reports_reachable() {
     let tmp = tempfile::tempdir().unwrap();
