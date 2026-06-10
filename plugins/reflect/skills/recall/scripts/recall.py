@@ -46,6 +46,16 @@ from typing import Any
 
 import yaml  # declared in PEP 723 header; uv run --script always installs
 
+# R6: query-time date parsing lives in a stdlib-only sibling module. When
+# recall.py runs as a script its directory is already on sys.path; library
+# imports (tests, recall_stages) load recall via a path insert, so mirror
+# the recall_stages.py convention to keep both paths working.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from temporal_extraction import (  # noqa: E402
+    TemporalRange,
+    extract_temporal_constraint,
+)
+
 
 # --- Config --------------------------------------------------------------
 
@@ -174,6 +184,13 @@ _STOPWORDS = frozenset(
 # gaps every session).
 GAP_LOG_ENABLED = os.environ.get("RECALL_GAP_LOG", "1") != "0"
 
+# R6: query-time date parsing. Natural-language date phrases ("last week",
+# "in march", "since 2026-01-01") are extracted from every query into a
+# TemporalRange and surfaced on RecallResult / the JSON output. Extraction
+# only — the R5 temporal arm consumes the range for time-aware ranking.
+# Pure-regex stdlib pass, sub-millisecond; disable with RECALL_TEMPORAL=0.
+TEMPORAL_ENABLED = os.environ.get("RECALL_TEMPORAL", "1") != "0"
+
 # R4: token-budget retrieval. Rough estimate — 1 token ≈ 4 chars — matching
 # Hindsight's budget-not-top-k contract (agents think in tokens).
 def _est_tokens(text: str) -> int:
@@ -298,6 +315,11 @@ class RecallResult:
     # pipeline (recall_stages.py reflect_index) surfaces them as compact
     # ID-only index rows. Empty on error returns.
     scores: dict[str, float] = field(default_factory=dict)
+    # R6: the date range parsed out of the query ("last week", "in march",
+    # "since 2026-01-01"), or None when the query carries no date phrase.
+    # Populated on EVERY return path (including errors) — the R5 temporal
+    # arm and downstream callers read it regardless of retrieval outcome.
+    temporal: TemporalRange | None = None
 
 
 # --- Helpers -------------------------------------------------------------
@@ -1080,7 +1102,11 @@ def render_markdown(
 
 
 def render_json(
-    learnings: list[Learning], query: str, mode: str, ood_gated: bool = False
+    learnings: list[Learning],
+    query: str,
+    mode: str,
+    ood_gated: bool = False,
+    temporal: TemporalRange | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -1088,6 +1114,8 @@ def render_json(
             "mode": mode,
             "count": len(learnings),
             "ood_gated": ood_gated,
+            # R6: the date range parsed out of the query, or null.
+            "temporal": temporal.to_dict() if temporal else None,
             "results": [
                 {
                     "id": lrn.id,
@@ -1221,11 +1249,16 @@ def recall(
     search failed) are NOT gaps and never logged.
     """
     mmr_on = MMR_ENABLED and use_mmr  # R3
+    # R6: parse a natural-language date phrase out of the query up front so
+    # every return path (errors included) carries the range. Extraction is a
+    # stdlib regex pass that never raises — None when no phrase resolves.
+    temporal = extract_temporal_constraint(query) if TEMPORAL_ENABLED else None
     cli = find_learnings_cli()
     if not cli:
         return RecallResult(
             [], query, mode,
             error="reflect CLI not found on $PATH (install with `uv tool install reflect-kb`)",
+            temporal=temporal,
         )
 
     fetched_limit = max(limit * 2, 10)
@@ -1259,7 +1292,7 @@ def recall(
                 log_knowledge_gap(query, session_id)
             return RecallResult(
                 learnings, query, mode, cache_hit=True, ood_gated=gated,
-                scores=rank_scores,
+                scores=rank_scores, temporal=temporal,
             )
 
     # Fan out vector search (reflect CLI), QMD (BM25), and — R1 — the graph
@@ -1294,7 +1327,7 @@ def recall(
 
     # If the primary path failed but a booster returned results, keep going.
     if graph_err and not qmd_results and not entity_results:
-        return RecallResult([], query, mode, error=graph_err)
+        return RecallResult([], query, mode, error=graph_err, temporal=temporal)
 
     learnings = rrf_fuse([graph_results, qmd_results, entity_results])
     # R2: cross-encoder scores for the fused top candidates. R3: mpnet
@@ -1357,7 +1390,10 @@ def recall(
     log_recall(query, mode, len(learnings), cached=False)
     if gap_log and not learnings:  # SG6
         log_knowledge_gap(query, session_id)
-    return RecallResult(learnings, query, mode, ood_gated=gated, scores=rank_scores)
+    return RecallResult(
+        learnings, query, mode, ood_gated=gated, scores=rank_scores,
+        temporal=temporal,
+    )
 
 
 def main() -> int:
@@ -1423,7 +1459,10 @@ def main() -> int:
         return 0
 
     if args.format == "json":
-        print(render_json(result.learnings, query, args.mode, result.ood_gated))
+        print(render_json(
+            result.learnings, query, args.mode, result.ood_gated,
+            temporal=result.temporal,
+        ))
     else:
         out = render_markdown(result.learnings, query, max_chars=args.max_chars)
         if out:
