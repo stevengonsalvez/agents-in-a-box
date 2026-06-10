@@ -220,9 +220,18 @@ pub(crate) struct ScanCtx<'a> {
     pub(crate) stable_policy: StablePolicy,
     /// `(path, mtime_nanos, size)` of every stable file seen.
     pub(crate) stable_present: Vec<(String, u64, u64)>,
+    /// `(path, mtime_nanos, size)` of every *recent* (newer than the
+    /// watermark) cached-provider file seen. Only collected when a
+    /// watermark is set — the full-scan path doesn't pay for it. Feeds
+    /// the unchanged-snapshot short-circuit in [`scan_incremental`].
+    pub(crate) recent_present: Vec<(String, u64, u64)>,
     /// Stable files' calls — populated only under
     /// [`StablePolicy::Collect`].
     pub(crate) stable_calls: Vec<ProviderCall>,
+    /// Files whose `stat` failed this scan. Any non-zero count poisons
+    /// the unchanged-snapshot short-circuit: such a file can still
+    /// parse, but has no fingerprint for the memo to compare.
+    pub(crate) stat_failures: u32,
     pub(crate) counters: ScanCounters,
 }
 
@@ -235,7 +244,9 @@ impl<'a> ScanCtx<'a> {
             watermark_nanos: None,
             stable_policy: StablePolicy::Skip,
             stable_present: Vec::new(),
+            recent_present: Vec::new(),
             stable_calls: Vec::new(),
+            stat_failures: 0,
             counters: ScanCounters::default(),
         }
     }
@@ -251,20 +262,49 @@ impl<'a> ScanCtx<'a> {
             watermark_nanos: Some(watermark_nanos),
             stable_policy,
             stable_present: Vec::new(),
+            recent_present: Vec::new(),
             stable_calls: Vec::new(),
+            stat_failures: 0,
             counters: ScanCounters::default(),
         }
     }
+}
+
+/// What the previous refresh saw on the recent (newer-than-watermark)
+/// side — the unchanged-snapshot short-circuit's comparison key.
+///
+/// A refresh whose stable fingerprint set, recent fingerprint set, and
+/// uncached-provider output all equal the previous refresh's must
+/// produce a byte-identical snapshot (the cached-provider calls are a
+/// pure function of `(path, mtime, size)` via the parse cache, and
+/// fold/emit are deterministic) — so the aggregation and publish can
+/// be skipped outright.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RecentMemo {
+    /// Sorted `(path, mtime_nanos, size)` of every recent
+    /// cached-provider file.
+    pub(crate) recent_present: Vec<(String, u64, u64)>,
+    /// Gemini / Copilot / Cursor output, in walk order. These parsers
+    /// are uncached so fingerprints don't exist for them; whole-output
+    /// equality is the (cheap — usually empty) correctness guard.
+    pub(crate) uncached_calls: Vec<ProviderCall>,
 }
 
 /// Result of an incremental scan: the snapshot, what the scan did,
 /// and the (reused or rebuilt) stable aggregate the caller should
 /// persist when `stable_rebuilt` is set.
 pub(crate) struct ScanOutcome {
-    pub(crate) data: UsageData,
+    /// The emitted snapshot — `None` when the unchanged-snapshot
+    /// short-circuit proved this refresh byte-identical to the
+    /// previous one (the caller keeps its published snapshot and skips
+    /// the publish).
+    pub(crate) data: Option<UsageData>,
     pub(crate) counters: ScanCounters,
     pub(crate) stable: StableAggregate,
     pub(crate) stable_rebuilt: bool,
+    /// What this refresh saw on the recent side — feed back as `prev`
+    /// on the next refresh to arm the short-circuit.
+    pub(crate) memo: RecentMemo,
 }
 
 /// Run every provider parser, aggregate, return a snapshot.
@@ -361,6 +401,19 @@ fn walk_providers(
     ctx: &mut ScanCtx<'_>,
     reporter: &mut ProgressReporter,
 ) -> Vec<ProviderCall> {
+    let mut calls = walk_cached_providers(roots, ctx, reporter);
+    calls.extend(parse_uncached_providers(roots));
+    calls
+}
+
+/// The cache-aware half of [`walk_providers`]: Claude and Codex,
+/// through the watermark-partitioned per-file path.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk_cached_providers(
+    roots: &ProviderRoots,
+    ctx: &mut ScanCtx<'_>,
+    reporter: &mut ProgressReporter,
+) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
         calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
@@ -372,6 +425,16 @@ fn walk_providers(
             root, ctx, reporter,
         ));
     }
+    calls
+}
+
+/// The uncached half of [`walk_providers`]: Gemini / Copilot / Cursor
+/// parse from scratch on every scan (no per-file cache, no watermark
+/// partition). Split out so [`scan_incremental`] can compare their
+/// output across refreshes for the unchanged-snapshot short-circuit.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_uncached_providers(roots: &ProviderRoots) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
     if let Some(root) = &roots.gemini_sessions {
         calls.extend(crate::parsers::gemini::parse_dir(root));
     }
@@ -404,61 +467,108 @@ fn walk_providers(
 /// The published snapshot is `emit(stable ⊕ fold(recent))`, sharing
 /// [`emit`]/[`fold`] with [`aggregate`] — the property tests pin the
 /// result byte-identical to a one-shot full scan of the same tree.
+///
+/// **Unchanged-snapshot short-circuit (issue #255).** When `prev` is
+/// the memo of the previous refresh and (a) the stable fingerprint set
+/// matches `stored.folded`, (b) the recent fingerprint set matches
+/// `prev.recent_present`, and (c) the uncached providers' output
+/// matches `prev.uncached_calls`, the snapshot is provably
+/// byte-identical to the previous one — fold/clone/absorb/emit are
+/// all skipped and `data` comes back `None` so the caller can skip
+/// the (multi-hundred-MB) republish too.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn scan_incremental(
     roots: &ProviderRoots,
     cache: &mut Option<crate::cache::UsageCache>,
     stored: Option<StableAggregate>,
     watermark_nanos: u64,
+    prev: Option<&RecentMemo>,
     reporter: &mut ProgressReporter,
 ) -> ScanOutcome {
     // Pass 1: skip stable files, parse-or-cache recent ones.
     let mut ctx = ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Skip);
-    let recent_calls = walk_providers(roots, &mut ctx, reporter);
+    let recent_calls = walk_cached_providers(roots, &mut ctx, reporter);
+    let uncached_calls = parse_uncached_providers(roots);
     let mut counters = ctx.counters;
     let mut stable_present = std::mem::take(&mut ctx.stable_present);
     stable_present.sort_unstable();
+    let mut recent_present = std::mem::take(&mut ctx.recent_present);
+    recent_present.sort_unstable();
 
-    let (stable, stable_rebuilt, recent_calls) = match stored {
-        Some(st) if st.folded == stable_present => {
+    let stable_matches = stored.as_ref().is_some_and(|st| st.folded == stable_present);
+
+    // Short-circuit: nothing moved since the previous refresh — the
+    // snapshot is byte-identical, skip aggregation and tell the caller
+    // to skip the publish. Any stat failure disarms it: a file without
+    // a fingerprint can still contribute calls the memo can't see.
+    if let (true, 0, Some(prev)) = (stable_matches, ctx.stat_failures, prev) {
+        if prev.recent_present == recent_present && prev.uncached_calls == uncached_calls {
             counters.stable_reused = true;
-            (st, false, recent_calls)
-        }
-        _ => {
-            // Rebuild pass: read stable files too (cache-served when
-            // warm) and fold a fresh rollup. Progress already ticked
-            // in pass 1, so this pass reports to a noop sink.
-            let mut rebuild_ctx =
-                ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Collect);
-            let mut noop = ProgressReporter::noop();
-            let recent2 = walk_providers(roots, &mut rebuild_ctx, &mut noop);
-            counters.files_statted += rebuild_ctx.counters.files_statted;
-            counters.parsed += rebuild_ctx.counters.parsed;
-            counters.cache_hits += rebuild_ctx.counters.cache_hits;
-            let mut folded = std::mem::take(&mut rebuild_ctx.stable_present);
-            folded.sort_unstable();
-            let state = fold(std::mem::take(&mut rebuild_ctx.stable_calls));
-            (
-                StableAggregate {
-                    watermark_nanos,
-                    folded,
-                    state,
+            return ScanOutcome {
+                data: None,
+                counters,
+                stable: stored.expect("matched above"),
+                stable_rebuilt: false,
+                memo: RecentMemo {
+                    recent_present,
+                    uncached_calls,
                 },
-                true,
-                recent2,
-            )
+            };
         }
+    }
+
+    let (stable, stable_rebuilt, recent_calls, recent_present) = if stable_matches {
+        counters.stable_reused = true;
+        (
+            stored.expect("matched above"),
+            false,
+            recent_calls,
+            recent_present,
+        )
+    } else {
+        // Rebuild pass: read stable files too (cache-served when
+        // warm) and fold a fresh rollup. Progress already ticked
+        // in pass 1, so this pass reports to a noop sink. The
+        // uncached providers are NOT re-parsed — pass 1's output is
+        // reused (they have no stable/recent partition).
+        let mut rebuild_ctx = ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Collect);
+        let mut noop = ProgressReporter::noop();
+        let recent2 = walk_cached_providers(roots, &mut rebuild_ctx, &mut noop);
+        counters.files_statted += rebuild_ctx.counters.files_statted;
+        counters.parsed += rebuild_ctx.counters.parsed;
+        counters.cache_hits += rebuild_ctx.counters.cache_hits;
+        let mut folded = std::mem::take(&mut rebuild_ctx.stable_present);
+        folded.sort_unstable();
+        let mut recent_present2 = std::mem::take(&mut rebuild_ctx.recent_present);
+        recent_present2.sort_unstable();
+        let state = fold(std::mem::take(&mut rebuild_ctx.stable_calls));
+        (
+            StableAggregate {
+                watermark_nanos,
+                folded,
+                state,
+            },
+            true,
+            recent2,
+            recent_present2,
+        )
     };
 
     let mut merged = stable.state.clone();
-    merged.absorb(fold(recent_calls));
+    let mut all_recent = recent_calls;
+    all_recent.extend(uncached_calls.iter().cloned());
+    merged.absorb(fold(all_recent));
     let data = emit(merged);
 
     ScanOutcome {
-        data,
+        data: Some(data),
         counters,
         stable,
         stable_rebuilt,
+        memo: RecentMemo {
+            recent_present,
+            uncached_calls,
+        },
     }
 }
 
@@ -1729,13 +1839,13 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let out = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        let out = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
 
         assert!(out.stable_rebuilt, "no stored stable => rebuild");
         assert!(!out.counters.stable_reused);
         assert_eq!(out.stable.folded.len(), 1, "old.jsonl folded");
         assert_eq!(
-            encode(&out.data),
+            encode(out.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches full-scan oracle"
         );
@@ -1760,7 +1870,7 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
 
         // Second refresh, nothing changed on disk: the CPU-fix gate.
         let second = scan_incremental(
@@ -1768,6 +1878,7 @@ mod tests {
             &mut cache,
             Some(first.stable),
             watermark,
+            None,
             &mut reporter,
         );
 
@@ -1789,10 +1900,205 @@ mod tests {
             "recent file served from cache"
         );
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches full-scan oracle"
         );
+    }
+
+    // ── unchanged-snapshot short-circuit (issue #255) ───────────────
+
+    #[test]
+    fn unchanged_refresh_short_circuits_with_memo() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert!(first.data.is_some(), "first refresh always publishes");
+        assert_eq!(
+            first.memo.recent_present.len(),
+            1,
+            "one recent file fingerprinted"
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert!(
+            second.data.is_none(),
+            "unchanged refresh skips aggregation entirely"
+        );
+        assert!(second.counters.stable_reused);
+        assert!(!second.stable_rebuilt);
+        assert_eq!(second.counters.parsed, 0);
+        assert_eq!(second.memo, first.memo, "memo carries forward unchanged");
+
+        // The short-circuit re-arms from its own returned memo.
+        let third = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(second.stable),
+            watermark,
+            Some(&second.memo),
+            &mut reporter,
+        );
+        assert!(third.data.is_none(), "still unchanged on the third refresh");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_recent_file_changes() {
+        let fx = IncrFixture::new();
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[
+                claude_line("2026-06-01T10:00:00Z", "s2", 10, 20),
+                claude_line("2026-06-01T11:00:00Z", "s2", 1, 2),
+            ],
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        let data = second.data.as_ref().expect("changed file must re-publish");
+        assert_eq!(data.grand_total.call_count, 2);
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
+        assert_ne!(second.memo, first.memo, "memo reflects the new fingerprint");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_recent_file_deleted() {
+        // Deletion is the trap a naive `parsed == 0` check would miss:
+        // nothing parses, the stable set is untouched, but the snapshot
+        // must shrink — the recent fingerprint set is what catches it.
+        let fx = IncrFixture::new();
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "keep.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+        fx.write_file(
+            "proj-b",
+            "gone.jsonl",
+            &[claude_line("2026-06-02T10:00:00Z", "s3", 30, 40)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert_eq!(
+            first.data.as_ref().expect("publishes").grand_total.call_count,
+            2
+        );
+
+        std::fs::remove_file(fx.claude_root.join("proj-b/gone.jsonl")).expect("delete");
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert_eq!(second.counters.parsed, 0, "nothing re-parses on a delete");
+        let data = second.data.as_ref().expect("deletion must re-publish");
+        assert_eq!(
+            data.grand_total.call_count, 1,
+            "deleted file's call is gone"
+        );
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_stable_file_touched() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        // Rewrite the stable file: its mtime moves it to the recent
+        // side AND breaks the stable fingerprint set.
+        tick();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[
+                claude_line("2026-05-01T10:00:00Z", "s1", 100, 200),
+                claude_line("2026-05-01T11:00:00Z", "s1", 5, 6),
+            ],
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert!(
+            second.stable_rebuilt,
+            "touched stable file forces a rebuild"
+        );
+        let data = second.data.as_ref().expect("stable change must re-publish");
+        assert_eq!(data.grand_total.call_count, 3);
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
     }
 
     #[test]
@@ -1814,7 +2120,7 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
 
         fx.write_file(
             "proj-b",
@@ -1826,13 +2132,14 @@ mod tests {
             &mut cache,
             Some(first.stable),
             watermark,
+            None,
             &mut reporter,
         );
 
         assert!(second.counters.stable_reused, "stable side untouched");
         assert_eq!(second.counters.parsed, 1, "only the new file parses");
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches full-scan oracle"
         );
@@ -1857,7 +2164,7 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let first = scan_incremental(&fx.roots, &mut cache, None, wm1, &mut reporter);
+        let first = scan_incremental(&fx.roots, &mut cache, None, wm1, None, &mut reporter);
         assert_eq!(first.stable.folded.len(), 1);
 
         // The watermark advances past b.jsonl — it ages into the
@@ -1868,6 +2175,7 @@ mod tests {
             &mut cache,
             Some(first.stable),
             wm2,
+            None,
             &mut reporter,
         );
 
@@ -1878,7 +2186,7 @@ mod tests {
             "rebuild is cache-served, no reparse"
         );
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches full-scan oracle"
         );
@@ -1902,7 +2210,7 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
         assert_eq!(first.stable.folded.len(), 2);
 
         std::fs::remove_file(fx.claude_root.join("proj-a/doomed.jsonl")).expect("rm");
@@ -1911,6 +2219,7 @@ mod tests {
             &mut cache,
             Some(first.stable),
             watermark,
+            None,
             &mut reporter,
         );
 
@@ -1924,7 +2233,7 @@ mod tests {
             "only the keeper remains folded"
         );
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches post-delete oracle"
         );
@@ -1943,7 +2252,7 @@ mod tests {
 
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
         assert_eq!(first.stable.folded.len(), 1, "grow.jsonl folded as stable");
 
         // Append a line: mtime bumps past the watermark, so the file
@@ -1960,17 +2269,19 @@ mod tests {
             &mut cache,
             Some(first.stable),
             watermark,
+            None,
             &mut reporter,
         );
 
         assert!(second.stable_rebuilt, "stable set lost the appended file");
         assert!(second.stable.folded.is_empty(), "nothing stable remains");
         assert_eq!(
-            second.data.grand_total.call_count, 2,
+            second.data.as_ref().expect("changed scan publishes").grand_total.call_count,
+            2,
             "old + appended call, counted once each"
         );
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             fx.oracle_bytes(),
             "matches post-append oracle"
         );
@@ -1981,8 +2292,18 @@ mod tests {
         let fx = IncrFixture::new();
         let mut cache = fx.open_cache();
         let mut reporter = ProgressReporter::noop();
-        let out = scan_incremental(&fx.roots, &mut cache, None, now_nanos(), &mut reporter);
-        assert_eq!(encode(&out.data), encode(&UsageData::default()));
+        let out = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            None,
+            now_nanos(),
+            None,
+            &mut reporter,
+        );
+        assert_eq!(
+            encode(out.data.as_ref().expect("changed scan publishes")),
+            encode(&UsageData::default())
+        );
         assert!(out.stable.folded.is_empty());
     }
 

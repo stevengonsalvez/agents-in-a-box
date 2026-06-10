@@ -56,12 +56,20 @@ fn decode_refresh_request(payload: &[u8]) -> RefreshRequest {
 /// testable without a `HostClient`.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct BlockingScanOutcome {
-    pub(crate) data: ainb_plugin_types_sessions::UsageData,
+    /// The snapshot to publish — `None` when the scanner proved this
+    /// refresh byte-identical to the previous one (unchanged-snapshot
+    /// short-circuit, issue #255): the caller keeps the published
+    /// snapshot and skips the publish entirely.
+    pub(crate) data: Option<ainb_plugin_types_sessions::UsageData>,
     /// The (reused or rebuilt) stable rollup to keep in memory for the
     /// next refresh. `None` on the cache-less full-scan path.
     pub(crate) stable: Option<scanner::StableAggregate>,
     /// Cache handle returned to the plugin for reuse.
     pub(crate) cache: Option<crate::cache::UsageCache>,
+    /// What the incremental scan saw on the recent side — feed back as
+    /// `prev_memo` next refresh to arm the short-circuit. `None` on
+    /// the cache-less full-scan path.
+    pub(crate) memo: Option<scanner::RecentMemo>,
     /// Scan instrumentation — `Some` iff the incremental path ran.
     pub(crate) counters: Option<scanner::ScanCounters>,
     pub(crate) stable_rebuilt: bool,
@@ -86,6 +94,7 @@ pub(crate) fn run_blocking_scan(
     roots: &ProviderRoots,
     cache: Option<crate::cache::UsageCache>,
     stored: Option<scanner::StableAggregate>,
+    prev_memo: Option<&scanner::RecentMemo>,
     window_days: u32,
     reporter: &mut scanner::ProgressReporter,
 ) -> BlockingScanOutcome {
@@ -102,7 +111,14 @@ pub(crate) fn run_blocking_scan(
     if cache_opt.is_some() {
         let watermark =
             now_ns().saturating_sub(u64::from(window_days).saturating_mul(NANOS_PER_DAY));
-        let outcome = scanner::scan_incremental(roots, &mut cache_opt, stored, watermark, reporter);
+        let outcome = scanner::scan_incremental(
+            roots,
+            &mut cache_opt,
+            stored,
+            watermark,
+            prev_memo,
+            reporter,
+        );
         if outcome.stable_rebuilt {
             if let Some(cache) = cache_opt.as_mut() {
                 if let Err(err) = cache.store_stable(&outcome.stable) {
@@ -117,6 +133,7 @@ pub(crate) fn run_blocking_scan(
             data: outcome.data,
             stable: Some(outcome.stable),
             cache: cache_opt,
+            memo: Some(outcome.memo),
             counters: Some(outcome.counters),
             stable_rebuilt: outcome.stable_rebuilt,
             cold_start,
@@ -124,9 +141,10 @@ pub(crate) fn run_blocking_scan(
     } else {
         let data = scanner::scan_with_cache_and_progress(roots, &mut cache_opt, reporter);
         BlockingScanOutcome {
-            data,
+            data: Some(data),
             stable: None,
             cache: cache_opt,
+            memo: None,
             counters: None,
             stable_rebuilt: false,
             cold_start,
@@ -198,6 +216,13 @@ pub struct SessionReader {
     stable: Option<scanner::StableAggregate>,
     #[cfg(not(target_arch = "wasm32"))]
     cache: Option<crate::cache::UsageCache>,
+    /// What the previous *successfully published* refresh saw on the
+    /// recent side — arms the scanner's unchanged-snapshot
+    /// short-circuit. Deliberately `None` until a publish lands (and
+    /// reset to `None` whenever one fails) so a skipped publish can
+    /// never strand consumers on a snapshot that was never delivered.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_memo: Option<scanner::RecentMemo>,
     /// Set to `true` once we've attempted (and possibly failed) to open
     /// the cache so we don't retry on every publish.
     #[cfg(not(target_arch = "wasm32"))]
@@ -218,6 +243,8 @@ impl SessionReader {
             #[cfg(not(target_arch = "wasm32"))]
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
+            last_memo: None,
+            #[cfg(not(target_arch = "wasm32"))]
             cache_init: false,
         }
     }
@@ -235,6 +262,8 @@ impl SessionReader {
             stable: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_memo: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache_init: false,
         }
@@ -256,8 +285,12 @@ impl SessionReader {
     async fn flush_cache(&mut self, host: &HostClient) {
         // The persisted stable rollup dies with the cache (clear()
         // wipes both tables); the in-memory copy must die with it or
-        // the next refresh would resurrect stale history.
+        // the next refresh would resurrect stale history. The refresh
+        // memo dies too — a hard refresh exists precisely because the
+        // user distrusts cached state, so the unchanged-snapshot
+        // short-circuit must not suppress the rebuilt publish.
         self.stable = None;
+        self.last_memo = None;
         self.ensure_cache();
         if let Some(cache) = self.cache.as_mut() {
             match cache.clear() {
@@ -381,21 +414,33 @@ impl SessionReader {
     }
 
     /// Run the scan on a blocking task and publish progress events to
-    /// `host` as they arrive. Returns the assembled `UsageData` once
-    /// the scan task completes.
+    /// `host` as they arrive. Returns the assembled `UsageData` (or
+    /// `None` when the unchanged-snapshot short-circuit fired) plus
+    /// the refresh's memo, which the caller commits to
+    /// [`Self::last_memo`] only after the publish lands.
     ///
     /// The blocking task owns the cache for the duration of the scan
     /// (moved out of `self.cache`), then hands it back so the plugin
-    /// can reuse it on the next publish. Progress events flow over a
+    /// can reuse it on the next publish. The previous memo travels the
+    /// same way — taken at scan start, so a panicked task or a failed
+    /// publish leaves `last_memo` empty and the next refresh publishes
+    /// unconditionally. Progress events flow over a
     /// `tokio::sync::mpsc::unbounded` channel: the rate-limit lives in
     /// the [`scanner::ProgressReporter`] inside the blocking task, so
     /// the async drain loop never sees more than ~10 events/s.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn scan_streaming(&mut self, host: &HostClient) -> ainb_plugin_types_sessions::UsageData {
+    async fn scan_streaming(
+        &mut self,
+        host: &HostClient,
+    ) -> (
+        Option<ainb_plugin_types_sessions::UsageData>,
+        Option<scanner::RecentMemo>,
+    ) {
         self.ensure_cache();
         let roots = self.roots.clone();
         let cache = self.cache.take();
         let stored = self.stable.take();
+        let prev_memo = self.last_memo.take();
         let window_days = self.window_days;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
@@ -407,7 +452,14 @@ impl SessionReader {
                 // we hold `rx` until `scan_handle` resolves).
                 let _ = tx.send(evt);
             });
-            run_blocking_scan(&roots, cache, stored, window_days, &mut reporter)
+            run_blocking_scan(
+                &roots,
+                cache,
+                stored,
+                prev_memo.as_ref(),
+                window_days,
+                &mut reporter,
+            )
         });
 
         // Drain progress events. `rx.recv()` returns `None` once the
@@ -466,7 +518,7 @@ impl SessionReader {
                         ))
                         .await;
                 }
-                outcome.data
+                (outcome.data, outcome.memo)
             }
             Err(err) => {
                 // The panicked closure took ownership of the cache and
@@ -484,7 +536,7 @@ impl SessionReader {
                         falling back to in-line scan"
                     ))
                     .await;
-                self.scan_now()
+                (Some(self.scan_now()), None)
             }
         }
     }
@@ -509,9 +561,34 @@ impl SessionReader {
     /// `is_final = true`.
     async fn publish(&mut self, host: &HostClient) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
-        let data = self.scan_streaming(host).await;
+        let (data, memo) = self.scan_streaming(host).await;
         #[cfg(target_arch = "wasm32")]
-        let data = self.scan_now();
+        let (data, memo) = (Some(self.scan_now()), None);
+
+        let Some(data) = data else {
+            // Unchanged-snapshot short-circuit: the scanner proved the
+            // snapshot byte-identical to the one already published —
+            // consumers keep what they have, nothing goes on the wire.
+            let _ = host.log_info("publish: snapshot unchanged — publish skipped").await;
+            // ...except the terminal progress event: consumers clear
+            // their "Scanning sessions…" banner on the final
+            // usage_data chunk, and no such chunk is coming. `done`
+            // tells them the scan ended without a republish.
+            let done = ScanProgressEvent {
+                done: true,
+                ..ScanProgressEvent::default()
+            };
+            if let Ok(bytes) = rmp_serde::to_vec_named(&done) {
+                let _ = host.snapshot_publish(TOPIC_SCAN_PROGRESS, bytes).await;
+            }
+            self.set_last_memo(memo);
+            return Ok(());
+        };
+
+        // The memo commits only after every chunk lands: an error exit
+        // below leaves it empty, so the next refresh re-publishes
+        // rather than skipping consumers onto a half-delivered
+        // snapshot. (`scan_streaming` already took the previous memo.)
         let published_ns = now_ns();
         let chunks = chunk_usage_data(data, published_ns, false, CHUNK_TARGET_BYTES);
         let total_chunks = chunks.len();
@@ -541,8 +618,20 @@ impl SessionReader {
                 self.last_event = Some(event);
             }
         }
+        self.set_last_memo(memo);
         Ok(())
     }
+
+    /// Store the refresh memo that arms the next scan's
+    /// unchanged-snapshot short-circuit. No-op on wasm32, where the
+    /// incremental path (and the memo) don't exist.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_last_memo(&mut self, memo: Option<scanner::RecentMemo>) {
+        self.last_memo = memo;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn set_last_memo(&mut self, _memo: Option<()>) {}
 }
 
 /// Headroom added to the per-chunk running-size estimate to cover
@@ -930,12 +1019,16 @@ mod tests {
         let mut reporter = scanner::ProgressReporter::noop();
 
         // First refresh: cold start seeds + persists the rollup.
-        let first = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        let first = run_blocking_scan(&roots, open_cache(&cache_dir), None, None, 0, &mut reporter);
         assert!(first.cold_start, "no rollup anywhere yet");
         assert!(first.stable_rebuilt);
         let c = first.counters.expect("incremental path ran");
         assert_eq!(c.parsed, 2, "seed scan parses both files");
-        assert_eq!(encode(&first.data), oracle, "matches full-scan oracle");
+        assert_eq!(
+            encode(first.data.as_ref().expect("changed scan publishes")),
+            oracle,
+            "matches full-scan oracle"
+        );
         assert!(
             first.cache.expect("cache returned").load_stable().expect("load").is_some(),
             "rollup persisted for the next process"
@@ -944,7 +1037,8 @@ mod tests {
         // Simulated plugin restart: in-memory rollup gone (stored =
         // None), fresh cache handle on the same file. The glue must
         // rehydrate from disk and reuse — zero parses.
-        let second = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        let second =
+            run_blocking_scan(&roots, open_cache(&cache_dir), None, None, 0, &mut reporter);
         assert!(!second.cold_start, "rollup rehydrated from the cache");
         assert!(!second.stable_rebuilt);
         let c = second.counters.expect("incremental path ran");
@@ -955,10 +1049,69 @@ mod tests {
         assert!(c.stable_reused);
         assert_eq!(c.stable_skipped, 2, "both stable files skipped outright");
         assert_eq!(
-            encode(&second.data),
+            encode(second.data.as_ref().expect("changed scan publishes")),
             oracle,
             "still byte-identical to the oracle"
         );
+    }
+
+    #[test]
+    fn glue_unchanged_refresh_returns_no_data_and_memo_round_trips() {
+        let (tree, roots, cache_dir) = glue_fixture();
+        let oracle = encode(&scanner::scan(&roots));
+        let mut reporter = scanner::ProgressReporter::noop();
+
+        // Seed (window 36500 days → everything is recent, exercising
+        // the recent fingerprint memo rather than the stable rollup).
+        let first = run_blocking_scan(
+            &roots,
+            open_cache(&cache_dir),
+            None,
+            None,
+            36_500,
+            &mut reporter,
+        );
+        assert!(first.data.is_some(), "first refresh publishes");
+        let memo = first.memo.clone().expect("incremental path produces a memo");
+
+        // Unchanged refresh with the memo armed: no data → no publish.
+        let second = run_blocking_scan(
+            &roots,
+            open_cache(&cache_dir),
+            Some(first.stable.expect("rollup")),
+            Some(&memo),
+            36_500,
+            &mut reporter,
+        );
+        assert!(
+            second.data.is_none(),
+            "unchanged refresh short-circuits the publish"
+        );
+        let memo = second.memo.expect("memo still round-trips on a skip");
+
+        // Touch a file: the same memo must now disarm and re-publish.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            tree.path().join("claude/projects/proj-a/two.jsonl"),
+            format!(
+                "{}\n{}",
+                glue_claude_line("2026-06-01T10:00:00Z", "s2"),
+                glue_claude_line("2026-06-02T10:00:00Z", "s2")
+            ),
+        )
+        .expect("append");
+        let third = run_blocking_scan(
+            &roots,
+            open_cache(&cache_dir),
+            second.stable,
+            Some(&memo),
+            36_500,
+            &mut reporter,
+        );
+        let data = third.data.as_ref().expect("changed file re-publishes");
+        let fresh_oracle = encode(&scanner::scan(&roots));
+        assert_ne!(encode(data), oracle, "snapshot moved past the seed state");
+        assert_eq!(encode(data), fresh_oracle, "matches the post-change oracle");
     }
 
     #[test]
@@ -967,7 +1120,7 @@ mod tests {
         let oracle = encode(&scanner::scan(&roots));
         let mut reporter = scanner::ProgressReporter::noop();
 
-        let out = run_blocking_scan(&roots, None, None, 0, &mut reporter);
+        let out = run_blocking_scan(&roots, None, None, None, 0, &mut reporter);
         assert!(
             out.counters.is_none(),
             "cache-less refresh takes the legacy full path"
@@ -975,7 +1128,7 @@ mod tests {
         assert!(out.stable.is_none(), "nothing to persist a rollup into");
         assert!(!out.stable_rebuilt);
         assert_eq!(
-            encode(&out.data),
+            encode(out.data.as_ref().expect("changed scan publishes")),
             oracle,
             "full path matches the oracle trivially"
         );
