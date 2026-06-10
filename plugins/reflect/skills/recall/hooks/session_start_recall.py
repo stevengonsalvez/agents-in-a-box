@@ -10,6 +10,11 @@ Fires on SessionStart. Builds a query from the current project context
 (cwd, git branch, recent commits) and injects the top-3 learnings
 (any confidence; reranked) into the agent's context via additionalContext.
 
+R10 (opt-in via REFLECT_TIERED_INJECT): retrieval is tiered — the skills
+index (R20, curated) is consulted FIRST, and a strong skill hit injects
+just the skill name + one-line summary, skipping the raw-learnings recall
+entirely. Lower tiers run only when the skills tier is empty or stale.
+
 Usage in settings.json:
 {
   "hooks": {
@@ -73,6 +78,13 @@ SESSION_START_MAX_CHARS = 1500
 SESSION_START_MIN_OVERLAP = float(os.environ.get("REFLECT_RECALL_MIN_OVERLAP", "0.2"))
 # R4: optional token budget for the injected block (0 = keep max-chars only).
 SESSION_START_MAX_TOKENS = int(os.environ.get("REFLECT_RECALL_MAX_TOKENS", "0"))  # tighter than explicit /reflect:recall
+# R10: tiered inject — skills (curated) > learnings (raw). Opt-in rollout
+# flag: the skills tier only runs when REFLECT_TIERED_INJECT is truthy.
+TIERED_INJECT_FLAG = "REFLECT_TIERED_INJECT"
+SKILL_TIER_LIMIT = 2
+# match_skills scores name/tag token hits at 2.0 and summary hits at 1.0;
+# default threshold = at least one strong (name/tag) hit.
+SKILL_TIER_DEFAULT_MIN_SCORE = 2.0
 
 
 # --- Context extraction --------------------------------------------------
@@ -160,6 +172,69 @@ def build_query(cwd: Path) -> tuple[str, list[str]]:
     return " ".join(dedup), tags
 
 
+# --- R10: skills tier (curated beats raw) --------------------------------
+
+def tiered_inject_enabled() -> bool:
+    """Opt-in rollout flag. Read at call time so settings.json env stanzas
+    (and tests) can flip it without re-importing the hook."""
+    return os.environ.get(TIERED_INJECT_FLAG, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def skill_tier_min_score() -> float:
+    """'Strong hit' threshold for the skills tier (env-tunable)."""
+    try:
+        return float(os.environ["REFLECT_SKILL_TIER_MIN_SCORE"])
+    except (KeyError, ValueError):
+        return SKILL_TIER_DEFAULT_MIN_SCORE
+
+
+def skill_tier_context(query: str) -> str:
+    """Tier 1 of the R10 hierarchy: skills (curated) outrank raw learnings.
+
+    Matches *query* against the R20 skills index (the ``skills`` table in
+    reflect.db). A strong hit returns a compact block — skill name + one-
+    line summary per hit — and the caller skips the recall.py learnings
+    pass entirely: a polished skill always wins over a raw note covering
+    the same ground. ``refresh_if_stale()`` runs first (stat()-only for
+    unchanged skills) so a deleted or stale skill can never win the tier;
+    an empty/stale top tier falls through to the learnings inject below.
+
+    Silent-fail: any error (missing module, locked/unwritable DB, broken
+    config) returns "" so the hook degrades to the flat learnings path.
+    """
+    if not tiered_inject_enabled():
+        return ""
+    try:
+        # Lazy imports: only pay the sqlite/index cost when the flag is on.
+        # scripts/ is already on sys.path (silent_fail import above).
+        import reflect_db
+        import skill_index
+
+        conn = reflect_db.get_conn()
+        skill_index.refresh_if_stale(conn=conn)
+        min_score = skill_tier_min_score()
+        hits = [
+            hit
+            for hit in skill_index.match_skills(
+                query, limit=SKILL_TIER_LIMIT, conn=conn
+            )
+            if hit["score"] >= min_score
+        ]
+        if not hits:
+            return ""
+        lines = [
+            "## Skills for this context (curated — prefer over raw learnings)"
+        ]
+        for hit in hits:
+            summary = hit.get("summary") or "(no summary)"
+            lines.append(f"- **{hit['name']}** — {summary}")
+        return "\n".join(lines)[:SESSION_START_MAX_CHARS]
+    except Exception:
+        return ""
+
+
 # --- Hook main -----------------------------------------------------------
 
 def find_recall_script() -> Path | None:
@@ -219,6 +294,13 @@ def _main_body() -> NoReturn:
     query, tags = build_query(cwd)
     if not query:
         emit("")
+
+    # R10: tiered inject — skills (curated) are the top tier. A strong
+    # skill hit wins outright; the learnings recall below only runs when
+    # the skills tier is empty/stale (or the flag is off).
+    skill_block = skill_tier_context(query)
+    if skill_block:
+        emit(skill_block)
 
     recall = find_recall_script()
     if not recall or not UV_BIN:
