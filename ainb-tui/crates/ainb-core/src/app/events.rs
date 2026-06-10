@@ -3734,6 +3734,13 @@ impl EventHandler {
                 tracing::info!("Navigating to Hangar");
                 // Plugin-owned screen: the `hangar-tui` subprocess renders it and
                 // owns its own data load (snapshot RPCs over the daemon socket).
+                // Save the origin like every other panel so Esc (which on plugin
+                // screens resolves to `PanelBack`, and via `ui.close_request` once
+                // hangar-tui adopts it) pops back to where it was opened from
+                // rather than a stale `previous_screen` left by an earlier panel.
+                if state.current_screen != screen_ids::HANGAR {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
@@ -5252,6 +5259,44 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
+    /// it must therefore save its origin on entry like every other panel,
+    /// or it would pop a stale `previous_screen` left by an earlier panel.
+    #[test]
+    fn go_to_hangar_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.current_screen, ids::HANGAR);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Regression for the stale-origin edge the review flagged: open a
+    /// panel from the session list (sets previous_screen=session_list),
+    /// leave it WITHOUT Esc (straight to home), then open Hangar from
+    /// home. Hangar's Esc must return to HOME, not the stale session_list.
+    #[test]
+    fn hangar_does_not_pop_a_stale_origin_from_an_earlier_panel() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        EventHandler::process_event(AppEvent::GoToStats, &mut state); // previous=session_list
+        EventHandler::process_event(AppEvent::GoToHomeScreen, &mut state); // leave without Esc
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(
+            state.current_screen,
+            ids::HOME,
+            "Hangar must not pop the stale session_list origin"
+        );
     }
 
     #[test]
