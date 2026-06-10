@@ -58,6 +58,13 @@ const HINT_MUTED: Color = Color::rgb(120, 120, 140);
 const BADGE_PREFIX: &str = "▶ PR ";
 /// The keybinding hint painted next to the URL (two-space gap + `[o] open`).
 const BADGE_HINT: &str = "  [o] open";
+/// Accent for the comment-compose input bar (a calm emerald, distinct from the
+/// gold PR badge so the two bars never read as the same control).
+const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
+/// The leading glyph + label painted before the typed comment body (`💬 `).
+const COMPOSE_PREFIX: &str = "💬 ";
+/// The keybinding hint painted after the caret on the compose bar.
+const COMPOSE_HINT: &str = "  [enter] post  [esc] cancel";
 
 /// Where the task is in its lifecycle, derived from the task event stream.
 ///
@@ -164,6 +171,11 @@ pub struct TaskDetailState {
     stuck_to_bottom: bool,
     /// Whether the cancel-confirm modal is open.
     cancel_modal_open: bool,
+    /// The comment-compose modal buffer (e38.5). `Some(buf)` while the modal is
+    /// open (`buf` is the in-progress comment text, possibly empty); `None` when
+    /// closed. While open the modal captures every key as text input, so it is
+    /// mutually exclusive with the scroll / retry / cancel keys.
+    compose: Option<String>,
 }
 
 impl TaskDetailState {
@@ -179,6 +191,7 @@ impl TaskDetailState {
             scroll_offset: 0,
             stuck_to_bottom: true,
             cancel_modal_open: false,
+            compose: None,
         }
     }
 
@@ -236,6 +249,13 @@ impl TaskDetailState {
     #[must_use]
     pub const fn cancel_modal_open(&self) -> bool {
         self.cancel_modal_open
+    }
+
+    /// The comment-compose buffer when the compose modal is open (e38.5), or
+    /// `None` when it is closed. `Some("")` is an open-but-empty modal.
+    #[must_use]
+    pub fn compose_buffer(&self) -> Option<&str> {
+        self.compose.as_deref()
     }
 
     /// The display view: raw entries with long consecutive thinking runs folded
@@ -302,6 +322,15 @@ pub enum TaskDetailIntent {
     RetryTask(TaskId),
     /// Cancel the (running) task, confirmed in the modal (`X` then Enter).
     CancelTask(TaskId),
+    /// Post a comment on the bound issue (`c`, type, Enter) — the plugin glue
+    /// fires `hangar/comment_add` over the daemon socket (e38.5). Carries the
+    /// issue the comment is for and the (non-empty) typed body.
+    AddComment {
+        /// The issue the comment is posted on (the bound `issue.id`).
+        issue_id: ainb_hangar_core::ids::IssueId,
+        /// The typed comment body (guaranteed non-empty by the reducer).
+        body: String,
+    },
 }
 
 /// The result of folding one [`TaskDetailEvent`] into a [`TaskDetailState`].
@@ -324,9 +353,14 @@ pub fn reduce_task_detail(state: &TaskDetailState, ev: TaskDetailEvent) -> TaskD
     }
 }
 
-/// Handle a printable key. When the cancel modal is open it captures Enter
-/// (confirm) and any other key is a no-op until Esc closes it.
+/// Handle a printable key. When a modal is open it captures input: the
+/// compose modal (e38.5) eats every key as text (Enter submits, Backspace
+/// deletes); the cancel modal captures Enter (confirm) and ignores the rest.
 fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
+    // The compose modal owns input while open: type / delete / submit.
+    if state.compose.is_some() {
+        return reduce_compose_key(state, c);
+    }
     if state.cancel_modal_open {
         return match c {
             '\n' | '\r' => confirm_cancel(state),
@@ -338,6 +372,8 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
     match c {
         'j' => scroll_down(state),
         'k' => scroll_up(state),
+        // Open the comment-compose modal (`c`); captures input until Enter/Esc.
+        'c' => open_compose(state),
         // Retry only once terminal; otherwise a no-op.
         'R' if state.lifecycle.is_terminal() => with_intent(
             state.clone(),
@@ -349,10 +385,53 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
     }
 }
 
-/// Handle Esc: abort the cancel modal if open; otherwise a no-op (the router
-/// owns leaving the screen).
+/// Compose-modal key handling (e38.5): Enter submits a non-empty body (closing
+/// the modal + emitting [`TaskDetailIntent::AddComment`]), Backspace deletes the
+/// last char, any other printable char appends. Enter on an empty/whitespace
+/// body is a no-op that keeps the modal open (never an empty comment).
+fn reduce_compose_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
+    let mut buf = state.compose.clone().unwrap_or_default();
+    match c {
+        '\n' | '\r' => {
+            if buf.trim().is_empty() {
+                // Empty body: keep the modal open, submit nothing.
+                return unchanged(state);
+            }
+            let mut next = state.clone();
+            next.compose = None;
+            return with_intent(
+                next,
+                TaskDetailIntent::AddComment {
+                    issue_id: state.issue.id.clone(),
+                    body: buf,
+                },
+            );
+        }
+        '\u{8}' | '\u{7f}' => {
+            buf.pop();
+        }
+        other => buf.push(other),
+    }
+    let mut next = state.clone();
+    next.compose = Some(buf);
+    no_intent(next)
+}
+
+/// Open the comment-compose modal with an empty buffer (`c`).
+fn open_compose(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.compose = Some(String::new());
+    no_intent(next)
+}
+
+/// Handle Esc: close whichever modal is open (compose discards its draft, cancel
+/// aborts); otherwise a no-op (the router owns leaving the screen).
 fn reduce_esc(state: &TaskDetailState) -> TaskDetailReduction {
-    if state.cancel_modal_open {
+    if state.compose.is_some() {
+        let mut next = state.clone();
+        next.compose = None;
+        no_intent(next)
+    } else if state.cancel_modal_open {
         let mut next = state.clone();
         next.cancel_modal_open = false;
         no_intent(next)
@@ -510,13 +589,23 @@ pub fn render_task_detail(
         top.saturating_add(1)
     });
 
+    // The compose modal (e38.5), when open, takes the bottom row as an input bar,
+    // shrinking the transcript region by one row so the two never overlap.
+    let body_bottom = if state.compose.is_some() {
+        let bar_row = bottom.saturating_sub(1);
+        render_compose_bar(buf, area_w, bar_row, state.compose.as_deref().unwrap_or(""));
+        bar_row
+    } else {
+        bottom
+    };
+
     // Sidebar takes a right-hand cap; it collapses when the area is too narrow
     // to leave the transcript a usable column.
     let sidebar_w: u16 = if area_w >= 60 { 24 } else { 0 };
     let main_w = area_w.saturating_sub(sidebar_w);
 
     // The transcript paints the visible (collapsed) view linearly.
-    render_transcript(buf, main_w, body_top, bottom, &state.visible_entries());
+    render_transcript(buf, main_w, body_top, body_bottom, &state.visible_entries());
 
     if sidebar_w > 0 {
         let sidebar_x = main_w;
@@ -524,11 +613,24 @@ pub fn render_task_detail(
             buf,
             sidebar_x,
             body_top,
-            bottom,
+            body_bottom,
             sidebar_w,
             &state.issue,
         );
     }
+}
+
+/// Paint the single-row comment-compose input bar at `(0, row)` (e38.5):
+/// `💬 <typed body>▏` in the compose accent followed by a muted
+/// `[enter] post  [esc] cancel` keybinding hint (hint-near-control). Clipped by
+/// **chars** at `area_w` (multi-byte safe) so a long draft truncates cleanly.
+fn render_compose_bar(buf: &mut WireBuffer, area_w: u16, row: u16, body: &str) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, COMPOSE_PREFIX, COMPOSE_ACCENT, area_w);
+    cx = put_clipped(buf, cx, row, body, COMPOSE_ACCENT, area_w);
+    // A block caret so the cursor position is visible while typing.
+    cx = put_clipped(buf, cx, row, "▏", COMPOSE_ACCENT, area_w);
+    let _ = put_clipped(buf, cx, row, COMPOSE_HINT, HINT_MUTED, area_w);
 }
 
 /// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold followed by

@@ -99,6 +99,17 @@ const DAEMON_HEALTH_REQ_ID: i64 = 24;
 /// JSON-RPC id for a `hangar/issue_update` request raised by the agent picker
 /// (e38.8).
 const ISSUE_UPDATE_REQ_ID: i64 = 25;
+/// JSON-RPC id for a `hangar/comment_add` request raised by the task-detail
+/// compose modal (e38.5).
+const COMMENT_ADD_REQ_ID: i64 = 26;
+/// The actor-ref the plugin authors comments as (e38.5).
+///
+/// The plugin has no per-user auth/identity layer yet (a later concern), so a
+/// comment the local user composes is attributed to this canonical member ref.
+/// The daemon only requires a well-formed `member:<id>` / `agent:<id>` token (the
+/// `comment.author_type` CHECK), so this is accepted as-is; swapping in the real
+/// signed-in member is a drop-in change once identity lands.
+const SELF_AUTHOR_REF: &str = "member:me";
 /// How many trailing log lines the logs pane reads from the newest `daemon.*`
 /// file on each refresh (P8.6). Bounded so a huge log file never blows up the
 /// pane; the daily rotation keeps a single day's file the practical ceiling.
@@ -700,6 +711,42 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a deferred issue-comment RPC raised by the task-detail compose modal
+    /// (e38.5).
+    ///
+    /// Maps the [`IssueCommentAction::Add`] to `hangar/comment_add`, posting the
+    /// typed body on the issue authored by the current member, framed over the
+    /// socket cap. After firing, re-pull the issue list so the daemon's
+    /// `CommentAdded` push (or the next snapshot) re-renders the new comment. A
+    /// send failure is logged but non-fatal — the comment simply isn't posted.
+    async fn apply_comment_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::IssueCommentAction,
+    ) {
+        use crate::screen::IssueCommentAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let IssueCommentAction::Add { issue_id, body } = action;
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id, "author": SELF_AUTHOR_REF, "body": body
+        });
+        let Ok(body) = encode_request(
+            COMMENT_ADD_REQ_ID,
+            daemon_methods::HANGAR_COMMENT_ADD,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: comment add send failed: {e}"))
+                .await;
+        }
+    }
+
     /// Fire a deferred autopilot RPC raised by the autopilot-manager screen
     /// (P7.5).
     ///
@@ -1031,6 +1078,11 @@ impl Plugin for HangarPlugin {
         // socket to set the issue's assignee.
         if let Some(action) = self.screens.take_pending_assign_action() {
             self.apply_assign_action(host, action).await;
+        }
+        // e38.5: drain any deferred issue-comment (Enter in the task-detail
+        // compose modal) and fire `hangar/comment_add` over the daemon socket.
+        if let Some(action) = self.screens.take_pending_comment_action() {
+            self.apply_comment_action(host, action).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active

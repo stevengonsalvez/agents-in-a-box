@@ -307,3 +307,92 @@ fn unrelated_presence_event_is_noop() {
     );
     assert_eq!(out.state.transcript_len(), 0);
 }
+
+// --- e38.5 comment compose ----------------------------------------------------
+
+/// `c` opens the compose modal with an empty buffer; typed printable chars and
+/// Backspace edit it; the modal stays open (no intent) while typing.
+#[test]
+fn compose_key_opens_and_types_into_buffer() {
+    let s = state_for_task();
+    assert!(s.compose_buffer().is_none(), "compose closed initially");
+
+    let out = reduce_task_detail(&s, TaskDetailEvent::Key('c'));
+    assert_eq!(
+        out.state.compose_buffer(),
+        Some(""),
+        "c opens an empty buffer"
+    );
+    assert!(out.intent.is_none());
+
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('h'));
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('i'));
+    assert_eq!(out.state.compose_buffer(), Some("hi"));
+    assert!(out.intent.is_none(), "typing emits no intent");
+
+    // Backspace deletes the last char.
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('\u{8}'));
+    assert_eq!(out.state.compose_buffer(), Some("h"));
+}
+
+/// Enter on a non-empty compose buffer submits an `AddComment` intent carrying
+/// the bound issue id + the typed body, and closes the modal.
+#[test]
+fn compose_enter_submits_add_comment_intent() {
+    let s = state_for_task();
+    let mut out = reduce_task_detail(&s, TaskDetailEvent::Key('c'));
+    for ch in "ship it".chars() {
+        out = reduce_task_detail(&out.state, TaskDetailEvent::Key(ch));
+    }
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('\n'));
+    assert_eq!(
+        out.intent,
+        Some(TaskDetailIntent::AddComment {
+            issue_id: IssueId::from_str("i1").unwrap(),
+            body: "ship it".into(),
+        }),
+        "Enter must submit the typed comment for the bound issue"
+    );
+    assert!(
+        out.state.compose_buffer().is_none(),
+        "submitting closes the compose modal"
+    );
+}
+
+/// Enter on an empty (or whitespace-only) compose buffer submits nothing and
+/// keeps the modal open — never an empty comment.
+#[test]
+fn compose_enter_on_empty_buffer_does_not_submit() {
+    let s = state_for_task();
+    let out = reduce_task_detail(&s, TaskDetailEvent::Key('c'));
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('\n'));
+    assert!(out.intent.is_none(), "empty body must not submit");
+    assert_eq!(out.state.compose_buffer(), Some(""), "modal stays open");
+}
+
+/// Esc closes the compose modal without submitting, discarding the buffer.
+#[test]
+fn compose_esc_cancels_without_submit() {
+    let s = state_for_task();
+    let mut out = reduce_task_detail(&s, TaskDetailEvent::Key('c'));
+    for ch in "draft".chars() {
+        out = reduce_task_detail(&out.state, TaskDetailEvent::Key(ch));
+    }
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Esc);
+    assert!(out.intent.is_none(), "Esc submits nothing");
+    assert!(out.state.compose_buffer().is_none(), "Esc closes the modal");
+}
+
+/// While the compose modal is open, scroll keys (`j`/`k`) type into the buffer
+/// rather than moving the viewport — the modal captures input.
+#[test]
+fn compose_captures_navigation_keys() {
+    let s = state_for_task();
+    let out = reduce_task_detail(&s, TaskDetailEvent::Key('c'));
+    let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('j'));
+    assert_eq!(
+        out.state.compose_buffer(),
+        Some("j"),
+        "j is captured as text while composing"
+    );
+}

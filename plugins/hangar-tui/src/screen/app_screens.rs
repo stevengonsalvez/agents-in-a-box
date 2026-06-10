@@ -31,7 +31,7 @@ use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsSt
 use super::skill_manager::{
     reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
 };
-use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailState};
+use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailIntent, TaskDetailState};
 use super::{AppState, Screen};
 
 /// A deferred host-cap action raised by the Settings Workspace pane (P5.5).
@@ -124,6 +124,24 @@ pub enum IssueAssignAction {
     },
 }
 
+/// A deferred daemon RPC raised by the task-detail compose modal (e38.5).
+///
+/// Like [`IssueAssignAction`], the sync key router can't `await`; the compose
+/// modal stashes the action on [`ScreenStates::pending_comment_action`] and the
+/// plugin's `render` pass drains it and fires `hangar/comment_add` over the
+/// daemon socket cap, then re-pulls the issue's comments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueCommentAction {
+    /// Post a comment on an issue (Enter on a non-empty compose buffer) —
+    /// `hangar/comment_add` with the typed body.
+    Add {
+        /// The issue the comment is for (`issue.id`).
+        issue_id: String,
+        /// The typed comment body (non-empty).
+        body: String,
+    },
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -175,6 +193,10 @@ pub struct ScreenStates {
     /// actor), awaiting the `render` pass to fire `hangar/issue_update` over the
     /// daemon socket (e38.8). `None` when idle.
     pub pending_assign_action: Option<IssueAssignAction>,
+    /// An issue-comment RPC raised by the task-detail compose modal (Enter on a
+    /// non-empty buffer), awaiting the `render` pass to fire `hangar/comment_add`
+    /// over the daemon socket (e38.5). `None` when idle.
+    pub pending_comment_action: Option<IssueCommentAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -305,6 +327,12 @@ impl ScreenStates {
     /// (e38.8).
     pub const fn take_pending_assign_action(&mut self) -> Option<IssueAssignAction> {
         self.pending_assign_action.take()
+    }
+
+    /// Take the pending issue-comment RPC raised by the task-detail compose
+    /// modal, if any (e38.5).
+    pub const fn take_pending_comment_action(&mut self) -> Option<IssueCommentAction> {
+        self.pending_comment_action.take()
     }
 }
 
@@ -600,8 +628,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
 /// nothing. Esc + all other keys fold into the reducer as before.
 fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
     let td = states.task_detail.take()?;
-    // Intercept `o` before the reducer: open the captured PR URL, if any.
-    if key.code == (KeyCode::Char { ch: 'o' }) {
+    // Intercept `o` before the reducer: open the captured PR URL, if any — but
+    // NOT while the compose modal is open, where `o` is a typed character (e38.5).
+    if td.compose_buffer().is_none() && key.code == (KeyCode::Char { ch: 'o' }) {
         let nav = td.pr_url().map(|url| NavIntent::OpenPrUrl(url.to_string()));
         states.task_detail = Some(td);
         return nav;
@@ -617,6 +646,15 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
         return None;
     };
     let out = reduce_task_detail(&td, ev);
+    // Lift the compose-submit intent into a deferred `hangar/comment_add` RPC the
+    // `render` pass drains + fires (the sync key router can't `await`). Retry /
+    // cancel intents are not yet wired to an RPC, so they fold as before.
+    if let Some(TaskDetailIntent::AddComment { issue_id, body }) = out.intent {
+        states.pending_comment_action = Some(IssueCommentAction::Add {
+            issue_id: issue_id.as_str().to_string(),
+            body,
+        });
+    }
     states.task_detail = Some(out.state);
     None
 }
