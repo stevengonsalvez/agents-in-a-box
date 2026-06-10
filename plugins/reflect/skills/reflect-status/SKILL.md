@@ -179,6 +179,29 @@ Shows, per learning (most-updated first):
 revised — inspect the snapshots (`learning_history.snapshot_json` or the
 `.history.yaml` sidecar) to see why the rule kept changing.
 
+### 9. Contradictions (cross-turn detection)
+
+Every new learning write runs deterministic contradiction detection against
+recent in-scope learnings sharing >= 1 concept tag (negation-stripped token
+Jaccard > 0.9 with a negation marker in exactly one of the two — e.g. saving
+"never use foo" against an existing "use foo"). The OLDER learning is demoted
+(`is_latest = 0`, `superseded_by_learning_id` set) and a
+`contradiction_detected` audit event is written to the events table in
+`~/.reflect/reflect.db`, mirrored to `~/.reflect/events.jsonl`.
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_db.py contradictions
+```
+
+Shows:
+- Total contradiction count
+- Recent contradiction pairs (older id -> newer id, similarity, both titles)
+
+**If contradictions exist**: the demoted side is preserved (history snapshot +
+`is_latest = 0`, never deleted) — review the pairs to confirm the newer rule
+is actually the correct one; if the flip was wrong, re-state the older rule
+so it wins the next round.
+
 ## Review Mode
 
 When invoked as `reflect review` or when there are pending items, enter review mode.
@@ -293,6 +316,13 @@ Suggest: capture learnings for these topics, then /reflect:ingest
 |----------|---------|--------------|
 | never use var in this codebase | 4 | 2026-04-12 |
 | prefer uv over pip | 2 | 2026-04-10 |
+
+## Contradictions
+Contradictions detected: 2
+| Older (demoted) | Newer (kept) | Similarity |
+|-----------------|--------------|------------|
+| use fab deploy | never use fab deploy | 1.00 |
+| commit straight to main | don't commit straight to main | 1.00 |
 
 ## Pending Reviews: 2
 1. [MEDIUM] "Consider cursor-based pagination for large datasets" (5 days)

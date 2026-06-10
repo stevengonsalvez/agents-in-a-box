@@ -105,6 +105,7 @@ _LEARNING_COLUMNS = (
     "helpful_count",
     "ignored_count",
     "stale_count",
+    "is_latest",
 )
 
 _PROPOSAL_COLUMNS = (
@@ -165,6 +166,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     helpful_count           INTEGER NOT NULL DEFAULT 0,
     ignored_count           INTEGER NOT NULL DEFAULT 0,
     stale_count             INTEGER NOT NULL DEFAULT 0,
+    is_latest               INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (supersedes_learning_id) REFERENCES learnings(id),
     FOREIGN KEY (superseded_by_learning_id) REFERENCES learnings(id)
 );
@@ -288,6 +290,15 @@ CREATE TABLE IF NOT EXISTS learning_history (
 );
 """
 
+_CONCEPT_INDEX_DDL = """
+CREATE TABLE IF NOT EXISTS concept_index (
+    concept         TEXT NOT NULL,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (concept, learning_id)
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -302,6 +313,8 @@ CREATE INDEX IF NOT EXISTS idx_recall_events_learning_id ON recall_events(learni
 CREATE INDEX IF NOT EXISTS idx_artifacts_learning_id ON artifacts(learning_id);
 CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
     ON learning_history(learning_id);
+CREATE INDEX IF NOT EXISTS idx_concept_index_learning_id
+    ON concept_index(learning_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
@@ -317,6 +330,7 @@ _SCHEMA_DDL = (
     + _RECALL_EVENTS_DDL
     + _ARTIFACTS_DDL
     + _LEARNING_HISTORY_DDL
+    + _CONCEPT_INDEX_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -550,6 +564,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE learnings ADD COLUMN ignored_count INTEGER NOT NULL DEFAULT 0",
         ),
         ("stale_count", "ALTER TABLE learnings ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0"),
+        ("is_latest", "ALTER TABLE learnings ADD COLUMN is_latest INTEGER NOT NULL DEFAULT 1"),
     ]
     with conn:
         for column, sql in learning_alters:
@@ -634,6 +649,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_RECALL_EVENTS_DDL)
         conn.execute(_ARTIFACTS_DDL)
         conn.execute(_LEARNING_HISTORY_DDL)
+        conn.execute(_CONCEPT_INDEX_DDL)
+
+    _backfill_concept_index(conn)
 
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -804,6 +822,15 @@ def add_learning(
             conn=conn,
             autocommit=False,
         )
+    # SG1 post-write hook: concept-index the new title, then demote any
+    # recent in-scope learning this write contradicts (negation-stripped
+    # Jaccard > 0.9 with opposite negation polarity). Best-effort — a
+    # failure here must never break the write itself (silent-fail shaped).
+    try:
+        _index_learning_concepts(conn, lid, title, created_at=now)
+        detect_and_resolve_contradictions(lid, title, scope=scope, conn=conn)
+    except Exception:
+        pass
     return lid
 
 
@@ -1075,6 +1102,228 @@ def get_update_counts(
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Concept index + contradictions (SG1: cross-turn contradiction detection)
+# ---------------------------------------------------------------------------
+
+CONTRADICTION_EVENT_TYPE = "contradiction_detected"
+
+# Statuses that never resurface as contradiction candidates — retired beliefs
+# (same set the S5 revision recall excludes).
+_CONTRADICTION_RETIRED_STATUSES = (
+    LearningStatus.REVERTED.value,
+    LearningStatus.SUPERSEDED.value,
+    LearningStatus.REJECTED.value,
+)
+
+
+def _load_contradiction_detector():
+    """Lazy import so reflect_db keeps working if the module is absent."""
+    import contradiction_detector
+
+    return contradiction_detector
+
+
+def _index_learning_concepts(
+    conn: sqlite3.Connection,
+    learning_id: str,
+    title: str,
+    *,
+    created_at: str,
+    autocommit: bool = True,
+) -> int:
+    """Write *title*'s concept tags into ``concept_index``.
+
+    The concept index is the candidate-pruning structure for contradiction
+    detection: only learnings sharing >= 1 concept with a new write are
+    ever compared (agentmemory's concept-index shape). Returns the number
+    of concepts indexed.
+    """
+    detector = _load_contradiction_detector()
+    rows = [
+        (concept, learning_id, created_at)
+        for concept in sorted(detector.extract_concepts(title))
+    ]
+    if not rows:
+        return 0
+    sql = (
+        "INSERT OR IGNORE INTO concept_index (concept, learning_id, created_at) "
+        "VALUES (?, ?, ?)"
+    )
+    if autocommit:
+        with conn:
+            conn.executemany(sql, rows)
+    else:
+        conn.executemany(sql, rows)
+    return len(rows)
+
+
+def _backfill_concept_index(conn: sqlite3.Connection) -> None:
+    """One-shot migration: concept-index pre-existing learnings.
+
+    Without this, learnings written before SG1 shipped would never be
+    contradiction candidates. Only runs when the index is empty and
+    learnings exist; bounded to the newest scan-cap rows (older rows
+    fall outside the recency window anyway). Best-effort — a failure
+    here must never block schema migration.
+    """
+    try:
+        detector = _load_contradiction_detector()
+        existing = conn.execute("SELECT COUNT(*) FROM concept_index").fetchone()[0]
+        if existing:
+            return
+        rows = conn.execute(
+            "SELECT id, title, created_at FROM learnings "
+            "ORDER BY created_at DESC LIMIT ?",
+            (detector.CANDIDATE_SCAN_CAP,),
+        ).fetchall()
+        with conn:
+            for row in rows:
+                _index_learning_concepts(
+                    conn, row["id"], row["title"],
+                    created_at=row["created_at"], autocommit=False,
+                )
+    except Exception:
+        return
+
+
+def _conn_state_dir(conn: sqlite3.Connection) -> Optional[Path]:
+    """Directory holding this connection's DB file (None for :memory:)."""
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main" and row[2]:
+                return Path(row[2]).resolve().parent
+    except Exception:
+        pass
+    return None
+
+
+def _append_contradiction_jsonl(
+    conn: sqlite3.Connection, payload: dict[str, Any],
+) -> None:
+    """Append a contradiction record to ``events.jsonl`` beside the DB.
+
+    With the default DB path this is ``~/.reflect/events.jsonl`` — the
+    append-only audit file the SG1 acceptance contract pins. Best-effort:
+    the sqlite event row is the source of truth; this mirror is for
+    grep-ability and never raises.
+    """
+    try:
+        state = _conn_state_dir(conn)
+        if state is None:
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        with open(state / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def detect_and_resolve_contradictions(
+    learning_id: str,
+    title: str,
+    *,
+    scope: str = "project",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """SG1 post-write hook body: demote learnings the new write contradicts.
+
+    Candidate pruning: recent (newest scan-cap) in-scope learnings sharing
+    >= 1 concept tag with *title*, still ``is_latest`` and not retired.
+    A candidate contradicts the new write when the negation-stripped
+    Jaccard similarity is > 0.9 AND a negation marker appears in exactly
+    one of the two titles (see ``contradiction_detector``).
+
+    For each hit the OLDER side (the candidate — the caller is the row
+    that was just written) is demoted non-destructively: history snapshot
+    first (S6), then ``is_latest = 0`` + ``superseded_by_learning_id``,
+    plus a ``contradiction_detected`` audit event in sqlite mirrored to
+    ``events.jsonl``. Returns the resolved pairs.
+    """
+    conn = conn or get_conn()
+    detector = _load_contradiction_detector()
+    concepts = sorted(detector.extract_concepts(title))
+    if not concepts:
+        return []
+
+    concept_marks = ", ".join("?" for _ in concepts)
+    retired_marks = ", ".join("?" for _ in _CONTRADICTION_RETIRED_STATUSES)
+    candidates = conn.execute(
+        f"""SELECT DISTINCT l.id, l.title, l.created_at
+            FROM concept_index ci
+            JOIN learnings l ON l.id = ci.learning_id
+            WHERE ci.concept IN ({concept_marks})
+              AND l.id != ?
+              AND l.scope = ?
+              AND l.is_latest = 1
+              AND l.status NOT IN ({retired_marks})
+            ORDER BY l.created_at DESC
+            LIMIT ?""",
+        (
+            *concepts,
+            learning_id,
+            scope,
+            *_CONTRADICTION_RETIRED_STATUSES,
+            detector.CANDIDATE_SCAN_CAP,
+        ),
+    ).fetchall()
+
+    resolved: list[dict[str, Any]] = []
+    for candidate in candidates:
+        similarity = detector.detect_contradiction(title, candidate["title"])
+        if similarity is None:
+            continue
+        older_id = candidate["id"]
+        details = {
+            "older_id": older_id,
+            "older_title": candidate["title"],
+            "newer_id": learning_id,
+            "newer_title": title,
+            "similarity": round(similarity, 4),
+        }
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                older_id,
+                change_type="contradiction",
+                changed_fields=["is_latest", "superseded_by_learning_id"],
+                reason=(
+                    f"contradicted by {learning_id} "
+                    f"(jaccard {similarity:.2f}): {title}"
+                ),
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                """UPDATE learnings
+                   SET is_latest = 0, superseded_by_learning_id = ?
+                   WHERE id = ?""",
+                (learning_id, older_id),
+            )
+            add_event(
+                CONTRADICTION_EVENT_TYPE,
+                older_id,
+                details,
+                conn=conn,
+                autocommit=False,
+            )
+        _append_contradiction_jsonl(
+            conn, {"type": CONTRADICTION_EVENT_TYPE, "created_at": _now_iso(), **details},
+        )
+        resolved.append(details)
+    return resolved
+
+
+def get_contradiction_count(*, conn: Optional[sqlite3.Connection] = None) -> int:
+    """Total contradiction audit events on file (powers /reflect:status)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE type = ?",
+        (CONTRADICTION_EVENT_TYPE,),
+    ).fetchone()
+    return int(row[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1574,7 +1823,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Reflect SQLite manager")
     parser.add_argument(
         "command",
-        choices=["init", "stats", "events", "history", "doctor"],
+        choices=["init", "stats", "events", "history", "contradictions", "doctor"],
         help="Action to perform",
     )
     parser.add_argument("--limit", type=int, default=20)
@@ -1596,6 +1845,7 @@ def main() -> None:
             "recall_events",
             "artifacts",
             "learning_history",
+            "concept_index",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
@@ -1616,6 +1866,22 @@ def main() -> None:
             print(
                 f"  {row['learning_id']}  updates={row['update_count']}  "
                 f"last={row['last_updated_at']}  {row['title']}"
+            )
+
+    elif args.command == "contradictions":
+        total = get_contradiction_count(conn=conn)
+        print(f"  contradictions detected: {total}")
+        for ev in get_events_by_type(
+            CONTRADICTION_EVENT_TYPE, limit=args.limit, conn=conn,
+        ):
+            details = json.loads(ev["details_json"] or "{}")
+            print(
+                f"  [{ev['created_at']}] "
+                f"older={details.get('older_id', ev['learning_id'] or '-')} "
+                f"newer={details.get('newer_id', '-')} "
+                f"jaccard={details.get('similarity', '-')}  "
+                f"{details.get('older_title', '')!r} -> "
+                f"{details.get('newer_title', '')!r}"
             )
 
     elif args.command == "doctor":
