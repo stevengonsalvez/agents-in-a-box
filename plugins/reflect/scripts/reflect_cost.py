@@ -13,8 +13,12 @@ spend over time. Tokens are the hard data; $ is authoritative where the drainer
 recorded ``cost_usd`` from ``claude -p`` and an *estimate* otherwise.
 
 Usage:
-    reflect_cost.py [--since 30d] [--by day|transcript|model|outcome]
+    reflect_cost.py [--since 30d] [--by day|transcript|model|outcome|writer]
                     [--top N] [--json] [--state-dir DIR]
+
+``--by writer`` groups on the M2 writer-output classification
+(``writer_class``: valid/prose/idle/poisoned/malformed) recorded per run by
+the drainer — the writer-health view. Pre-M2 events show as ``?``.
 
 Cached-vs-uncached framing (the 2026-05-31 lesson):
     cache_read     = cheap reuse (0.1x)   — what SHOULD dominate
@@ -140,6 +144,8 @@ def _bucket_key(e: dict, by: str) -> str:
         return str(e.get("model") or "?")
     if by == "outcome":
         return str(e.get("outcome") or "?")
+    if by == "writer":
+        return str(e.get("writer_class") or "?")
     return "?"
 
 
@@ -177,7 +183,7 @@ def aggregate(events: list[dict], by: str) -> dict[str, dict]:
 
 def render(agg: dict[str, dict], by: str, top: int, outlier_tokens: int) -> str:
     keys = sorted(agg.keys())
-    if by in ("transcript", "model", "outcome"):
+    if by in ("transcript", "model", "outcome", "writer"):
         keys = sorted(agg.keys(), key=lambda k: agg[k]["tokens"], reverse=True)
         if top:
             keys = keys[:top]
@@ -220,8 +226,8 @@ def render(agg: dict[str, dict], by: str, top: int, outlier_tokens: int) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="reflect drain cost report")
     ap.add_argument("--since", default="30d", help="window, e.g. 30d / 7d / 24h")
-    ap.add_argument("--by", default="day", choices=["day", "transcript", "model", "outcome"])
-    ap.add_argument("--top", type=int, default=15, help="limit rows for transcript/model/outcome")
+    ap.add_argument("--by", default="day", choices=["day", "transcript", "model", "outcome", "writer"])
+    ap.add_argument("--top", type=int, default=15, help="limit rows for transcript/model/outcome/writer")
     ap.add_argument("--outlier-tokens", type=int, default=5_000_000,
                     help="flag any single run above this many tokens")
     ap.add_argument("--json", action="store_true")

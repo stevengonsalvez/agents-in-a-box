@@ -33,6 +33,9 @@
 #                             more than this many total tokens.
 # REFLECT_DRAIN_MODEL         Model alias for claude -p (--model).    Default: sonnet
 # REFLECT_DRAIN_DEBOUNCE_SEC  Min seconds between drain runs.         Default: 600
+# REFLECT_DRAIN_INVALID_THRESHOLD  Consecutive non-valid writer       Default: 3
+#                             outputs before the writer-drift breaker
+#                             poisons the transcript (M2).
 # REFLECT_DISABLED            If "1", drainer is a hard no-op.        Default: 0
 #
 # Circuit-breaker rationale (2026-05-31 incident: a single drain ran 223 Opus
@@ -59,6 +62,7 @@ RETRY_FILE="${STATE_DIR}/retry-count.jsonl"
 COST_FILE="${STATE_DIR}/drain-cost.jsonl"
 POISON_FILE="${STATE_DIR}/poison-reflections.jsonl"
 DEBOUNCE_FILE="${STATE_DIR}/drain.last-run"   # epoch seconds of last drain start
+WRITER_HEALTH_FILE="${STATE_DIR}/writer-health.jsonl"  # M2: per-transcript invalid streaks
 
 MAX_PER_RUN="${REFLECT_DRAIN_MAX:-3}"
 DAILY_MAX="${REFLECT_DRAIN_DAILY_MAX:-20}"
@@ -73,10 +77,12 @@ DRAIN_MODEL="${REFLECT_DRAIN_MODEL:-sonnet}"
 DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
 CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
 DRAIN_CWD="${REFLECT_DRAIN_CWD:-$HOME}"          # W5: neutral cwd for claude -p
+INVALID_THRESHOLD="${REFLECT_DRAIN_INVALID_THRESHOLD:-3}"  # M2: writer-drift breaker
 
-# Locate sibling scripts (cascade) relative to this hook, robust to symlinks.
+# Locate sibling scripts (cascade, classifier) relative to this hook, robust to symlinks.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASCADE_SCRIPT="${SCRIPT_DIR}/../scripts/reflect_cascade.py"
+CLASSIFIER_SCRIPT="${SCRIPT_DIR}/../scripts/output_classifier.py"
 
 mkdir -p "$STATE_DIR"
 
@@ -228,13 +234,16 @@ PY
 
 record_cost_event() {
     # record_cost_event <entries> <transcript> <outcome> \
-    #   [tokens] [cost_usd] [turns] [model] [cache_read] [cache_creation] [input] [output]
+    #   [tokens] [cost_usd] [turns] [model] [cache_read] [cache_creation] [input] [output] [writer_class]
     # The token/cost fields default to 0 so pre-run outcomes (stale/poison) and
     # the legacy 3-arg call shape still emit valid JSON. `reflect cost` reads
-    # these for the cached-vs-uncached timeline (W3).
+    # these for the cached-vs-uncached timeline (W3). writer_class (M2) is the
+    # output classifier's verdict so `reflect cost --by writer` shows
+    # writer-health; empty for pre-run outcomes that never spawned a writer.
     local entry_count="$1" transcript="$2" outcome="$3"
     local tokens="${4:-0}" cost="${5:-0}" turns="${6:-0}" model="${7:-}"
     local cache_read="${8:-0}" cache_creation="${9:-0}" input_tok="${10:-0}" output_tok="${11:-0}"
+    local writer_class="${12:-}"
     # Coerce anything non-numeric to 0/valid so the JSON line never breaks.
     [[ "$tokens"         =~ ^[0-9]+$        ]] || tokens=0
     [[ "$cost"           =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
@@ -253,10 +262,11 @@ record_cost_event() {
     # are already coerced above so they serialise as bare numbers.
     python3 - "$ts" "$today" "$entry_count" "$transcript" "$outcome" "$model" \
         "$turns" "$tokens" "$cost" "$input_tok" "$output_tok" "$cache_read" "$cache_creation" \
+        "$writer_class" \
         >> "$COST_FILE" <<'PY'
 import json, sys
 (ts, day, entries, transcript, outcome, model,
- turns, tokens, cost, inp, out, cr, cc) = sys.argv[1:14]
+ turns, tokens, cost, inp, out, cr, cc, writer_class) = sys.argv[1:15]
 def _num(x):
     try:
         return int(x)
@@ -271,6 +281,7 @@ print(json.dumps({
     "turns": _num(turns), "tokens": _num(tokens), "cost_usd": _num(cost),
     "input": _num(inp), "output": _num(out),
     "cache_read": _num(cr), "cache_creation": _num(cc),
+    "writer_class": writer_class,
 }))
 PY
 }
@@ -482,12 +493,42 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
     # Sanitize cost ("?" on parse failure) to a JSON-safe number.
     [[ "$cost" =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
 
+    # ── Writer-output classifier + drift circuit breaker (M2) ─────────────────
+    # Classify the writer's raw stdout into {valid,prose,idle,poisoned,malformed}
+    # and track the per-transcript consecutive-invalid streak. A valid envelope
+    # resets the streak; INVALID_THRESHOLD consecutive invalids (or one poisoned
+    # wedge marker) trip the breaker: kill the (already-exited) writer's entry
+    # and archive it as drain_poison reason=writer_drift — mirroring the
+    # token-budget poison path — so the next entry gets a fresh writer instead
+    # of a silent slow rot of the queue. Best-effort: classifier failure leaves
+    # writer_class empty and the legacy paths below behave exactly as before.
+    local writer_class="" writer_respawn="false" writer_streak=0 writer_cats=""
+    if [[ -f "$CLASSIFIER_SCRIPT" ]]; then
+        writer_class=$(printf '%s' "$out_json" | python3 "$CLASSIFIER_SCRIPT" classify 2>/dev/null || echo "")
+        if [[ -n "$writer_class" ]]; then
+            local writer_track_json
+            writer_track_json=$(python3 "$CLASSIFIER_SCRIPT" track \
+                --state "$WRITER_HEALTH_FILE" --transcript "$transcript" \
+                --category "$writer_class" --threshold "$INVALID_THRESHOLD" 2>/dev/null || echo '{}')
+            writer_respawn=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("respawn") else "false")' 2>/dev/null || echo "false")
+            writer_streak=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("consecutive",0)))' 2>/dev/null || echo 0)
+            writer_cats=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("categories",[])))' 2>/dev/null || echo "")
+        fi
+    fi
+    if [[ "$writer_respawn" == "true" ]]; then
+        log "    WRITER RESPAWN (writer_drift): ${writer_streak} consecutive invalid outputs, categories=[${writer_cats}]; killing writer + archiving transcript"
+        emit_error error drain_poison "writer_drift: ${writer_streak} consecutive invalid writer outputs (categories: ${writer_cats})" "$transcript"
+        printf '%s\n' "$entry_json" >> "$POISON_FILE"
+        record_cost_event 1 "$transcript" "poison_writer_drift" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
+        return 2
+    fi
+
     # Fatal subprocess errors (signal, timeout, process couldn't start) — no JSON.
     if [[ -z "$out_json" ]]; then
         log "    claude -p produced no output (exit=$exit_code); likely timeout or auth issue"
         emit_error error drain_no_output "claude -p produced no output (exit=$exit_code)" "$transcript"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}"
+        record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}" 0 0 0 "" 0 0 0 0 "$writer_class"
         return 1
     fi
 
@@ -499,7 +540,7 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
         log "    BUDGET poison: run used ${total_tokens} tokens (> ${TOKEN_MAX}); archiving transcript"
         emit_error error drain_budget_exceeded "run used ${total_tokens} tokens (> ${TOKEN_MAX})" "$transcript"
         printf '%s\n' "$entry_json" >> "$POISON_FILE"
-        record_cost_event 1 "$transcript" "poison_budget" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "poison_budget" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 2
     fi
 
@@ -511,7 +552,7 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
         local retries_after
         retries_after=$(bump_retry_count "$transcript")
         log "    partial: terminal=max_turns turns=${num_turns} cost=\$${cost} tokens=${total_tokens} retries=${retries_after}"
-        record_cost_event 1 "$transcript" "partial_max_turns" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "partial_max_turns" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         # If we've hit max_turns repeatedly, give up and drop from queue.
         if [[ "$retries_after" -ge "$MAX_RETRIES" ]]; then
             emit_error warn drain_max_turns_exhausted "max_turns hit $MAX_RETRIES times" "$transcript"
@@ -523,25 +564,25 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
     if [[ "$is_error" == "True" || "$is_error" == "true" ]]; then
         log "    claude reported is_error=true terminal=${terminal_reason} result=${result_summary}"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_is_error" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "fail_is_error" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 1
     fi
 
     if [[ $exit_code -ne 0 ]]; then
         log "    claude -p exit=$exit_code (but is_error=false; treating as soft fail)"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_exit_${exit_code}" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "fail_exit_${exit_code}" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 1
     fi
 
     log "    OK turns=${num_turns} cost=\$${cost} tokens=${total_tokens} result=${result_summary}"
-    record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+    record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
     return 0
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
-    log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX dry_run=$DRY_RUN) ────"
+    log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX invalid_threshold=$INVALID_THRESHOLD dry_run=$DRY_RUN) ────"
 
     if [[ ! -s "$QUEUE_FILE" ]]; then
         log "queue empty or missing; nothing to do"

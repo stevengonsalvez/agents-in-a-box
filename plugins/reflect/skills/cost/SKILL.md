@@ -81,6 +81,11 @@ echo
 python3 "$COST_PY" --since "$WINDOW" --by model
 echo
 python3 "$COST_PY" --since "$WINDOW" --by transcript --top 10
+echo
+# Writer health (M2): each run's output classification — a healthy drain is
+# all `valid`; prose/idle/poisoned/malformed rows mean the writer is drifting
+# (3 consecutive invalids poison the transcript as writer_drift).
+python3 "$COST_PY" --since "$WINDOW" --by writer
 ```
 
 For a machine-readable view, add `--json`.
