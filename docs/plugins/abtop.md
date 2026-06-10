@@ -61,13 +61,16 @@ Once open, you are in abtop's own interactive TUI. All of abtop's modal keys pas
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Select agent row |
-| `Enter` | Jump to selected agent's session |
-| `f` | Filter by agent type |
-| `s` | Sort column |
+| `↑` / `↓` | Select an agent row |
+| `Enter` | Jump to the selected agent's tmux pane (then exits abtop back to ainb, via `--exit-on-jump`) |
+| `x` | Kill the selected session |
+| `/` | Filter sessions |
+| `v` | View menu (tree, timeline, panel toggles) |
+| `c` | Config overlay |
+| `?` | Help — abtop's full keybinding list |
 | `q` | Quit abtop, return to ainb |
 
-Refer to [abtop's own docs](https://github.com/graykode/abtop) for the full keybinding reference — the keys are abtop's, not ainb's.
+These are abtop's own keys (verified against the v0.4.7 footer bar), not ainb's — press `?` inside abtop, or see [abtop's docs](https://github.com/graykode/abtop), for the complete reference.
 
 ### CLI (`ainb abtop`)
 
