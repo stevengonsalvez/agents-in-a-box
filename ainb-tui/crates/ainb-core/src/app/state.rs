@@ -2669,6 +2669,13 @@ pub struct AppState {
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
     pub last_preview_update: Option<Instant>,
 
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview — one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
+
     // Background workspace loading state
     pub is_loading_workspaces: bool,
     pub workspace_load_error: Option<String>,
@@ -3098,6 +3105,7 @@ impl Default for AppState {
 
             // Throttled tmux preview updates
             last_preview_update: None,
+            last_status_check: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -9223,6 +9231,19 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
+        // Non-selected sessions only need a status (running/idle) refresh, which
+        // is not time-critical — sweep them on a longer cadence so we don't
+        // spawn one `capture-pane` per non-selected session on every 5s preview
+        // refresh. (perf: bead 9pb)
+        const STATUS_INTERVAL_SECS: u64 = 20;
+        let do_status_check = match self.last_status_check {
+            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
+            None => true,
+        };
+        if do_status_check {
+            self.last_status_check = Some(now);
+        }
+
         // updates: (session_id, content, claude_running) for the selected session.
         // Attention markers are derived separately from hook events in
         // `refresh_attention_markers`, not from live pane state.
@@ -9268,9 +9289,10 @@ impl AppState {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
                     }
                 }
-            } else {
-                // Non-selected sessions: only capture visible area for status detection
-                // Much cheaper — just the last screenful (~50 lines)
+            } else if do_status_check {
+                // Non-selected sessions: only capture visible area for status
+                // detection, and only on the longer status cadence. Much
+                // cheaper — just the last screenful (~50 lines). (perf: 9pb)
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
