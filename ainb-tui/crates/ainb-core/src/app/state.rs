@@ -1176,6 +1176,7 @@ pub enum ConfigCategory {
     AgentDefaults,
     Editor,
     Plugins,
+    McpPool,
     Permissions,
     Appearance,
     Analytics,
@@ -1190,6 +1191,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults,
             ConfigCategory::Editor,
             ConfigCategory::Plugins,
+            ConfigCategory::McpPool,
             ConfigCategory::Permissions,
             ConfigCategory::Appearance,
             ConfigCategory::Analytics,
@@ -1204,6 +1206,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Agent Defaults",
             ConfigCategory::Editor => "Editor",
             ConfigCategory::Plugins => "Plugins",
+            ConfigCategory::McpPool => "MCP Pool",
             ConfigCategory::Permissions => "Permissions",
             ConfigCategory::Appearance => "Appearance",
             ConfigCategory::Analytics => "Analytics",
@@ -1218,6 +1221,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "🤖",
             ConfigCategory::Editor => "📝",
             ConfigCategory::Plugins => "🔌",
+            ConfigCategory::McpPool => "🧬",
             ConfigCategory::Permissions => "🛡️",
             ConfigCategory::Appearance => "🎨",
             ConfigCategory::Analytics => "📊",
@@ -1232,6 +1236,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Model, temperature, max tokens",
             ConfigCategory::Editor => "Preferred code editor for sessions",
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
+            ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
             ConfigCategory::Permissions => "File write, shell, git approval",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
             ConfigCategory::Analytics => "Usage tracking, cost alerts",
@@ -1496,6 +1501,27 @@ impl Default for ConfigScreenState {
                 value: ConfigValue::Text("None installed".to_string()),
                 description: "Manage installed plugins from the Catalog".to_string(),
             }],
+        );
+
+        // MCP Pool (per-server `shared.*` toggles appended in from_app_config)
+        settings.insert(
+            ConfigCategory::McpPool,
+            vec![
+                ConfigSetting {
+                    key: "pool_enabled".to_string(),
+                    label: "Shared MCP Pool".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "One MCP server process shared across all host sessions"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "idle_grace_secs".to_string(),
+                    label: "Idle Grace (seconds)".to_string(),
+                    value: ConfigValue::Number(300),
+                    description: "Reap a pooled server this long after its last session detaches"
+                        .to_string(),
+                },
+            ],
         );
 
         // Analytics
@@ -1764,6 +1790,34 @@ impl ConfigScreenState {
             }
         }
 
+        // Update MCP Pool from config + append one shared-toggle per server
+        if let Some(settings) = state.settings.get_mut(&ConfigCategory::McpPool) {
+            for setting in settings.iter_mut() {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        setting.value = ConfigValue::Bool(config.mcp_pool.enabled);
+                    }
+                    "idle_grace_secs" => {
+                        setting.value = ConfigValue::Number(config.mcp_pool.idle_grace_secs as i64);
+                    }
+                    _ => {}
+                }
+            }
+            let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+            names.sort();
+            for name in names {
+                let server = &config.mcp_servers[name];
+                settings.push(ConfigSetting {
+                    key: format!("shared.{name}"),
+                    label: format!("Share: {name}"),
+                    value: ConfigValue::Bool(server.shared),
+                    description: format!(
+                        "Pool '{name}' across sessions (disable for stateful servers)"
+                    ),
+                });
+            }
+        }
+
         // Update Analytics from config
         if let Some(settings) = state.settings.get_mut(&ConfigCategory::Analytics) {
             for setting in settings.iter_mut() {
@@ -1860,6 +1914,33 @@ impl ConfigScreenState {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Apply MCP Pool settings
+        if let Some(settings) = self.settings.get(&ConfigCategory::McpPool) {
+            for setting in settings {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        if let ConfigValue::Bool(enabled) = &setting.value {
+                            config.mcp_pool.enabled = *enabled;
+                        }
+                    }
+                    "idle_grace_secs" => {
+                        if let ConfigValue::Number(secs) = &setting.value {
+                            config.mcp_pool.idle_grace_secs = (*secs).max(0) as u64;
+                        }
+                    }
+                    key => {
+                        if let (Some(name), ConfigValue::Bool(shared)) =
+                            (key.strip_prefix("shared."), &setting.value)
+                        {
+                            if let Some(server) = config.mcp_servers.get_mut(name) {
+                                server.shared = *shared;
+                            }
+                        }
+                    }
                 }
             }
         }
