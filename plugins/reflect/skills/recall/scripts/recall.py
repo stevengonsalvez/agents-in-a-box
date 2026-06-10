@@ -285,6 +285,33 @@ TEMPORAL_ARM_MAX_FILES = 5000
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
+# M8: token-economics surfacing (claude-mem TokenCalculator shape). Every
+# rendered recall block shows three numbers per learning — discovery_tokens
+# (estimated cost to find this info in the wild), read_tokens (cost to
+# re-read the stored note, via the same ≈4-chars/token estimator the R4
+# budget uses), savings_pct — next to a type glyph drawn from the ACTIVE
+# mode's learning_types (M4 ``work_emoji``; never a hardcoded table). Block
+# totals roll up to the header line, and the SessionStart hook appends a
+# one-line economics footer. Disable with RECALL_ECONOMICS=0.
+ECONOMICS_ENABLED = os.environ.get("RECALL_ECONOMICS", "1") != "0"
+# Discovery-cost fallbacks for notes that predate the write-time
+# ``discovery_tokens`` frontmatter field AND whose source transcript
+# (provenance.source_path) is gone: category averages keyed by
+# learning_type — debugging-heavy types cost more to re-derive than a
+# recorded decision. The bead's "category average" tier.
+DISCOVERY_CATEGORY_AVERAGES = {
+    "bug-fix": 3000,
+    "anti-pattern": 2500,
+    "correction": 2000,
+    "pattern": 1500,
+    "decision": 1200,
+}
+DEFAULT_DISCOVERY_TOKENS = 1500
+# Glyph for a learning whose type the active mode doesn't declare. A single
+# neutral placeholder, NOT a type→glyph mapping — the mapping itself always
+# comes from the mode (claude-mem getWorkEmoji falls back the same way).
+ECONOMICS_FALLBACK_GLYPH = "·"
+
 # --- QMD fusion config ---------------------------------------------------
 # QMD provides BM25 lexical search (fast, ~0.5s) as a complement to
 # GraphRAG's vector path. Fusing the two via RRF gives hybrid lex+vec
@@ -442,6 +469,60 @@ class Learning:
         """
         raw = self.frontmatter.get("project_id") or self.frontmatter.get("project")
         return _normalize_project(raw)
+
+    @property
+    def learning_type(self) -> str:
+        """M8: the note's taxonomy type (``learning_type`` frontmatter,
+        normalized lowercase) — the key the mode's glyph mapping and the
+        discovery category averages are looked up by. "" when absent."""
+        raw = self.frontmatter.get("learning_type")
+        if raw is None or isinstance(raw, bool):
+            return ""
+        return str(raw).strip().lower()
+
+    @property
+    def discovery_tokens(self) -> int:
+        """M8: estimated tokens the ORIGINATING session spent discovering
+        this information (claude-mem ``obs.discovery_tokens`` shape).
+
+        Resolution order:
+          1. ``discovery_tokens`` frontmatter — the integer captured at
+             write time (learning_template.md declares it; the drain fills
+             it from the source transcript length).
+          2. Source transcript size (``provenance.source_path``) ÷ 4 — the
+             re-derivation cost when the transcript still exists. stat()
+             only, never a read: transcripts can be multi-MB.
+          3. Category average by learning_type, then the generic default.
+        Never raises; malformed values degrade down the chain.
+        """
+        raw = self.frontmatter.get("discovery_tokens")
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                num = int(raw)
+                if num >= 0:
+                    return num
+            except (TypeError, ValueError):
+                pass
+        provenance = self.frontmatter.get("provenance")
+        if isinstance(provenance, dict):
+            source = provenance.get("source_path")
+            if isinstance(source, str) and source.strip():
+                try:
+                    size = Path(source.strip()).expanduser().stat().st_size
+                    if size > 0:
+                        return max(1, size // 4)
+                except OSError:
+                    pass
+        return DISCOVERY_CATEGORY_AVERAGES.get(
+            self.learning_type, DEFAULT_DISCOVERY_TOKENS
+        )
+
+    @property
+    def read_tokens(self) -> int:
+        """M8: cost to re-read this stored learning on injection — the SAME
+        ≈4-chars/token estimator the R4 token budget uses (the active
+        tokenizer of this pipeline)."""
+        return _est_tokens(self.chunk_text)
 
     @property
     def how_to_apply(self) -> str:
@@ -1553,6 +1634,102 @@ def filter_by_token_budget(
     return out
 
 
+# --- M8: token economics ---------------------------------------------------
+
+def _plugin_scripts_dir() -> Path:
+    """plugins/reflect/scripts — where mode_loader.py (M4) lives relative to
+    this script (skills/recall/scripts/recall.py)."""
+    return Path(__file__).resolve().parents[3] / "scripts"
+
+
+def mode_glyphs() -> dict[str, str]:
+    """M8: ``{learning_type_id: glyph}`` from the ACTIVE mode (M4).
+
+    The mapping is declarative mode data, never a constant in this script:
+    each mode's ``learning_types`` entries carry a ``work_emoji`` (claude-mem
+    plugin/modes/code.json shape; the display ``emoji`` is the fallback per
+    type). Active-mode resolution (env > project config > TOML > default)
+    is mode_loader's job — re-resolved on every call so REFLECT_MODE /
+    REFLECT_MODES_DIR changes take effect without a re-import.
+
+    Silent-fail: any problem (mode_loader missing in a stripped deploy,
+    broken mode file, empty modes dir) returns {} so economics degrade to
+    the neutral fallback glyph instead of breaking recall.
+    """
+    try:
+        scripts = _plugin_scripts_dir()
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import mode_loader
+
+        mode = mode_loader.get_active_mode()
+        glyphs: dict[str, str] = {}
+        for entry in mode_loader.get_learning_types(mode):
+            if not isinstance(entry, dict):
+                continue
+            tid = str(entry.get("id", "") or "").strip().lower()
+            glyph = str(
+                entry.get("work_emoji") or entry.get("emoji") or ""
+            ).strip()
+            if tid and glyph:
+                glyphs[tid] = glyph
+        return glyphs
+    except Exception:
+        return {}
+
+
+def learning_economics(
+    learning: Learning, glyphs: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """M8: one learning's token economics (claude-mem
+    formatObservationTokenDisplay shape).
+
+    ``savings_pct`` = round((discovery − read) / discovery × 100); 0 when
+    discovery is unknown-zero. Negative when the stored note is LONGER than
+    its estimated discovery cost — surfaced honestly, not clamped.
+    """
+    read = learning.read_tokens
+    discovery = learning.discovery_tokens
+    pct = round((discovery - read) / discovery * 100) if discovery > 0 else 0
+    if glyphs is None:
+        glyphs = mode_glyphs()
+    return {
+        "discovery_tokens": discovery,
+        "read_tokens": read,
+        "savings_pct": pct,
+        "glyph": glyphs.get(learning.learning_type)
+        or ECONOMICS_FALLBACK_GLYPH,
+    }
+
+
+def block_economics(learnings: list[Learning]) -> dict[str, int]:
+    """M8: per-block roll-up (claude-mem calculateTokenEconomics shape):
+    total injected (read) tokens, total discovery tokens, saved = the
+    difference, and the block-level savings percentage."""
+    read = sum(lrn.read_tokens for lrn in learnings)
+    discovery = sum(lrn.discovery_tokens for lrn in learnings)
+    saved = discovery - read
+    pct = round(saved / discovery * 100) if discovery > 0 else 0
+    return {
+        "count": len(learnings),
+        "read_tokens": read,
+        "discovery_tokens": discovery,
+        "saved_tokens": saved,
+        "savings_pct": pct,
+    }
+
+
+def _economics_row(econ: dict[str, Any]) -> str:
+    """M8: the per-row display — ``<glyph> D:<n> → R:<n> (-<pct>%)``.
+    A net-negative row renders ``(+<pct>%)`` so a bloated note is visible."""
+    pct = econ["savings_pct"]
+    sign = "-" if pct >= 0 else "+"
+    return (
+        f"{econ['glyph']} D:{econ['discovery_tokens']} → "
+        f"R:{econ['read_tokens']} ({sign}{abs(pct)}%)"
+    )
+
+
 def render_markdown(
     learnings: list[Learning],
     query: str,
@@ -1565,20 +1742,36 @@ def render_markdown(
     ("just the rule" instead of a paragraph). Legacy notes without the field
     fall back to the matching body section, then key_insight/title — never
     dropped, never crash.
+
+    M8: every row carries its token economics next to the mode's type glyph
+    (``<glyph> D:<n> → R:<n> (-<pct>%)``) and the header line rolls up the
+    block totals — recall is self-justifying about its ROI. Disable with
+    RECALL_ECONOMICS=0 for byte-identical pre-M8 output.
     """
     if not learnings:
         return ""
     title = f"## Prior learnings relevant to `{query[:80]}`"
     if field:
         title += f" (field: {field})"
+    glyphs = mode_glyphs() if ECONOMICS_ENABLED else {}
+    if ECONOMICS_ENABLED:
+        totals = block_economics(learnings)
+        title += (
+            f" — {totals['count']} learnings, "
+            f"~{totals['read_tokens']} tok injected, "
+            f"est ~{totals['saved_tokens']} tok saved"
+        )
     lines = [title + "\n"]
     used = len(lines[0])
     for lrn in learnings:
+        suffix = ""
+        if ECONOMICS_ENABLED:
+            suffix = " — " + _economics_row(learning_economics(lrn, glyphs))
         if field:
             value = lrn.field_value(field) or lrn.key_insight or lrn.title
-            entry = f"- **[{lrn.id}]** {value}\n"
+            entry = f"- **[{lrn.id}]** {value}{suffix}\n"
         else:
-            header = f"- **[{lrn.id}]** {lrn.key_insight or lrn.title}"
+            header = f"- **[{lrn.id}]** {lrn.key_insight or lrn.title}{suffix}"
             how = lrn.how_to_apply
             entry = header + (f"\n  How to apply: {how}" if how else "") + "\n"
         if used + len(entry) > max_chars:
@@ -1601,7 +1794,13 @@ def render_json(
     ``field_value`` — the projected frontmatter field (body-section fallback
     for legacy notes), or null when the note genuinely has nothing. JSON is
     programmatic, so unlike the markdown rendering it never substitutes
-    key_insight/title — callers can tell "has the field" from "doesn't"."""
+    key_insight/title — callers can tell "has the field" from "doesn't".
+
+    M8: each result carries an ``economics`` object (discovery_tokens /
+    read_tokens / savings_pct / glyph) and the envelope a block-total
+    ``economics`` roll-up; both null/absent when RECALL_ECONOMICS=0."""
+    glyphs = mode_glyphs() if ECONOMICS_ENABLED else {}
+
     def _result(lrn: Learning) -> dict[str, Any]:
         row: dict[str, Any] = {
             "id": lrn.id,
@@ -1617,6 +1816,9 @@ def render_json(
         }
         if field:
             row["field_value"] = lrn.field_value(field) or None
+        if ECONOMICS_ENABLED:
+            # M8: per-result token economics next to the mode glyph.
+            row["economics"] = learning_economics(lrn, glyphs)
         return row
 
     return json.dumps(
@@ -1629,6 +1831,10 @@ def render_json(
             "temporal": temporal.to_dict() if temporal else None,
             # S1: the projected field name, or null when no projection.
             "field": field or None,
+            # M8: block-total token economics, or null when disabled.
+            "economics": (
+                block_economics(learnings) if ECONOMICS_ENABLED else None
+            ),
             "results": [_result(lrn) for lrn in learnings],
         },
         indent=2,
@@ -1638,30 +1844,36 @@ def render_json(
 def log_recall(
     query: str, mode: str, count: int, cached: bool,
     cache_tier: str | None = None,
+    economics: dict[str, int] | None = None,
 ) -> None:
     """D_phase6: append-only jsonl for future helpfulness tracking.
 
     R9: ``cache_tier`` records WHICH tier answered ("exact" / "fuzzy" /
     None) so the fuzzy hit-rate over a session is measurable from the log.
+
+    M8: ``economics`` (the block_economics roll-up) lands as
+    injected_tokens / discovery_tokens / saved_tokens / savings_pct so the
+    A4 followup-rate diagnostic can correlate economics with recall quality.
     """
     base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
     log = base / "recall_log.jsonl"
+    record = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "query": query,
+        "mode": mode,
+        "count": count,
+        "cached": cached,
+        "cache_tier": cache_tier,
+    }
+    if economics is not None:
+        record["injected_tokens"] = economics.get("read_tokens", 0)
+        record["discovery_tokens"] = economics.get("discovery_tokens", 0)
+        record["saved_tokens"] = economics.get("saved_tokens", 0)
+        record["savings_pct"] = economics.get("savings_pct", 0)
     try:
         base.mkdir(parents=True, exist_ok=True)
         with log.open("a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "query": query,
-                        "mode": mode,
-                        "count": count,
-                        "cached": cached,
-                        "cache_tier": cache_tier,
-                    }
-                )
-                + "\n"
-            )
+            f.write(json.dumps(record) + "\n")
     except OSError:
         pass
 
@@ -1955,6 +2167,9 @@ def recall(
             log_recall(
                 query, mode, len(learnings), cached=True,
                 cache_tier=cache_tier,  # R9
+                economics=(  # M8
+                    block_economics(learnings) if ECONOMICS_ENABLED else None
+                ),
             )
             if gap_log and not learnings:  # SG6
                 log_knowledge_gap(query, session_id)
@@ -2076,7 +2291,12 @@ def recall(
     else:
         learnings = learnings[:limit]
     learnings = filter_by_token_budget(learnings, max_tokens)  # R4
-    log_recall(query, mode, len(learnings), cached=False)
+    log_recall(
+        query, mode, len(learnings), cached=False,
+        economics=(  # M8
+            block_economics(learnings) if ECONOMICS_ENABLED else None
+        ),
+    )
     if gap_log and not learnings:  # SG6
         log_knowledge_gap(query, session_id)
     record_followup_diagnostic(query, learnings, session_id, followup_track)  # A4

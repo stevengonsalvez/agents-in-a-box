@@ -236,6 +236,38 @@ def join_blocks(*blocks: str) -> str:
     return "\n\n".join(b for b in blocks if b)
 
 
+# --- M8: token-economics footer -------------------------------------------
+
+# Matches the per-row economics recall.py renders next to each learning's
+# type glyph: "D:<discovery> → R:<read> (-<pct>%)". The hook owns the
+# session-level footer; recall.py owns the per-row numbers — parsing our
+# own row format keeps this hook stdlib-only (no yaml import, no second
+# recall subprocess).
+ECONOMICS_ROW_RE = re.compile(r"D:(\d+) → R:(\d+)")
+
+
+def economics_footer(block: str) -> str:
+    """M8: one-line token-economics roll-up for the injected recall block.
+
+    'memory: N learnings, ~X tok injected, est ~Y tok saved' — X is the
+    re-read cost actually paid this session, Y the discovery cost the
+    learnings spare the agent from re-deriving (claude-mem renderFooter
+    shape). Returns "" when the block carries no economics rows (economics
+    disabled via RECALL_ECONOMICS=0, empty inject, skills-tier win) so the
+    footer never appears without numbers backing it.
+    """
+    rows = ECONOMICS_ROW_RE.findall(block or "")
+    if not rows:
+        return ""
+    discovery = sum(int(d) for d, _ in rows)
+    read = sum(int(r) for _, r in rows)
+    saved = discovery - read
+    return (
+        f"memory: {len(rows)} learnings, ~{read} tok injected, "
+        f"est ~{saved} tok saved"
+    )
+
+
 # --- O2: conventions tier (Tier-1 ambient — pre-synthesized doc pointer) --
 
 def conventions_symlink_enabled() -> bool:
@@ -463,7 +495,10 @@ def _main_body() -> NoReturn:
     if r.returncode != 0:
         emit(ambient_block)
 
-    emit(join_blocks(ambient_block, (r.stdout or "").strip()))
+    recall_block = (r.stdout or "").strip()
+    # M8: append the one-line token-economics footer (sums the per-row
+    # D:/R: numbers recall.py rendered; "" when there are none).
+    emit(join_blocks(ambient_block, recall_block, economics_footer(recall_block)))
 
 
 def main() -> NoReturn:

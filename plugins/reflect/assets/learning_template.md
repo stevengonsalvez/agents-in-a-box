@@ -20,6 +20,12 @@ confidence: {{CONFIDENCE}}
 # defaults for legacy tier-only notes.
 confidence_num: {{CONFIDENCE_NUM}}
 learning_type: {{LEARNING_TYPE}}
+# M8: token economics — integer estimate of the tokens the ORIGINATING
+# session spent discovering this information (≈ source transcript chars / 4).
+# Captured at WRITE time; recall surfaces discovery-vs-re-read cost on every
+# injected block. Legacy notes without it fall back to the source transcript
+# size, then a per-type category average.
+discovery_tokens: {{DISCOVERY_TOKENS}}
 title: "{{TITLE}}"
 tags: [{{TAGS}}]
 symptoms:

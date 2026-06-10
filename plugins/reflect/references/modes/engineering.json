@@ -8,31 +8,36 @@
       "id": "pattern",
       "label": "Pattern",
       "description": "Reusable technique or approach worth preserving",
-      "emoji": "◆"
+      "emoji": "◆",
+      "work_emoji": "⌕"
     },
     {
       "id": "correction",
       "label": "Correction",
       "description": "Wrong approach identified; the behaviour to use instead",
-      "emoji": "↻"
+      "emoji": "↻",
+      "work_emoji": "⌕"
     },
     {
       "id": "bug-fix",
       "label": "Bug Fix",
       "description": "Problem diagnosed and solved, with root cause",
-      "emoji": "●"
+      "emoji": "●",
+      "work_emoji": "⚒"
     },
     {
       "id": "decision",
       "label": "Decision",
       "description": "Chose X over Y with rationale",
-      "emoji": "⚖"
+      "emoji": "⚖",
+      "work_emoji": "⚖"
     },
     {
       "id": "anti-pattern",
       "label": "Anti-Pattern",
       "description": "What NOT to do, discovered through failure",
-      "emoji": "⚠"
+      "emoji": "⚠",
+      "work_emoji": "⚠"
     }
   ],
   "concepts": [
