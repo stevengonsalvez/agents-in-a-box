@@ -88,9 +88,7 @@ pub async fn send(session: &Session, text: &str) -> Result<SendOutcome> {
 
     Ok(outcome.unwrap_or_else(|| SendOutcome::Failed {
         reason: match mode {
-            Transport::TmuxOnly => {
-                "no live tmux session found (transport=tmux-only)".to_string()
-            }
+            Transport::TmuxOnly => "no live tmux session found (transport=tmux-only)".to_string(),
             _ => "no live tmux session and no reachable broker peer".to_string(),
         },
     }))
