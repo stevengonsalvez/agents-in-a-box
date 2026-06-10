@@ -19,7 +19,9 @@ use ainb_hangar_proto::settings::{
 };
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
-use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
+use super::agent_picker::{
+    reduce_agent_picker, AgentPickerEvent, AgentPickerIntent, AgentPickerState,
+};
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
 use super::daemon_health::DaemonHealthState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
@@ -104,6 +106,24 @@ pub enum KanbanAction {
     },
 }
 
+/// A deferred daemon RPC raised by the agent-picker modal (e38.8).
+///
+/// Like [`KanbanAction`], the sync key router can't `await`; the picker stashes
+/// the action on [`ScreenStates::pending_assign_action`] and the plugin's
+/// `render` pass drains it and fires `hangar/issue_update` over the daemon socket
+/// cap, setting the issue's assignee to the picked actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueAssignAction {
+    /// Assign an actor to an issue (Enter on a picked actor) —
+    /// `hangar/issue_update` with `assignee` set.
+    Assign {
+        /// The issue the picker was opened for (`issue.id`).
+        issue_id: String,
+        /// The picked actor in canonical `member:<id>` / `agent:<id>` form.
+        actor_ref: String,
+    },
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -151,6 +171,10 @@ pub struct ScreenStates {
     /// `render` pass to fire `hangar/task_transition` over the daemon socket
     /// (P8.4). `None` when idle.
     pub pending_kanban_action: Option<KanbanAction>,
+    /// An issue-assign RPC raised by the agent-picker modal (Enter on a picked
+    /// actor), awaiting the `render` pass to fire `hangar/issue_update` over the
+    /// daemon socket (e38.8). `None` when idle.
+    pub pending_assign_action: Option<IssueAssignAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -275,6 +299,12 @@ impl ScreenStates {
     /// Take the pending Kanban card-move RPC raised by the board, if any (P8.4).
     pub const fn take_pending_kanban_action(&mut self) -> Option<KanbanAction> {
         self.pending_kanban_action.take()
+    }
+
+    /// Take the pending issue-assign RPC raised by the agent picker, if any
+    /// (e38.8).
+    pub const fn take_pending_assign_action(&mut self) -> Option<IssueAssignAction> {
+        self.pending_assign_action.take()
     }
 }
 
@@ -634,9 +664,16 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
     }
 }
 
-/// Agent-picker key routing: Esc (or a reducer-closed state) raises
-/// [`NavIntent::CloseModal`] so the plugin pops the modal back to its prior
-/// screen.
+/// Agent-picker key routing: fold the key into the pure reducer, then act on the
+/// reduction.
+///
+/// Enter raises [`AgentPickerIntent::Assign`]; the sync router can't `await`, so
+/// the action is lifted into a deferred [`IssueAssignAction::Assign`] on
+/// [`ScreenStates::pending_assign_action`] (the `render` pass drains it and fires
+/// `hangar/issue_update` over the daemon socket) and the modal is dismissed —
+/// pressing Enter assigns the issue *and* closes the picker (e38.8). Esc (or any
+/// reducer-closed state) raises [`NavIntent::CloseModal`] with no assign, popping
+/// the modal back to its prior screen.
 fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
     let picker = states.agent_picker.take()?;
     let ev = match key.code {
@@ -644,6 +681,22 @@ fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIn
         _ => AgentPickerEvent::Key(key_char(key)?),
     };
     let out = reduce_agent_picker(&picker, ev);
+
+    // Enter on a picked actor: queue the assign RPC and dismiss the modal.
+    if let Some(AgentPickerIntent::Assign {
+        issue_id,
+        actor_ref,
+    }) = out.intent
+    {
+        states.agent_picker = None;
+        states.pending_assign_action = Some(IssueAssignAction::Assign {
+            issue_id: issue_id.as_str().to_string(),
+            actor_ref,
+        });
+        return Some(NavIntent::CloseModal);
+    }
+
+    // No assign: Esc (or a reducer-closed state) dismisses; anything else stays.
     let closed = out.state.is_closed();
     states.agent_picker = Some(out.state);
     if closed {

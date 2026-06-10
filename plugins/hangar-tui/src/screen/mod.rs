@@ -27,8 +27,8 @@ pub mod skill_manager;
 pub mod task_detail;
 
 pub use app_screens::{
-    render_body, route_key, AutopilotAction, KanbanAction, NavIntent, ScreenStates, SkillAction,
-    WorkspaceAction,
+    render_body, route_key, AutopilotAction, IssueAssignAction, KanbanAction, NavIntent,
+    ScreenStates, SkillAction, WorkspaceAction,
 };
 pub use router::reduce;
 

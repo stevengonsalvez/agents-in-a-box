@@ -96,6 +96,9 @@ const TASKS_REQ_ID: i64 = 22;
 const TASK_TRANSITION_REQ_ID: i64 = 23;
 /// JSON-RPC id for the `hangar/daemon_health` snapshot request (P8.5).
 const DAEMON_HEALTH_REQ_ID: i64 = 24;
+/// JSON-RPC id for a `hangar/issue_update` request raised by the agent picker
+/// (e38.8).
+const ISSUE_UPDATE_REQ_ID: i64 = 25;
 /// How many trailing log lines the logs pane reads from the newest `daemon.*`
 /// file on each refresh (P8.6). Bounded so a huge log file never blows up the
 /// pane; the daily rotation keeps a single day's file the practical ceiling.
@@ -341,16 +344,18 @@ impl HangarPlugin {
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
-            // kanban task transition) answer `{}`; we re-fetch the relevant lists
-            // to refresh derived columns (`used`, next-tick, enabled, last-run,
-            // task status buckets).
+            // kanban task transition, issue assign) answer with the changed row or
+            // `{}`; we re-fetch the relevant lists to refresh derived columns
+            // (`used`, next-tick, enabled, last-run, task status buckets, issue
+            // assignee).
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
                 | SKILL_DETACH_REQ_ID
                 | AUTOPILOT_FIRE_REQ_ID
                 | AUTOPILOT_TOGGLE_REQ_ID
-                | TASK_TRANSITION_REQ_ID,
+                | TASK_TRANSITION_REQ_ID
+                | ISSUE_UPDATE_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -654,6 +659,43 @@ impl HangarPlugin {
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host
                 .log_info(format!("hangar: task transition send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fire a deferred issue-assign RPC raised by the agent-picker modal (e38.8).
+    ///
+    /// Maps the [`IssueAssignAction::Assign`] to `hangar/issue_update`, setting
+    /// the issue's `assignee` to the picked actor-ref, framed over the socket cap.
+    /// A send failure is logged but non-fatal — the assignee simply doesn't change
+    /// (the next snapshot reconciles).
+    async fn apply_assign_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::IssueAssignAction,
+    ) {
+        use crate::screen::IssueAssignAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let IssueAssignAction::Assign {
+            issue_id,
+            actor_ref,
+        } = action;
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id, "assignee": actor_ref
+        });
+        let Ok(body) = encode_request(
+            ISSUE_UPDATE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_UPDATE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: issue update send failed: {e}"))
                 .await;
         }
     }
@@ -983,6 +1025,12 @@ impl Plugin for HangarPlugin {
         // board and fire `hangar/task_transition` over the daemon socket.
         if let Some(action) = self.screens.take_pending_kanban_action() {
             self.apply_kanban_action(host, action).await;
+        }
+        // e38.8: drain any deferred issue-assign (Enter in the agent picker)
+        // raised by the modal and fire `hangar/issue_update` over the daemon
+        // socket to set the issue's assignee.
+        if let Some(action) = self.screens.take_pending_assign_action() {
+            self.apply_assign_action(host, action).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active
