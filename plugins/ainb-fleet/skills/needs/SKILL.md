@@ -78,6 +78,35 @@ Each row in the output array:
 }
 ```
 
+## Enrich — token-efficient (cache-aware)
+
+Each row also carries three enrich fields:
+
+| field | meaning |
+|---|---|
+| `enrich_key` | content hash of the card; the producer's cache key |
+| `enriched` | a **fresh cached** suggestion (free) — render it as-is |
+| `need_enrich` | `true` only when there is no cache entry and enrichment is on |
+
+Draft the missing ones by COUNT, never one subagent per session:
+
+```
+stale = rows where need_enrich == true
+  stale == 0  ─▶ render cached/snippet only         (0 tokens)
+  stale ≤ 6   ─▶ draft inline in THIS session        (0 subagents)
+  stale  > 6  ─▶ /ainb-fleet:fleet-needs workflow     (1 batched agent)
+```
+
+Cutoff: `AINB_FLEET_ENRICH_INLINE_MAX` (default 6). When you draft inline,
+persist each so the next read is free:
+
+```bash
+ainb fleet enrich-cache put --key "<enrich_key>" --suggestion "<text>"
+```
+
+`ainb fleet needs --no-enrich` (or `AINB_FLEET_ENRICH=0`) skips all of this —
+cached suggestions still render, nothing new is drafted, 0 tokens.
+
 ## Render template — Jarvis HUD
 
 The calling LLM session should render this exact layout in chat:

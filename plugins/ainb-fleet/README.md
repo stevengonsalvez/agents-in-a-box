@@ -225,12 +225,12 @@ A session present in two sources collapses into one record with
 **Now (landing)**
 
 - [x] tmux-first transport with `AINB_FLEET_TRANSPORT` toggle
-- [ ] Batched enrichment — collapse per-session subagents into ≤1 call
-- [ ] Hybrid inline / batched enrich locus by fleet size
-- [ ] Content-hash enrich cache (`sha(ctx)`, LRU, no TTL)
-- [ ] JSONL fallback for ERR detection on pane miss
-- [ ] Unified enrich path across `needs` and `standup`
-- [ ] `--no-enrich` instant 0-token HUD
+- [x] Batched enrichment — collapse per-session subagents into ≤1 call
+- [x] Hybrid inline / batched enrich locus by fleet size (`AINB_FLEET_ENRICH_INLINE_MAX`)
+- [x] Content-hash enrich cache (`sha(ctx)`, LRU, no TTL)
+- [x] JSONL fallback for ERR detection on pane miss
+- [x] Unified enrich path across `needs` and `standup`
+- [x] `--no-enrich` instant 0-token HUD
 
 **Next**
 

@@ -1310,6 +1310,12 @@ impl CliCommand for FleetCommand {
                     .long("text")
                     .action(clap::ArgAction::SetTrue)
                     .help("Force text output even with --format json"),
+            )
+            .arg(
+                clap::Arg::new("no-enrich")
+                    .long("no-enrich")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Skip AI enrichment — 0-token output (env AINB_FLEET_ENRICH=0)"),
             );
         let broadcast = Command::new("broadcast")
             .about("Send one prompt to selected sessions (peers-first, tmux fallback)")
@@ -1349,6 +1355,27 @@ impl CliCommand for FleetCommand {
                     .long("idle-min")
                     .value_parser(clap::value_parser!(i64))
                     .help("Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)"),
+            )
+            .arg(
+                clap::Arg::new("no-enrich")
+                    .long("no-enrich")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Skip AI enrichment — 0-token HUD (env AINB_FLEET_ENRICH=0)"),
+            );
+        let enrich_cache = Command::new("enrich-cache")
+            .about("Content-addressed enrich cache (the producer's write path)")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("put")
+                    .about("Store a drafted suggestion under a card's enrich_key")
+                    .arg(clap::Arg::new("key").long("key").required(true))
+                    .arg(clap::Arg::new("suggestion").long("suggestion").required(true)),
+            )
+            .subcommand(
+                Command::new("get")
+                    .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
+                    .arg(clap::Arg::new("key").long("key").required(true)),
             );
         let daemon = Command::new("daemon")
             .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
@@ -1367,7 +1394,8 @@ impl CliCommand for FleetCommand {
                 .subcommand(broadcast)
                 .subcommand(sequence)
                 .subcommand(needs)
-                .subcommand(daemon),
+                .subcommand(daemon)
+                .subcommand(enrich_cache),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
