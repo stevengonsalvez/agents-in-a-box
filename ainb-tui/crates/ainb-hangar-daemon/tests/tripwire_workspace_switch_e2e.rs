@@ -67,12 +67,11 @@ fn workspace_switch_e2e() {
     // long-resolved P4.9 render blocker), which silently masked the notifyd
     // first-run dialog swallowing the `g` nav on CI. Fail loud instead.
     let sess = TuiSession::spawn(&bin, pipe.home());
-    if sess.open_hangar_and_wait_ready().is_none() {
-        panic!(
-            "hangar issue list never rendered (precondition):\n{}",
-            sess.capture()
-        );
-    }
+    assert!(
+        sess.open_hangar_and_wait_ready().is_some(),
+        "hangar issue list never rendered (precondition):\n{}",
+        sess.capture()
+    );
 
     // 1. Open Settings.
     sess.send_key(",");

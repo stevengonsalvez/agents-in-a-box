@@ -58,12 +58,11 @@ fn warning_shown_on_first_provider_use() {
     // real regression, not a missing prerequisite. This used to SKIP (citing
     // the long-resolved P4.9 render blocker), which silently masked the notifyd
     // first-run dialog swallowing the `g` nav on CI. Fail loud instead.
-    if sess.open_hangar_and_wait_ready().is_none() {
-        panic!(
-            "hangar screen never rendered (precondition):\n{}",
-            sess.capture()
-        );
-    }
+    assert!(
+        sess.open_hangar_and_wait_ready().is_some(),
+        "hangar screen never rendered (precondition):\n{}",
+        sess.capture()
+    );
 
     // POSITIVE: the danger-full-access warning modal appears within 10s.
     let shown = sess.poll_capture(Instant::now() + Duration::from_secs(10), |c| {

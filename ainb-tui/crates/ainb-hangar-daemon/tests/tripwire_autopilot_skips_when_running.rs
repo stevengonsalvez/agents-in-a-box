@@ -73,6 +73,10 @@ async fn next_event(
     tokio::time::timeout(timeout, rx.recv()).await.ok().flatten()
 }
 
+// One linear scheduler scenario (seed → first fire → saturated skip → drain);
+// splitting it would separate the in-flight-run setup from the skip assertion
+// it exists to explain.
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn autopilot_skips_tick_when_prior_run_in_flight() {
     let dir = tempfile::tempdir().expect("tempdir");
