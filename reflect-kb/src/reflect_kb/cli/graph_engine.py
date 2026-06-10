@@ -266,6 +266,21 @@ class LearningsGraphEngine:
         result = self._graph.query(query, param=param)
         return result if result else ""
 
+    def get_typed_edges(self, link_types: Optional[List[str]] = None) -> List[dict]:
+        """Return stored graph edges, optionally filtered by typed link (S2).
+
+        Typed causal links from sidecars survive into the GraphML as
+        ``[type]``-prefixed edge descriptions (see
+        ``entity_store.Relationship.typed_description``). This recovers
+        them so the graph-expansion arm (R1) can filter by type, e.g.
+        ``get_typed_edges(["caused_by", "enables"])``.
+
+        Stdlib XML parse — works on slim builds without networkx.
+        """
+        from reflect_kb.cli.graph_links import get_typed_edges
+
+        return get_typed_edges(self._cache_dir, link_types=link_types)
+
     def clear_cache(self):
         """Clear the graph cache for full rebuild."""
         if self._cache_dir.exists():
