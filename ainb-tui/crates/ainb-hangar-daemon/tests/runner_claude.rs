@@ -163,6 +163,39 @@ exit 1"#,
 }
 
 #[tokio::test]
+async fn exec_extempfail_75_marks_runtime_offline() {
+    // EX_TEMPFAIL (75) is the provider's "transient runtime failure, retry later"
+    // signal — it must classify as the infra/retryable RuntimeOffline reason
+    // (which the daemon's retry chain re-dispatches), NOT the terminal AgentError
+    // that every other non-zero exit maps to.
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-claude.sh",
+        r#"echo '{"type":"system","session_id":"s"}'
+exit 75"#,
+    );
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+
+    match outcome {
+        RunOutcome::Failed { reason, result } => {
+            assert_eq!(reason, FailureReason::RuntimeOffline);
+            assert_eq!(result.exit_code, Some(75));
+        }
+        RunOutcome::Success(_) => panic!("expected Failed(RuntimeOffline), got Success"),
+    }
+}
+
+#[tokio::test]
 async fn exec_parses_session_id_from_first_system_message() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());

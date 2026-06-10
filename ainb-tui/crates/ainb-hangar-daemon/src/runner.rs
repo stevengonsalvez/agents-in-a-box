@@ -21,8 +21,13 @@
 //! The runner does **not** itself touch the database. It returns a
 //! [`RunOutcome`] the daemon's claim loop maps onto the FSM:
 //! - clean exit (code 0)        → [`RunOutcome::Success`] → daemon `CompleteTask`,
-//! - non-zero exit              → [`RunOutcome::Failed`] with
-//!   [`FailureReason::AgentError`] (the agent itself errored / gave up),
+//! - exit [`EX_TEMPFAIL`] (75)   → [`RunOutcome::Failed`] with
+//!   [`FailureReason::RuntimeOffline`] — a provider's POSIX `sysexits.h`
+//!   "temporary failure, retry later" code, the infra/retryable failure the
+//!   daemon's retry chain (e38.28) re-dispatches as a child task,
+//! - any other non-zero exit    → [`RunOutcome::Failed`] with
+//!   [`FailureReason::AgentError`] (the agent itself errored / gave up — terminal,
+//!   not retried),
 //! - deadline exceeded → kill   → [`RunOutcome::Failed`] with
 //!   [`FailureReason::Timeout`].
 
@@ -66,6 +71,17 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CODEX_HOME",
     "CURSOR_HOME",
 ];
+
+/// The POSIX `sysexits.h` `EX_TEMPFAIL` (75): "temporary failure, indicating
+/// something that is not really an error … the request can be retried later".
+///
+/// A provider that detects its runtime/API is transiently unreachable exits with
+/// this distinguished code so the daemon classifies the run as
+/// [`FailureReason::RuntimeOffline`] (infra, retryable) rather than
+/// [`FailureReason::AgentError`] (the agent gave up, terminal). This is the seam
+/// that lets a retryable failure flow into the e38.28 retry chain; every OTHER
+/// non-zero exit stays `AgentError`.
+const EX_TEMPFAIL: i32 = 75;
 
 /// The provider-log file written under [`ExecEnv::logs`] for the `claude`
 /// provider.
@@ -541,6 +557,20 @@ impl Runner {
             }
         } else if exit_code == Some(0) {
             RunOutcome::Success(result)
+        } else if exit_code == Some(EX_TEMPFAIL) {
+            // `EX_TEMPFAIL` (75): the provider signalled a transient runtime
+            // failure. Classify as infra/retryable so the daemon's retry chain
+            // re-dispatches a child task, rather than treating it as a terminal
+            // agent error.
+            tracing::warn!(
+                provider = spec.name,
+                reason = "runtime_offline",
+                "runner_failed"
+            );
+            RunOutcome::Failed {
+                reason: FailureReason::RuntimeOffline,
+                result,
+            }
         } else {
             tracing::warn!(provider = spec.name, reason = "agent_error", exit_code = ?exit_code, "runner_failed");
             RunOutcome::Failed {
