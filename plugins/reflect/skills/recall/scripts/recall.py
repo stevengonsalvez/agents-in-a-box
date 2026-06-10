@@ -107,6 +107,14 @@ PROOF_COUNT_ALPHA = _env_alpha("RECALL_PROOF_ALPHA", 0.1)
 # per-project sharding lands, its shard-scoped path should pass
 # current_project="" so affinity only kicks in on the global path.
 PROJECT_AFFINITY_ALPHA = _env_alpha("RECALL_PROJECT_ALPHA", 0.2)
+# SG3: speculative down-rank strength. Idle-triggered reflections are tagged
+# 'speculative' by the drain (the session went quiet rather than ending, so
+# it may resume and overturn the conclusion). Speculative-tagged learnings
+# take the boost FLOOR (1 − α/2, default −10%); everything else sits at the
+# neutral 0.5 norm so its score is EXACTLY unchanged. Set to 0 (env
+# RECALL_SPECULATIVE_ALPHA) to disable.
+SPECULATIVE_ALPHA = _env_alpha("RECALL_SPECULATIVE_ALPHA", 0.2)
+SPECULATIVE_TAG = "speculative"
 # R8: recency normalization — linear decay over a year, floored at 0.1
 # (Hindsight reranking.py): even ancient notes keep a toehold.
 RECENCY_WINDOW_DAYS = 365.0
@@ -1238,10 +1246,10 @@ def rerank(
     current_project: str | None = None,
 ) -> list[Learning]:
     """
-    D8 + S4 + R8 + R16: score = CE × confidence_boost × recency_boost
-    × tag_boost × proof_count_boost × project_affinity_boost — every boost
-    multiplicative and bounded to ±α/2 (Hindsight ``apply_combined_scoring``
-    shape; see :func:`bounded_boost`).
+    D8 + S4 + R8 + R16 + SG3: score = CE × confidence_boost × recency_boost
+    × tag_boost × proof_count_boost × project_affinity_boost
+    × speculative_boost — every boost multiplicative and bounded to ±α/2
+    (Hindsight ``apply_combined_scoring`` shape; see :func:`bounded_boost`).
 
     R16: ``current_project`` scopes the affinity boost — None (default)
     auto-detects via :func:`detect_current_project`; "" disables matching
@@ -1309,6 +1317,7 @@ def rerank_with_scores(
                 project_norm(current_project, lrn.project_id),
                 PROJECT_AFFINITY_ALPHA,
             )
+            * bounded_boost(speculative_norm(lrn.tags), SPECULATIVE_ALPHA)
         )
 
     def score(lrn: Learning) -> float:
@@ -1446,6 +1455,17 @@ def tag_norm(query_tags: set[str], learning_tags: list[str]) -> float:
         return 0.5
     lt = set(t.lower() for t in learning_tags)
     return len(query_tags & lt) / len(query_tags)
+
+
+def speculative_norm(learning_tags: list[str]) -> float:
+    """SG3: speculative-tagged learning → 0.0 (boost floor 1 − α/2);
+    everything else sits at the neutral 0.5 so the multiplier is EXACTLY
+    1.0. Idle-triggered reflections carry the tag because the session may
+    resume and overturn them — they should lose ties against learnings
+    harvested from explicit session ends, not vanish."""
+    if any(str(t).strip().lower() == SPECULATIVE_TAG for t in learning_tags):
+        return 0.0
+    return 0.5
 
 
 def proof_count_boost(proof_count: int | None) -> float:

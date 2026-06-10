@@ -474,6 +474,16 @@ process_entry() {
     # skill_refresh entries (R13) get the skill-edit prompt instead: the
     # writer re-runs the /reflect skill-edit step against the stale SKILL.md
     # so the skill catches up with the revised learnings corpus.
+    # idle entries (SG3) get a speculative addendum: the session went quiet
+    # rather than ending explicitly, so it may resume and overturn whatever
+    # the writer concludes — tag the learnings 'speculative' (recall
+    # down-ranks that tag) and cap confidence.
+    local speculative_note=""
+    if [[ "$trigger" == "idle" ]]; then
+        speculative_note="
+
+This reflection was triggered by session IDLENESS (no transcript activity for the idle window), NOT an explicit session end — the session may still resume and overturn these conclusions. Treat every finding as provisional: add the tag 'speculative' to the tags list of EVERY learning you write, and cap confidence at MEDIUM (never HIGH)."
+    fi
     local prompt
     if [[ "$trigger" == "skill_refresh" ]]; then
         prompt="/reflect
@@ -490,7 +500,7 @@ Process the transcript at: ${reflect_target}
 
 Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow.
 
-Belief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.
+Belief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.${speculative_note}
 
 When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
     fi
