@@ -59,6 +59,54 @@ fn shim_entry(ainb_exe: &Path, socket: &Path) -> Value {
     })
 }
 
+/// Extract poolable stdio server definitions from an `mcpServers` JSON map
+/// (project `.mcp.json` or Claude user scope in `~/.claude.json`).
+/// Skips http/sse/ws entries (nothing to pool) and entries already pointing
+/// at the `ainb mcp proxy` shim (our own output — re-importing it would
+/// pool the shim itself).
+pub fn parse_stdio_servers(path: &Path) -> Vec<PooledServer> {
+    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(root) = serde_json::from_str::<Value>(&content) else { return vec![] };
+    extract_stdio_servers(root.get("mcpServers"))
+}
+
+/// Same extraction from an already-parsed `mcpServers` value.
+pub fn extract_stdio_servers(servers: Option<&Value>) -> Vec<PooledServer> {
+    let Some(map) = servers.and_then(Value::as_object) else { return vec![] };
+    let mut out = Vec::new();
+    for (name, entry) in map {
+        let transport = entry.get("type").and_then(Value::as_str).unwrap_or("stdio");
+        if transport != "stdio" {
+            continue;
+        }
+        let Some(command) = entry.get("command").and_then(Value::as_str) else { continue };
+        let args: Vec<String> = entry
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        if is_shim_invocation(&args) {
+            continue;
+        }
+        let env = entry
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(PooledServer { name: name.clone(), command: command.to_string(), args, env });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn is_shim_invocation(args: &[String]) -> bool {
+    args.len() >= 2 && args[0] == "mcp" && args[1] == "proxy"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +152,30 @@ mod tests {
 
         // …user's other server untouched.
         assert_eq!(servers["my-private"]["command"], "node");
+    }
+
+    #[test]
+    fn parse_skips_remote_and_shim_entries_keeps_stdio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "mcpServers": {
+                    "ctx": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"], "env": {"K": "v"}},
+                    "remote": {"type": "http", "url": "https://example.com/mcp"},
+                    "already-shimmed": {"command": "/usr/local/bin/ainb", "args": ["mcp", "proxy", "/x.sock"]},
+                    "typed-stdio": {"type": "stdio", "command": "uvx", "args": ["mcp-server-fetch"]}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let servers = parse_stdio_servers(&path);
+        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["ctx", "typed-stdio"], "{servers:?}");
+        assert_eq!(servers[0].env.get("K").unwrap(), "v");
     }
 
     #[test]

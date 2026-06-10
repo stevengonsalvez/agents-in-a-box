@@ -161,12 +161,30 @@ fn setup_mcp_pool(work_dir: &std::path::Path) {
     if !config.mcp_pool.enabled {
         return;
     }
-    let pooled = mcp_pool::pooled_servers(&config);
+    let mut pooled = mcp_pool::pooled_servers(&config);
+
+    // Auto-import: stdio servers already declared in the worktree's
+    // .mcp.json join the pool too (config entries win on name conflict).
+    // Users who never touched ainb config still get pooling for free.
+    let known: std::collections::HashSet<String> = pooled.iter().map(|s| s.name.clone()).collect();
+    for server in mcp_pool::mcp_json::parse_stdio_servers(&work_dir.join(".mcp.json")) {
+        if !known.contains(&server.name) && server.resolvable_on_host() {
+            info!("mcp pool: auto-importing '{}' from project .mcp.json", server.name);
+            pooled.push(server);
+        }
+    }
     if pooled.is_empty() {
         return;
     }
+
     if let Err(e) = mcp_pool::client::ensure_daemon() {
         warn!("mcp pool: daemon unavailable, falling back to per-session MCP: {e}");
+        return;
+    }
+    // Teach the (possibly long-running, other-project-started) daemon every
+    // server this session expects. Existing names are no-ops.
+    if let Err(e) = mcp_pool::client::register_servers(&pooled) {
+        warn!("mcp pool: register failed, falling back to per-session MCP: {e}");
         return;
     }
     match mcp_pool::mcp_json::write_session_mcp_json(work_dir, &pooled) {
