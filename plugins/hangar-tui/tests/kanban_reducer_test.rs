@@ -7,7 +7,7 @@
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow, TaskResult};
 use ainb_plugin_hangar::screen::kanban::{
-    BoardColumn, KanbanEvent, KanbanIntent, KanbanState, reduce_kanban,
+    reduce_kanban, BoardColumn, KanbanEvent, KanbanIntent, KanbanState,
 };
 
 const NOW: i64 = 1_700_000_600_000;
