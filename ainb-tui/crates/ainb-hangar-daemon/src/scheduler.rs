@@ -243,6 +243,7 @@ pub struct AutopilotScheduler {
     clock: Arc<dyn HangarClock>,
     shutdown: CancellationToken,
     events: Option<UnboundedSender<SchedulerEvent>>,
+    hangar_events: Option<crate::events::EventSink>,
     wake: Option<WakeHandle>,
 }
 
@@ -255,6 +256,7 @@ impl AutopilotScheduler {
             clock,
             shutdown,
             events: None,
+            hangar_events: None,
             wake: None,
         }
     }
@@ -275,6 +277,17 @@ impl AutopilotScheduler {
     #[must_use]
     pub fn with_event_sink(mut self, tx: UnboundedSender<SchedulerEvent>) -> Self {
         self.events = Some(tx);
+        self
+    }
+
+    /// Attach the daemon's wire-event sink (e38.2): each fire / skip decision
+    /// additionally publishes a workspace-scoped
+    /// [`HangarEvent::AutopilotRunChanged`](ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged)
+    /// so the autopilot manager's run-history pane updates live. Production
+    /// (`boot`) wires the broker sink; tests may leave it off.
+    #[must_use]
+    pub fn with_hangar_events(mut self, sink: crate::events::EventSink) -> Self {
+        self.hangar_events = Some(sink);
         self
     }
 
@@ -377,6 +390,7 @@ impl AutopilotScheduler {
                 reason: "concurrency",
                 in_flight,
             });
+            self.emit_run_changed(ap, "skipped");
         } else {
             match fire_autopilot_tick(&self.pool, &*self.clock, ap).await {
                 Ok((run_id, task_id)) => {
@@ -391,6 +405,7 @@ impl AutopilotScheduler {
                         run_id: run_id.to_string(),
                         task_id: task_id.to_string(),
                     });
+                    self.emit_run_changed(ap, "running");
                 }
                 Err(e) => {
                     tracing::error!(autopilot_id = %ap.id, error = %e, "autopilot fire failed");
@@ -433,6 +448,24 @@ impl AutopilotScheduler {
     fn emit(&self, event: SchedulerEvent) {
         if let Some(tx) = &self.events {
             let _ = tx.send(event);
+        }
+    }
+
+    /// Publish a workspace-scoped
+    /// [`AutopilotRunChanged`](ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged)
+    /// onto the daemon's wire-event sink when one is attached (e38.2). The
+    /// scheduler is daemon-global, so each event is scoped to the firing
+    /// autopilot's own workspace — a foreign tenant's subscription never sees
+    /// it.
+    fn emit_run_changed(&self, ap: &Autopilot, status: &str) {
+        if let Some(sink) = &self.hangar_events {
+            sink.emit(
+                &ap.workspace_id,
+                ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                    autopilot_id: ap.id.clone(),
+                    status: status.to_string(),
+                },
+            );
         }
     }
 }

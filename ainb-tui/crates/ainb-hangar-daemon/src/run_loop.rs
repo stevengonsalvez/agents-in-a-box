@@ -43,6 +43,7 @@ use ainb_hangar_store::service::fail::FailTaskService;
 use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
 
+use crate::events::EventSink;
 use crate::execenv::prepare_env;
 use crate::health_stats::HealthStats;
 use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
@@ -124,6 +125,11 @@ fn env_u64_opt(key: &str) -> Option<u64> {
 /// the `hangar/daemon_health` pane sees live per-second completed / failed
 /// counts. The collector is shared with the RPC server (which snapshots it).
 ///
+/// `events` is the daemon's event sink (e38.2): each FSM step the loop drives —
+/// `dispatched -> running` and the terminal finalize — publishes its typed
+/// [`HangarEvent`](ainb_hangar_proto::events::HangarEvent) so subscribed
+/// plugins see lifecycle changes without re-pulling snapshots.
+///
 /// # Errors
 ///
 /// Returns an error if installing the shutdown handler fails. Per-task failures
@@ -133,6 +139,7 @@ pub async fn run(
     pool: SqlitePool,
     cfg: DaemonConfig,
     stats: Arc<HealthStats>,
+    events: EventSink,
 ) -> anyhow::Result<()> {
     spawn_sweepers(pool.clone(), cfg.sweeper);
 
@@ -163,7 +170,9 @@ pub async fn run(
 
         match ClaimTaskService::claim_for_runtime(&pool, &runtime_id, &clock).await {
             Ok(Some(claimed)) => {
-                if let Err(e) = execute_claimed(&pool, &runner, &claimed, &clock, &stats).await {
+                if let Err(e) =
+                    execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events).await
+                {
                     tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
                 }
             }
@@ -231,6 +240,7 @@ async fn execute_claimed(
     claimed: &ClaimedTask,
     clock: &dyn HangarClock,
     stats: &HealthStats,
+    events: &EventSink,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -243,6 +253,9 @@ async fn execute_claimed(
     // an FSM error; bail without running a duplicate provider.
     StartTaskService::start(pool, &task.id, clock).await?;
     tracing::info!(task_id = %task.id, "task running");
+    // e38.2: announce the start to subscribed plugins (best-effort push; the
+    // next snapshot pull reconciles if no subscriber is connected).
+    emit_task_started(events, &task, clock);
 
     // Snapshot the daemon's env into an owned map *before* the await: the
     // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
@@ -320,6 +333,13 @@ async fn execute_claimed(
             // P8.5: record the successful terminal outcome into the rolling
             // throughput ring so the daemon-health pane's sparkline sees it.
             stats.record_completed(clock.now_ms() / 1_000);
+            // e38.2: push the terminal transition to subscribed plugins.
+            emit_task_finished(
+                events,
+                &task,
+                ainb_hangar_proto::events::TaskResult::Success,
+                clock,
+            );
             tracing::info!(task_id = %task.id, "task done");
         }
         RunOutcome::Failed { reason, result } => {
@@ -330,10 +350,62 @@ async fn execute_claimed(
             // P8.5: record the failed terminal outcome (drives the sparkline's
             // red proportion for this second).
             stats.record_failed(clock.now_ms() / 1_000);
+            // e38.2: push the terminal transition to subscribed plugins.
+            emit_task_finished(
+                events,
+                &task,
+                ainb_hangar_proto::events::TaskResult::Failure,
+                clock,
+            );
             tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
         }
     }
     Ok(())
+}
+
+/// Publish a [`TaskStarted`](ainb_hangar_proto::events::HangarEvent::TaskStarted)
+/// for `task`, scoped to its owning workspace (e38.2). Best-effort: a
+/// malformed id or out-of-range clock only skips the push — the FSM write has
+/// already committed and the next snapshot pull reconciles.
+fn emit_task_started(events: &EventSink, task: &Task, clock: &dyn HangarClock) {
+    let Ok(task_id) = ainb_hangar_core::ids::TaskId::from_str(task.id.clone()) else {
+        return;
+    };
+    let Some(started_at) = chrono::DateTime::from_timestamp_millis(clock.now_ms()) else {
+        return;
+    };
+    events.emit(
+        &task.workspace_id,
+        ainb_hangar_proto::events::HangarEvent::TaskStarted {
+            task_id,
+            started_at,
+        },
+    );
+}
+
+/// Publish a [`TaskFinished`](ainb_hangar_proto::events::HangarEvent::TaskFinished)
+/// with `result` for `task`, scoped to its owning workspace (e38.2).
+/// Best-effort, mirroring [`emit_task_started`].
+fn emit_task_finished(
+    events: &EventSink,
+    task: &Task,
+    result: ainb_hangar_proto::events::TaskResult,
+    clock: &dyn HangarClock,
+) {
+    let Ok(task_id) = ainb_hangar_core::ids::TaskId::from_str(task.id.clone()) else {
+        return;
+    };
+    let Some(ended_at) = chrono::DateTime::from_timestamp_millis(clock.now_ms()) else {
+        return;
+    };
+    events.emit(
+        &task.workspace_id,
+        ainb_hangar_proto::events::HangarEvent::TaskFinished {
+            task_id,
+            result,
+            ended_at,
+        },
+    );
 }
 
 /// Materialise the claimed task's agent skills into the provider layout, after

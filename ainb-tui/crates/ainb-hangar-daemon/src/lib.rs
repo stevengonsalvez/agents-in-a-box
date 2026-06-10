@@ -33,6 +33,14 @@ pub mod beads_sync;
 /// the claim loop uses before spawning a provider: ambient env is filtered by
 /// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
 pub mod dispatch;
+/// The daemon's in-process event broker (e38.2).
+///
+/// [`events::EventBroker`] fans typed [`ainb_hangar_proto::events::HangarEvent`]s
+/// from the daemon's mutation paths (claim-loop FSM finalize, RPC
+/// `task_transition`, autopilot scheduler / fire-now) out to the RPC server's
+/// per-connection, workspace-scoped subscribers — the producer half of the
+/// dual-channel design the plugin's `StreamClient` has decoded since P3.
+pub mod events;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
@@ -193,6 +201,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // terminal outcome into the ring).
     let stats = std::sync::Arc::new(crate::health_stats::HealthStats::default());
 
+    // e38.2: the daemon-global event broker. Mutation paths (the claim loop's
+    // FSM steps, the RPC mutations, the autopilot scheduler) publish typed
+    // `HangarEvent`s through cloned sinks; the RPC server forwards them to
+    // authenticated, workspace-subscribed connections. With no subscriber the
+    // emissions are dropped silently, so the broker costs nothing when no TUI
+    // is attached.
+    let broker = crate::events::EventBroker::new();
+
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the
     // daemon's claim loop must still run even if no plugin can reach it (and a
@@ -219,7 +235,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                     token_file = %token_path.display(),
                     "hangar rpc listening"
                 );
-                tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
+                tokio::spawn(rpc::serve(
+                    listener,
+                    store.pool().clone(),
+                    health,
+                    broker.clone(),
+                ));
             }
             Err(e) => {
                 tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed");
@@ -249,7 +270,8 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             store.pool().clone(),
             Arc::new(SystemClock),
             CancellationToken::new(),
-        );
+        )
+        .with_hangar_events(broker.sink());
         tokio::spawn(scheduler.run());
         tracing::info!("autopilot scheduler spawned");
     }
@@ -259,5 +281,5 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = DaemonConfig::from_env();
-    run(store.pool().clone(), cfg, stats).await
+    run(store.pool().clone(), cfg, stats, broker.sink()).await
 }

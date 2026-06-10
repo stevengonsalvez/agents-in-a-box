@@ -167,7 +167,12 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
         version: "0.1.0".into(),
         stats: std::sync::Arc::new(ainb_hangar_daemon::health_stats::HealthStats::default()),
     };
-    tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
+    tokio::spawn(rpc::serve(
+        listener,
+        store.pool().clone(),
+        health,
+        ainb_hangar_daemon::events::EventBroker::new(),
+    ));
     (socket_path, store)
 }
 

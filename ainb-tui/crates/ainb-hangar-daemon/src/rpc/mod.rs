@@ -21,6 +21,20 @@
 //! The dispatcher ([`dispatch`]) is `async` but holds no per-connection mutable
 //! state, so two plugins (e.g. a TUI + a CLI probe) can be served in parallel
 //! without coordination.
+//!
+//! ## Event push (e38.2)
+//!
+//! Responses and pushed `hangar/event` notifications share one connection, so
+//! each connection runs a dedicated **writer task** fed by an mpsc channel:
+//! the request loop queues response frames, and — once the (authenticated)
+//! connection has issued `workspace/subscribe` for a known workspace — a
+//! per-connection **forwarder task** taps the daemon-global
+//! [`crate::events::EventBroker`], filters to the subscribed workspace's
+//! resolved row id, and queues notification frames onto the same channel.
+//! Connection close tears both tasks down, deregistering the subscription.
+//! Unauthenticated connections never reach the subscribe path (the auth gate
+//! closes them first), so only authenticated, subscribed connections ever
+//! receive event frames.
 
 pub mod auth;
 pub mod snapshots;
@@ -36,9 +50,11 @@ use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 use sqlx::SqlitePool;
 
+use crate::events::{EventBroker, EventSink, ScopedEvent, encode_event_frame};
 use crate::health_stats::HealthStats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{broadcast, mpsc};
 
 /// JSON-RPC "method not found" code (spec-reserved).
 const METHOD_NOT_FOUND: i32 = -32601;
@@ -123,17 +139,26 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
 
 /// Accept connections forever, serving each on its own task.
 ///
+/// `broker` is the daemon-global event broker: each connection that subscribes
+/// a workspace gets a scoped forwarder onto it (e38.2).
+///
 /// Never returns under normal operation; the caller runs it as a background
 /// task alongside the claim loop. A single accept error is logged and the loop
 /// continues (one bad connection must not down the listener).
-pub async fn serve(listener: UnixListener, pool: SqlitePool, health: DaemonHealth) {
+pub async fn serve(
+    listener: UnixListener,
+    pool: SqlitePool,
+    health: DaemonHealth,
+    broker: EventBroker,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let pool = pool.clone();
                 let health = health.clone();
+                let broker = broker.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_conn(stream, pool, health).await {
+                    if let Err(e) = serve_conn(stream, pool, health, broker).await {
                         tracing::debug!(error = %e, "hangar rpc connection closed");
                     }
                 });
@@ -146,10 +171,17 @@ pub async fn serve(listener: UnixListener, pool: SqlitePool, health: DaemonHealt
 /// Serve one plugin connection: gate it (same-uid peer credentials, then the
 /// `auth/hello` token handshake on the first frame), then read framed
 /// requests, dispatch, write responses, until EOF.
+///
+/// All outbound frames — responses AND pushed `hangar/event` notifications —
+/// flow through one writer task so they never interleave mid-frame. A
+/// `workspace/subscribe` for a known workspace (re)registers this connection's
+/// event forwarder; EOF tears the forwarder and writer down, which is the
+/// subscription's deregistration.
 async fn serve_conn(
     stream: UnixStream,
     pool: SqlitePool,
     health: DaemonHealth,
+    broker: EventBroker,
 ) -> std::io::Result<()> {
     // Gate 1 — kernel peer credentials: only this user's processes may talk to
     // the control plane. Reject + close on mismatch (or on a cred-read fault).
@@ -161,54 +193,161 @@ async fn serve_conn(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
+    // The single writer: every outbound frame is queued here so a pushed event
+    // can never split a response frame (or vice versa).
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE);
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = out_rx.recv().await {
+            if write_half.write_all(&frame).await.is_err() {
+                break;
+            }
+            if write_half.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
     // Gate 2 — first-frame token auth: the connection's first frame must be a
     // valid `auth/hello`. Unauthenticated or wrong-token connections get an
     // UNAUTHORIZED error envelope back, then the connection closes — no
-    // `hangar/*` method is dispatched.
-    let Some(first) = read_frame(&mut reader).await? else {
-        return Ok(());
+    // `hangar/*` method is dispatched and no event forwarder ever exists.
+    let authed = async {
+        let Some(first) = read_frame(&mut reader).await? else {
+            return Ok(false);
+        };
+        match auth::authenticate_first_frame(&pool, &first).await {
+            Ok(ack) => {
+                let _ = out_tx.send(encode_frame(&ack)).await;
+                Ok(true)
+            }
+            Err(rejection) => {
+                let _ = out_tx.send(encode_frame(&rejection)).await;
+                Ok(false)
+            }
+        }
+    }
+    .await;
+    let proceed = match authed {
+        Ok(p) => p,
+        Err(e) => {
+            drop(out_tx);
+            let _ = writer.await;
+            return Err(e);
+        }
     };
-    match auth::authenticate_first_frame(&pool, &first).await {
-        Ok(ack) => {
-            write_half.write_all(&encode_frame(&ack)).await?;
-            write_half.flush().await?;
-        }
-        Err(rejection) => {
-            write_half.write_all(&encode_frame(&rejection)).await?;
-            write_half.flush().await?;
-            return Ok(());
-        }
+    if !proceed {
+        drop(out_tx);
+        let _ = writer.await;
+        return Ok(());
     }
 
-    while let Some(body) = read_frame(&mut reader).await? {
-        let resp = match serde_json::from_slice::<RpcRequest>(&body) {
-            Ok(req) => dispatch(&pool, &req, &health).await,
-            Err(e) => RpcResponse {
-                jsonrpc: ainb_hangar_proto::jsonrpc_version(),
-                // We could not parse an id; reply with a null/0 id so the peer
-                // still sees a framed error rather than a dropped connection.
-                id: RpcId::Number(0),
-                result: None,
-                error: Some(RpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("malformed request: {e}"),
-                    data: None,
-                }),
-            },
-        };
-        let frame = encode_frame(&resp);
-        write_half.write_all(&frame).await?;
-        write_half.flush().await?;
+    let events = broker.sink();
+    // The connection's event subscription: at most one forwarder; a
+    // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
+    let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+
+    let served: std::io::Result<()> = async {
+        while let Some(body) = read_frame(&mut reader).await? {
+            let req = serde_json::from_slice::<RpcRequest>(&body);
+            let resp = match &req {
+                Ok(req) => dispatch(&pool, req, &health, &events).await,
+                Err(e) => RpcResponse {
+                    jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+                    // We could not parse an id; reply with a null/0 id so the
+                    // peer still sees a framed error rather than a dropped
+                    // connection.
+                    id: RpcId::Number(0),
+                    result: None,
+                    error: Some(RpcError {
+                        code: INVALID_PARAMS,
+                        message: format!("malformed request: {e}"),
+                        data: None,
+                    }),
+                },
+            };
+            let acked = resp.error.is_none();
+            if out_tx.send(encode_frame(&resp)).await.is_err() {
+                break; // writer gone — the connection is dead
+            }
+            // Register the event subscription AFTER queueing the ack so the
+            // ack frame always precedes the first pushed event.
+            if let Ok(req) = &req {
+                if acked && req.method == methods::WORKSPACE_SUBSCRIBE {
+                    if let Ok(Some(ws)) = resolve(&pool, req).await {
+                        if let Some(old) = forwarder.take() {
+                            old.abort();
+                        }
+                        forwarder = Some(spawn_event_forwarder(
+                            broker.subscribe(),
+                            ws,
+                            out_tx.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    if let Some(f) = forwarder {
+        f.abort();
+    }
+    drop(out_tx);
+    let _ = writer.await;
+    served
+}
+
+/// Outbound frame queue depth per connection (responses + pushed events).
+const OUTBOUND_QUEUE: usize = 64;
+
+/// Spawn the per-connection event forwarder: drain the broker, keep only
+/// events scoped to `workspace_id` (the resolved row id), frame each as a
+/// `hangar/event` notification, and queue it on the connection's writer.
+///
+/// Ends when the broker closes, or the connection's writer is gone. A lagged
+/// receiver (consumer slower than the broadcast buffer) drops the lost events
+/// and keeps streaming — the next snapshot pull reconciles authoritatively.
+fn spawn_event_forwarder(
+    mut rx: broadcast::Receiver<ScopedEvent>,
+    workspace_id: String,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(scoped) => {
+                    // The workspace boundary: a foreign workspace's event is
+                    // never forwarded onto this connection.
+                    if scoped.workspace_id != workspace_id {
+                        continue;
+                    }
+                    if out.send(encode_event_frame(&scoped.event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::debug!(missed, "hangar event stream lagged; events dropped");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Dispatch one decoded request to its handler, returning the response envelope.
 ///
-/// Pure of socket IO (the caller owns the stream); only touches the store. Every
-/// method echoes the request id; an unknown method answers `-32601`.
-pub async fn dispatch(pool: &SqlitePool, req: &RpcRequest, health: &DaemonHealth) -> RpcResponse {
-    let result = handle(pool, req, health).await;
+/// Pure of socket IO (the caller owns the stream); only touches the store and —
+/// for the mutating handlers — publishes the matching [`HangarEvent`] onto
+/// `events` after the write commits. Every method echoes the request id; an
+/// unknown method answers `-32601`.
+pub async fn dispatch(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    health: &DaemonHealth,
+    events: &EventSink,
+) -> RpcResponse {
+    let result = handle(pool, req, health, events).await;
     match result {
         Ok(value) => ok(req.id.clone(), value),
         Err(err) => RpcResponse {
@@ -226,6 +365,7 @@ async fn handle(
     pool: &SqlitePool,
     req: &RpcRequest,
     health: &DaemonHealth,
+    events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     match req.method.as_str() {
         methods::PING => Ok(serde_json::json!({})),
@@ -300,7 +440,7 @@ async fn handle(
         methods::HANGAR_AUTOPILOTS_LIST
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
-        | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req).await,
+        | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => {
             let tasks = match resolve(pool, req).await? {
                 Some(ws) => snapshots::tasks_list(pool, &ws).await.map_err(|e| store_err(&e))?,
@@ -308,19 +448,7 @@ async fn handle(
             };
             to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
         }
-        methods::HANGAR_TASK_TRANSITION => {
-            let params: ainb_hangar_proto::snapshots::TaskTransitionParams =
-                parse_params(req, "{ workspace_id, task_id, to_status }")?;
-            // The mutating handler must not silently no-op on a typo'd workspace.
-            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
-            let to = parse_task_status(&params.to_status)?;
-            snapshots::task_transition(pool, &SystemClock, ws.as_str(), &params.task_id, to)
-                .await
-                .map_err(|e| store_err(&e))?;
-            // A foreign / unknown task id moves nothing; that is a no-op, not an
-            // error (mirrors the autopilot fire-now foreign-id behaviour).
-            Ok(serde_json::json!({}))
-        }
+        methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -406,6 +534,75 @@ fn agent_id(raw: &str) -> Result<AgentId, RpcError> {
 fn autopilot_id(raw: &str) -> Result<AutopilotId, RpcError> {
     AutopilotId::from_str(raw.to_string())
         .map_err(|_| invalid_params("autopilot_id must be a non-empty string"))
+}
+
+/// Dispatch `hangar/task_transition` (P8.4): drive the store FSM column-move,
+/// then — only when a row actually moved — push the matching lifecycle event
+/// to subscribed plugins (e38.2). A foreign / unknown task id moves nothing;
+/// that is a no-op, not an error (mirrors the autopilot fire-now foreign-id
+/// behaviour) and must not announce a state change that never happened. Split
+/// out of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_task_transition(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::TaskTransitionParams =
+        parse_params(req, "{ workspace_id, task_id, to_status }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let to = parse_task_status(&params.to_status)?;
+    let moved = snapshots::task_transition(pool, &SystemClock, ws.as_str(), &params.task_id, to)
+        .await
+        .map_err(|e| store_err(&e))?;
+    if moved {
+        if let Some(event) = task_transition_event(&params.task_id, to, SystemClock.now_ms()) {
+            events.emit(ws.as_str(), event);
+        }
+    }
+    Ok(serde_json::json!({}))
+}
+
+/// Map a committed task transition onto its wire [`HangarEvent`] (e38.2).
+///
+/// `running` announces a start; the three terminal statuses announce a finish
+/// with the matching [`TaskResult`](ainb_hangar_proto::events::TaskResult).
+/// `queued` / `dispatched` map to no event: the only queue-shaped variant
+/// ([`HangarEvent::TaskQueued`]) carries `issue_id` + `agent_id`, which a bare
+/// column move does not know — and we never invent new variants. Returns
+/// `None` (silently) for those, or for a malformed empty task id.
+fn task_transition_event(
+    task_id: &str,
+    to: ainb_hangar_core::task_status::TaskStatus,
+    now_ms: i64,
+) -> Option<ainb_hangar_proto::events::HangarEvent> {
+    use ainb_hangar_core::task_status::TaskStatus;
+    use ainb_hangar_proto::events::{HangarEvent, TaskResult};
+
+    let task_id = ainb_hangar_core::ids::TaskId::from_str(task_id.to_string()).ok()?;
+    let at = chrono::DateTime::from_timestamp_millis(now_ms)?;
+    match to {
+        TaskStatus::Running => Some(HangarEvent::TaskStarted {
+            task_id,
+            started_at: at,
+        }),
+        TaskStatus::Done => Some(HangarEvent::TaskFinished {
+            task_id,
+            result: TaskResult::Success,
+            ended_at: at,
+        }),
+        TaskStatus::Failed => Some(HangarEvent::TaskFinished {
+            task_id,
+            result: TaskResult::Failure,
+            ended_at: at,
+        }),
+        TaskStatus::Cancelled => Some(HangarEvent::TaskFinished {
+            task_id,
+            result: TaskResult::Cancelled,
+            ended_at: at,
+        }),
+        TaskStatus::Queued | TaskStatus::Dispatched => None,
+    }
 }
 
 /// Parse a Kanban card-move target status from its wire token, rejecting an
@@ -510,10 +707,13 @@ async fn attach_or_detach(
 /// Dispatch the four P7.5 autopilot-manager RPCs. Each resolves + scopes by
 /// workspace (a foreign id yields an empty snapshot for the reads, fires/toggles
 /// nothing for the mutations) and drives the workspace-scoped autopilot snapshot
-/// mappers. Split out of [`handle`] to keep that dispatcher within the line cap.
+/// mappers. The two mutations publish their matching [`HangarEvent`] onto
+/// `events` after the write commits (e38.2). Split out of [`handle`] to keep
+/// that dispatcher within the line cap.
 async fn handle_autopilot(
     pool: &SqlitePool,
     req: &RpcRequest,
+    events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     match req.method.as_str() {
         methods::HANGAR_AUTOPILOTS_LIST => {
@@ -544,9 +744,19 @@ async fn handle_autopilot(
                 parse_params(req, "{ workspace_id, autopilot_id }")?;
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
-            snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
+            let fired = snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
                 .await
                 .map_err(|e| internal(&format!("autopilot fire: {e}")))?;
+            // A foreign autopilot id fires nothing — announce only real runs.
+            if fired {
+                events.emit(
+                    ws.as_str(),
+                    ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                        autopilot_id: id.to_string(),
+                        status: "running".to_string(),
+                    },
+                );
+            }
             Ok(serde_json::json!({}))
         }
         methods::HANGAR_AUTOPILOT_SET_ENABLED => {
@@ -557,6 +767,18 @@ async fn handle_autopilot(
             snapshots::autopilot_set_enabled(pool, &SystemClock, &ws, &id, params.enabled)
                 .await
                 .map_err(|e| autopilot_repo_err(&e))?;
+            // Push the refreshed row so the manager table updates in place
+            // (the AutopilotUpdated contract carries the full wire row).
+            // Best-effort: a re-read fault only skips the push — the toggle
+            // itself already committed and the next snapshot reconciles.
+            if let Ok(rows) = snapshots::autopilots_list(pool, &ws).await {
+                if let Some(row) = rows.into_iter().find(|r| r.id == id.as_str()) {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::AutopilotUpdated(row),
+                    );
+                }
+            }
             Ok(serde_json::json!({}))
         }
         other => Err(RpcError {
@@ -714,6 +936,11 @@ mod tests {
         }
     }
 
+    /// A throwaway event sink (no subscribers — emissions are dropped).
+    fn sink() -> EventSink {
+        EventBroker::new().sink()
+    }
+
     fn req(method: &str, params: serde_json::Value) -> RpcRequest {
         RpcRequest {
             jsonrpc: ainb_hangar_proto::jsonrpc_version(),
@@ -731,6 +958,7 @@ mod tests {
             store.pool(),
             &req(methods::PING, serde_json::Value::Null),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
@@ -748,6 +976,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "subscribe must ack: {resp:?}");
@@ -762,6 +991,7 @@ mod tests {
             store.pool(),
             &req("nope/nope", serde_json::Value::Null),
             &health(),
+            &sink(),
         )
         .await;
         assert_eq!(resp.error.unwrap().code, METHOD_NOT_FOUND);
@@ -775,6 +1005,7 @@ mod tests {
             store.pool(),
             &req(methods::HANGAR_HEALTH, serde_json::json!({})),
             &health(),
+            &sink(),
         )
         .await;
         let v = resp.result.unwrap();
@@ -791,6 +1022,7 @@ mod tests {
             store.pool(),
             &req(methods::HANGAR_ISSUES_LIST, serde_json::json!({})),
             &health(),
+            &sink(),
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
@@ -810,6 +1042,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","skill_id":"skill-commit"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -832,6 +1065,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope","skill_id":"skill-commit"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
@@ -853,6 +1087,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","agent_id":"agent-1","skill_id":"skill-review"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(attach.error.is_none(), "{attach:?}");
@@ -867,6 +1102,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","agent_id":"agent-1","skill_id":"skill-review"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(detach.error.is_none(), "{detach:?}");
@@ -888,6 +1124,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","agent_id":"nonexistent-agent","skill_id":"skill-commit"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
@@ -931,6 +1168,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -956,6 +1194,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
@@ -999,6 +1238,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"enabled":false}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(disable.error.is_none(), "{disable:?}");
@@ -1012,6 +1252,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"enabled":true}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(enable.error.is_none(), "{enable:?}");
@@ -1054,6 +1295,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str()}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(fire.error.is_none(), "{fire:?}");
@@ -1097,6 +1339,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"limit":10}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -1114,6 +1357,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","autopilot_id":"01HANGARNOSUCHAUTOPILOT00","limit":10}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(foreign.error.is_none());
@@ -1134,6 +1378,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -1158,6 +1403,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
@@ -1180,6 +1426,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","task_id":"task-1","to_status":"done"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -1207,6 +1454,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope","task_id":"task-1","to_status":"done"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
@@ -1229,6 +1477,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","task_id":"no-such-task","to_status":"done"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(
@@ -1251,6 +1500,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default","task_id":"task-1","to_status":"banana"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
@@ -1282,6 +1532,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"default"}),
             ),
             &health,
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
@@ -1321,6 +1572,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
@@ -1341,6 +1593,7 @@ mod tests {
                 serde_json::json!({"workspace_id":"nope"}),
             ),
             &health(),
+            &sink(),
         )
         .await;
         assert!(resp.error.is_none());
