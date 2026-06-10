@@ -13,7 +13,7 @@ use ainb_plugin_sdk::{
     Result, SdkError, WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
-    ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
+    RefreshRequest, ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
 };
 use async_trait::async_trait;
 use ratatui::buffer::Buffer as RBuffer;
@@ -148,6 +148,13 @@ impl Plugin for BurndownPlugin {
         // walking the per-provider dirs on a cold cache. Failure is
         // non-fatal — the legacy ⏳ Waiting spinner remains.
         let _ = host.snapshot_subscribe("sessions.scan_progress").await;
+        // Subscribe to refresh requests so a HARD refresh (from our own
+        // R-confirm or the CLI --hard) drops the in-memory snapshot:
+        // the dashboard falls back to the scanning skeleton, and the
+        // CLI dispatch retry loop can only be satisfied by data
+        // published AFTER the rebuild — never by the pre-wipe snapshot
+        // the user just declared distrusted.
+        let _ = host.snapshot_subscribe("sessions.refresh_request").await;
 
         // Trigger a fresh publish. Eager-spawned session-reader runs
         // its first publish during its own `on_init`, which races
@@ -171,6 +178,28 @@ impl Plugin for BurndownPlugin {
             }
             "sessions.scan_progress" => {
                 self.ingest_scan_progress(host, &params.payload).await;
+            }
+            "sessions.refresh_request" => {
+                // Empty payload = incremental ping (our own r key, the
+                // FS watcher) — nothing to do. Only a hard refresh
+                // invalidates what is on screen.
+                let hard = !params.payload.is_empty()
+                    && rmp_serde::from_slice::<RefreshRequest>(&params.payload)
+                        .map(|req| req.hard)
+                        .unwrap_or(false);
+                if hard {
+                    self.data = None;
+                    self.pending = None;
+                    self.ui.data = None;
+                    self.ui.cached_filtered = None;
+                    self.filter_cache = None;
+                    self.generation = self.generation.wrapping_add(1);
+                    let _ = host
+                        .log_info(
+                            "burndown: hard refresh observed — dropped snapshot, awaiting rebuild",
+                        )
+                        .await;
+                }
             }
             _ => {}
         }
@@ -203,16 +232,42 @@ impl Plugin for BurndownPlugin {
     /// Generation is bumped only when the dispatch matched a binding,
     /// so unmapped keys won't trigger an avoidable re-render.
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        // Hard-refresh confirm overlay is modal: while it's up, every
+        // key resolves it. Dispatched before everything else so the
+        // confirm `y` can never collide with the zoom-yank `y` below.
+        if self.ui.confirm_hard {
+            self.ui.confirm_hard = false;
+            if matches!(params.key.code, KeyCode::Char { ch: 'y' | 'Y' }) {
+                let payload = rmp_serde::to_vec_named(&RefreshRequest { hard: true })
+                    .map(bytes::Bytes::from)
+                    .unwrap_or_default();
+                let _ = host.snapshot_publish("sessions.refresh_request", payload).await;
+            }
+            // Any other key cancels: prior data stays on screen,
+            // nothing is published. (`Esc` is host-reserved and pops
+            // the screen before reaching us, hence `n`/anything.)
+            self.generation = self.generation.wrapping_add(1);
+            return Ok(());
+        }
+
         // Refresh + flush-cache are the two bindings that need the
         // host. Everything else mutates `self.ui` only, so it lives in
         // the pure helper below for testability.
         let handled = match params.key.code {
-            KeyCode::Char { ch: 'r' | 'R' } => {
-                // Ask session-reader to re-publish from scratch. Best
-                // effort — failure is silently dropped, the existing
-                // snapshot stays on screen.
+            KeyCode::Char { ch: 'r' } => {
+                // Ask session-reader to re-publish. Empty payload =
+                // incremental refresh (the cheap path). Best effort —
+                // failure is silently dropped, the existing snapshot
+                // stays on screen.
                 let _ =
                     host.snapshot_publish("sessions.refresh_request", bytes::Bytes::new()).await;
+                true
+            }
+            KeyCode::Char { ch: 'R' } => {
+                // Hard refresh re-parses ALL history from source —
+                // CPU-heavy, so it's gated behind the ⚠ confirm
+                // overlay. Nothing publishes until `y`.
+                self.ui.confirm_hard = true;
                 true
             }
             KeyCode::Char { ch: 'F' } => {

@@ -78,6 +78,27 @@ pub struct ScanProgressEvent {
     pub current_project: String,
 }
 
+/// Optional payload for the `sessions.refresh_request` topic.
+///
+/// Historically the topic was a bare ping (empty payload) and most
+/// publishers — the host FS watcher, burndown s `r` key — still send
+/// exactly that, which decodes to the default: a normal incremental
+/// refresh. A `hard` refresh (msgpack `{hard: true}`) tells
+/// session-reader to distrust every cache layer and rebuild from
+/// source — the CPU-heavy path, so publishers gate it behind explicit
+/// user intent (`R` confirm in the TUI, `--hard` on the CLI).
+///
+/// Schema is intentionally unversioned, mirroring
+/// [`ScanProgressEvent`]: new fields arrive with `#[serde(default)]`
+/// so older publishers payloads keep decoding cleanly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    /// `true` = full rebuild from source (wipe parse cache + stable
+    /// rollup first). `false`/absent = incremental refresh.
+    #[serde(default)]
+    pub hard: bool,
+}
+
 /// Top-level envelope published on the `sessions.usage_data` topic.
 ///
 /// `published_ns` is filled in from the host's wall-clock at publish
@@ -523,6 +544,34 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&data).unwrap();
         let back: UsageData = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(data, back);
+    }
+
+    #[test]
+    fn refresh_request_roundtrip_and_default() {
+        let bytes = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).unwrap();
+        let back: RefreshRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(back.hard);
+
+        // Empty map (a publisher encoding `{}`) → hard defaults off.
+        let back: RefreshRequest = rmp_serde::from_slice(&[0x80]).unwrap();
+        assert!(!back.hard);
+    }
+
+    /// Wire-format pin: the host CLI (`ainb-core/src/cli/registry.rs`,
+    /// `--hard` branch of `dispatch_inner`) publishes this exact byte
+    /// sequence WITHOUT linking this crate, to stay decoupled from the
+    /// plugin codec. If the canonical `to_vec_named` encoding of
+    /// `RefreshRequest { hard: true }` ever drifts from those
+    /// hand-pinned bytes, this test fails and both sides must move
+    /// together.
+    #[test]
+    fn refresh_request_hard_wire_bytes_are_pinned() {
+        const HARD_REFRESH_MSGPACK: [u8; 7] = [0x81, 0xA4, b'h', b'a', b'r', b'd', 0xC3];
+        let canonical = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).unwrap();
+        assert_eq!(
+            canonical, HARD_REFRESH_MSGPACK,
+            "host CLI pinned bytes drifted"
+        );
     }
 
     #[test]

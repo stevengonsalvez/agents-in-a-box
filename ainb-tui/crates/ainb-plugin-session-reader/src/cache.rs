@@ -39,16 +39,50 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ainb_plugin_types_sessions::ProviderCall;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::fnv::fnv1a_64;
 
+/// How long a writer waits for a competing writer/checkpoint before SQLite
+/// returns `SQLITE_BUSY`. Two ainb instances share one `usage.sqlite`, so an
+/// overlapping scan's write would otherwise collide instantly and the caller
+/// falls back to a cache-less (re-parsing) scan — doubling CPU. 5s comfortably
+/// covers a scan's write burst.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Retry a SQLite op when it fails with `BUSY`/`LOCKED`. `busy_timeout` already
+/// blocks for [`BUSY_TIMEOUT`] per attempt; this is a small bounded backstop
+/// for the rare case it still surfaces (e.g. a WAL checkpoint stall under two
+/// concurrent writers). Bounded so a genuinely wedged DB still surfaces an error.
+fn with_busy_retry<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    use rusqlite::ffi::ErrorCode;
+    let mut attempt: u32 = 0;
+    loop {
+        let result = op();
+        if let Err(rusqlite::Error::SqliteFailure(err, _)) = &result {
+            if matches!(
+                err.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) && attempt < 3
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
+                continue;
+            }
+        }
+        return result;
+    }
+}
+
 /// Current on-disk schema version. Bumping this triggers the v0→vN
 /// migration block in [`UsageCache::migrate`].
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// v2: adds the single-row `stable_aggregate` table holding the
+/// bincode'd incremental-refresh rollup. Additive over v1.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Cache error surface.
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +131,10 @@ impl UsageCache {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // Block (up to BUSY_TIMEOUT) instead of erroring when another instance
+        // holds the write lock, so concurrent scans serialize rather than
+        // dropping to a cache-less reparse.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Self::migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -112,20 +150,21 @@ impl UsageCache {
         mtime: u64,
         size: u64,
     ) -> Result<Option<Vec<ProviderCall>>, CacheError> {
-        let row: Option<(i64, i64, Vec<u8>)> = self
-            .conn
-            .query_row(
-                "SELECT mtime, size, parsed FROM file_cache WHERE path = ?1",
-                params![path],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let row: Option<(i64, i64, Vec<u8>)> = with_busy_retry(|| {
+            self.conn
+                .query_row(
+                    "SELECT mtime, size, parsed FROM file_cache WHERE path = ?1",
+                    params![path],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+        })?;
 
         let Some((stored_mtime, stored_size, blob)) = row else {
             return Ok(None);
@@ -158,31 +197,48 @@ impl UsageCache {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn.execute(
-            "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(path) DO UPDATE SET
-                mtime       = excluded.mtime,
-                size        = excluded.size,
-                fingerprint = excluded.fingerprint,
-                parsed      = excluded.parsed,
-                cached_at   = excluded.cached_at",
-            params![
-                path,
-                i64::try_from(mtime).unwrap_or(i64::MAX),
-                i64::try_from(size).unwrap_or(i64::MAX),
-                i64::from_ne_bytes(fingerprint.to_ne_bytes()),
-                blob,
-                cached_at,
-            ],
-        )?;
+        with_busy_retry(|| {
+            self.conn.execute(
+                "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(path) DO UPDATE SET
+                    mtime       = excluded.mtime,
+                    size        = excluded.size,
+                    fingerprint = excluded.fingerprint,
+                    parsed      = excluded.parsed,
+                    cached_at   = excluded.cached_at",
+                params![
+                    path,
+                    i64::try_from(mtime).unwrap_or(i64::MAX),
+                    i64::try_from(size).unwrap_or(i64::MAX),
+                    i64::from_ne_bytes(fingerprint.to_ne_bytes()),
+                    blob,
+                    cached_at,
+                ],
+            )
+        })?;
         Ok(())
     }
 
-    /// Drop every cached row. Schema row (PRAGMA user_version) is
-    /// preserved so re-opens don't trigger another migration.
+    /// Drop every cached row — the per-file parse cache AND the stable
+    /// aggregate. Schema row (PRAGMA user_version) is preserved so
+    /// re-opens don't trigger another migration.
+    ///
+    /// This is the hard-refresh / flush primitive: after a clear, the
+    /// next scan re-parses every file from source and the incremental
+    /// path sees no stable aggregate (cold start).
     pub fn clear(&mut self) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM file_cache", [])?;
+        // One transaction + busy retry: under cross-process contention a
+        // partial wipe (file_cache gone, rollup still present) must
+        // never become visible to the other instance.
+        with_busy_retry(|| {
+            self.conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DELETE FROM file_cache;
+                 DELETE FROM stable_aggregate;
+                 COMMIT;",
+            )
+        })?;
         // VACUUM is a tidiness operation; failure here doesn't matter.
         if let Err(err) = self.conn.execute("VACUUM", []) {
             tracing::warn!("session-reader cache VACUUM after clear failed: {err}");
@@ -190,9 +246,55 @@ impl UsageCache {
         Ok(())
     }
 
-    /// Apply v0→v1 schema migration using `PRAGMA user_version`.
-    /// Future bumps append additional `if version < N` blocks before
-    /// the final `pragma_update`.
+    /// Persist the stable (older-than-watermark) aggregate. Single-row
+    /// upsert; the previous rollup is replaced atomically.
+    pub fn store_stable(
+        &mut self,
+        stable: &crate::scanner::StableAggregate,
+    ) -> Result<(), CacheError> {
+        let blob = bincode::serialize(stable)?;
+        with_busy_retry(|| {
+            self.conn.execute(
+                "INSERT INTO stable_aggregate (id, blob) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET blob = excluded.blob",
+                params![blob],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Load the persisted stable aggregate, if any.
+    ///
+    /// A decode failure (blob written by an incompatible build) is
+    /// treated as absence — the caller rebuilds from the per-file
+    /// cache, which self-heals the row on the next `store_stable`.
+    pub fn load_stable(&self) -> Result<Option<crate::scanner::StableAggregate>, CacheError> {
+        let row: Option<Vec<u8>> = with_busy_retry(|| {
+            self.conn
+                .query_row(
+                    "SELECT blob FROM stable_aggregate WHERE id = 1",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+        })?;
+        let Some(blob) = row else {
+            return Ok(None);
+        };
+        match bincode::deserialize(&blob) {
+            Ok(stable) => Ok(Some(stable)),
+            Err(err) => {
+                tracing::warn!(
+                    "session-reader cache: stable aggregate decode failed ({err}); rebuilding"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Apply schema migrations using `PRAGMA user_version`. Each bump
+    /// appends an additional `if version < N` block before the final
+    /// `pragma_update`.
     fn migrate(conn: &Connection) -> Result<(), CacheError> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap_or(0);
 
@@ -210,7 +312,24 @@ impl UsageCache {
             )?;
         }
 
-        if version != SCHEMA_VERSION {
+        // v1→v2: single-row home for the bincode'd StableAggregate
+        // (incremental refresh rollup). Additive — `file_cache` rows
+        // survive, so the upgrade costs one stable rebuild, not a full
+        // re-parse.
+        if version < 2 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS stable_aggregate (
+                     id   INTEGER PRIMARY KEY CHECK (id = 1),
+                     blob BLOB    NOT NULL
+                 );",
+            )?;
+        }
+
+        // Only stamp UP. A db written by a NEWER build (two ainb
+        // versions sharing one usage.sqlite) must keep its higher
+        // version: stamping it down would make the newer binary re-run
+        // its migrations against an already-migrated schema.
+        if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
@@ -352,13 +471,142 @@ mod tests {
     }
 
     #[test]
-    fn migrate_sets_user_version_to_one() {
+    fn migrate_sets_user_version_to_current() {
         let (_dir, cache) = open_in_tmp();
         let version: i64 = cache
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("pragma");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v1_db_migrates_to_v2_preserving_file_cache() {
+        // Hand-build a v1-schema DB (file_cache only, user_version=1)
+        // with one row, then open through UsageCache and assert the
+        // migration is additive: the parse row survives, the version
+        // bumps, and the stable_aggregate table exists (empty).
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("usage.sqlite");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            conn.execute_batch(
+                "CREATE TABLE file_cache (
+                     path        TEXT    PRIMARY KEY,
+                     mtime       INTEGER NOT NULL,
+                     size        INTEGER NOT NULL,
+                     fingerprint INTEGER NOT NULL,
+                     parsed      BLOB    NOT NULL,
+                     cached_at   INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_mtime ON file_cache(mtime);
+                 PRAGMA user_version = 1;",
+            )
+            .expect("create v1 schema");
+            let blob = bincode::serialize(&vec![fake_call(7)]).expect("blob");
+            conn.execute(
+                "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
+                 VALUES ('/tmp/v1.jsonl', 5, 6, 0, ?1, 0)",
+                params![blob],
+            )
+            .expect("seed v1 row");
+        }
+
+        let cache = UsageCache::open(&db).expect("open migrates");
+        let version: i64 = cache
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("pragma");
+        assert_eq!(version, 2, "v1 db migrated to v2");
+
+        let hit = cache.lookup("/tmp/v1.jsonl", 5, 6).expect("lookup").expect("hit");
+        assert_eq!(hit[0].id, 7, "pre-migration parse row survives");
+
+        assert!(
+            cache.load_stable().expect("load").is_none(),
+            "fresh v2 upgrade has no stable aggregate yet"
+        );
+    }
+
+    #[test]
+    fn stable_aggregate_roundtrips() {
+        let (_dir, mut cache) = open_in_tmp();
+        let stable = crate::scanner::StableAggregate {
+            watermark_nanos: 1_234_567,
+            folded: vec![
+                ("/tmp/a.jsonl".into(), 42, 100),
+                ("/tmp/b.jsonl".into(), 43, 7),
+            ],
+            state: crate::scanner::fold(vec![fake_call(1), fake_call(2)]),
+        };
+        cache.store_stable(&stable).expect("store");
+        let back = cache.load_stable().expect("load").expect("present");
+        assert_eq!(back.watermark_nanos, stable.watermark_nanos);
+        assert_eq!(back.folded, stable.folded);
+        assert_eq!(back.state.calls.len(), 2);
+
+        // Upsert replaces, not appends.
+        let stable2 = crate::scanner::StableAggregate {
+            watermark_nanos: 99,
+            folded: Vec::new(),
+            state: crate::scanner::fold(Vec::new()),
+        };
+        cache.store_stable(&stable2).expect("store 2");
+        let back2 = cache.load_stable().expect("load 2").expect("present");
+        assert_eq!(back2.watermark_nanos, 99);
+        assert!(back2.folded.is_empty());
+    }
+
+    #[test]
+    fn clear_drops_stable_aggregate_too() {
+        let (_dir, mut cache) = open_in_tmp();
+        let stable = crate::scanner::StableAggregate {
+            watermark_nanos: 1,
+            folded: vec![("/tmp/a.jsonl".into(), 1, 1)],
+            state: crate::scanner::fold(vec![fake_call(1)]),
+        };
+        cache.store_stable(&stable).expect("store");
+        cache.clear().expect("clear");
+        assert!(
+            cache.load_stable().expect("load").is_none(),
+            "clear() wipes the stable aggregate"
+        );
+    }
+
+    #[test]
+    fn newer_schema_version_is_never_stamped_down() {
+        // Two ainb versions share one usage.sqlite. A db written by a
+        // NEWER build must keep its higher user_version: stamping it
+        // down would make the newer binary re-run its migrations
+        // against an already-migrated schema.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("usage.sqlite");
+        {
+            let cache = UsageCache::open(&db).expect("open v2");
+            cache.conn.pragma_update(None, "user_version", 99).expect("fake v99");
+        }
+        let cache = UsageCache::open(&db).expect("reopen");
+        let version: i64 = cache
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("pragma");
+        assert_eq!(version, 99, "future schema version preserved");
+    }
+
+    #[test]
+    fn corrupt_stable_blob_reads_as_absent() {
+        let (_dir, mut cache) = open_in_tmp();
+        cache
+            .conn
+            .execute(
+                "INSERT INTO stable_aggregate (id, blob) VALUES (1, X'DEADBEEF')",
+                [],
+            )
+            .expect("plant corrupt blob");
+        assert!(
+            cache.load_stable().expect("load must not error").is_none(),
+            "undecodable stable blob degrades to None (forces rebuild)"
+        );
     }
 
     #[test]
@@ -421,6 +669,43 @@ mod tests {
         // Original (mtime=1, size=1) row is gone.
         let stale = cache.lookup("/tmp/a.jsonl", 1, 1).expect("lookup");
         assert!(stale.is_none());
+    }
+
+    #[test]
+    fn concurrent_writers_serialize_without_busy_error() {
+        // Two ainb instances share one usage.sqlite. With WAL + busy_timeout,
+        // overlapping writers must serialize instead of erroring SQLITE_BUSY
+        // (which would drop the scan to a cache-less reparse). Without the
+        // busy_timeout pragma this test flakes/panics under contention.
+        use std::sync::Arc;
+        let dir = TempDir::new().expect("tempdir");
+        let db = Arc::new(dir.path().join("usage.sqlite"));
+        // Seed the DB so both threads open an existing WAL file.
+        drop(UsageCache::open(&db).expect("seed open"));
+
+        let handles: Vec<_> = (0..2u64)
+            .map(|t| {
+                let db = Arc::clone(&db);
+                std::thread::spawn(move || {
+                    let mut cache = UsageCache::open(&db).expect("open under contention");
+                    for i in 0..200u64 {
+                        let path = format!("/tmp/t{t}-{i}.jsonl");
+                        cache
+                            .insert(&path, i, i, i, &[fake_call(i)])
+                            .expect("insert under contention");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        // Both writers' rows landed.
+        let cache = UsageCache::open(&db).expect("reopen");
+        assert!(cache.lookup("/tmp/t0-199.jsonl", 199, 199).expect("lookup").is_some());
+        assert!(cache.lookup("/tmp/t1-199.jsonl", 199, 199).expect("lookup").is_some());
     }
 
     // `default_db_path` reads `AINB_HOME` / `XDG_DATA_HOME` / `HOME`
