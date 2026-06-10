@@ -27,6 +27,7 @@ struct Metrics {
     draw_ns_total: AtomicU64,
     draw_ns_max: AtomicU64,
     favorites_loads: AtomicU64,
+    git_resolves: AtomicU64,
     keys_seen: AtomicU64,
     first_paint_ns: OnceLock<u64>,
     /// Key-to-render samples in nanoseconds (bounded to avoid unbounded growth
@@ -44,6 +45,7 @@ fn metrics() -> &'static Metrics {
         draw_ns_total: AtomicU64::new(0),
         draw_ns_max: AtomicU64::new(0),
         favorites_loads: AtomicU64::new(0),
+        git_resolves: AtomicU64::new(0),
         keys_seen: AtomicU64::new(0),
         first_paint_ns: OnceLock::new(),
         key_to_render_ns: Mutex::new(Vec::new()),
@@ -113,6 +115,17 @@ pub fn record_draw(dur: Duration) {
     }
 }
 
+/// Record a git remote resolution done while computing favorite status.
+/// Used to prove this work happens at workspace-load / favorite-toggle time
+/// (a handful of calls) rather than once per workspace per render frame.
+#[inline]
+pub fn record_git_resolve() {
+    if !enabled() {
+        return;
+    }
+    metrics().git_resolves.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record that a key event was received by the event loop.
 #[inline]
 pub fn record_key() {
@@ -151,6 +164,7 @@ fn summary_string() -> String {
     let draw_total = m.draw_ns_total.load(Ordering::Relaxed);
     let draw_max = m.draw_ns_max.load(Ordering::Relaxed);
     let fav = m.favorites_loads.load(Ordering::Relaxed);
+    let git = m.git_resolves.load(Ordering::Relaxed);
     let keys = m.keys_seen.load(Ordering::Relaxed);
     let first_paint = m.first_paint_ns.get().copied().unwrap_or(0);
     let mut samples = m
@@ -171,6 +185,7 @@ fn summary_string() -> String {
     let _ = writeln!(s, "draw avg / max           : {:.3} / {:.3} ms", ms(avg_draw), ms(draw_max));
     let _ = writeln!(s, "total time in draw()     : {:.1} ms", ms(draw_total));
     let _ = writeln!(s, "favorites store loads    : {fav}");
+    let _ = writeln!(s, "git remote resolves      : {git}");
     let _ = writeln!(s, "key-to-render samples    : {}", samples.len());
     if !samples.is_empty() {
         let _ = writeln!(

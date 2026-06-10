@@ -3655,6 +3655,11 @@ impl EventHandler {
                                 ));
                             }
                         }
+
+                        // Favorites changed — refresh the precomputed star
+                        // cache so the session list reflects the toggle without
+                        // re-resolving favorites in the render path. (perf 9ov/8rn)
+                        state.recompute_favorite_workspaces();
                     }
                 }
             }
