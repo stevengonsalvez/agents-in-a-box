@@ -395,6 +395,60 @@ async fn claim_allows_when_under_max_concurrent() {
     assert_eq!(claimed.id, "task-queued");
 }
 
+#[tokio::test]
+async fn claim_counts_dispatched_against_max_concurrent() {
+    // e38.27: a `dispatched` (claimed-but-not-yet-`running`) task consumes a
+    // concurrency slot. agent.max_concurrent_tasks = 1, one task already
+    // `dispatched` (not yet started) -> a second queued task is NOT claimable.
+    //
+    // Without this the daemon over-dispatches under live contention: two daemons
+    // polling the same runtime each see `running` below the cap, each claim a
+    // row (queued -> dispatched), and the agent ends up with more concurrent
+    // in-flight work than its cap once both `dispatched` rows reach `running`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store, "rt-1", "agent-1", 1).await;
+
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-dispatched", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue first");
+    // Claim it (queued -> dispatched). It is NOT `running` yet — the start
+    // transition has not happened. The slot must already be consumed.
+    let clock = FixedClock(NOW_MS);
+    let first = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
+        .await
+        .expect("claim ok")
+        .expect("first task claimed");
+    assert_eq!(first.id, "task-dispatched");
+    let row = TaskRepo::get_by_id(store.pool(), "task-dispatched")
+        .await
+        .expect("read back")
+        .expect("row exists");
+    assert_eq!(
+        row.status, "dispatched",
+        "claimed row is dispatched, not running"
+    );
+
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-queued", "rt-1", "agent-1", None, 2),
+    )
+    .await
+    .expect("enqueue second");
+
+    let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
+        .await
+        .expect("claim ok");
+    assert!(
+        claimed.is_none(),
+        "a dispatched (not-yet-running) task must consume the cap slot; \
+         the second task must not be claimable, got {claimed:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_claims_two_agents_same_issue_both_succeed() {
     // Multica per-(issue, agent) parity: two DIFFERENT agents each hold a

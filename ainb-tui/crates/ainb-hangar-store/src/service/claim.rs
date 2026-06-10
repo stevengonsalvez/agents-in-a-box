@@ -13,10 +13,22 @@
 //! # Per-agent concurrency cap
 //!
 //! The candidate `SELECT` excludes any task whose agent already has
-//! `max_concurrent_tasks` rows in `running` — Multica's `CountRunningTasks`
-//! guard (`task.go:761`). This keeps a single agent from being dispatched more
+//! `max_concurrent_tasks` rows **in flight** — i.e. already `dispatched` or
+//! `running` (Multica's `CountRunningTasks` guard, `task.go:761`, widened to
+//! the post-claim set). This keeps a single agent from being dispatched more
 //! concurrent work than its runtime can handle. The count and the claim happen
 //! in one statement, so the cap holds even under concurrent claims.
+//!
+//! The in-flight set **must** include `dispatched`, not just `running`: a
+//! claim flips a row `queued -> dispatched`, and only later does
+//! [`StartTaskService::start`](crate::service::start) flip it
+//! `dispatched -> running`. If the cap counted only `running`, then between a
+//! claim and its start the just-claimed slot would be invisible — so several
+//! daemons polling the same runtime could each see `running` below the cap and
+//! each claim a row, over-dispatching the agent past `max_concurrent_tasks`
+//! once those `dispatched` rows all reach `running` (e38.27). Counting
+//! `dispatched` closes that race: the claim that stamps `dispatched`
+//! immediately consumes a slot a concurrent claim can see.
 //!
 //! # Per-(issue, agent) active-set guard
 //!
@@ -65,8 +77,9 @@ impl ClaimTaskService {
     /// it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
     ///
     /// A task is *claimable* when it is `queued`, bound to `runtime_id`, its
-    /// agent has fewer than `max_concurrent_tasks` rows currently `running`,
-    /// and — for issue tasks — its agent has no other active (`queued` /
+    /// agent has fewer than `max_concurrent_tasks` rows currently in flight
+    /// (`dispatched` or `running`), and — for issue tasks — its agent has no
+    /// other active (`queued` /
     /// `dispatched` / `running`) task for the same issue (the per-(issue,
     /// agent) guard; a *different* agent's task on the issue does not block).
     /// Returns the claimed projection, or `Ok(None)` when nothing is claimable
@@ -114,8 +127,10 @@ impl ClaimTaskService {
 /// runtime — `ORDER BY priority DESC, created_at, id` (Multica ordering
 /// parity: higher `priority` jumps the queue, 0..3 = P3..P0 per migration
 /// 0013; equal priorities drain FIFO) — whose agent is under its
-/// `max_concurrent_tasks` cap (a correlated COUNT of
-/// the agent's `running` rows) AND has no other active (`queued` /
+/// `max_concurrent_tasks` cap (a correlated COUNT of the agent's in-flight
+/// `dispatched` + `running` rows, so a just-claimed-but-not-yet-started slot
+/// is already counted and concurrent daemons cannot over-dispatch) AND has no
+/// other active (`queued` /
 /// `dispatched` / `running`) task for the same issue (the `NOT EXISTS`
 /// per-(issue, agent) guard — Multica `ClaimAgentTask` parity; `NULL`
 /// `issue_id` candidates never match the correlated equality and so bypass
@@ -131,7 +146,7 @@ WHERE id = ( \
     WHERE q.status = 'queued' AND q.runtime_id = ?2 \
       AND ( \
         SELECT COUNT(*) FROM agent_task_queue AS r \
-        WHERE r.agent_id = q.agent_id AND r.status = 'running' \
+        WHERE r.agent_id = q.agent_id AND r.status IN ('dispatched','running') \
       ) < a.max_concurrent_tasks \
       AND NOT EXISTS ( \
         SELECT 1 FROM agent_task_queue AS s \
