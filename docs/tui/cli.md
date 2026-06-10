@@ -96,7 +96,7 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ├── favorites.json                   # Favorite repositories (managed by `favorites`)
 └── presets/<name>.toml              # Custom presets (managed by `presets`)
 
-./.agents-box/
+./.ainb/
 ├── config.toml                      # Project-level config override (takes precedence)
 └── preset.toml                      # Active preset (written by `presets apply`)
 
@@ -106,7 +106,7 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ```
 
 Configuration precedence (highest first):
-1. `./.agents-box/config.toml` (project)
+1. `./.ainb/config.toml` (project; legacy `./.agents-box/config.toml` still read)
 2. `~/.agents-in-a-box/config/config.toml` (user)
 3. `/etc/agents-in-a-box/config.toml` (system)
 

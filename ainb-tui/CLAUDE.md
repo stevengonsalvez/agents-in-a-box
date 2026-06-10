@@ -172,7 +172,7 @@ The config auto-detects and uses it if installed.
 ## Configuration
 
 Configuration files are loaded from (in order of precedence):
-1. `./.agents-box/config.toml` (project-level)
+1. `./.ainb/config.toml` (project-level; legacy `./.agents-box/config.toml` still read)
 2. `~/.agents-in-a-box/config/config.toml` (user-level)
 3. `/etc/agents-in-a-box/config.toml` (system-level)
 

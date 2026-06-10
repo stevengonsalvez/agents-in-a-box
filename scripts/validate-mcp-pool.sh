@@ -41,13 +41,13 @@ command -v jq >/dev/null || { echo "jq required"; exit 2; }
 # ---------------------------------------------------------------- setup ----
 say "setup: test repo + project config (context7 via npx, grace=${GRACE}s)"
 REPO="$WORKDIR/repo"
-mkdir -p "$REPO/.agents-box"
+mkdir -p "$REPO/.ainb"
 git -C "$REPO" init -q -b main
 echo "# mcp pool validation" > "$REPO/README.md"
 git -C "$REPO" -c user.email=v@l.id -c user.name=validator add -A
 git -C "$REPO" -c user.email=v@l.id -c user.name=validator commit -qm init
 
-cat > "$REPO/.agents-box/config.toml" <<EOF
+cat > "$REPO/.ainb/config.toml" <<EOF
 [mcp_pool]
 enabled = true
 idle_grace_secs = $GRACE
