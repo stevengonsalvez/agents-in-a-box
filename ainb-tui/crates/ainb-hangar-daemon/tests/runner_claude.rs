@@ -78,6 +78,11 @@ exit 0"#,
         claude_path: script,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
+        // Exercise the WIRED sandbox path: the stand-in script reads `$HOME`
+        // (pointed at the tempdir, which is the task root and so an allowed read
+        // root) and writes only its log under `logs/`, so a confined run still
+        // succeeds — proving the env-allowlist + OS-sandbox layers compose.
+        sandbox: true,
     };
     let runner = Runner::new(cfg);
     // SECRET_KEY is NOT in the 12-var allowlist; HOME is. The runner must build
@@ -111,6 +116,7 @@ async fn exec_captures_exit_code() {
         claude_path: script,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
+        sandbox: true,
     });
 
     let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
@@ -133,6 +139,7 @@ exit 1"#,
         claude_path: script,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
+        sandbox: true,
     });
 
     let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
@@ -162,6 +169,7 @@ exit 0"#,
         claude_path: script,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
+        sandbox: true,
     });
 
     let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
@@ -189,6 +197,7 @@ exit 0"#,
         claude_path: script,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
+        sandbox: true,
     });
 
     runner.run_claude(&env, std::iter::empty()).await.expect("run");
@@ -220,6 +229,7 @@ exit 0"#,
         claude_path: script,
         max_runtime: Duration::from_millis(100),
         tail_lines: 50,
+        sandbox: true,
     });
 
     let started = std::time::Instant::now();

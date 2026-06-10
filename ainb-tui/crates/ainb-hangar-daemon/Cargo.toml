@@ -48,6 +48,10 @@ ainb-hangar-core = { path = "../ainb-hangar-core" }
 # Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
 # serialises over the unix socket (P4.10). Pure data — no host deps leak in.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# e38.23 OS-level agent confinement: wraps the provider spawn in a Seatbelt
+# (macOS) / Landlock (Linux) FS sandbox so the agent subprocess can only
+# read/write the task's isolated roots. Gates the non-claude providers (e38.16).
+ainb-hangar-sandbox = { path = "../ainb-hangar-sandbox" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",

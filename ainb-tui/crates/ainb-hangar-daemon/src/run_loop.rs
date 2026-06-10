@@ -22,6 +22,7 @@
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | Multica default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
+//! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
 //!
 //! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the daemon
 //! still sweeps) — a daemon with no runtime has nothing to claim.
@@ -74,6 +75,11 @@ pub struct DaemonConfig {
     /// the stale-dispatch sweeper tripwire to seed a `dispatched` row and prove
     /// the sweeper fails it without the loop racing to start it.
     pub disable_claim: bool,
+    /// e38.23: confine every provider subprocess in the OS-level FS sandbox.
+    /// **Default ON**; set `HANGAR_DAEMON_DISABLE_SANDBOX=1` to opt out (the
+    /// override seam — e.g. a debug build on a platform whose sandbox primitive
+    /// misbehaves). Disabling it is a security downgrade and is logged.
+    pub sandbox: bool,
 }
 
 impl DaemonConfig {
@@ -97,6 +103,8 @@ impl DaemonConfig {
             sweeper.reclaim_window = sweeper.reclaim_window.min(sweeper.dispatched_ttl / 2);
         }
         let disable_claim = std::env::var_os("HANGAR_DAEMON_DISABLE_CLAIM").is_some();
+        // e38.23: sandbox is ON by default; the env var is an explicit opt-out.
+        let sandbox = std::env::var_os("HANGAR_DAEMON_DISABLE_SANDBOX").is_none_or(|v| v != "1");
 
         Self {
             runtime_id,
@@ -104,6 +112,7 @@ impl DaemonConfig {
             poll_interval,
             sweeper,
             disable_claim,
+            sandbox,
         }
     }
 }
@@ -170,6 +179,10 @@ pub async fn run(
         claude_path: cfg.claude_path.clone(),
         max_runtime: PROVIDER_MAX_RUNTIME,
         tail_lines: TAIL_LINES,
+        // e38.23: confine every provider spawn in the OS-level FS sandbox by
+        // default. Overridable via `HANGAR_DAEMON_DISABLE_SANDBOX=1` (see
+        // `DaemonConfig::from_env`).
+        sandbox: cfg.sandbox,
     });
     let clock = SystemClock;
 

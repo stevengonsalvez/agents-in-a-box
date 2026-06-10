@@ -78,6 +78,14 @@ pub struct RunnerConfig {
     /// How many trailing stdout/stderr lines to retain in [`RunnerResult`] for
     /// the audit/UI tail.
     pub tail_lines: usize,
+    /// e38.23: confine the provider subprocess in an OS-level FS sandbox
+    /// (Seatbelt on macOS / Landlock on Linux) so the agent can only read/write
+    /// the task's isolated roots. **Default ON** (the override seam); the
+    /// existing `claude` provider keeps working confined (it needs only network
+    /// and the workdir, both allowed). On a platform with no sandbox primitive
+    /// the spawn transparently runs unconfined (the sandbox layer reports
+    /// `Enforcement::None`) rather than failing the task.
+    pub sandbox: bool,
 }
 
 /// The captured result of one provider run.
@@ -158,6 +166,46 @@ impl Runner {
         Self { cfg }
     }
 
+    /// Build the (tokio) spawn command for the provider, wrapped in the OS-level
+    /// FS sandbox when [`RunnerConfig::sandbox`] is on.
+    ///
+    /// The confinement policy is derived from the task's [`ExecEnv`]: writes are
+    /// confined to the task root (`workdir`/`output`/`logs` all live under it) +
+    /// the process temp dir; reads are confined to the system roots a real agent
+    /// needs + the task root; network egress to the model API stays allowed.
+    /// With the sandbox off, or on an unsupported platform, the command is the
+    /// bare provider binary (the env allowlist + process-group kill still
+    /// apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] only if a *supported* sandbox primitive is
+    /// expected but unavailable, or a sandbox setup IO fault occurs. An
+    /// unsupported platform is NOT an error — it degrades to a passthrough.
+    fn build_command(&self, env: &ExecEnv) -> std::io::Result<Command> {
+        if !self.cfg.sandbox {
+            let cmd = ainb_hangar_sandbox::SandboxedCommand::passthrough(&self.cfg.claude_path)
+                .into_inner();
+            return Ok(Command::from(cmd));
+        }
+
+        let policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
+        let sandboxed = ainb_hangar_sandbox::sandboxed_command(&self.cfg.claude_path, &policy)
+            .map_err(|e| std::io::Error::other(format!("sandbox setup: {e}")))?;
+        if sandboxed.enforcement() == ainb_hangar_sandbox::Enforcement::None {
+            tracing::warn!(
+                provider = self.name(),
+                "OS sandbox unavailable on this platform; provider runs unconfined"
+            );
+        }
+        // Convert the std command (with the inline Seatbelt wrapping on macOS /
+        // the `pre_exec` Landlock hook on Linux already baked in) into a tokio
+        // command. `From` preserves the program, args, and any `pre_exec`
+        // closure, so the FS confinement carries over with the command — no
+        // external profile file or guard to keep alive.
+        Ok(Command::from(sandboxed.into_inner()))
+    }
+
     /// Spawn `claude` in `env.workdir`, stream its JSONL stdout to
     /// `{env.logs}/claude.jsonl`, pin the first `session_id`, and enforce the
     /// configured deadline.
@@ -189,7 +237,16 @@ impl Runner {
             .write(true)
             .open(&log_path)?;
 
-        let mut child = Command::new(&self.cfg.claude_path)
+        // e38.23: build the spawn command through the OS-level FS sandbox so the
+        // provider can only read/write the task's isolated roots. The sandbox
+        // wraps the program (Seatbelt `sandbox-exec` on macOS / a `pre_exec`
+        // Landlock ruleset on Linux); on an unsupported platform it returns a
+        // transparent passthrough (`Enforcement::None`) so a task still runs.
+        // The env allowlist + process-group kill below are unchanged — the
+        // sandbox is an *additional* FS-confinement layer, not a replacement for
+        // the secret-leak env boundary.
+        let mut command = self.build_command(env)?;
+        let mut child = command
             .current_dir(&env.workdir)
             .env_clear()
             .envs(allowed)
