@@ -49,7 +49,7 @@ run_one() {
 }
 
 # ── hangar crates: every non-tripwire, non-helper integration test target.
-for pkg in ainb-hangar-store ainb-hangar-proto ainb-hangar-daemon; do
+for pkg in ainb-hangar-store ainb-hangar-proto ainb-hangar-sandbox ainb-hangar-daemon; do
     for f in crates/"$pkg"/tests/*.rs; do
         [ -e "$f" ] || continue
         name="$(basename "$f" .rs)"
