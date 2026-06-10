@@ -1,5 +1,17 @@
 # ainb-tui performance review — June 2026
 
+> **Update — fixes shipped (branch `f/perform-review`).** All P1 + P2 are fixed
+> and proven: **idle TUI CPU ~4.8% → ~0.55%** (~9×), 0 git2 calls in render,
+> favorites parsed once per change (not per frame), key-to-render p99 2.48 ms and
+> now constant in workspace count. P3 `9pb` (tmux status cadence) and `dsp`
+> (daemon RPC idle timeout) fixed; `h04` was already fixed on main. P3 `ma9`,
+> `178`, `uf3`, `h3t` carry documented architecture recommendations on their
+> beads (deferred to focused, individually-reviewed changes). Verified via
+> `AINB_PERF_TRACE` before/after, the `tripwire_perf_render_gate` tmux test
+> (5/5 non-flaky) plus the full existing tripwire suite, and a vhs frame-truth
+> recording of the Home→Inbox→Home journey. Commits: `e8a21461` (wai/9ov/8rn),
+> `75e289c8` (9pb), `54155296` (dsp). Awaiting human sign-off (tmux-verify G6).
+
 Execution-construct review of the TUI, plugin runtime, all in-tree plugins, and
 the hangar daemon. Scope is runtime behaviour — event loops, timers, threads,
 file IO, subprocess spawns, render cycles — not code style. Findings are backed
