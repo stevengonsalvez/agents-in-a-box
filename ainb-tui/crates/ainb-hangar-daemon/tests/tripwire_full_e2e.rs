@@ -30,7 +30,8 @@
 //!
 //! `BASELINE_TRIPWIRES` was captured by running the discovery once and reading
 //! the actual count (25 on the P9.3 commit; 28 once the Logs `L` + Autopilots
-//! `5` screen tripwires landed), per `feedback_dont_guess_test_constants`. When
+//! `5` screen tripwires landed; 29 once the daemon crash-recovery tripwire
+//! landed), per `feedback_dont_guess_test_constants`. When
 //! you ADD a tripwire, this test keeps passing (count rises) — but bump the
 //! baseline to the new captured count in the same commit. When you INTENTIONALLY
 //! remove one, bump the baseline down so the drop is reviewed, never silent.
@@ -41,7 +42,7 @@ use std::path::{Path, PathBuf};
 
 /// Hangar tripwire binaries present at the captured commit. See module docs for
 /// the capture procedure. Lower-bound assertion: adding tripwires is always fine.
-const BASELINE_TRIPWIRES: usize = 28;
+const BASELINE_TRIPWIRES: usize = 29;
 
 /// `tests/` directories that hold Hangar tripwires, relative to the cargo
 /// workspace root (`ainb-tui/`).
