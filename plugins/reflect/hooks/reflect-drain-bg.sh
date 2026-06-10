@@ -16,6 +16,11 @@
 # - Stale-tolerant: skips queue entries whose transcript no longer exists.
 # - Poison-message-tolerant: per-entry retry counter at ~/.reflect/retry-count.jsonl;
 #                           entries that fail >3 times are archived as "poison".
+# - Skill-refresh aware (R13): entries with trigger=skill_refresh (enqueued by
+#                           reflect_cascade.py belief revision) carry a SKILL.md
+#                           path in transcript_path; the drain bypasses the
+#                           cascade, re-runs the /reflect skill-edit step on the
+#                           stale skill, and clears its staleness flag on success.
 # - Always exits 0 so the calling SessionStart hook never thinks bootstrap broke.
 #
 # Configuration (env)
@@ -384,6 +389,18 @@ process_entry() {
     session_id=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("session_id","unknown"))' 2>/dev/null || echo "unknown")
     trigger=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("trigger","unknown"))' 2>/dev/null || echo "unknown")
 
+    # R13: skill_refresh tasks (enqueued by reflect_cascade.py when belief
+    # revision lands on a learning that backs a skill) carry the SKILL.md
+    # path in transcript_path, so every queue mechanic below (existence
+    # check, retry counter, poison, rewrite) works unchanged; only the
+    # cascade and the prompt branch on the trigger.
+    local skill_name="" refresh_learning_id="" refresh_reason=""
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        skill_name=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("skill_name",""))' 2>/dev/null || echo "")
+        refresh_learning_id=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("learning_id",""))' 2>/dev/null || echo "")
+        refresh_reason=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason",""))' 2>/dev/null || echo "")
+    fi
+
     if [[ -z "$transcript" ]]; then
         log "  skip: entry has no transcript_path"
         return 2
@@ -412,8 +429,10 @@ process_entry() {
     # Default-on. Skips reflect-on-reflect / no-signal / already-captured for $0,
     # and shrinks the input from the full transcript to just the signal-bearing
     # windows (~10x) so /reflect runs cheap on Sonnet with a low turn budget.
+    # skill_refresh entries (R13) bypass it: a SKILL.md is not a transcript and
+    # the gate would always skip it as no-signal.
     local reflect_target="$transcript" slice_path=""
-    if [[ "$CASCADE_ENABLED" == "1" && -f "$CASCADE_SCRIPT" ]]; then
+    if [[ "$CASCADE_ENABLED" == "1" && -f "$CASCADE_SCRIPT" && "$trigger" != "skill_refresh" ]]; then
         local prep_json prep_action prep_reason prep_slice
         # prepare exits 0=reflect / 1=skip but ALWAYS prints valid JSON to
         # stdout. Capture stdout directly — do NOT `|| echo {}`, which would
@@ -437,7 +456,11 @@ process_entry() {
     fi
 
     if [[ "$DRY_RUN" == "1" ]]; then
-        log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect $reflect_target"
+        if [[ "$trigger" == "skill_refresh" ]]; then
+            log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect skill-refresh ${skill_name:-?} $reflect_target"
+        else
+            log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect $reflect_target"
+        fi
         [[ -n "$slice_path" ]] && rm -f "$slice_path"
         record_cost_event 1 "$transcript" "dry_run"
         return 0
@@ -448,8 +471,20 @@ process_entry() {
     # revision paragraph (S5) is intentionally thin: the cascade embeds the
     # full action contract + exact 'revise' command inside the slice itself,
     # so the prompt only has to point the writer at it.
+    # skill_refresh entries (R13) get the skill-edit prompt instead: the
+    # writer re-runs the /reflect skill-edit step against the stale SKILL.md
+    # so the skill catches up with the revised learnings corpus.
     local prompt
-    prompt="/reflect
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        prompt="/reflect
+
+Skill refresh (auto-triggered): the skill '${skill_name:-unknown}' at ${transcript} is marked stale — a learning that backs it was revised (learning: ${refresh_learning_id:-unknown}; reason: ${refresh_reason:-belief revision}).
+
+Re-run the skill-edit step on this skill: read the SKILL.md, check the current learnings covering its domain (reflect search, or the learnings table in reflect.db), and EDIT the SKILL.md in place so its guidance matches the revised corpus — fold in the new rule, and update or remove any guidance the revision contradicts. Keep the edit surgical and additive where possible; do not rewrite unrelated sections.
+
+When done, summarize what you changed. Do NOT touch the queue file — the drain script handles archiving."
+    else
+        prompt="/reflect
 
 Process the transcript at: ${reflect_target}
 
@@ -458,6 +493,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
 Belief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.
 
 When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
+    fi
 
     local out_json exit_code
     # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
@@ -584,6 +620,23 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
 
     log "    OK turns=${num_turns} cost=\$${cost} tokens=${total_tokens} result=${result_summary}"
     record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
+
+    # R13: a completed skill-refresh clears the staleness flag so the skill
+    # re-enters the inject matcher. refresh_if_stale re-parses the (likely
+    # edited) SKILL.md first; the explicit clear covers a refresh run that
+    # concluded no edit was needed. Best-effort — never fails the entry.
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        python3 - "${SCRIPT_DIR}/../scripts" "$transcript" >/dev/null 2>>"$LOG_FILE" <<'PY' || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import reflect_db
+import skill_index
+conn = reflect_db.get_conn()
+skill_index.refresh_if_stale(conn=conn)
+reflect_db.clear_skill_stale(sys.argv[2], conn=conn)
+PY
+        log "    skill-refresh complete: cleared staleness for $transcript"
+    fi
     return 0
 }
 

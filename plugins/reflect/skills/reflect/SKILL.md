@@ -405,6 +405,28 @@ python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_cascade.py revise \
 The interactive `/reflect` flow is unchanged — this section only applies when
 the input explicitly carries the related-learnings block.
 
+### Auto Skill Refresh (R13)
+
+Skills are promoted from learnings once and would otherwise drift as the
+corpus evolves. Belief revision closes that loop automatically — no manual
+step in this skill is required:
+
+1. When a `revise` UPDATE/DELETE lands on a learning whose title tokens or
+   category overlap an indexed skill's `tags` (the R20 `skills` table in
+   `reflect.db`), that skill is flagged `is_stale`.
+2. Stale skills stop matching in the SessionStart inject tier immediately —
+   a skill with possibly-outdated guidance never wins over raw learnings.
+3. A `skill_refresh` task is queued in `~/.reflect/pending_reflections.jsonl`
+   (`transcript_path` = the SKILL.md, `trigger` = `skill_refresh`, at most one
+   pending task per skill). The background drain consumes it by re-running
+   the skill-edit step (Step 2.5 shape: re-read the SKILL.md, check current
+   learnings for its domain, edit in place).
+4. Regenerating the SKILL.md (mtime change) — or a completed refresh run —
+   clears the flag and the skill re-enters the inject matcher.
+
+The `revise` summary reports the back-reaction as `skills_marked_stale` and
+`refreshes_queued`.
+
 ## Toggle Auto-Reflect
 
 ```

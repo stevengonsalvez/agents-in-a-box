@@ -4,8 +4,9 @@
 # dependencies = []
 # ///
 # ABOUTME: Skills index (port R20, hindsight mental_models shape) — keeps reflect.db's
-# ABOUTME: skills table (name, path, tags[], summary, mtime, last_refreshed_at) in sync
-# ABOUTME: with installed SKILL.md files so retrieval can match queries without a file scan.
+# ABOUTME: skills table (name, path, tags[], summary, mtime, last_refreshed_at, is_stale)
+# ABOUTME: in sync with installed SKILL.md files so retrieval can match queries without
+# ABOUTME: a file scan. Stale skills (R13) are excluded from matching until regenerated.
 """Maintain the installed-skills index in ``reflect.db``.
 
 Port R20. Tiered inject (R10), forced-grounding short-circuit (R11), and the
@@ -297,12 +298,20 @@ def match_skills(
     Only rows scoring > 0 are returned, best first, each annotated with a
     ``score`` key. This is the 'is there a skill for this query?' check
     R10/R11 build on — deliberately deterministic and stdlib-only.
+
+    R13: skills flagged ``is_stale`` (a backing learning was revised after
+    the SKILL.md was written) never match — a stale skill must not win the
+    inject tier with possibly-outdated guidance. The hierarchy falls
+    through to the raw-learnings tier until the refresh task regenerates
+    the skill (mtime change clears the flag in ``upsert_skill``).
     """
     query_tokens = _tokenize(query)
     if not query_tokens:
         return []
     scored: list[tuple[float, dict[str, Any]]] = []
     for row in reflect_db.get_skills(conn=conn):
+        if row.get("is_stale"):
+            continue
         strong = _tokenize(row["name"]) | _tokenize(" ".join(row["tags"]))
         weak = _tokenize(row["summary"]) - strong
         score = 2.0 * len(query_tokens & strong) + 1.0 * len(query_tokens & weak)
@@ -342,9 +351,10 @@ def main() -> None:
 
     elif args.command == "list":
         for row in reflect_db.get_skills(conn=conn):
+            stale = "  [STALE]" if row.get("is_stale") else ""
             print(
                 f"  {row['name']}  tags={','.join(row['tags']) or '-'}  "
-                f"refreshed={row['last_refreshed_at']}  {row['path']}"
+                f"refreshed={row['last_refreshed_at']}  {row['path']}{stale}"
             )
 
     elif args.command == "match":

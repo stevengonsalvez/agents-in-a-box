@@ -308,7 +308,8 @@ CREATE TABLE IF NOT EXISTS skills (
     tags                TEXT NOT NULL DEFAULT '[]',
     summary             TEXT NOT NULL DEFAULT '',
     mtime               REAL NOT NULL DEFAULT 0,
-    last_refreshed_at   TEXT NOT NULL
+    last_refreshed_at   TEXT NOT NULL,
+    is_stale            INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -685,6 +686,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_CONCEPT_INDEX_DDL)
         conn.execute(_SKILLS_DDL)
         conn.execute(_SLOTS_DDL)
+
+    # R13: pre-existing skills tables predate the staleness flag.
+    skill_columns = _table_columns(conn, "skills")
+    if skill_columns and "is_stale" not in skill_columns:
+        with conn:
+            conn.execute(
+                "ALTER TABLE skills ADD COLUMN is_stale INTEGER NOT NULL DEFAULT 0"
+            )
 
     _backfill_concept_index(conn)
 
@@ -1880,6 +1889,12 @@ def upsert_skill(
     primary key (skill *names* can collide across plugin namespaces);
     ``mtime`` is the file's modification time, which makes the staleness
     check in ``skill_index.refresh_if_stale`` a pure stat() pass.
+
+    R13: ``is_stale`` clears ONLY when the upsert carries a NEW mtime —
+    i.e. the SKILL.md was actually regenerated/edited on disk. Re-upserting
+    an unchanged file (a full ``rebuild_index`` pass) preserves the flag, so
+    a skill marked stale by belief revision stays stale until its content
+    is really refreshed.
     """
     conn = conn or get_conn()
     with conn:
@@ -1890,6 +1905,8 @@ def upsert_skill(
                    name = excluded.name,
                    tags = excluded.tags,
                    summary = excluded.summary,
+                   is_stale = CASE WHEN excluded.mtime != skills.mtime
+                                   THEN 0 ELSE skills.is_stale END,
                    mtime = excluded.mtime,
                    last_refreshed_at = excluded.last_refreshed_at""",
             (path, name, json.dumps(tags or []), summary, float(mtime), _now_iso()),
@@ -1940,6 +1957,66 @@ def remove_skills(
     with conn:
         cur = conn.execute(f"DELETE FROM skills WHERE path IN ({marks})", paths)
     return cur.rowcount
+
+
+def mark_skills_stale(
+    paths: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """R13: flag the skills at *paths* as stale. Returns rows newly flagged.
+
+    A stale skill is one whose backing learnings changed (belief-revision
+    UPDATE/DELETE) after the SKILL.md was last written — its guidance may
+    no longer match the corpus. Stale skills are excluded from the inject
+    matcher (``skill_index.match_skills``) until regenerated; the flag
+    clears when the SKILL.md is re-edited (mtime change → ``upsert_skill``)
+    or via :func:`clear_skill_stale`.
+    """
+    if not paths:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in paths)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE skills SET is_stale = 1 "
+            f"WHERE path IN ({marks}) AND is_stale = 0",
+            paths,
+        )
+    return cur.rowcount
+
+
+def clear_skill_stale(
+    path: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """R13: clear the staleness flag for one skill (refresh completed)."""
+    if not path:
+        return False
+    conn = conn or get_conn()
+    with conn:
+        cur = conn.execute(
+            "UPDATE skills SET is_stale = 0 WHERE path = ? AND is_stale = 1",
+            (path,),
+        )
+    return cur.rowcount > 0
+
+
+def get_stale_skills(
+    *, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """R13: every skill currently flagged stale (tags decoded), name-ordered."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM skills WHERE is_stale = 1 ORDER BY name, path"
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["tags"] = _decode_tags(record.get("tags"))
+        out.append(record)
+    return out
 
 
 # ---------------------------------------------------------------------------

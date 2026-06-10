@@ -46,13 +46,25 @@ The weekly consolidation pass catches dupes after they have been served for
 days; this catches them at write. S5's title-overlap recall is lexical and
 misses paraphrases — the cosine probe is the semantic backstop.
 
+R13 auto-skill-refresh: a revision UPDATE/DELETE that lands on a learning
+backing an installed skill (skill tags overlap the learning's title tokens or
+category) marks that skill ``is_stale`` in ``reflect.db.skills`` — stale
+skills stop matching in the inject tier (R11 via ``skill_index.match_skills``)
+— and enqueues a ``skill_refresh`` task into ``pending_reflections.jsonl``.
+The drain consumes the task by re-running the /reflect skill-edit step on the
+SKILL.md so the skill catches up with the revised corpus; regeneration (mtime
+change) clears the flag. This is the Hindsight
+``_trigger_mental_model_refreshes`` shape: belief revision back-reacts on the
+curated layer instead of letting promoted skills drift.
+
 CLI:
     reflect_cascade.py prepare <transcript.jsonl> [--out SLICE] [--context N]
         -> JSON {action, reason, signal_count, slice_path, orig_tokens,
                  slice_tokens, signal_hash, related_count}
     reflect_cascade.py revise [--actions JSON|FILE|-] [--source ID]
         -> JSON {executed, created, updated, deleted, skipped,
-                 needs_adjudication, adjudications, errors}
+                 needs_adjudication, adjudications, skills_marked_stale,
+                 refreshes_queued, errors}
 """
 
 from __future__ import annotations
@@ -103,6 +115,11 @@ _DEDUP_THRESHOLD_DEFAULT = 0.97
 _DEDUP_SCAN_CAP = 200      # newest learnings embedded per probe (bounded)
 _DEDUP_TEXT_CAP = 2000     # chars of each text handed to the embedder
 _DEDUP_EMBED_TIMEOUT = 60  # seconds — first call may pay the model load
+
+# R13: queue trigger value for auto-skill-refresh tasks. The drain branches on
+# it: skill_refresh entries skip the cascade (a SKILL.md is not a transcript)
+# and get the skill-edit prompt instead of the transcript prompt.
+SKILL_REFRESH_TRIGGER = "skill_refresh"
 
 
 @dataclass
@@ -457,6 +474,140 @@ def _build_revision_block(related: list[dict], transcript_path: str) -> str:
     )
 
 
+def skills_backing_learning(learning: dict) -> list[dict]:
+    """R13: indexed skills whose tags overlap *learning*'s tags/category.
+
+    A skill is "backed by" the learning when any of its tags either equals
+    the learning's category (case-insensitive) or has ALL of its content
+    tokens present in the learning's title — a multi-word tag must match
+    whole, so the tag "belief revision" doesn't fire on every learning that
+    merely says "revision". Deterministic, stdlib-only, and best-effort:
+    returns [] when the skills index is unavailable.
+    """
+    title_tokens = _content_tokens(str(learning.get("title", "") or ""))
+    category = str(learning.get("category", "") or "").strip().lower()
+    if not title_tokens and not category:
+        return []
+    try:
+        from reflect_db import get_skills
+        skills = get_skills()
+    except Exception:
+        return []
+    hits: list[dict] = []
+    for skill in skills:
+        for tag in skill.get("tags") or []:
+            tag = str(tag).strip().lower()
+            if not tag:
+                continue
+            if category and tag == category:
+                hits.append(skill)
+                break
+            tag_tokens = _content_tokens(tag)
+            if tag_tokens and tag_tokens <= title_tokens:
+                hits.append(skill)
+                break
+    return hits
+
+
+def _skill_refresh_queue_file() -> Path:
+    """The drain's pending-reflections queue (REFLECT_STATE_DIR-aware)."""
+    import os
+    state = os.environ.get("REFLECT_STATE_DIR", "")
+    base = Path(state).expanduser() if state else Path.home() / ".reflect"
+    return base / "pending_reflections.jsonl"
+
+
+def _skill_refresh_already_queued(qfile: Path, skill_path: str) -> bool:
+    """True when a refresh task for *skill_path* is already pending.
+
+    Fail-closed on read errors (returns False → enqueue anyway): a duplicate
+    refresh is cheap, a silently dropped one leaves the skill stale forever.
+    """
+    if not qfile.exists():
+        return False
+    try:
+        with open(qfile, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("trigger") == SKILL_REFRESH_TRIGGER
+                    and entry.get("transcript_path") == skill_path
+                ):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def enqueue_skill_refresh(skill: dict, *, learning_id: str = "",
+                          reason: str = "") -> bool:
+    """R13: append a ``skill_refresh`` task to ``pending_reflections.jsonl``.
+
+    ``transcript_path`` carries the SKILL.md path on purpose — the drain
+    keys ALL its queue mechanics (existence check, retry counters, rewrite,
+    poison) on that field, so a refresh task rides the existing machinery;
+    the ``trigger`` discriminator switches the drain to the skill-edit
+    prompt. Dedup: at most one pending refresh per skill path.
+    """
+    skill_path = str(skill.get("path", "") or "")
+    if not skill_path:
+        return False
+    qfile = _skill_refresh_queue_file()
+    if _skill_refresh_already_queued(qfile, skill_path):
+        return False
+    from datetime import datetime
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "session_id": "skill-refresh",
+        "transcript_path": skill_path,
+        "trigger": SKILL_REFRESH_TRIGGER,
+        "skill_name": str(skill.get("name", "") or ""),
+        "learning_id": learning_id,
+        "reason": reason,
+    }
+    qfile.parent.mkdir(parents=True, exist_ok=True)
+    with open(qfile, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+    return True
+
+
+def trigger_skill_refreshes(learning: dict, *, action: str = "",
+                            reason: str = "") -> dict:
+    """R13: after a revision lands on *learning*, refresh the skills it backs.
+
+    Marks every overlapping skill ``is_stale`` (drops it out of the inject
+    matcher immediately) and enqueues one ``skill_refresh`` drain task per
+    skill. Returns ``{"skills_marked_stale": N, "refreshes_queued": M}``.
+    Best-effort end to end: any failure returns zero counts — the back-
+    reaction loop must never break the revision write path itself.
+    """
+    summary = {"skills_marked_stale": 0, "refreshes_queued": 0}
+    try:
+        backing = skills_backing_learning(learning)
+        if not backing:
+            return summary
+        from reflect_db import mark_skills_stale
+        summary["skills_marked_stale"] = mark_skills_stale(
+            [skill["path"] for skill in backing]
+        )
+        learning_id = str(learning.get("id", "") or "")
+        why = reason or f"learning revised ({action.lower() or 'update'})"
+        for skill in backing:
+            if enqueue_skill_refresh(
+                skill, learning_id=learning_id, reason=why,
+            ):
+                summary["refreshes_queued"] += 1
+    except Exception:
+        pass
+    return summary
+
+
 def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
     """S5: apply structured CREATE/UPDATE/DELETE actions to the learnings DB.
 
@@ -476,11 +627,18 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
     the CREATE with ``"dedup_adjudicated": true`` to keep both. The probe
     fail-opens (no CLI / slim engine / timeout -> plain CREATE).
 
+    R13: every executed UPDATE/DELETE back-reacts on the skills index —
+    skills whose tags overlap the revised learning are flagged stale
+    (``skills_marked_stale``) and a ``skill_refresh`` drain task is queued
+    per skill (``refreshes_queued``). Best-effort: a refresh-trigger
+    failure never fails the revision itself.
+
     Per-action failures are collected in ``errors`` — one malformed action
     never blocks the rest of the batch.
     """
     summary = {"executed": 0, "created": 0, "updated": 0, "deleted": 0,
                "skipped": 0, "needs_adjudication": 0, "adjudications": [],
+               "skills_marked_stale": 0, "refreshes_queued": 0,
                "errors": []}
     try:
         import reflect_db
@@ -505,12 +663,20 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                     summary["skipped"] += 1
                     summary["errors"].append("UPDATE missing target_id")
                     continue
-                if reflect_db.get_learning(target) is None:
+                row = reflect_db.get_learning(target)
+                if row is None:
                     summary["skipped"] += 1
                     summary["errors"].append(f"UPDATE {target}: learning not found")
                     continue
                 if reflect_db.add_learning_proof(target, sid):
                     summary["updated"] += 1
+                    # R13: an updated learning may back a promoted skill —
+                    # mark those skills stale + queue their regeneration.
+                    refreshed = trigger_skill_refreshes(
+                        row, action="UPDATE", reason=reason,
+                    )
+                    summary["skills_marked_stale"] += refreshed["skills_marked_stale"]
+                    summary["refreshes_queued"] += refreshed["refreshes_queued"]
                 else:
                     # Idempotent: this source already proved this learning.
                     summary["skipped"] += 1
@@ -533,6 +699,12 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                     revert_reason=reason or "belief-revision: retired as stale",
                 )
                 summary["deleted"] += 1
+                # R13: retiring a learning invalidates skills built on it.
+                refreshed = trigger_skill_refreshes(
+                    row, action="DELETE", reason=reason,
+                )
+                summary["skills_marked_stale"] += refreshed["skills_marked_stale"]
+                summary["refreshes_queued"] += refreshed["refreshes_queued"]
             elif action == "CREATE":
                 if not content:
                     summary["skipped"] += 1
@@ -707,6 +879,7 @@ def main() -> None:
             print(json.dumps({"executed": 0, "created": 0, "updated": 0,
                               "deleted": 0, "skipped": 0,
                               "needs_adjudication": 0, "adjudications": [],
+                              "skills_marked_stale": 0, "refreshes_queued": 0,
                               "errors": [f"invalid actions JSON: {exc}"]}))
             sys.exit(1)
         if isinstance(parsed, dict):
