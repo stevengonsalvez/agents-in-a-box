@@ -661,6 +661,53 @@ async fn migration_0014_adds_issue_priority_due_date_labels_columns() {
 }
 
 #[tokio::test]
+async fn migration_0015_adds_agent_archive_and_config_columns() {
+    // The agent edit/archive surface (parity-review gap: "create/edit/archive
+    // agents + configure runtime/model/args partial") needs the `agent` table to
+    // carry an archive flag and the per-agent runtime config knobs. Six columns
+    // land on `agent`:
+    //   - `archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))`;
+    //   - `model TEXT` (nullable provider model override);
+    //   - `cli_args TEXT NOT NULL DEFAULT '[]'` (JSON array of CLI args);
+    //   - `mcp_config TEXT NOT NULL DEFAULT '{}'` (JSON object MCP config);
+    //   - `thinking TEXT` (nullable reasoning level);
+    //   - `agent_env TEXT NOT NULL DEFAULT '{}'` (JSON object env map).
+    // Wiring these into the provider EXEC is a SEPARATE bead (e38.16); this
+    // migration only lands the columns the edit/archive RPCs write. ALTER TABLE
+    // ADD COLUMN rewrites the catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains("archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))"),
+        "agent.archived 0/1 flag with CHECK: {agent}"
+    );
+    assert!(
+        agent.contains("model TEXT"),
+        "agent.model nullable: {agent}"
+    );
+    assert!(
+        agent.contains("cli_args TEXT NOT NULL DEFAULT '[]'"),
+        "agent.cli_args default empty JSON array: {agent}"
+    );
+    assert!(
+        agent.contains("mcp_config TEXT NOT NULL DEFAULT '{}'"),
+        "agent.mcp_config default empty JSON object: {agent}"
+    );
+    assert!(
+        agent.contains("thinking TEXT"),
+        "agent.thinking nullable: {agent}"
+    );
+    assert!(
+        agent.contains("agent_env TEXT NOT NULL DEFAULT '{}'"),
+        "agent.agent_env default empty JSON object: {agent}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn all_migrations_create_exactly_seventeen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
