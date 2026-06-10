@@ -1730,6 +1730,7 @@ mod chunk_accumulator_tests {
             scanned: 7,
             total: 100,
             current_project: "alpha".into(),
+            done: false,
         });
         let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
         assert!(
@@ -1810,6 +1811,7 @@ mod scan_progress_tests {
             scanned,
             total,
             current_project: project.into(),
+            done: false,
         })
         .expect("encode scan_progress")
     }
@@ -1856,6 +1858,7 @@ mod scan_progress_tests {
             scanned: 5,
             total: 10,
             current_project: "good".into(),
+            done: false,
         });
         let bad = b"\xff\xff\xff not msgpack";
         let result = rmp_serde::from_slice::<ScanProgressEvent>(bad);

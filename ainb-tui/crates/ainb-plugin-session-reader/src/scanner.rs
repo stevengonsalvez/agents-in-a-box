@@ -99,6 +99,7 @@ impl ProgressReporter {
                 scanned: self.scanned,
                 total: self.total,
                 current_project: current_project.to_string(),
+                done: false,
             });
             self.last_emit = Some(now);
         }
@@ -116,6 +117,7 @@ impl ProgressReporter {
             scanned: self.scanned,
             total: self.total,
             current_project: current_project.to_string(),
+            done: false,
         });
         self.last_emit = Some(Instant::now());
     }

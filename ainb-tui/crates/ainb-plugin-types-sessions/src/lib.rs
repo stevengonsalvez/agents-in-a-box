@@ -76,6 +76,14 @@ pub struct ScanProgressEvent {
     /// Project label (basename of the project dir or rollout date) for
     /// the most recently scanned file.
     pub current_project: String,
+    /// `true` on the terminal event of a scan whose refresh decided
+    /// NOT to republish (unchanged-snapshot short-circuit): consumers
+    /// must clear any in-flight scan UI now, because no
+    /// `sessions.usage_data` chunk is coming to clear it for them.
+    /// Absent/`false` on every per-file tick (and from pre-#255
+    /// publishers, which decode-default cleanly).
+    #[serde(default)]
+    pub done: bool,
 }
 
 /// Optional payload for the `sessions.refresh_request` topic.
