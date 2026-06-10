@@ -161,10 +161,12 @@ async fn plugin_reaches_connected_against_mock_daemon() {
             .await
             .unwrap();
 
-        // 2. Service the plugin's reverse calls until the subscribe is sent.
-        //    The host drives: dial (request) → send (notification) → init result.
-        let mut subscribe_sent = false;
-        while !subscribe_sent {
+        // 2. Service the plugin's reverse calls until BOTH connect-time sends
+        //    (the e38.1 `auth/hello` first frame, then `workspace/subscribe`)
+        //    have been relayed to the daemon. The host drives: dial (request)
+        //    → send ×2 (notifications) → init result.
+        let mut sends_relayed = 0;
+        while sends_relayed < 2 {
             let frame = read_frame(&mut host_read).await.expect("plugin link alive");
             match frame.get("method").and_then(|m| m.as_str()) {
                 Some(methods::HOST_UNIX_SOCKET_DIAL) => {
@@ -186,32 +188,35 @@ async fn plugin_reaches_connected_against_mock_daemon() {
                     let conn = daemon_conn.as_mut().expect("dialed first");
                     conn.write_all(&send.bytes).await.unwrap();
                     conn.flush().await.unwrap();
-                    subscribe_sent = true;
+                    sends_relayed += 1;
                 }
                 _ => { /* host/log etc. — drain */ }
             }
         }
 
-        // 3. Read the daemon's reply, push it to the plugin as a socket event.
+        // 3. Read the daemon's replies (auth ack, then subscribe ack) and push
+        //    each to the plugin as a socket event.
         let conn = daemon_conn.as_mut().unwrap();
         let mut dr = BufReader::new(conn);
-        let reply = read_frame(&mut dr).await.expect("daemon reply");
-        let reply_frame = framing::encode(&serde_json::to_vec(&reply).unwrap());
-        let event = UnixSocketEvent {
-            kind: UnixSocketEventKind::Data,
-            bytes: Some(reply_frame.into()),
-            error: None,
-        };
-        let evt = HandleEventParams {
-            topic: format!("socket:{stream_id}"),
-            payload: serde_json::to_vec(&event).unwrap().into(),
-        };
-        host_write
-            .write_all(&host_frame(&serde_json::json!({
-                "jsonrpc": "2.0", "method": methods::PLUGIN_HANDLE_EVENT, "params": evt
-            })))
-            .await
-            .unwrap();
+        for which in ["auth ack", "subscribe ack"] {
+            let reply = read_frame(&mut dr).await.expect(which);
+            let reply_frame = framing::encode(&serde_json::to_vec(&reply).unwrap());
+            let event = UnixSocketEvent {
+                kind: UnixSocketEventKind::Data,
+                bytes: Some(reply_frame.into()),
+                error: None,
+            };
+            let evt = HandleEventParams {
+                topic: format!("socket:{stream_id}"),
+                payload: serde_json::to_vec(&event).unwrap().into(),
+            };
+            host_write
+                .write_all(&host_frame(&serde_json::json!({
+                    "jsonrpc": "2.0", "method": methods::PLUGIN_HANDLE_EVENT, "params": evt
+                })))
+                .await
+                .unwrap();
+        }
 
         // 4. Poll render until the chrome presence dot reads `online`.
         let connected = poll_until_connected(&mut host_write, &mut host_read).await;

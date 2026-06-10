@@ -54,6 +54,12 @@ const FALLBACK_VIEWPORT: (u16, u16) = (1, 1);
 /// whitelist (which lists this exact path).
 const DAEMON_SOCKET_PATH: &str = "~/.ainb/hangar.sock";
 
+/// JSON-RPC id of the `auth/hello` frame the plugin sends FIRST on every
+/// connection (e38.1): the daemon rejects any other first frame. The token is
+/// read from `{hangar_home}/hangar/daemon.token` (written by the daemon at
+/// boot, `0600`).
+const AUTH_REQ_ID: i64 = 0;
+
 /// JSON-RPC id the plugin assigns to its `workspace/subscribe` request.
 /// A single id is enough: the plugin issues exactly one subscribe per
 /// connection, and matching the ack by id avoids treating an unrelated
@@ -130,6 +136,21 @@ pub struct HangarPlugin {
     /// [`RecordingOpener`] for the tmux tripwire — see [`crate::shell`]). Held as
     /// a trait object so tests can inject a recording opener.
     opener: Box<dyn crate::shell::Opener>,
+}
+
+/// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
+///
+/// The home resolves exactly like [`crate::firstrun::state_path`]
+/// (`$AINB_HANGAR_HOME` when set and non-empty, else `$HOME/.ainb`) via the
+/// shared [`ainb_hangar_proto::auth::default_token_file`] helper, so the file
+/// read here is the one the daemon wrote at boot. `None` when the file is
+/// missing or empty (the daemon then rejects the connection with a clear
+/// UNAUTHORIZED error instead of a hang).
+fn read_daemon_token() -> Option<String> {
+    let path = ainb_hangar_proto::auth::default_token_file()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let token = raw.trim().to_string();
+    (!token.is_empty()).then_some(token)
 }
 
 impl Default for HangarPlugin {
@@ -212,6 +233,30 @@ impl HangarPlugin {
         };
         self.conn.on_dialed(dial.stream_id.clone());
 
+        // First frame (e38.1): authenticate with the daemon token read from
+        // `{hangar_home}/hangar/daemon.token`. A missing/unreadable file sends
+        // an empty token — the daemon answers UNAUTHORIZED, which surfaces as
+        // a clean connection error rather than a silent hang.
+        let token = read_daemon_token().unwrap_or_default();
+        let auth_body = match encode_request(
+            AUTH_REQ_ID,
+            daemon_methods::AUTH_HELLO,
+            serde_json::json!({ "token": token }),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.conn.on_error(format!("encode auth failed: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = host
+            .unix_socket_send(dial.stream_id.clone(), auth_body)
+            .await
+        {
+            self.conn.on_error(format!("send auth failed: {e}"));
+            return;
+        }
+
         // Frame the workspace/subscribe request and write it to the cap stream.
         let body = match encode_request(
             SUBSCRIBE_REQ_ID,
@@ -228,7 +273,9 @@ impl HangarPlugin {
             self.conn.on_error(format!("send subscribe failed: {e}"));
             return;
         }
-        let _ = host.log_info("hangar: dialed daemon, subscribe sent").await;
+        let _ = host
+            .log_info("hangar: dialed daemon, auth + subscribe sent")
+            .await;
     }
 
     /// Feed an inbound `socket:<stream_id>` event into the connection.
@@ -263,6 +310,16 @@ impl HangarPlugin {
     /// React to one fully-decoded daemon response.
     fn on_daemon_response(&mut self, resp: &RpcResponse) {
         match resp.id {
+            // The auth ack precedes the subscribe ack (e38.1). Success is
+            // silent (the subscribe ack drives the state machine forward); a
+            // rejection surfaces as a connection error so the chrome shows why
+            // the daemon is unreachable.
+            RpcId::Number(AUTH_REQ_ID) => {
+                if let Some(err) = &resp.error {
+                    self.conn
+                        .on_error(format!("daemon auth rejected: {}", err.message));
+                }
+            }
             // The subscribe ack completes the handshake and arms the snapshot
             // fetch (issued by `handle_event`, which holds the `host`).
             RpcId::Number(SUBSCRIBE_REQ_ID) => {

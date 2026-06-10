@@ -109,6 +109,7 @@ fn spawn_real_daemon(listener: UnixListener) -> oneshot::Sender<()> {
         };
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
+        let mut authed = false;
         loop {
             tokio::select! {
                 _ = &mut kill_rx => {
@@ -118,21 +119,33 @@ fn spawn_real_daemon(listener: UnixListener) -> oneshot::Sender<()> {
                 frame = read_frame(&mut reader) => {
                     let Some(raw) = frame else { return };
                     // Decode as the genuine proto request type — proves the
-                    // plugin emits a real workspace/subscribe envelope.
+                    // plugin emits real envelopes in the contract order:
+                    // `auth/hello` first (e38.1), then `workspace/subscribe`.
                     let req: RpcRequest = match serde_json::from_value(raw) {
                         Ok(r) => r,
                         Err(_) => return,
                     };
-                    assert_eq!(
-                        req.method,
-                        daemon_methods::WORKSPACE_SUBSCRIBE,
-                        "plugin must send workspace/subscribe first"
-                    );
+                    let result = if authed {
+                        assert_eq!(
+                            req.method,
+                            daemon_methods::WORKSPACE_SUBSCRIBE,
+                            "plugin must send workspace/subscribe after auth"
+                        );
+                        // Empty snapshot ack, per the daemon contract.
+                        serde_json::json!({ "snapshot": {} })
+                    } else {
+                        assert_eq!(
+                            req.method,
+                            daemon_methods::AUTH_HELLO,
+                            "plugin must authenticate on its FIRST frame"
+                        );
+                        authed = true;
+                        serde_json::json!({})
+                    };
                     let resp = RpcResponse {
                         jsonrpc: "2.0".into(),
                         id: req.id,
-                        // Empty snapshot ack, per the daemon contract.
-                        result: Some(serde_json::json!({ "snapshot": {} })),
+                        result: Some(result),
                         error: None,
                     };
                     let body = serde_json::to_vec(&resp).expect("serialize resp");
@@ -233,8 +246,10 @@ where
         .unwrap();
 
     let mut daemon_conn: Option<UnixStream> = None;
-    let mut subscribe_sent = false;
-    while !subscribe_sent {
+    // The plugin sends TWO connect-time frames back-to-back: the e38.1
+    // `auth/hello` first, then `workspace/subscribe`. Relay both.
+    let mut sends_relayed = 0;
+    while sends_relayed < 2 {
         let frame = read_frame(host_read).await.expect("plugin link alive");
         match frame.get("method").and_then(|m| m.as_str()) {
             Some(methods::HOST_UNIX_SOCKET_DIAL) => {
@@ -256,7 +271,7 @@ where
                 let conn = daemon_conn.as_mut().expect("dialed before send");
                 conn.write_all(&send.bytes).await.unwrap();
                 conn.flush().await.unwrap();
-                subscribe_sent = true;
+                sends_relayed += 1;
             }
             _ => { /* host/log etc. — drain */ }
         }
@@ -333,10 +348,13 @@ async fn tripwire_hangar_plugin_connects() {
         let mut daemon_conn =
             init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
 
-        // Read the daemon's real workspace/subscribe ack and relay it.
+        // Read the daemon's real acks (auth, then workspace/subscribe) and
+        // relay each to the plugin.
         let mut dr = BufReader::new(&mut daemon_conn);
-        let reply = read_frame(&mut dr).await.expect("daemon ack");
-        push_socket_data(&mut host_write, &stream_id, &reply).await;
+        for which in ["auth ack", "subscribe ack"] {
+            let reply = read_frame(&mut dr).await.expect(which);
+            push_socket_data(&mut host_write, &stream_id, &reply).await;
+        }
 
         let (connected, last) = poll_chrome_for(&mut host_write, &mut host_read, "online").await;
 
@@ -375,8 +393,10 @@ async fn tripwire_detects_daemon_drop() {
             init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
 
         let mut dr = BufReader::new(&mut daemon_conn);
-        let reply = read_frame(&mut dr).await.expect("daemon ack");
-        push_socket_data(&mut host_write, &stream_id, &reply).await;
+        for which in ["auth ack", "subscribe ack"] {
+            let reply = read_frame(&mut dr).await.expect(which);
+            push_socket_data(&mut host_write, &stream_id, &reply).await;
+        }
 
         let (connected, _) = poll_chrome_for(&mut host_write, &mut host_read, "online").await;
         assert!(connected, "precondition: must reach online before drop");
