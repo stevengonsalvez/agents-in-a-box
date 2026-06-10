@@ -195,6 +195,30 @@ def create_knowledge_note(
     if context:
         content += f"\n## Context\n\n{context}\n"
 
+    # M5: verify commit-like refs in the LLM-authored body against the local
+    # repo before persistence. Hallucinated refs get recorded in frontmatter
+    # (so recall can downrank / warn); a note where EVERY ref is fabricated is
+    # rejected outright.
+    try:
+        from commit_verifier import verify_refs
+        # Verify against the PROJECT repo (CLAUDE_PROJECT_DIR / nearest .git),
+        # not Path.cwd() — the drain runs with a neutral $HOME cwd.
+        report = verify_refs(f"{problem}\n{solution}\n{context}", repo_dir=get_project_dir())
+        if report.all_unverified:
+            raise ValueError(
+                "all_refs_hallucinated: every commit ref in this note "
+                f"({', '.join(report.unverified)}) is absent from the repo"
+            )
+        if report.checked and report.unverified:
+            frontmatter["unverified_refs"] = report.unverified
+            if yaml:
+                fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
+                content = f"---\n{fm_str}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
+                if context:
+                    content += f"\n## Context\n\n{context}\n"
+    except ImportError:  # pragma: no cover — verifier is best-effort
+        pass
+
     filepath.write_text(content)
     return filepath, slug
 
