@@ -30,6 +30,9 @@ fn issue_row() -> IssueRow {
         assignee: Some("agent:claude-agent".into()),
         creator: "member:alice".into(),
         created_at: 0,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
         pr_url: None,
     }
 }

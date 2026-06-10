@@ -88,6 +88,10 @@ impl AutopilotsState {
 }
 
 /// An input the autopilots reducer folds into [`AutopilotsState`].
+// Reduction enum: `Event(HangarEvent)` dominates the size, the rest are scalar
+// inputs. Short-lived, reducer-folded, not a hot allocation path — left unboxed
+// for consistency with the other screen reducers (boxing would only add churn).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutopilotsEvent {
     /// A printable key (`'j'`, `'r'`, `'d'`, …).

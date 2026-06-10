@@ -39,6 +39,9 @@ fn sample_issue() -> IssueRow {
         assignee: Some("agent:claude".to_string()),
         creator: "member:alice".to_string(),
         created_at: 1_700_000_000_000,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
         pr_url: Some("https://github.com/o/r/pull/42".to_string()),
     }
 }
@@ -209,6 +212,29 @@ fn issue_row_pr_url_is_additive() {
     let legacy = r#"{"id":"issue-1","workspace_id":"default","title":"t","description":null,"state":"open","assignee":null,"creator":"member:alice","created_at":0}"#;
     let row: IssueRow = serde_json::from_str(legacy).expect("decode legacy");
     assert_eq!(row.pr_url, None);
+}
+
+/// e38.9: an `IssueRow` carries the create-flow attributes priority, due_date,
+/// and labels, and a pre-e38.9 snapshot (no keys) still decodes them to their
+/// defaults (priority 0, due_date None, empty labels).
+#[test]
+fn issue_row_priority_due_date_labels_roundtrip_and_default() {
+    let row = IssueRow {
+        priority: 3,
+        due_date: Some(1_700_000_500_000),
+        labels: vec!["bug".to_string(), "p0".to_string()],
+        ..sample_issue()
+    };
+    let json = serde_json::to_string(&row).expect("encode");
+    let back: IssueRow = serde_json::from_str(&json).expect("decode");
+    assert_eq!(back, row, "priority/due_date/labels round-trip");
+
+    // A pre-e38.9 snapshot (none of the three keys) decodes to defaults.
+    let legacy = r#"{"id":"issue-1","workspace_id":"default","title":"t","description":null,"state":"open","assignee":null,"creator":"member:alice","created_at":0}"#;
+    let legacy_row: IssueRow = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(legacy_row.priority, 0, "default priority is 0");
+    assert_eq!(legacy_row.due_date, None, "default due_date is None");
+    assert!(legacy_row.labels.is_empty(), "default labels is empty");
 }
 
 #[test]

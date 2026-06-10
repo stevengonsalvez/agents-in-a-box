@@ -66,6 +66,9 @@ pub async fn issues_list(
                 assignee: issue.assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
                 creator: format!("{}:{}", issue.creator.kind().as_str(), issue.creator.id()),
                 created_at: issue.created_at,
+                priority: issue.priority,
+                due_date: issue.due_date,
+                labels: issue.labels,
                 pr_url,
             });
         }

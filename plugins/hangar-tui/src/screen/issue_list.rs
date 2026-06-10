@@ -618,6 +618,9 @@ mod tests {
             assignee: assignee.map(ToString::to_string),
             creator: "member:alice".into(),
             created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
             pr_url: None,
         }
     }

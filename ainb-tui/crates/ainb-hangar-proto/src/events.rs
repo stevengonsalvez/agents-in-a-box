@@ -217,6 +217,19 @@ pub struct IssueRow {
     pub creator: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// Urgency: `0..3` mapping `P3..P0` (HIGHER = MORE URGENT; default `0` =
+    /// P3, routine) — the same scale as `TaskCardRow::priority` (migration
+    /// 0014). `#[serde(default)]` keeps a pre-e38.9 snapshot decodable.
+    #[serde(default)]
+    pub priority: i64,
+    /// Optional deadline as epoch milliseconds; `None` (the default) when unset.
+    /// Omitted from the wire when absent (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<i64>,
+    /// Free-form labels (e.g. `["bug", "p0"]`). Empty by default; omitted from
+    /// the wire when empty (additive) so a pre-e38.9 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     /// The PR URL captured from this issue's latest completed task's
     /// `result.pr_url` (P9.1 capture, P9.2 surface), or `None` when no task on
     /// the issue opened a PR. Omitted from the JSON entirely when `None`

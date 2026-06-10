@@ -29,6 +29,9 @@ fn issue_with_pr(pr_url: Option<&str>) -> IssueRow {
         assignee: Some("agent:claude-agent".into()),
         creator: "member:alice".into(),
         created_at: 0,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
         pr_url: pr_url.map(String::from),
     }
 }
