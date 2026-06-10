@@ -1,4 +1,5 @@
-//! Host-side conformance tests: 14 axes for ABI v2.
+//! Host-side conformance tests for ABI v2: the 14 core axes plus the
+//! `read_paths`/`[config]`, mouse-forwarding, and redraw-hint canaries.
 
 use std::path::PathBuf;
 use std::time::Duration;

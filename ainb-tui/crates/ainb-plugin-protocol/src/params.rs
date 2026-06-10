@@ -546,7 +546,8 @@ pub struct NetworkFetchResult {
 }
 
 // =====================================================================
-// (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
+// (de)serialise bytes::Bytes as a base64 string (with a legacy
+// byte-array fallback on decode).
 // =====================================================================
 
 /// Binary payloads ride the JSON-RPC envelope as **base64 strings**.
