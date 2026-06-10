@@ -86,6 +86,16 @@ TAG_ALPHA = _env_alpha("RECALL_TAG_ALPHA", 0.2)  # ±10%
 # S4: proof-count boost strength — conservative ±5% (Hindsight): evidence
 # nudges ordering between near-ties without overpowering quality/recency.
 PROOF_COUNT_ALPHA = _env_alpha("RECALL_PROOF_ALPHA", 0.1)
+# R16: project-affinity boost strength. Learnings whose project matches the
+# current session's project get bounded_boost(1.0, α) = 1 + α/2 (default
+# +10%); cross-project and project-less hits sit at the neutral 0.5 norm so
+# their score is EXACTLY unchanged. Soft affinity, not hard isolation —
+# cross-project gems still surface, just down-ranked relative to same-project
+# ties. Set to 0 (env RECALL_PROJECT_ALPHA, config
+# recall.boost.project_affinity_alpha) to disable entirely. When R15
+# per-project sharding lands, its shard-scoped path should pass
+# current_project="" so affinity only kicks in on the global path.
+PROJECT_AFFINITY_ALPHA = _env_alpha("RECALL_PROJECT_ALPHA", 0.2)
 # R8: recency normalization — linear decay over a year, floored at 0.1
 # (Hindsight reranking.py): even ancient notes keep a toehold.
 RECENCY_WINDOW_DAYS = 365.0
@@ -237,6 +247,16 @@ class Learning:
             return int(raw)
         except (ValueError, TypeError):
             return None
+
+    @property
+    def project_id(self) -> str:
+        """R16: which project this learning came from, normalized for the
+        affinity match. Prefers explicit `project_id`, falls back to
+        `project`. Returns "" when absent — the affinity boost treats
+        unknown-project learnings as neutral, never penalised.
+        """
+        raw = self.frontmatter.get("project_id") or self.frontmatter.get("project")
+        return _normalize_project(raw)
 
     @property
     def how_to_apply(self) -> str:
@@ -749,11 +769,18 @@ def rerank(
     query_tags: list[str] | None = None,
     now: datetime | None = None,
     ce_scores: dict[str, float] | None = None,
+    current_project: str | None = None,
 ) -> list[Learning]:
     """
-    D8 + S4 + R8: score = CE × confidence_boost × recency_boost × tag_boost
-    × proof_count_boost — every boost multiplicative and bounded to ±α/2
-    (Hindsight ``apply_combined_scoring`` shape; see :func:`bounded_boost`).
+    D8 + S4 + R8 + R16: score = CE × confidence_boost × recency_boost
+    × tag_boost × proof_count_boost × project_affinity_boost — every boost
+    multiplicative and bounded to ±α/2 (Hindsight ``apply_combined_scoring``
+    shape; see :func:`bounded_boost`).
+
+    R16: ``current_project`` scopes the affinity boost — None (default)
+    auto-detects via :func:`detect_current_project`; "" disables matching
+    (the future R15 shard-scoped path passes "" so affinity only applies
+    when scope is global).
 
     R2: when ``ce_scores`` (cross-encoder logits keyed by learning key) are
     present, semantic relevance becomes the PRIMARY sort key and the
@@ -768,7 +795,9 @@ def rerank(
 
     Sorts in-place and returns the same list.
     """
-    learnings, _ = rerank_with_scores(learnings, query_tags, now, ce_scores)
+    learnings, _ = rerank_with_scores(
+        learnings, query_tags, now, ce_scores, current_project
+    )
     return learnings
 
 
@@ -777,6 +806,7 @@ def rerank_with_scores(
     query_tags: list[str] | None = None,
     now: datetime | None = None,
     ce_scores: dict[str, float] | None = None,
+    current_project: str | None = None,
 ) -> tuple[list[Learning], dict[str, float]]:
     """R3: :func:`rerank` + the final per-candidate scores it sorted by.
 
@@ -788,15 +818,29 @@ def rerank_with_scores(
     """
     now = now or datetime.now(tz=None)
     qt = set(t.lower() for t in (query_tags or []))
+    if current_project is None:
+        # R16: only pay for project detection (one git subprocess, memoized)
+        # when the boost is live AND at least one candidate declares a
+        # project — otherwise every norm is neutral anyway.
+        current_project = (
+            detect_current_project()
+            if PROJECT_AFFINITY_ALPHA > 0.0
+            and any(lrn.project_id for lrn in learnings)
+            else ""
+        )
 
     def formula(lrn: Learning) -> float:
-        # R8: product of bounded multiplicative boosts — each signal worth
-        # at most ±α/2, so no single one can dominate the ordering.
+        # R8 + R16: product of bounded multiplicative boosts — each signal
+        # worth at most ±α/2, so no single one can dominate the ordering.
         return (
             bounded_boost(confidence_norm(lrn.confidence), CONFIDENCE_ALPHA)
             * bounded_boost(recency_norm(lrn.archived_at, now), RECENCY_ALPHA)
             * bounded_boost(tag_norm(qt, lrn.tags), TAG_ALPHA)
             * proof_count_boost(lrn.proof_count)
+            * bounded_boost(
+                project_norm(current_project, lrn.project_id),
+                PROJECT_AFFINITY_ALPHA,
+            )
         )
 
     def score(lrn: Learning) -> float:
@@ -822,6 +866,62 @@ def bounded_boost(norm: float, alpha: float) -> float:
     """
     norm = min(1.0, max(0.0, norm))
     return 1.0 + alpha * (norm - 0.5)
+
+
+def _normalize_project(raw: Any) -> str:
+    """R16: normalize a project identifier for the affinity match.
+
+    Accepts a bare name ("my-app") or a path ("/Users/x/dev/my-app" — what a
+    CLAUDE_PROJECT_DIR-derived writer records); either way the comparison key
+    is the lowercase final path component. Empty/None → "" (no project).
+    """
+    if raw is None or isinstance(raw, bool):
+        return ""
+    text = str(raw).strip().strip("/")
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1].strip().lower()
+
+
+_CURRENT_PROJECT_CACHE: str | None = None
+
+
+def detect_current_project() -> str:
+    """R16: the current session's project id, memoized per process.
+
+    Resolution order (mirrors output_generator.get_project_dir):
+      1. $CLAUDE_PROJECT_DIR — set by Claude Code hooks/skills.
+      2. `git rev-parse --show-toplevel` — repo root of the cwd.
+    Returns "" when neither resolves (non-git scratch dir, git missing) —
+    the affinity boost is then neutral for every hit.
+    """
+    global _CURRENT_PROJECT_CACHE
+    if _CURRENT_PROJECT_CACHE is not None:
+        return _CURRENT_PROJECT_CACHE
+    project = _normalize_project(os.environ.get("CLAUDE_PROJECT_DIR"))
+    if not project:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            project = _normalize_project(proc.stdout.strip())
+    _CURRENT_PROJECT_CACHE = project
+    return project
+
+
+def project_norm(current_project: str, hit_project: str) -> float:
+    """R16: same-project match → 1.0 (boost ceiling 1 + α/2); everything
+    else — cross-project, unknown current project, project-less learning —
+    sits at the neutral 0.5 so the multiplier is EXACTLY 1.0. There is no
+    below-neutral side: cross-project hits are down-RANKED relative to
+    same-project ties, never down-SCORED below their R8 baseline."""
+    if current_project and hit_project and current_project == hit_project:
+        return 1.0
+    return 0.5
 
 
 def confidence_norm(tier: str) -> float:

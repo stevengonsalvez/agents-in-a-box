@@ -82,6 +82,12 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         "REFLECT_RECALL_CE_MODEL": (["recall", "cross_encoder", "model"], str),
         "REFLECT_RECALL_CE_CANDIDATES": (["recall", "cross_encoder", "candidates"], int),
         "REFLECT_RECALL_CE_TIMEOUT": (["recall", "cross_encoder", "timeout_s"], int),
+        # R16: project-affinity boost strength (recall.py reads the matching
+        # RECALL_PROJECT_ALPHA env var directly; this key is the declarative
+        # surface for hooks/tools that wire its environment). 0 disables.
+        "REFLECT_RECALL_PROJECT_ALPHA": (
+            ["recall", "boost", "project_affinity_alpha"], float,
+        ),
     }
 
     for env_key, (path_keys, cast) in env_map.items():
@@ -162,6 +168,13 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
             "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
             "candidates": 20,
             "timeout_s": 60,
+        },
+        # R16: bounded multiplicative boost knobs. project_affinity_alpha
+        # is the R8 bounded-boost α — same-project hits get 1 + α/2 (+10%
+        # at the default 0.2); cross-project hits are exactly unchanged.
+        # Set to 0 to disable. Soft affinity, not hard isolation.
+        "boost": {
+            "project_affinity_alpha": 0.2,
         },
     },
     "telemetry": {

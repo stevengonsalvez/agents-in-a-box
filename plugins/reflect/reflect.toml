@@ -53,6 +53,15 @@ model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 candidates = 20
 timeout_s = 60
 
+[recall.boost]
+# R16: project-affinity multiplicative boost (bounded R8 shape). Learnings
+# whose project_id matches the current session's project get 1 + α/2
+# (+10% at the default 0.2); cross-project hits are exactly unchanged —
+# soft affinity, not hard isolation. recall.py itself is controlled by the
+# RECALL_PROJECT_ALPHA env var; this key is the declarative surface for
+# hooks that set it. Set to 0 to disable.
+project_affinity_alpha = 0.2
+
 [telemetry]
 enabled = true
 log_level = "info"
