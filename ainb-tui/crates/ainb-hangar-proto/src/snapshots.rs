@@ -409,6 +409,7 @@ mod tests {
                 agent_id: "agent-1".into(),
                 issue_id: Some("issue-1".into()),
                 status: "running".into(),
+                priority: 2,
                 created_at: 1_700_000_000_000,
             }],
         };
@@ -425,5 +426,15 @@ mod tests {
             serde_json::from_str::<TaskTransitionParams>(&s).unwrap(),
             transition
         );
+    }
+
+    /// A pre-priority snapshot (no `priority` key) still decodes: the field
+    /// defaults to 0 (P3, routine), so an old daemon's `tasks_list` stays
+    /// readable.
+    #[test]
+    fn p8_task_card_priority_defaults_when_absent() {
+        let json = r#"{"id":"task-1","workspace_id":"ws-1","agent_id":"agent-1","issue_id":null,"status":"queued","created_at":1}"#;
+        let row: TaskCardRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.priority, 0, "absent priority decodes to the P3 default");
     }
 }

@@ -8,7 +8,7 @@
 //! Non-vacuous colour checks back the selection marker + the status-chip colours.
 
 use ainb_hangar_proto::events::TaskCardRow;
-use ainb_plugin_hangar::screen::kanban::{render_kanban, BoardColumn, KanbanState};
+use ainb_plugin_hangar::screen::kanban::{BoardColumn, KanbanState, render_kanban};
 use ainb_plugin_sdk::{Color, WireBuffer};
 
 /// Fixed render clock so the age labels are deterministic.
@@ -27,6 +27,7 @@ fn task(id: &str, agent: &str, status: &str, created_at: i64) -> TaskCardRow {
         agent_id: agent.into(),
         issue_id: Some("issue-1".into()),
         status: status.into(),
+        priority: 0,
         created_at,
     }
 }

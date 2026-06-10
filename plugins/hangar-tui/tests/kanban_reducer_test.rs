@@ -7,7 +7,7 @@
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow, TaskResult};
 use ainb_plugin_hangar::screen::kanban::{
-    reduce_kanban, BoardColumn, KanbanEvent, KanbanIntent, KanbanState,
+    BoardColumn, KanbanEvent, KanbanIntent, KanbanState, reduce_kanban,
 };
 
 const NOW: i64 = 1_700_000_600_000;
@@ -19,6 +19,7 @@ fn task(id: &str, status: &str) -> TaskCardRow {
         agent_id: "agent-1".into(),
         issue_id: Some("issue-1".into()),
         status: status.into(),
+        priority: 0,
         created_at: NOW - 60_000,
     }
 }

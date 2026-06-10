@@ -484,6 +484,7 @@ pub async fn tasks_list(
             agent_id: t.agent_id,
             issue_id: t.issue_id,
             status: t.status,
+            priority: t.priority,
             created_at: t.created_at,
         });
     }

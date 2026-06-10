@@ -348,6 +348,12 @@ pub struct TaskCardRow {
     /// Raw lifecycle status — one of the six `TaskStatus` wire tokens. The board
     /// buckets these into its four columns client-side.
     pub status: String,
+    /// Claim urgency: 0..3 mapping P3..P0 — higher = more urgent (store
+    /// migration 0013). The claim loop drains `priority DESC, created_at, id`;
+    /// `0` (P3) is the routine default. `#[serde(default)]` keeps snapshots
+    /// from a pre-priority daemon decodable.
+    #[serde(default)]
+    pub priority: i64,
     /// Creation (queued-at) timestamp (epoch milliseconds) — drives the card age.
     pub created_at: i64,
 }
