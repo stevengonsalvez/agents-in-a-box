@@ -17,6 +17,7 @@ pub mod fleet;
 pub mod git;
 pub mod interactive;
 pub mod models;
+pub mod perf;
 pub mod plugins;
 pub mod providers;
 pub mod tmux;

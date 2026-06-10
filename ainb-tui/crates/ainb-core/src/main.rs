@@ -43,6 +43,7 @@ mod fleet;
 mod git;
 mod interactive;
 mod models;
+mod perf;
 mod plugins;
 mod providers;
 mod tmux;
@@ -85,6 +86,7 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    crate::perf::init();
     setup_logging();
     setup_panic_handler();
 
@@ -296,6 +298,10 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
         cleanup_terminal();
     }
 
+    // Perf trace summary (no-op unless AINB_PERF_TRACE is set). Emitted after
+    // the alternate screen is torn down so the report lands on the real stderr.
+    crate::perf::report();
+
     result
 }
 
@@ -324,6 +330,12 @@ async fn run_tui_loop(
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 
+    // Perf trace: timestamp of the most recent keystroke awaiting its paint.
+    // Set when a key event is read; consumed at the top of the next loop
+    // iteration once the paint that reflects it has completed. Gated behind
+    // `AINB_PERF_TRACE` (see `crate::perf`); zero cost when disabled.
+    let mut pending_key_at: Option<Instant> = None;
+
     // Startup guard: Ignore key events for the first 100ms to prevent stray keypresses
     // from triggering actions (e.g., buffered 'n' key opening New Session dialog)
     let startup_time = Instant::now();
@@ -339,9 +351,16 @@ async fn run_tui_loop(
         // directly.
         app.tick_plugin_renders();
 
+        let draw_start = Instant::now();
         terminal.draw(|frame| {
             layout.render(frame, &mut app.state);
         })?;
+        crate::perf::record_draw(draw_start.elapsed());
+        // This paint is the first one to reflect any key read in the previous
+        // iteration, so it marks the end of the key-to-render interval.
+        if let Some(key_at) = pending_key_at.take() {
+            crate::perf::record_key_to_render(key_at.elapsed());
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -354,6 +373,12 @@ async fn run_tui_loop(
                     // Drop Release so Enter doesn't immediately re-trigger and close popups.
                     if key_event.kind == KeyEventKind::Release {
                         continue;
+                    }
+
+                    // Perf trace: this real keystroke now awaits the next paint.
+                    if crate::perf::enabled() {
+                        crate::perf::record_key();
+                        pending_key_at = Some(Instant::now());
                     }
 
                     // Startup guard: Ignore key events during startup period

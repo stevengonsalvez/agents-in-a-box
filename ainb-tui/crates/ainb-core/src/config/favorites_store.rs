@@ -165,6 +165,7 @@ impl FavoritesStore {
 
     /// Load from disk (returns empty store if file doesn't exist)
     pub fn load() -> Self {
+        crate::perf::record_favorites_load();
         Self::storage_path()
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|content| serde_yaml::from_str(&content).ok())
