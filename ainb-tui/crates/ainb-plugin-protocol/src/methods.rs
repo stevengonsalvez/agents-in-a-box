@@ -24,6 +24,7 @@ pub const PLUGIN_RENDER: &str = "plugin/render";
 pub const PLUGIN_HANDLE_EVENT: &str = "plugin/handle_event";
 
 /// Host forwards a single key event to the plugin owning the focused screen.
+///
 /// Notification — no response expected. Ordering is preserved across the same
 /// transport as `plugin/handle_event` so key sequences arrive in send order.
 pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
@@ -62,6 +63,108 @@ pub const HOST_FS_READ_FILE: &str = "host/fs/read_file";
 /// Plugin fetches a URL through the host (capability-gated).
 pub const HOST_NETWORK_FETCH: &str = "host/network/fetch";
 
+/// Plugin opens a cancellable streaming subscription on a topic.
+///
+/// Capability-gated. Host allocates a `stream_id` and thereafter emits
+/// `plugin/handle_event` notifications under topic `stream:<stream_id>` until
+/// the plugin cancels or the plugin process leaves the `Running` state.
+pub const HOST_EVENT_STREAM_SUBSCRIBE: &str = "host/event_stream_subscribe";
+
+/// Plugin cancels a previously opened event stream.
+///
+/// Notification — no response expected. The host also implicitly cancels
+/// every stream a plugin holds when that plugin shuts down, crashes, or is
+/// quarantined.
+pub const HOST_EVENT_STREAM_CANCEL: &str = "host/event_stream_cancel";
+
+/// Plugin asks the host to spawn a host-supervised child process.
+///
+/// Capability-gated by the plugin's `spawn_managed_subprocess` grant,
+/// which MUST be list-form (an allow-list of binary names/paths) — a
+/// bool-true grant is rejected with `-32003 MANIFEST_VALIDATION`. The
+/// host owns the child's lifecycle: it spawns under the same pgrp /
+/// `PDEATHSIG` leak guard as plugin processes and kills every managed
+/// child on plugin shutdown or `Runtime` drop. On success the plugin
+/// receives an opaque `handle` it can compose with
+/// `host/event_stream_subscribe` (topic `managed:<handle>:stdout`).
+pub const HOST_SPAWN_MANAGED_SUBPROCESS: &str = "host/spawn_managed_subprocess";
+
+/// Plugin asks the host to dial a whitelisted `AF_UNIX` socket path.
+///
+/// Capability-gated by the plugin's `unix_socket_dial` grant, which MUST
+/// be list-form (an allow-list of socket paths) — a bool-true grant is
+/// rejected with `-32003 MANIFEST_VALIDATION` so there is no way to
+/// request an unrestricted "dial any socket" grant. The host
+/// canonicalizes the requested path (resolving symlinks) before
+/// comparing it against the allow-list, defending against a symlink that
+/// resolves outside the whitelist. On success the plugin receives an
+/// opaque, host-minted `stream_id`; thereafter the host emits
+/// `plugin/handle_event` notifications under topic `socket:<stream_id>`
+/// carrying `data` / `eof` / `error` frames, and the plugin writes via
+/// `host/unix_socket_send` and tears down via `host/unix_socket_close`.
+pub const HOST_UNIX_SOCKET_DIAL: &str = "host/unix_socket_dial";
+
+/// Plugin writes bytes to a previously dialled unix socket. Notification.
+///
+/// The host looks up the `stream_id`'s live connection and writes the
+/// supplied bytes to it. A `stream_id` the plugin does not own (or that
+/// has already closed) is silently dropped.
+pub const HOST_UNIX_SOCKET_SEND: &str = "host/unix_socket_send";
+
+/// Plugin closes a previously dialled unix socket. Notification.
+///
+/// The host shuts down the connection and stops emitting
+/// `socket:<stream_id>` events. Closure is also implicit when the plugin
+/// shuts down, crashes, or is quarantined.
+pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
+
+/// Plugin asks the host to read a secret from the platform secret store,
+/// addressed by `(scope, key)`.
+///
+/// Capability-gated by the plugin's `secrets:read` grant. List form is an
+/// allow-list of secret `key` names (e.g. `["anthropic_api_key"]`); a
+/// bool-true grant is an unconditional read (allowed, but a danger surface
+/// — every `key` becomes readable). `scope` is `"workspace"` (requires
+/// `workspace_id`) or `"global"`. On macOS the host reads the generic
+/// password from the login Keychain; on linux the host returns
+/// `-32005 NOT_IMPLEMENTED` (Secret Service deferred to a later phase) so
+/// the plugin can degrade to dotenv. A missing entry returns
+/// `-32004 SECRET_NOT_FOUND`; a locked backend `-32006`; denied access
+/// `-32007`. The secret is returned base64-encoded in `value` so it never
+/// rides the wire as a raw byte array.
+pub const HOST_SECRET_STORE_GET: &str = "host/secret_store_get";
+
+/// Plugin asks the host for the list of workspaces, with each row's
+/// active/default flags resolved from `~/.ainb/hangar/state.toml`.
+///
+/// Ungated read. Result: `{ workspaces: [WorkspaceEntry, ...] }`, each entry
+/// carrying the ULID `id`, the display `slug`, the `name`, and the resolved
+/// `active` / `default` booleans.
+pub const HOST_WORKSPACE_LIST: &str = "host/workspace_list";
+
+/// Plugin asks the host which workspace is currently active.
+///
+/// Ungated read. Resolution order: the explicit `active_workspace` from
+/// `state.toml`, else the `default_workspace`, else the first listed
+/// workspace, else `None`. Result: `{ workspace_id: String | null }`.
+pub const HOST_WORKSPACE_GET_ACTIVE: &str = "host/workspace_get_active";
+
+/// Plugin asks the host to switch the active workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Writes
+/// `active_workspace = <id>` to `state.toml` (foreign sections preserved,
+/// atomic temp+rename) and broadcasts a `WorkspaceChanged { from, to }`
+/// event so subscribed plugins re-fetch. The `workspace_id` MUST be a known
+/// workspace id; an unknown id is `-32602 INVALID_PARAMS`.
+pub const HOST_WORKSPACE_SET_ACTIVE: &str = "host/workspace_set_active";
+
+/// Plugin asks the host to set the default workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Writes
+/// `default_workspace = <id>` to `state.toml`. Independent of the active
+/// workspace: setting the default never changes `active_workspace`.
+pub const HOST_WORKSPACE_SET_DEFAULT: &str = "host/workspace_set_default";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -81,6 +184,17 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_FS_READ_DIR,
     HOST_FS_READ_FILE,
     HOST_NETWORK_FETCH,
+    HOST_EVENT_STREAM_SUBSCRIBE,
+    HOST_EVENT_STREAM_CANCEL,
+    HOST_SPAWN_MANAGED_SUBPROCESS,
+    HOST_UNIX_SOCKET_DIAL,
+    HOST_UNIX_SOCKET_SEND,
+    HOST_UNIX_SOCKET_CLOSE,
+    HOST_SECRET_STORE_GET,
+    HOST_WORKSPACE_LIST,
+    HOST_WORKSPACE_GET_ACTIVE,
+    HOST_WORKSPACE_SET_ACTIVE,
+    HOST_WORKSPACE_SET_DEFAULT,
 ];
 
 #[cfg(test)]
@@ -128,8 +242,92 @@ mod tests {
             HOST_FS_READ_DIR,
             HOST_FS_READ_FILE,
             HOST_NETWORK_FETCH,
+            HOST_EVENT_STREAM_SUBSCRIBE,
+            HOST_EVENT_STREAM_CANCEL,
+            HOST_SPAWN_MANAGED_SUBPROCESS,
+            HOST_UNIX_SOCKET_DIAL,
+            HOST_UNIX_SOCKET_SEND,
+            HOST_UNIX_SOCKET_CLOSE,
+            HOST_SECRET_STORE_GET,
+            HOST_WORKSPACE_LIST,
+            HOST_WORKSPACE_GET_ACTIVE,
+            HOST_WORKSPACE_SET_ACTIVE,
+            HOST_WORKSPACE_SET_DEFAULT,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
+    }
+
+    #[test]
+    fn all_methods_contains_workspace_methods() {
+        for m in [
+            HOST_WORKSPACE_LIST,
+            HOST_WORKSPACE_GET_ACTIVE,
+            HOST_WORKSPACE_SET_ACTIVE,
+            HOST_WORKSPACE_SET_DEFAULT,
+        ] {
+            assert!(
+                ALL_METHODS.contains(&m),
+                "{m} missing from ALL_METHODS registry"
+            );
+        }
+        assert_eq!(HOST_WORKSPACE_LIST, "host/workspace_list");
+        assert_eq!(HOST_WORKSPACE_GET_ACTIVE, "host/workspace_get_active");
+        assert_eq!(HOST_WORKSPACE_SET_ACTIVE, "host/workspace_set_active");
+        assert_eq!(HOST_WORKSPACE_SET_DEFAULT, "host/workspace_set_default");
+    }
+
+    #[test]
+    fn all_methods_contains_unix_socket() {
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_DIAL),
+            "HOST_UNIX_SOCKET_DIAL missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_SEND),
+            "HOST_UNIX_SOCKET_SEND missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_CLOSE),
+            "HOST_UNIX_SOCKET_CLOSE missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_UNIX_SOCKET_DIAL, "host/unix_socket_dial");
+        assert_eq!(HOST_UNIX_SOCKET_SEND, "host/unix_socket_send");
+        assert_eq!(HOST_UNIX_SOCKET_CLOSE, "host/unix_socket_close");
+    }
+
+    #[test]
+    fn all_methods_contains_spawn_managed_subprocess() {
+        assert!(
+            ALL_METHODS.contains(&HOST_SPAWN_MANAGED_SUBPROCESS),
+            "HOST_SPAWN_MANAGED_SUBPROCESS missing from ALL_METHODS registry"
+        );
+        assert_eq!(
+            HOST_SPAWN_MANAGED_SUBPROCESS,
+            "host/spawn_managed_subprocess"
+        );
+    }
+
+    #[test]
+    fn all_methods_contains_secret_store_get() {
+        assert!(
+            ALL_METHODS.contains(&HOST_SECRET_STORE_GET),
+            "HOST_SECRET_STORE_GET missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_SECRET_STORE_GET, "host/secret_store_get");
+    }
+
+    #[test]
+    fn all_methods_contains_event_stream() {
+        assert!(
+            ALL_METHODS.contains(&HOST_EVENT_STREAM_SUBSCRIBE),
+            "HOST_EVENT_STREAM_SUBSCRIBE missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_EVENT_STREAM_CANCEL),
+            "HOST_EVENT_STREAM_CANCEL missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_EVENT_STREAM_SUBSCRIBE, "host/event_stream_subscribe");
+        assert_eq!(HOST_EVENT_STREAM_CANCEL, "host/event_stream_cancel");
     }
 }

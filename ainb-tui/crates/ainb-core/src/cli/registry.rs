@@ -105,9 +105,11 @@ impl CommandRegistry {
         r.register(ClaudecodeCommand);
         r.register(TmuxCommand);
         r.register(CompletionCommand);
+        r.register(AbtopCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
+        r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r
     }
 
@@ -1047,6 +1049,70 @@ impl CliCommand for CompletionCommand {
     }
 }
 
+/// `ainb abtop [args]` — print a one-shot snapshot of running AI agents by
+/// shelling out to the external `abtop --once` (the "top-for-agents" TUI).
+///
+/// abtop is a ratatui alternate-screen TUI: `--once` prints a human-readable
+/// snapshot and exits ONLY when stdout is a real terminal (piped, it blocks in
+/// its event loop). So this command inherits the parent's stdio — `ainb abtop`
+/// from a terminal works exactly like `abtop --once`. Extra args are forwarded
+/// verbatim (e.g. `ainb abtop --theme <name>`). The interactive full-screen
+/// abtop is reached from the TUI menu ("abtop (top-for-agents)" / press `t`),
+/// which attaches the real binary in tmux. The in-tree `ainb-plugin-abtop`
+/// crate owns detection + the install-hint empty-state; this is the live CLI.
+pub struct AbtopCommand;
+impl CliCommand for AbtopCommand {
+    fn name(&self) -> &'static str {
+        "abtop"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Snapshot running AI agents (top-for-agents) via `abtop --once`")
+                .arg(
+                    clap::Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true)
+                        .help(
+                            "Extra flags forwarded verbatim to `abtop --once` (e.g. --theme <name>)",
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let forwarded: Vec<String> = matches
+            .get_many::<String>("args")
+            .map(|vals| vals.cloned().collect())
+            .unwrap_or_default();
+        Box::pin(async move {
+            use tokio::process::Command as ChildCommand;
+            // Inherit stdio (the default) so abtop gets the user's real TTY —
+            // `abtop --once` only prints + exits cleanly against a terminal.
+            let status = ChildCommand::new("abtop").arg("--once").args(&forwarded).status().await;
+            match status {
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(anyhow::anyhow!(
+                    "abtop exited with status {}",
+                    s.code().map_or_else(|| "signal".to_string(), |c| c.to_string())
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!(
+                        "abtop is not installed or not on PATH.\n\n\
+                         Install it:\n  \
+                         macOS:  brew install graykode/tap/abtop\n  \
+                         Linux:  curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh\n  \
+                         any:    cargo install abtop\n  \
+                         docs:   https://github.com/graykode/abtop"
+                    );
+                    Err(anyhow::anyhow!("abtop not found on PATH"))
+                }
+                Err(e) => Err(anyhow::anyhow!("failed to launch abtop: {e}")),
+            }
+        })
+    }
+}
+
 /// `ainb plugin {marketplace,install,update,remove,list,search}` — Phase 4
 /// marketplace + installer. Argument shapes nailed down in Phase 2b so plugin
 /// authors could target them today; Phase 4 wires the real handlers in
@@ -1253,6 +1319,38 @@ impl CliCommand for FleetCommand {
     }
 }
 
+/// The `hangar` namespace — Hangar managed-agents control plane.
+///
+/// Augments the derive-side [`HangarCommand`](crate::cli::hangar::HangarCommand)
+/// subtree (noun groups: `issue` / `task` / `beads` / `daemon`) onto a `hangar`
+/// builder command, mirroring the hybrid derive+builder pattern used elsewhere
+/// in this registry. The dispatch lives in the `cli::hangar` lib module
+/// (`reference_rust_bin_lib_split`); `run` only extracts the parsed enum and
+/// hands it off. Verbs whose backing impl does not yet exist (`skill`,
+/// `autopilot`, `config`, `init`, `tui`, `daemon start|stop`) are intentionally
+/// absent — a later phase adds a variant rather than un-stubbing one here.
+pub struct HangarCommand;
+impl CliCommand for HangarCommand {
+    fn name(&self) -> &'static str {
+        "hangar"
+    }
+    fn build(&self, app: Command) -> Command {
+        let hangar = <crate::cli::hangar::HangarCommand as Subcommand>::augment_subcommands(
+            Command::new(self.name())
+                .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
+                .subcommand_required(true)
+                .arg_required_else_help(true),
+        );
+        app.subcommand(hangar)
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::hangar::HangarCommand::from_arg_matches(matches) {
+            Ok(cmd) => Box::pin(async move { crate::cli::hangar::dispatch(cmd, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1262,14 +1360,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_three_commands() {
+    fn built_ins_registers_twenty_five_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + plugin stub + fleet + hidden notifyd = 23. The
-        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
-        // inline.
-        assert_eq!(names.len(), 23, "expected 23 entries, got {names:?}");
+        // + tmux namespace + abtop + plugin stub + fleet + hidden notifyd
+        // + hangar = 25. The TUI is NOT in the registry — main.rs handles
+        // `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 25, "expected 25 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1291,9 +1389,11 @@ mod tests {
             "claudecode",
             "tmux",
             "completion",
+            "abtop",
             "plugin",
             "fleet",
             "notifyd",
+            "hangar",
         ] {
             assert!(
                 names.contains(&required),

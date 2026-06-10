@@ -412,6 +412,10 @@ The `/reflect` skill captures learnings. The `/research` and `/prime` skills ret
 
 ## Architecture
 
+<p align="center">
+  <img src="docs/assets/diagrams/ecosystem-architecture.svg" alt="agents-in-a-box ecosystem architecture — ainb TUI Rust workspace, JSON-RPC plugin host, fleet orchestration, portable toolkit deploying to 9+ tool homes, reflect GraphRAG memory, and the on-disk state that ties them together" width="900">
+</p>
+
 ```
 agents-in-a-box/
 │

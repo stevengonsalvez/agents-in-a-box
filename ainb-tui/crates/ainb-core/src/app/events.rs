@@ -208,10 +208,12 @@ pub enum AppEvent {
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
     GoToWitr,                // Navigate to the witr (process causality) plugin screen
+    GoToAbtop,               // Launch the abtop (top-for-agents) monitor full-screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
     PanelBack,               // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
     InboxMoveDown,           // Inbox: move selection down one row
     InboxPageUp,             // Inbox: jump 10 rows up
@@ -2050,7 +2052,9 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
+            KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
@@ -2937,6 +2941,20 @@ impl EventHandler {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
+                            crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
+                                // Run `abtop --setup`, then open abtop.
+                                state.pending_async_action =
+                                    Some(AsyncAction::SetupAbtopRateLimits);
+                            }
+                            crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
+                                // Decline setup this time; open abtop now.
+                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            }
+                            crate::app::state::ConfirmAction::DismissAbtopSetup => {
+                                // Never offer again, then open abtop.
+                                state.dismiss_abtop_setup();
+                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
                                 // Codex + the canonical hook script are written
@@ -3480,6 +3498,18 @@ impl EventHandler {
                         // plugin-rendered screen.
                         state.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
+                    SidebarItem::Abtop => {
+                        tracing::info!("Launching abtop (top-for-agents) from sidebar");
+                        // Hand the terminal to abtop's own interactive TUI
+                        // (see AppEvent::GoToAbtop) rather than a
+                        // plugin-rendered screen. Offer the one-time
+                        // rate-limit setup before the first attach.
+                        if state.should_offer_abtop_setup() {
+                            state.show_abtop_setup_prompt();
+                        } else {
+                            state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                        }
+                    }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
                         Self::process_event(AppEvent::GoToSkills, state);
@@ -3665,6 +3695,25 @@ impl EventHandler {
                 // slash; only the screen is the embedded binary.
                 state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
+            AppEvent::GoToAbtop => {
+                tracing::info!("Launching abtop (top-for-agents)");
+                // abtop is a full-screen interactive monitor of running AI
+                // agents with no JSON/WireBuffer equivalent — it lives only
+                // in the `abtop` binary. So instead of a plugin-rendered
+                // screen we hand the terminal to abtop's native TUI
+                // full-screen (suspend/attach, like an agent session) and
+                // resume ainb when the user quits it. Launched with
+                // `--exit-on-jump` so Enter jumps to an agent's pane and
+                // returns control to ainb. The abtop plugin still owns the
+                // `ainb abtop` CLI + the install-hint empty-state.
+                // First open: offer to run `abtop --setup` (rate-limit hook)
+                // before attaching; otherwise attach straight away.
+                if state.should_offer_abtop_setup() {
+                    state.show_abtop_setup_prompt();
+                } else {
+                    state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                }
+            }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
                 if state.current_screen != screen_ids::SKILLS {
@@ -3680,6 +3729,12 @@ impl EventHandler {
                 }
                 state.current_screen = screen_ids::INBOX.to_string();
                 state.inbox_state.refresh();
+            }
+            AppEvent::GoToHangar => {
+                tracing::info!("Navigating to Hangar");
+                // Plugin-owned screen: the `hangar-tui` subprocess renders it and
+                // owns its own data load (snapshot RPCs over the daemon socket).
+                state.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
             AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
@@ -5071,6 +5126,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
+            | ids::ABTOP
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY
@@ -5129,6 +5185,7 @@ mod navigate_to_tests {
             ids::CATALOG,
             ids::ANALYTICS,
             ids::WITR,
+            ids::ABTOP,
             ids::SESSION_LIST,
             ids::LOGS,
             ids::LOG_HISTORY,

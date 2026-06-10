@@ -19,9 +19,13 @@ use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
+    EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
     HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
-    PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
-    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    PluginShutdownParams, RenderParams, RenderResult, SecretStoreGetParams, SnapshotGetParams,
+    SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
+    SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
+    UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams, Viewport,
+    WorkspaceSetActiveParams, WorkspaceSetDefaultParams,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -32,16 +36,24 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::error::RuntimeError;
+use crate::event_stream::{EventStreamRegistry, topic_allowed};
 use crate::framing::{read_frame, write_frame};
+use crate::managed_subprocess::ManagedSubprocessRegistry;
 use crate::process::{SIGTERM, signal_pgrp, spawn_plugin};
 use crate::registry::RegisteredPlugin;
 use crate::rpc::{
     IdCounter, Inbound, build_error_response, build_notification, build_request, build_response,
     parse_inbound,
 };
+use crate::secret_store::{SharedSecretBackend, secret_store_get_logic};
 use crate::snapshot::SnapshotStore;
 use crate::types::{
-    ActionOutcome, CliOutcome, LifecycleState, PluginId, RenderOutcome, RuntimeConfig, Topic,
+    ActionOutcome, CliOutcome, LifecycleState, LogTap, PluginId, RenderOutcome, RuntimeConfig,
+    Topic,
+};
+use crate::unix_socket::{UnixSocketRegistry, path_allowed};
+use crate::workspace_store::{
+    SharedWorkspaceStore, get_active_logic, list_logic, set_active_logic, set_default_logic,
 };
 
 /// Wire-protocol ABI version the runtime advertises.
@@ -142,14 +154,16 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// responsiveness even during a multi-second chunk drain.
 pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
 
-/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
-/// subscriber notifications when a plugin issues `host/snapshot/publish`.
-/// Shared (clone-able `Arc`) with `Runtime`, which maintains it
-/// alongside the public plugin handle map.
+/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out notifications.
+///
+/// Fans out subscriber notifications when a plugin issues
+/// `host/snapshot/publish`. Shared (clone-able `Arc`) with `Runtime`, which
+/// maintains it alongside the public plugin handle map.
 pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 
-/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`] —
-/// when a plugin's `host/snapshot/publish` fans out to subscribers,
+/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`].
+///
+/// When a plugin's `host/snapshot/publish` fans out to subscribers,
 /// each subscriber's flag is set so the host's render-tick loop knows
 /// to kick a `plugin/render` for it. Without this the dirty bit set
 /// on the host-side `publish_snapshot` path would miss every
@@ -165,11 +179,18 @@ pub type DirtyMap = Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::ato
 /// notifications. The plugin task drains the key channel with priority
 /// (see `PluginTask::run`'s `biased;` select) so Esc and other
 /// keystrokes don't queue behind chunked `HandleEvent` publishes.
+#[allow(clippy::too_many_arguments)] // wiring fan-out: maps + registries the task shares with Runtime
 pub fn spawn(
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
     inboxes: InboxMap,
     dirty: DirtyMap,
+    event_streams: EventStreamRegistry,
+    managed_subprocess: ManagedSubprocessRegistry,
+    unix_sockets: UnixSocketRegistry,
+    secret_backend: SharedSecretBackend,
+    workspace_store: SharedWorkspaceStore,
+    log_tap: LogTap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
 ) -> (
@@ -187,6 +208,15 @@ pub fn spawn(
         snapshots,
         inboxes,
         dirty,
+        event_streams,
+        managed_subprocess,
+        unix_sockets,
+        secret_backend,
+        workspace_store,
+        // The task keeps a clone of its OWN inbox so the unix-socket read
+        // loop can deliver `socket:<id>` frames back to this plugin.
+        self_inbox: tx.clone(),
+        log_tap,
         config,
         cache: cache.clone(),
         state: state.clone(),
@@ -241,6 +271,37 @@ struct PluginTask {
     /// tick. Without this the dirty bit set on the host-side
     /// `publish_snapshot` path would miss every plugin→plugin publish.
     dirty: DirtyMap,
+    /// Cap-gated event-stream registry (shared with `Runtime`). The task
+    /// inserts on `host/event_stream_subscribe`, removes on
+    /// `host/event_stream_cancel`, and drops every owned stream on
+    /// teardown so no events leak to a dead/quarantined process.
+    event_streams: EventStreamRegistry,
+    /// Cap-gated managed-subprocess registry (shared with `Runtime`). The
+    /// task spawns on `host/spawn_managed_subprocess` and kills every
+    /// child this plugin owns on teardown so no host-supervised process
+    /// outlives the plugin that requested it.
+    managed_subprocess: ManagedSubprocessRegistry,
+    /// Cap-gated unix-socket dial registry (shared with `Runtime`). The
+    /// task dials on `host/unix_socket_dial`, writes on
+    /// `host/unix_socket_send`, closes on `host/unix_socket_close`, and
+    /// drops every socket this plugin owns on teardown so no `socket:<id>`
+    /// frame leaks to a dead/quarantined process.
+    unix_sockets: UnixSocketRegistry,
+    /// Shared platform secret backend (DI). `host/secret_store_get` reads
+    /// through this; production uses the macOS Keychain / linux stub, tests
+    /// inject an in-memory double.
+    secret_backend: SharedSecretBackend,
+    /// Shared host workspace store (DI). The `host/workspace_*` caps read /
+    /// write the active+default switch state in `~/.ainb/hangar/state.toml`
+    /// and broadcast `WorkspaceChanged` through this; tests inject a double.
+    workspace_store: SharedWorkspaceStore,
+    /// Clone of this task's own [`Inbox`]. The unix-socket read loop holds
+    /// it so reads from a dialled socket are delivered back to this plugin
+    /// as `Command::HandleEvent` under topic `socket:<stream_id>`.
+    self_inbox: Inbox,
+    /// Optional host-side log tap. When installed, every `host/log` line
+    /// is forwarded to it (sentinel capture for the CTS anti-cheat path).
+    log_tap: LogTap,
     config: RuntimeConfig,
     cache: RenderCache,
     state: Arc<parking_lot::RwLock<LifecycleState>>,
@@ -276,9 +337,8 @@ impl PluginTask {
                 // 100k+ call dataset) would starve Esc and other
                 // navigation keys until the chunks drained.
                 biased;
-                key = self.key_rx.recv() => match key {
-                    Some(params) => self.handle_key_command(params).await,
-                    None => {}
+                key = self.key_rx.recv() => if let Some(params) = key {
+                    self.handle_key_command(params).await;
                 },
                 cmd = self.rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
@@ -534,7 +594,7 @@ impl PluginTask {
             }
             Inbound::Notification { method, params } => {
                 debug!(plugin = %self.plugin.id, method = %method, "inbound notification");
-                self.handle_host_notification(&method, params);
+                self.handle_host_notification(&method, params).await;
             }
         }
     }
@@ -606,6 +666,16 @@ impl PluginTask {
         let result = match method {
             methods::HOST_SNAPSHOT_GET => self.host_snapshot_get(params),
             methods::HOST_SNAPSHOT_SUBSCRIBE => self.host_snapshot_subscribe(params),
+            methods::HOST_EVENT_STREAM_SUBSCRIBE => self.host_event_stream_subscribe(params),
+            methods::HOST_SPAWN_MANAGED_SUBPROCESS => self.host_spawn_managed_subprocess(params),
+            methods::HOST_UNIX_SOCKET_DIAL => self.host_unix_socket_dial(params).await,
+            methods::HOST_SECRET_STORE_GET => self.host_secret_store_get(params),
+            methods::HOST_WORKSPACE_LIST => Ok(list_logic(self.workspace_store.as_ref())),
+            methods::HOST_WORKSPACE_GET_ACTIVE => {
+                Ok(get_active_logic(self.workspace_store.as_ref()))
+            }
+            methods::HOST_WORKSPACE_SET_ACTIVE => self.host_workspace_set_active(params),
+            methods::HOST_WORKSPACE_SET_DEFAULT => self.host_workspace_set_default(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -659,7 +729,194 @@ impl PluginTask {
             .expect("SnapshotSubscribeResult serializable"))
     }
 
-    fn handle_host_notification(&self, method: &str, params: Value) {
+    /// Handle `host/event_stream_subscribe`.
+    ///
+    /// Cap gate (two stages):
+    /// 1. The `event_stream_subscribe` grant must be present at all
+    ///    (`is_granted`); otherwise reject with `-32001`.
+    /// 2. The requested topic must satisfy the grant's allow-list
+    ///    (list form = topic-prefix whitelist; bool-true = wildcard);
+    ///    otherwise reject with `-32001` carrying the attempted topic in
+    ///    `data.topic`.
+    ///
+    /// On success the host mints an opaque, unforgeable `stream_id` and
+    /// records the stream; events for the topic are thereafter pushed to
+    /// the plugin under `stream:<stream_id>`.
+    fn host_event_stream_subscribe(&self, params: Value) -> Result<Value, RpcError> {
+        let p: EventStreamSubscribeParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.event_stream_subscribe;
+        if !grant.is_granted() {
+            return Err(RpcError::capability_denied("event_stream_subscribe"));
+        }
+        if !topic_allowed(grant.allow_list(), &p.topic) {
+            return Err(RpcError::capability_denied("event_stream_subscribe")
+                .with_data(serde_json::json!({ "topic": p.topic })));
+        }
+        let topic = Topic::from(p.topic);
+        // Position the stream at the topic's current version (or the
+        // requested resume point). The first event the plugin observes
+        // is the next publish after this point.
+        let version = self.snapshots.get(&topic).map_or(0, |(_, v, _)| v);
+        let stream_id = self.event_streams.subscribe(self.plugin.id.clone(), topic);
+        let res = EventStreamSubscribeResult {
+            stream_id,
+            version: p.since_version.unwrap_or(version),
+        };
+        Ok(serde_json::to_value(res).expect("EventStreamSubscribeResult serializable"))
+    }
+
+    /// Handle `host/spawn_managed_subprocess`.
+    ///
+    /// Cap gate (three stages, all returning before any fork):
+    /// 1. The `spawn_managed_subprocess` grant must be present at all
+    ///    (`is_granted`); otherwise reject with `-32001`.
+    /// 2. The grant MUST be list-form. A bool-true grant is a request for
+    ///    an unrestricted "spawn anything" capability and is rejected with
+    ///    `-32003 MANIFEST_VALIDATION` — there is no legitimate wildcard
+    ///    spawn (defends shared dev boxes against arbitrary exec).
+    /// 3. The requested `bin` must be on the allow-list (exact match);
+    ///    otherwise reject with `-32001` carrying the attempted path in
+    ///    `data.bin`.
+    ///
+    /// On success the host spawns the child under the leak guard, records
+    /// it against this plugin (so it's reaped on teardown), and returns
+    /// the opaque handle + pid.
+    fn host_spawn_managed_subprocess(&self, params: Value) -> Result<Value, RpcError> {
+        let p: SpawnManagedSubprocessParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.spawn_managed_subprocess;
+        if !grant.is_granted() {
+            return Err(RpcError::capability_denied("spawn_managed_subprocess"));
+        }
+        // List-form mandatory: a bool-true grant is rejected outright.
+        let Some(allow) = grant.allow_list() else {
+            return Err(RpcError::manifest_validation(
+                "spawn_managed_subprocess must be a list-form allow-list of \
+                 binaries; bool-true grant rejected",
+            ));
+        };
+        if !crate::managed_subprocess::bin_allowed(allow, &p.bin) {
+            return Err(RpcError::capability_denied("spawn_managed_subprocess")
+                .with_data(serde_json::json!({ "bin": p.bin })));
+        }
+        let spawned = self
+            .managed_subprocess
+            .spawn(
+                self.plugin.id.clone(),
+                &p.bin,
+                &p.argv,
+                &p.env_allowlist,
+                p.cwd.as_deref(),
+            )
+            .map_err(|e| {
+                RpcError::new(ainb_plugin_protocol::errors::INVALID_PARAMS, e.to_string())
+            })?;
+        let res = SpawnManagedSubprocessResult {
+            handle: spawned.handle,
+            pid: spawned.pid,
+        };
+        Ok(serde_json::to_value(res).expect("SpawnManagedSubprocessResult serializable"))
+    }
+
+    /// Handle `host/unix_socket_dial`.
+    ///
+    /// Cap gate (three stages, all returning before any `connect`):
+    /// 1. The `unix_socket_dial` grant must be present at all
+    ///    (`is_granted`); otherwise reject with `-32001`.
+    /// 2. The grant MUST be list-form. A bool-true grant is a request for
+    ///    an unrestricted "dial any socket" capability and is rejected with
+    ///    `-32003 MANIFEST_VALIDATION` — there is no legitimate wildcard
+    ///    unix dial (defends shared dev boxes against arbitrary `AF_UNIX`
+    ///    abuse).
+    /// 3. The requested `path` must, after host-side env/`~` expansion and
+    ///    symlink canonicalization, exactly match a canonicalized
+    ///    allow-list entry; otherwise reject with `-32001` carrying the
+    ///    attempted path in `data.path`. Canonicalization is what defeats
+    ///    a symlink that resolves outside the whitelist.
+    ///
+    /// On success the host dials the socket, mints an opaque `stream_id`,
+    /// spawns a read loop that re-emits reads under `socket:<stream_id>`,
+    /// and returns the id.
+    async fn host_unix_socket_dial(&self, params: Value) -> Result<Value, RpcError> {
+        let p: UnixSocketDialParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.unix_socket_dial;
+        if !grant.is_granted() {
+            return Err(RpcError::capability_denied("unix_socket_dial"));
+        }
+        // List-form mandatory: a bool-true grant is rejected outright.
+        let Some(allow) = grant.allow_list() else {
+            return Err(RpcError::manifest_validation(
+                "unix_socket_dial must be a list-form allow-list of socket \
+                 paths; bool-true grant rejected",
+            ));
+        };
+        if !path_allowed(allow, &p.path) {
+            return Err(RpcError::capability_denied("unix_socket_dial")
+                .with_data(serde_json::json!({ "path": p.path })));
+        }
+        let expanded = crate::unix_socket::expand_path(&p.path);
+        let stream_id = self
+            .unix_sockets
+            .dial(self.plugin.id.clone(), &expanded, self.self_inbox.clone())
+            .await
+            .map_err(|e| {
+                RpcError::new(ainb_plugin_protocol::errors::INVALID_PARAMS, e.to_string())
+            })?;
+        let res = UnixSocketDialResult { stream_id };
+        Ok(serde_json::to_value(res).expect("UnixSocketDialResult serializable"))
+    }
+
+    /// Handle `host/secret_store_get`.
+    ///
+    /// A thin shell over [`secret_store_get_logic`]: it decodes the
+    /// `(scope, key)` params, then delegates the cap gate, scope parse,
+    /// injected-backend lookup, and base64 encode to the testable logic
+    /// function. The `secrets:read` grant is enforced there (grant present +
+    /// `key` on the list-form allow-list), never by omitting the method from
+    /// the dispatcher.
+    ///
+    /// On a permitted request the platform backend performs the lookup:
+    /// macOS reads the login Keychain; the linux stub returns `-32005`. A
+    /// miss returns `-32004`, a locked backend `-32006`, denied access
+    /// `-32007`. The secret is base64-encoded into `value` so it never rides
+    /// the wire as a raw byte array.
+    fn host_secret_store_get(&self, params: Value) -> Result<Value, RpcError> {
+        let p: SecretStoreGetParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.secrets_read;
+        secret_store_get_logic(grant, self.secret_backend.as_ref(), &p)
+    }
+
+    /// Handle `host/workspace_set_active`.
+    ///
+    /// Delegates to [`set_active_logic`], which gates on `workspace:write`
+    /// (`-32001` when the grant is absent, before any store hit), validates the
+    /// id against the catalogue (`-32602` for an unknown id), writes
+    /// `active_workspace` to `state.toml`, and broadcasts `WorkspaceChanged` so
+    /// subscribed plugins re-fetch.
+    fn host_workspace_set_active(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceSetActiveParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        set_active_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
+    }
+
+    /// Handle `host/workspace_set_default`.
+    ///
+    /// Delegates to [`set_default_logic`] (gated by `workspace:write`).
+    /// Validates the id and writes `default_workspace` to `state.toml`; never
+    /// changes the active workspace and emits no event (a default change is
+    /// silent).
+    fn host_workspace_set_default(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceSetDefaultParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        set_default_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
+    }
+
+    async fn handle_host_notification(&self, method: &str, params: Value) {
         match method {
             methods::HOST_SNAPSHOT_PUBLISH => {
                 let Ok(p) = serde_json::from_value::<SnapshotPublishParams>(params) else {
@@ -702,11 +959,55 @@ impl PluginTask {
                     }
                 }
             }
+            methods::HOST_EVENT_STREAM_CANCEL => {
+                let Ok(p) = serde_json::from_value::<EventStreamCancelParams>(params) else {
+                    warn!(plugin = %self.plugin.id, "bad event_stream_cancel payload");
+                    return;
+                };
+                let removed = self.event_streams.cancel(&self.plugin.id, &p.stream_id);
+                debug!(
+                    plugin = %self.plugin.id,
+                    stream_id = %p.stream_id,
+                    removed,
+                    "event_stream_cancel"
+                );
+            }
+            methods::HOST_UNIX_SOCKET_SEND => {
+                let Ok(p) = serde_json::from_value::<UnixSocketSendParams>(params) else {
+                    warn!(plugin = %self.plugin.id, "bad unix_socket_send payload");
+                    return;
+                };
+                let ok = self.unix_sockets.send(&self.plugin.id, &p.stream_id, &p.bytes).await;
+                debug!(
+                    plugin = %self.plugin.id,
+                    stream_id = %p.stream_id,
+                    ok,
+                    "unix_socket_send"
+                );
+            }
+            methods::HOST_UNIX_SOCKET_CLOSE => {
+                let Ok(p) = serde_json::from_value::<UnixSocketCloseParams>(params) else {
+                    warn!(plugin = %self.plugin.id, "bad unix_socket_close payload");
+                    return;
+                };
+                let removed = self.unix_sockets.close(&self.plugin.id, &p.stream_id);
+                debug!(
+                    plugin = %self.plugin.id,
+                    stream_id = %p.stream_id,
+                    removed,
+                    "unix_socket_close"
+                );
+            }
             methods::HOST_LOG => {
                 let Ok(p) = serde_json::from_value::<LogParams>(params) else {
                     warn!(plugin = %self.plugin.id, "bad log payload");
                     return;
                 };
+                // Forward to an installed log tap (sentinel capture for
+                // CTS anti-cheat) before the normal tracing emit.
+                if let Some(tap) = self.log_tap.read().as_ref() {
+                    tap(&p);
+                }
                 info!(plugin = %self.plugin.id, level = ?p.level, "{}", p.message);
             }
             other => debug!(plugin = %self.plugin.id, "ignoring notification: {other}"),
@@ -735,6 +1036,14 @@ impl PluginTask {
             cs.stderr_drain.abort();
             cs.stdout_reader.abort();
         }
+        // Process is gone (crash / broken pipe): drop subscriptions and
+        // streams so no further events are routed to a dead subscriber,
+        // and reap every managed child this plugin owned so no
+        // host-supervised process outlives its requester.
+        self.snapshots.unsubscribe_all(&self.plugin.id);
+        self.event_streams.drop_plugin(&self.plugin.id);
+        self.managed_subprocess.kill_plugin(&self.plugin.id);
+        self.unix_sockets.drop_plugin(&self.plugin.id);
         self.record_failure();
         if self.is_quarantine_due() {
             self.set_state(LifecycleState::Quarantined);
@@ -848,6 +1157,15 @@ impl PluginTask {
             cs.stdout_reader.abort();
         }
         self.snapshots.unsubscribe_all(&self.plugin.id);
+        // Drop every event stream the plugin held — the process is gone,
+        // so further events would leak to a dead subscription.
+        self.event_streams.drop_plugin(&self.plugin.id);
+        // Reap every managed child this plugin requested — the plugin
+        // that owns their lifecycle is gone.
+        self.managed_subprocess.kill_plugin(&self.plugin.id);
+        // Drop every dialled socket the plugin held — the process is gone,
+        // so further `socket:<id>` frames would leak to a dead subscription.
+        self.unix_sockets.drop_plugin(&self.plugin.id);
     }
 }
 
@@ -874,6 +1192,21 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     }
     if c.read_codex_logs.is_granted() {
         out.push("read_codex_logs".into());
+    }
+    if c.event_stream_subscribe.is_granted() {
+        out.push("event_stream_subscribe".into());
+    }
+    if c.spawn_managed_subprocess.is_granted() {
+        out.push("spawn_managed_subprocess".into());
+    }
+    if c.unix_socket_dial.is_granted() {
+        out.push("unix_socket_dial".into());
+    }
+    if c.secrets_read.is_granted() {
+        out.push("secrets:read".into());
+    }
+    if c.workspace_write.is_granted() {
+        out.push("workspace:write".into());
     }
     out
 }

@@ -1,0 +1,82 @@
+[package]
+name = "ainb-hangar-store"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar persistence layer: sqlx SQLite pool, embedded migrations, and repository wrappers for the ainb managed-agents control plane"
+categories = ["database"]
+keywords = ["ainb", "hangar", "sqlx", "sqlite", "migrations"]
+
+[lib]
+name = "ainb_hangar_store"
+path = "src/lib.rs"
+
+[dependencies]
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Injectable CSPRNG seam for token minting (P5.4). The `RngCore` trait appears
+# in the public `mint_pat` / `mint_daemon_token` signatures so callers (and
+# tests) supply their own random source; the actual hashing/encoding lives in
+# `ainb-hangar-core::token`.
+rand = "0.8"
+# Optional: only pulled in when `test-support` is enabled (it backs the
+# isolated-home tempdir). Kept out of normal builds of the store crate.
+tempfile = { workspace = true, optional = true }
+
+[features]
+# Exposes `test_support` (isolated `$HOME` + `ENV_LOCK`) and pulls in the core
+# crate's deterministic test doubles (`FixedClock`/`FixedIdGen`) so integration
+# tests can inject a frozen clock. Enabled automatically for this crate's own
+# integration tests via the self dev-dependency below, and opt-in for downstream
+# crates (e.g. the daemon's boot tripwire).
+test-support = ["dep:tempfile", "ainb-hangar-core/test-support"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+dirs = { workspace = true }
+# P8.3 span-emission tests install a hand-rolled `Layer` to capture each FSM
+# transition's span name + fields; the registry + Layer trait come from here.
+tracing-subscriber = { workspace = true }
+# Self dev-dependency enabling `test-support` so this crate's own integration
+# tests (tests/*.rs) can `use ainb_hangar_store::test_support`. Integration
+# tests do not inherit `#[cfg(test)]`, so the feature must be turned on
+# explicitly for the test build.
+ainb-hangar-store = { path = ".", features = ["test-support"] }
+
+# Local lint config rather than `workspace = true` because the
+# workspace-level lints declare lint groups (clippy::all, ::pedantic,
+# ::nursery, ::cargo) at the same priority as specific lints, which
+# rustc rejects with `lint group has the same priority as a lint`.
+# Mirror the workspace intent locally with explicit priorities so this
+# crate cleanly passes `cargo clippy -p ainb-hangar-store -- -D warnings`.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

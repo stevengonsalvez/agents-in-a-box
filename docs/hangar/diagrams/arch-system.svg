@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-monospace, monospace">
+<defs>
+<style>.title{font-size:18px;fill:#e2e8f0;font-weight:bold}.lbl{font-size:14px;fill:#e2e8f0}.sub{font-size:11px;fill:#94a3b8}.albl{font-size:11px;fill:#e2e8f0}.layer{font-size:11px;fill:#64748b}</style>
+<marker id="aBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#38bdf8"/></marker>
+<marker id="aTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2dd4bf"/></marker>
+<marker id="aOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker>
+</defs>
+<rect width="1200" height="760" fill="#0a1628"/>
+<text x="40" y="44" class="title">Hangar — Layered System Architecture</text>
+<rect x="480" y="72" width="240" height="46" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="600.0" y="96" text-anchor="middle" class="lbl">User (terminal)</text>
+<rect x="360" y="150" width="480" height="118" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="600.0" y="174" text-anchor="middle" class="lbl">Host: ainb TUI  (ratatui)</text>
+<text x="600.0" y="194" text-anchor="middle" class="sub">crate folder crates/ainb-core  ·  pkg = ainb</text>
+<text x="600.0" y="209" text-anchor="middle" class="sub"></text>
+<rect x="390" y="200" width="420" height="56" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="600.0" y="224" text-anchor="middle" class="lbl">plugin-runtime v2</text>
+<text x="600.0" y="244" text-anchor="middle" class="sub">spawns plugin subprocess · stdio JSON-RPC</text>
+<text x="600.0" y="259" text-anchor="middle" class="sub">Content-Length framing</text>
+<rect x="360" y="300" width="480" height="70" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="600.0" y="324" text-anchor="middle" class="lbl">Plugin: hangar-tui  (ainb-plugin-hangar)</text>
+<text x="600.0" y="344" text-anchor="middle" class="sub">renders 9 screens · dials the daemon</text>
+<rect x="330" y="440" width="540" height="84" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="600.0" y="464" text-anchor="middle" class="lbl">ainb-hangar-daemon  (separate binary)</text>
+<text x="600.0" y="484" text-anchor="middle" class="sub">claim loop · autopilot scheduler · RPC server</text>
+<text x="600.0" y="499" text-anchor="middle" class="sub">beads sync · observability</text>
+<rect x="360" y="556" width="480" height="60" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="600.0" y="580" text-anchor="middle" class="lbl">ainb-hangar-store</text>
+<text x="600.0" y="600" text-anchor="middle" class="sub">sqlx repos + FSM services</text>
+<rect x="480" y="652" width="240" height="56" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="600.0" y="676" text-anchor="middle" class="lbl">SQLite</text>
+<text x="600.0" y="696" text-anchor="middle" class="sub">~/.ainb/hangar/hangar.db</text>
+<rect x="40" y="300" width="260" height="118" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="170.0" y="324" text-anchor="middle" class="lbl">ainb-hangar-core</text>
+<text x="170.0" y="344" text-anchor="middle" class="sub">IO-free domain types</text>
+<text x="170.0" y="359" text-anchor="middle" class="sub">ids · clock · task_status · cron</text>
+<text x="170.0" y="374" text-anchor="middle" class="sub">env_policy · skill · autopilot traits</text>
+<text x="170.0" y="389" text-anchor="middle" class="sub">pr_url · token · result</text>
+<rect x="40" y="440" width="260" height="84" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="170.0" y="464" text-anchor="middle" class="lbl">ainb-hangar-proto</text>
+<text x="170.0" y="484" text-anchor="middle" class="sub">JSON-RPC wire types</text>
+<text x="170.0" y="499" text-anchor="middle" class="sub">+ method consts</text>
+<rect x="900" y="300" width="260" height="84" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="1030.0" y="324" text-anchor="middle" class="lbl">Plugin SDK layer</text>
+<text x="1030.0" y="344" text-anchor="middle" class="sub">ainb-plugin-protocol</text>
+<text x="1030.0" y="359" text-anchor="middle" class="sub">ainb-plugin-sdk-rust</text>
+<path d="M600,118 L600,150" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="564.0" y="126" width="72.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="600" y="138" text-anchor="middle" class="albl">keystrokes</text>
+<path d="M600,268 L600,300" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="554.4" y="276" width="91.2" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="600" y="288" text-anchor="middle" class="albl">spawn / stdio</text>
+<path d="M600,370 L600,440" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="532.0" y="388" width="136.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="600" y="400" text-anchor="middle" class="albl">unix-socket JSON-RPC</text>
+<text x="600" y="418" text-anchor="middle" class="sub">~/.ainb/hangar/hangar.sock</text>
+<path d="M600,524 L600,556" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="557.6" y="532" width="84.80000000000001" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="600" y="544" text-anchor="middle" class="albl">FSM services</text>
+<path d="M600,616 L600,652" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="509.6" y="628" width="180.8" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="600" y="640" text-anchor="middle" class="albl">sqlx / migrations 0001-0010</text>
+<path d="M300,340 L360,335" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M300,360 L330,470" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M300,500 L360,580" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M300,460 L330,480" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M300,455 L360,345" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M900,338 L840,335" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M900,330 L840,235" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<text x="360" y="138" class="sub">runtime spawns plugin: kill_on_drop + (linux) PR_SET_PDEATHSIG / (macOS) setpgid</text>
+<rect x="900" y="640" width="260" height="86" rx="6" fill="#0f2942" stroke="#334155" stroke-width="1"/>
+<text x="912" y="660" class="sub">Legend</text>
+<line x1="912" y1="678" x2="944" y2="678" stroke="#38bdf8" stroke-width="2"/><text x="952" y="682" class="sub">request / data</text>
+<line x1="912" y1="696" x2="944" y2="696" stroke="#fb923c" stroke-width="2"/><text x="952" y="700" class="sub">control / dependency</text>
+<line x1="912" y1="714" x2="944" y2="714" stroke="#2dd4bf" stroke-width="2"/><text x="952" y="718" class="sub">persistence / read</text>
+</svg>

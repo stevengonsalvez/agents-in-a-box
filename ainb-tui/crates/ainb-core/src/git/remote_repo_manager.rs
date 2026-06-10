@@ -74,8 +74,32 @@ impl RemoteRepoManager {
 
     /// Check if a repo is already cached (standard clone with .git subdirectory)
     pub fn is_cached(&self, parsed: &ParsedRepo) -> bool {
-        let cache_path = self.get_cache_path(parsed);
+        Self::cache_path_is_populated(&self.get_cache_path(parsed))
+    }
+
+    /// The one definition of "this cache path holds a usable clone" — shared
+    /// by `is_cached` and `cached_source_path` so the rule can't drift.
+    fn cache_path_is_populated(cache_path: &Path) -> bool {
         cache_path.exists() && cache_path.join(".git").exists()
+    }
+
+    /// Cache path for a clonable remote source IF it is already cloned.
+    /// `None` for a not-yet-cached remote and for sources that never clone
+    /// (local paths, SSH sessions, filter text). This is the disk location
+    /// whose refs seed the Configure screen's branch-collision guards and
+    /// the base-branch popup — keep every caller on this one resolver so the
+    /// guards and the popup can never disagree about where refs live.
+    pub fn cached_source_path(&self, source: &RepoSource) -> Option<PathBuf> {
+        match source {
+            RepoSource::HttpsUrl(_)
+            | RepoSource::SshUrl(_)
+            | RepoSource::GithubShorthand { .. } => {
+                let parsed = source.parse_components().ok()?;
+                let cache_path = self.get_cache_path(&parsed);
+                Self::cache_path_is_populated(&cache_path).then_some(cache_path)
+            }
+            _ => None,
+        }
     }
 
     /// List remote branches without cloning (uses git ls-remote)
@@ -1133,6 +1157,39 @@ mod tests {
         let parsed = source.parse_components().unwrap();
 
         assert!(!manager.is_cached(&parsed));
+    }
+
+    #[test]
+    fn cached_source_path_resolves_only_cached_remotes() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        // Fake a cached clone: `is_cached` checks for `<cache>/.git` on disk.
+        let cached = temp_dir.path().join("github.com").join("owner").join("repo");
+        std::fs::create_dir_all(cached.join(".git")).unwrap();
+
+        // Cached remote → resolves to the clone-cache path. This is the seed
+        // for the Configure screen's branch-collision guards: without it a
+        // remote pick gets empty guard lists and an existing branch name only
+        // fails AFTER Launch, at `git worktree add -b` (the feat/ota repro).
+        let hit = RepoSource::GithubShorthand {
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        assert_eq!(manager.cached_source_path(&hit), Some(cached));
+
+        // Same shape, never cloned → None (guards backfill async instead).
+        let miss = RepoSource::GithubShorthand {
+            owner: "owner".to_string(),
+            repo: "never-cloned".to_string(),
+        };
+        assert_eq!(manager.cached_source_path(&miss), None);
+
+        // Non-clonable sources never resolve, even if a path happens to exist.
+        let local = RepoSource::LocalPath(temp_dir.path().to_path_buf());
+        assert_eq!(manager.cached_source_path(&local), None);
+        let ssh_session = RepoSource::SshSession("ssh://user@host".to_string());
+        assert_eq!(manager.cached_source_path(&ssh_session), None);
     }
 
     #[test]

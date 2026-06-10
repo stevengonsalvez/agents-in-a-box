@@ -1,0 +1,44 @@
+# ainb plugin manifest — abtop (subprocess plugin, ABI v2).
+#
+# Loaded by ainb-plugin-runtime at host startup (discovery) and again at
+# plugin/init for validation. Schema lives in
+# `ainb-plugin-protocol::manifest::Manifest` — keep field names in sync
+# with that type.
+#
+# abtop ("top for AI agents") is an external TUI binary the user installs
+# separately. The plugin detects it at startup (present/absent only) and
+# exec's `abtop --once` on demand under the `spawn_subprocess` capability.
+# The live full-screen view is a host-side tmux attach (later phases); this
+# plugin owns detection + an install-hint empty-state + the CLI seam.
+
+[plugin]
+name = "abtop"
+version = "0.1.0"
+abi_version = 2
+description = "top-for-agents — live view of running AI coding agents (wraps the external abtop TUI)"
+
+[capabilities]
+# List form for future per-binary enforcement; the v1 runtime treats
+# this as audit metadata only.
+spawn_subprocess  = ["abtop"]
+event_bus         = false
+read_sessions     = false
+read_claude_logs  = false
+read_codex_logs   = false
+write_plugin_data = false
+network           = false
+
+[provides]
+screens        = ["abtop"]
+commands       = ["/abtop"]
+cli_namespaces = ["abtop"]
+snapshots      = []
+
+[subscribes]
+snapshots = []
+
+[lifecycle]
+# Lazy — abtop is on-demand. Don't spawn until the user opens the screen,
+# runs `ainb abtop`, or types `/abtop`.
+spawn          = "lazy"
+idle_reap_secs = 600

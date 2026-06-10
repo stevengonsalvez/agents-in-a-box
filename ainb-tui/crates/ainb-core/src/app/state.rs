@@ -682,6 +682,9 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
+    OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
+    DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
@@ -2746,6 +2749,8 @@ pub enum AsyncAction {
     CleanupOrphaned,                       // Clean up orphaned containers without worktrees
     AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -3872,19 +3877,11 @@ impl AppState {
         let source = cfg.repo_source.clone();
         let list_path: Option<std::path::PathBuf> = match &source {
             RepoSource::LocalPath(p) => Some(p.clone()),
-            RepoSource::HttpsUrl(_)
-            | RepoSource::SshUrl(_)
-            | RepoSource::GithubShorthand { .. } => {
-                crate::git::RemoteRepoManager::new().ok().and_then(|m| {
-                    source
-                        .parse_components()
-                        .ok()
-                        .filter(|parsed| m.is_cached(parsed))
-                        .map(|parsed| m.get_cache_path(&parsed))
-                })
-            }
-            // SshSession / Filter never show the Branch row.
-            _ => None,
+            // Remote sources resolve to their clone cache when already cloned;
+            // SshSession / Filter never show the Branch row (resolver → None).
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
         };
 
         let existing = cfg.existing_branches.clone();
@@ -5530,6 +5527,62 @@ impl AppState {
         }
     }
 
+    /// `true` if ainb should offer to run `abtop --setup` (the Claude
+    /// rate-limit StatusLine hook) before opening abtop for the first time.
+    /// Offered until the hook has run (its `~/.claude/abtop-rate-limits.json`
+    /// exists) or the user chose "don't ask again".
+    #[must_use]
+    pub fn should_offer_abtop_setup(&self) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let already_done = home.join(".claude").join("abtop-rate-limits.json").exists();
+        let dismissed = home.join(".agents-in-a-box").join("abtop-setup-dismissed").exists();
+        !already_done && !dismissed
+    }
+
+    /// Persist the user's "don't ask again" choice for the abtop setup offer.
+    pub fn dismiss_abtop_setup(&self) {
+        if let Some(home) = dirs::home_dir() {
+            let dir = home.join(".agents-in-a-box");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("abtop-setup-dismissed"), b"1");
+        }
+    }
+
+    /// One-time consent dialog offering `abtop --setup` (Claude rate-limit
+    /// tracking) the first time the user opens abtop. Every option proceeds to
+    /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
+    /// suppresses the offer permanently.
+    pub fn show_abtop_setup_prompt(&mut self) {
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Enable abtop rate-limit tracking?".to_string(),
+            message: "abtop can show Claude rate-limit usage (5-hour + weekly \
+                      windows). This installs a StatusLine hook into \
+                      ~/.claude/settings.json via `abtop --setup`. abtop works \
+                      without it — the rate-limit panel just stays empty."
+                .to_string(),
+            confirm_action: ConfirmAction::SetupAbtopRateLimits,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: "Enable".to_string(),
+                    action: ConfirmAction::SetupAbtopRateLimits,
+                },
+                DialogOption {
+                    label: "Just open abtop".to_string(),
+                    action: ConfirmAction::OpenAbtopSkipSetup,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissAbtopSetup,
+                },
+            ]),
+            selected_index: 0,
+        });
+    }
+
     /// Show confirmation dialog for killing an "other" tmux session
     pub fn show_kill_other_tmux_confirmation(&mut self, session_name: String) {
         info!(
@@ -6326,14 +6379,25 @@ impl AppState {
         // add` will accept — the legacy `list_worktrees()` alone missed by-name
         // worktrees (Stevie 2026-05-27: feat/blog re-launch slipped through;
         // review P1, PR #211 added the repo's own checkout; deduped in #232).
-        let repo_path = match &source {
-            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.as_path()),
-            _ => None,
+        let repo_path: Option<std::path::PathBuf> = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.clone()),
+            // Remote/star picks: when the clone cache already exists, its refs
+            // ARE the repo — seed both guards from it so typing an existing
+            // branch warns inline BEFORE launch instead of dying at
+            // `git worktree add -b` (Stevie 2026-06-09: feat/ota on the cached
+            // shotclubhouse pick slipped through and failed only after Launch).
+            // A not-yet-cached remote still starts empty; the base-picker
+            // ls-remote refresh backfills `repo_branch_names` later.
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
         };
+        let repo_path = repo_path.as_deref();
         let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
         // All existing branch names (local heads + remote-tracking) for the
-        // base-off "⚠ exists" guard. Cheap for a local repo; a remote pick
-        // fills this in later when the base picker lists/fetches branches.
+        // base-off "⚠ exists" guard. Cheap for a local repo or a cached
+        // remote; a not-yet-cached remote pick fills this in later when the
+        // base picker lists/fetches branches.
         let repo_branch_names: Vec<String> = repo_path
             .map(|p| {
                 crate::git::branch_list::list_repo_branches(p)
@@ -7950,6 +8014,14 @@ impl AppState {
                     debug!("AttachWitr action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
+                action @ AsyncAction::AttachAbtop => {
+                    debug!("AttachAbtop action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::SetupAbtopRateLimits => {
+                    debug!("SetupAbtopRateLimits action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
                     self.pending_async_action = Some(action);
@@ -9270,6 +9342,8 @@ impl App {
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
+            (crate::app::screens::ids::ABTOP, "abtop"),
+            (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {

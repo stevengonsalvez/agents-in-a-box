@@ -12,6 +12,7 @@
 //! - [`plugin`]      — the [`Plugin`] trait every plugin implements
 //! - [`host_client`] — [`HostClient`] is the plugin's outbound JSON-RPC client
 //! - [`server`]      — [`Server`] runs the dispatcher loop over an [`AsyncRead`]/[`AsyncWrite`] pair
+//! - [`parent_watch`] — macOS parent-death backstop that self-exits an orphaned plugin
 //!
 //! [`AsyncRead`]: tokio::io::AsyncRead
 //! [`AsyncWrite`]: tokio::io::AsyncWrite
@@ -24,6 +25,7 @@
 
 pub mod error;
 pub mod host_client;
+pub mod parent_watch;
 pub mod plugin;
 pub mod server;
 
@@ -41,13 +43,17 @@ pub use ainb_plugin_protocol::{
     manifest::Manifest,
     methods,
     params::{
-        ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult, FsDirEntry,
-        FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleEventParams,
-        HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode,
-        KeyEvent, KeyKind, LogLevel, LogParams, NetworkFetchParams, NetworkFetchResult,
-        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
-        RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-        SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+        ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
+        EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
+        FsDirEntry, FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult,
+        HandleEventParams, HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT,
+        KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel, LogParams, NetworkFetchParams,
+        NetworkFetchResult, PluginInitParams, PluginInitResult, PluginShutdownParams,
+        PluginShutdownResult, RenderParams, RenderResult, SecretStoreGetParams,
+        SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
+        SnapshotSubscribeParams, SnapshotSubscribeResult, SpawnManagedSubprocessParams,
+        SpawnManagedSubprocessResult, UnixSocketCloseParams, UnixSocketDialParams,
+        UnixSocketDialResult, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams, Viewport,
     },
     topics,
     wire_buffer::{Cell, Color, Coord, WireBuffer},
