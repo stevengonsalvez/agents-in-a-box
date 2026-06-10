@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-06-10
+### Added
+- Merge pull request #214 from stevengonsalvez/feat/learnings-plugin
+- Merge pull request #235 from stevengonsalvez/worktree-fleet-tmux-transport-toggle
+- Merge pull request #236 from stevengonsalvez/f/graph-memory
+- Merge pull request #253 from stevengonsalvez/f/abtop-overlay
+- Merge pull request #259 from stevengonsalvez/worktree-ainb-fleet-token-efficiency
+- **burndown**: clear scan banner on terminal done progress event
+- **config**: render per-plugin manifest config in Settings and persist to config.toml
+- **fleet**: add AINB_FLEET_TRANSPORT toggle, default tmux-first
+- **fleet**: collapse hangar enrich into one batched agent
+- **fleet**: token-efficient enrich — content cache, JSONL ERR fallback, --no-enrich
+- **learnings**: deterministic radial layout for the ego map
+- **learnings**: ego-subgraph extraction for the radial map
+- **learnings**: make qmd search killable via a SearchCancel handle
+- **learnings**: map interaction state, mouse hit-test, recentre animation
+- **learnings**: non-blocking document search with spinner + timeout
+- **learnings**: render the radial ego map into a ratatui buffer
+- **learnings**: two-stage BM25 fast-paint for document search
+- **learnings**: wire the radial map into the Graph tab + plugin
+- **plugin-config**: resolve per-plugin config from config.toml and inject at init
+- **plugin-learnings**: Browse tab + filter chips + tabbed UI shell
+- **plugin-learnings**: Detail/read pane (Enter opens, Backspace closes)
+- **plugin-learnings**: Graph tab — typed entity neighbourhood + community clusters
+- **plugin-learnings**: Search tab — query box, qmd ranked results, open detail
+- **plugin-learnings**: data layer — records, graph, qmd search, filters
+- **plugin-learnings**: scaffold plugin crate + host screen wiring
+- **plugin-learnings**: wire /recall and /memory slash commands to open the screen
+- **plugin-protocol**: add read_paths capability, [config] schema, and InitParams.config
+- **plugin-protocol**: add render redraw-hint for self-animation
+- **plugin-protocol**: forward mouse events to focused plugin
+- **plugin-runtime**: bound runaway plugin self-redraws with a host governor
+- **plugin-runtime**: enforce read_paths on host/fs reads + CTS conformance axis
+- **plugin-sdk**: forward resolved config to Plugin::on_init via InitContext
+- **session-reader**: skip aggregation and republish when snapshot unchanged
+- **tui**: make abtop a first-class overlay panel reachable from the session list
+- **tui**: make the learnings panel conform to the overlay-panel contract
+- **types-sessions**: add terminal done flag to ScanProgressEvent
+
+### Fixed
+- **fleet**: correct validate-fleet.sh assertions + teardown for real agents
+- **learnings**: clip map render to the buffer to avoid get_mut panic
+- **learnings**: kill orphaned qmd children on search timeout and supersede
+- **learnings**: make ego representative-edge tiebreak total
+- **plugin-runtime,sdk,cts**: clear strict-clippy bar on redraw/mouse paths
+- **plugin-sdk**: dispatch handle_mouse inline to preserve event order
+- **tui**: gate plugin render kicks to the focused screen
+
+### Documentation
+- **fleet**: add ainb-fleet plugin README
+- **fleet**: hybrid enrich locus + token-efficiency roadmap
+- **fleet**: reframe skills around tmux-first transport + toggle
+- **learnings**: add radial ego local-graph spec
+- **learnings-plugin**: add design spec + TDD phase plan
+- **plugin-protocol,cts**: fix bytes_serde header + cts axis count
+- **plugins**: add the learnings (memory browser) plugin page
+- **skills**: capture tmux recording/tripwire gotchas from the map build
+
+### Other
+- Merge pull request #258 from stevengonsalvez/feat/issue-255-incremental-aggregate
+- **learnings**: cache ego subgraph + layout, re-anchor map selection after hop/expand
+- **session-reader**: size chunks per item instead of re-probing whole chunks
+- **plugin-learnings**: apply review polish across the learnings plugin
+
+
 ## [1.6.0] - 2026-06-10
 ### Added
 - Merge pull request #179 from stevengonsalvez/feat/multica
