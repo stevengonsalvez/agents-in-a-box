@@ -25,6 +25,13 @@ capture: if the PostToolUse hook armed a watcher
 correction, write a low-confidence learning directly to disk WITHOUT
 calling /reflect, then clear the armed state.
 
+SG8 adds a parallel watcher for PERMISSION prompts: if the Notification
+hook armed ``~/.reflect/permission-armed/<sid>.json`` and the current
+prompt reads like a permission decision (``yes always`` / ``no never`` /
+``only for X`` / plain approve-deny), write a ``source:
+permission-pattern`` learning. Durable replies ('always'/'never'/'only
+for X') are HIGH confidence — they state project policy.
+
 Usage in hooks config (Claude plugin.json or Codex hooks.json):
 {
   "hooks": {
@@ -100,6 +107,10 @@ def armed_path(session_id: str) -> Path:
     return state_dir() / "armed" / f"{session_id}.json"
 
 
+def permission_armed_path(session_id: str) -> Path:
+    return state_dir() / "permission-armed" / f"{session_id}.json"
+
+
 def learnings_dir() -> Path:
     """Where mini-learnings get written. Honors REFLECT_LEARNINGS_DIR
     override; defaults to ~/.learnings/documents/."""
@@ -125,6 +136,56 @@ _CORRECTION_PATTERNS = [
 
 def looks_like_correction(prompt: str) -> bool:
     return any(p.search(prompt) for p in _CORRECTION_PATTERNS)
+
+
+# --- Permission-reply detection (port SG8) -------------------------------
+
+# Replies to a permission prompt, in priority order. Durable-policy
+# replies ('yes always' / 'no never' / 'only for X') are HIGH confidence —
+# they state project policy, not a one-off choice. Plain approve/deny is
+# still worth capturing (the pattern of one-off decisions accumulates into
+# policy) but only at MEDIUM confidence.
+_PERMISSION_ALWAYS = re.compile(
+    r"(?i)\b(?:yes,?\s+always|always\s+(?:allow|approve|yes|ok(?:ay)?)|"
+    r"allow\s+(?:this\s+)?always|always\s+for\s+this)\b"
+)
+_PERMISSION_NEVER = re.compile(
+    r"(?i)\b(?:no,?\s+never|never\s+(?:allow|approve|do|run|again)|"
+    r"don'?t\s+ever|do\s+not\s+ever|deny\s+always|always\s+deny)\b"
+)
+_PERMISSION_SCOPED = re.compile(
+    r"(?i)\bonly\s+(?:for|when|if|in|on)\s+\S+"
+)
+_PERMISSION_APPROVE = re.compile(
+    r"(?i)^\s*(?:yes|y|yep|yeah|ok(?:ay)?|sure|approve[d]?|allow(?:ed)?|"
+    r"go\s+ahead|proceed|do\s+it)\b"
+)
+_PERMISSION_DENY = re.compile(
+    r"(?i)^\s*(?:no|n|nope|deny|denied|reject(?:ed)?|don'?t|do\s+not|"
+    r"stop|cancel|abort)\b"
+)
+
+
+def classify_permission_reply(prompt: str) -> tuple[str, str] | None:
+    """Classify a prompt as a permission-prompt reply.
+
+    Returns ``(decision, confidence)`` or ``None`` if the prompt doesn't
+    look like a permission decision. Durable replies ('always' / 'never' /
+    'only for X') are HIGH confidence; one-off approve/deny is MEDIUM.
+    Ordering matters: 'no, never ...' must classify as deny-always, not
+    plain deny.
+    """
+    if _PERMISSION_NEVER.search(prompt):
+        return "deny-always", "high"
+    if _PERMISSION_ALWAYS.search(prompt):
+        return "allow-always", "high"
+    if _PERMISSION_SCOPED.search(prompt):
+        return "allow-scoped", "high"
+    if _PERMISSION_APPROVE.search(prompt):
+        return "allow-once", "medium"
+    if _PERMISSION_DENY.search(prompt):
+        return "deny-once", "medium"
+    return None
 
 
 # --- Dedupe state --------------------------------------------------------
@@ -334,6 +395,91 @@ def maybe_capture_minilearning(session_id: str, prompt: str) -> bool:
     return True
 
 
+# --- Permission-reply capture (Phase 2 of Notification arming, SG8) ------
+
+def maybe_capture_permission_reply(session_id: str, prompt: str) -> bool:
+    """If the Notification hook armed a permission watcher for this
+    session and the current prompt reads like a permission decision,
+    write a ``source: permission-pattern`` learning and clear the armed
+    state.
+
+    Single-shot: the reply to a permission prompt is the immediate next
+    typed prompt or nothing — a non-matching prompt clears the armed file
+    (unlike the failure-correction watcher, which lingers for 10 min).
+
+    Returns ``True`` iff a learning was written. Best-effort; swallows
+    all errors (silent-fail).
+    """
+    if not session_id:
+        return False
+    armed = permission_armed_path(session_id)
+    if not armed.exists():
+        return False
+    try:
+        armed_data = json.loads(armed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            armed.unlink()
+        except OSError:
+            pass
+        return False
+
+    # Stale armed file (e.g. session resumed hours later) — discard.
+    try:
+        armed_age = time.time() - float(armed_data.get("ts", 0))
+    except (TypeError, ValueError):
+        armed_age = 0.0
+    classified = None if armed_age > 600 else classify_permission_reply(prompt)
+
+    if classified is None:
+        # The permission moment has passed — clear the watcher.
+        try:
+            armed.unlink()
+        except OSError:
+            pass
+        return False
+
+    decision, confidence = classified
+
+    # Write the permission-pattern learning.
+    try:
+        ld = learnings_dir()
+        ld.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        slug = f"lrn-perm-{ts}-{session_id[:8]}"
+        path = ld / f"{slug}.md"
+        tool = str(armed_data.get("tool", "unknown") or "unknown")
+        message = scrub_secrets(str(armed_data.get("message", ""))[:300])
+        body = (
+            f"---\n"
+            f"id: {slug}\n"
+            f"confidence: {confidence}\n"
+            f"source: permission-pattern\n"
+            f"session_id: {session_id}\n"
+            f"captured_at: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+            f"---\n\n"
+            f"# Permission decision: {decision} for {tool}\n\n"
+            f"**Permission prompt**: {message}\n\n"
+            f"**Tool**: `{tool}`\n\n"
+            f"**User reply**: {scrub_secrets(prompt[:300])}\n\n"
+            f"**Decision**: `{decision}`\n\n"
+            f"_Auto-captured by the Notification + UserPromptSubmit permission "
+            f"watcher. Durable replies ('always'/'never'/'only for X') are "
+            f"`high` confidence — they state project policy._\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        forensics_log(_HOOK_NAME, f"permission-pattern captured: {slug} ({decision})")
+    except Exception:
+        return False
+
+    # Clear armed state (single shot).
+    try:
+        armed.unlink()
+    except OSError:
+        pass
+    return True
+
+
 # --- Output --------------------------------------------------------------
 
 def emit(additional_context: str) -> NoReturn:
@@ -371,6 +517,9 @@ def _main_body() -> NoReturn:
     # writing it is the side-effect we care about.
     if session_id and prompt:
         maybe_capture_minilearning(session_id, prompt)
+        # SG8: permission-prompt replies (Notification hook armed the
+        # watcher; we capture the user's approve/deny decision here).
+        maybe_capture_permission_reply(session_id, prompt)
 
     if len(prompt) < MIN_PROMPT_CHARS:
         emit("")
