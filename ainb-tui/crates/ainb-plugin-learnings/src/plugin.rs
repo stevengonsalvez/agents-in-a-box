@@ -27,8 +27,8 @@ use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
 use crate::data::{
-    DataError, QmdCli, QmdSearch, SearchHit, SearchMode, parse_community_reports,
-    resolve_config_path, scan_learnings_dir_report, search as run_search,
+    DataError, QmdCli, QmdSearch, SearchCancel, SearchHit, SearchMode, parse_community_reports,
+    resolve_config_path, scan_learnings_dir_report, search_cancellable,
 };
 use crate::ui::{LearningsUi, SearchContext, SearchRequest, SearchStage, render as render_ui};
 
@@ -85,6 +85,11 @@ pub struct LearningsPlugin {
     /// drops it once the result is applied / the search times out / is
     /// superseded.
     search_rx: Option<Receiver<SearchOutcome>>,
+    /// Kill handle for the in-flight worker's `qmd` children, `Some` only
+    /// while a search is running. Cancelling SIGKILLs + reaps the live child
+    /// and makes the worker skip its remaining stage. Replaced on every submit
+    /// (kill-before-spawn: at most ONE live qmd lineage at a time).
+    search_cancel: Option<Arc<SearchCancel>>,
     /// `true` once the Graph tab's community clusters have been lazily loaded
     /// from `graph_cache` (memoized so re-entry doesn't re-read).
     communities_loaded: bool,
@@ -94,14 +99,7 @@ pub struct LearningsPlugin {
 
 impl Default for LearningsPlugin {
     fn default() -> Self {
-        Self {
-            config: LearningsConfig::default(),
-            ui: LearningsUi::default(),
-            search_runner: Arc::new(QmdCli::default()),
-            search_rx: None,
-            communities_loaded: false,
-            generation: 0,
-        }
+        Self::with_search_runner(Arc::new(QmdCli::default()))
     }
 }
 
@@ -123,12 +121,19 @@ impl LearningsPlugin {
     /// tab renders ranked results deterministically without a live `qmd` index.
     ///
     /// The runner is wrapped in an [`Arc`] so the search worker thread can share
-    /// it (run the subprocess off the dispatch thread).
+    /// it (run the subprocess off the dispatch thread). Fields are spelled out
+    /// (no `..Self::default()` update) because the type implements `Drop` —
+    /// functional record update can't move out of a `Drop` type (E0509).
     #[must_use]
     pub fn with_search_runner(runner: Arc<dyn QmdSearch + Send + Sync>) -> Self {
         Self {
+            config: LearningsConfig::default(),
+            ui: LearningsUi::default(),
             search_runner: runner,
-            ..Self::default()
+            search_rx: None,
+            search_cancel: None,
+            communities_loaded: false,
+            generation: 0,
         }
     }
 
@@ -136,20 +141,29 @@ impl LearningsPlugin {
     /// thread and arm the result channel. Runtime-agnostic: uses `std::thread` +
     /// `mpsc` (the in-module + integration tests call into the plugin without
     /// guaranteeing a tokio runtime on the calling thread, so `spawn_blocking` is
-    /// unsafe here). Dropping the previous receiver here orphans any prior worker
-    /// — its results are ignored by token mismatch.
+    /// unsafe here).
+    ///
+    /// **Kill-before-spawn.** The previous lineage is cancelled FIRST — its
+    /// cancelled flag is set and its live `qmd` child is SIGKILLed + reaped —
+    /// so at most ONE qmd lineage is alive at a time. Without this, rapid
+    /// edit+Enter cycles pile up N concurrent `qmd` processes whose results
+    /// are all discarded by token mismatch.
     ///
     /// The single worker runs `qmd` twice, both tagged with the SAME `token`:
     ///
     /// 1. **BM25** (`run_bm25` / `qmd search --json`, no LLM — effectively
     ///    instant): sent first for the fast first paint.
     /// 2. **Semantic** (`run_query` / `qmd query --json -C 20`, the LLM rerank):
-    ///    sent second to swap in the reranked results.
+    ///    sent second to swap in the reranked results — skipped entirely when
+    ///    the lineage was cancelled between the stages.
     ///
     /// The plugin polls the receiver each render and applies each stage in turn
     /// ([`Self::poll_search`]); the channel is kept until the SEMANTIC stage
     /// lands (or the ceiling fires), so both stages reach the UI.
     fn start_search_worker(&mut self, request: SearchRequest) {
+        self.cancel_in_flight_search();
+        let cancel = Arc::new(SearchCancel::new());
+        self.search_cancel = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel::<SearchOutcome>();
         let runner = Arc::clone(&self.search_runner);
         let collection = self.config.qmd_collection.clone();
@@ -157,29 +171,47 @@ impl LearningsPlugin {
         let SearchRequest { token, query } = request;
         std::thread::spawn(move || {
             // Stage 1 — BM25 fast paint (no LLM, returns ~instantly).
-            let bm25 = run_search(
+            let bm25 = search_cancellable(
                 runner.as_ref(),
                 &query,
                 &collection,
                 &index,
                 SearchMode::Bm25,
+                &cancel,
             );
             // A failed send means the receiver is already gone (superseded /
             // timed-out search) — bail without running the slow semantic pass.
             if tx.send((token, SearchStage::Bm25, bm25)).is_err() {
                 return;
             }
+            // Superseded between the stages? Skip the slow semantic pass
+            // entirely — its result would be dropped by token mismatch anyway.
+            if cancel.is_cancelled() {
+                return;
+            }
             // Stage 2 — semantic rerank (the slow LLM path).
-            let semantic = run_search(
+            let semantic = search_cancellable(
                 runner.as_ref(),
                 &query,
                 &collection,
                 &index,
                 SearchMode::Semantic,
+                &cancel,
             );
             let _ = tx.send((token, SearchStage::Semantic, semantic));
         });
         self.search_rx = Some(rx);
+    }
+
+    /// Tear down the in-flight search worker, if any: set its cancelled flag,
+    /// SIGKILL + reap its live `qmd` child, and drop the result channel. The
+    /// worker thread observes the cancelled flag / dead channel and exits
+    /// instead of running (or finishing) the slow semantic stage.
+    fn cancel_in_flight_search(&mut self) {
+        if let Some(cancel) = self.search_cancel.take() {
+            cancel.cancel();
+        }
+        self.search_rx = None;
     }
 
     /// Poll the in-flight two-stage search worker (non-blocking) and enforce the
@@ -198,9 +230,11 @@ impl LearningsPlugin {
                 Ok((token, stage, result)) => {
                     changed |= self.ui.apply_search_result(token, stage, result);
                     // The semantic stage is the worker's last message — drop the
-                    // channel once it's been delivered.
+                    // channel (and the now-finished lineage's kill handle) once
+                    // it's been delivered.
                     if stage == SearchStage::Semantic {
                         self.search_rx = None;
+                        self.search_cancel = None;
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -208,6 +242,7 @@ impl LearningsPlugin {
                     // Worker ended without sending the remaining stage(s) — drop
                     // the dead channel (the UI keeps whatever already painted).
                     self.search_rx = None;
+                    self.search_cancel = None;
                 }
             }
         }
@@ -215,8 +250,9 @@ impl LearningsPlugin {
         // two-stage; if BM25 painted, the UI keeps those results on timeout).
         if self.ui.check_search_timeout() {
             changed = true;
-            // Abandon the worker channel; the orphan thread finishes on its own.
-            self.search_rx = None;
+            // Kill the hung `qmd` child + drop the channel — the worker then
+            // exits instead of burning CPU on a result nobody will read.
+            self.cancel_in_flight_search();
         }
         changed
     }
@@ -298,6 +334,14 @@ impl LearningsPlugin {
                 self.ui.set_communities(Vec::new());
             }
         }
+    }
+}
+
+impl Drop for LearningsPlugin {
+    /// Kill any in-flight `qmd` child on plugin teardown — a hung search must
+    /// not outlive its owner (and tests must not leak sleeper children).
+    fn drop(&mut self) {
+        self.cancel_in_flight_search();
     }
 }
 
@@ -506,5 +550,129 @@ mod tests {
         let mut p = LearningsPlugin::default();
         p.apply_init_config(&serde_json::json!({ "learnings_dir": "/kb" }));
         assert_eq!(p.config().learnings_dir, "/kb");
+    }
+
+    // ---- qmd child kill: timeout + kill-before-spawn ----
+
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use ainb_plugin_sdk::KeyCode;
+
+    use crate::data::test_proc::{pid_alive, write_script};
+
+    /// A plugin whose runner shells `script` as the `qmd` binary — the "slow
+    /// qmd" fixture path (a real subprocess, not a fake).
+    fn plugin_with_script(script: &Path) -> LearningsPlugin {
+        LearningsPlugin::with_search_runner(Arc::new(QmdCli::with_binary(
+            script.display().to_string(),
+        )))
+    }
+
+    /// Drive the UI to a submitted query (`/` focus, type, Enter) and kick the
+    /// REAL worker thread, mirroring `handle_key`'s submit path.
+    fn submit_search(p: &mut LearningsPlugin, query: &str) {
+        let ctx = SearchContext {
+            collection: "",
+            index: "",
+        };
+        p.ui.handle_key(&KeyCode::Char { ch: '/' }, &ctx);
+        for ch in query.chars() {
+            p.ui.handle_key(&KeyCode::Char { ch }, &ctx);
+        }
+        let out = p.ui.handle_key(&KeyCode::Enter, &ctx);
+        p.start_search_worker(out.start_search.expect("submit yields a worker request"));
+    }
+
+    /// Bounded-poll until the in-flight worker registers its `qmd` child with
+    /// the CURRENT cancel handle, returning the child's pid.
+    fn wait_for_child_pid(p: &LearningsPlugin) -> u32 {
+        let cancel = p.search_cancel.as_ref().expect("in-flight cancel handle");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = cancel.child_id() {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "qmd child never spawned/registered"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// TIMEOUT KILL: when the search ceiling fires, `poll_search` must SIGKILL
+    /// the in-flight `qmd` child — not merely drop the channel and leave an
+    /// orphan burning CPU on a result nobody will read.
+    #[test]
+    fn timeout_kills_the_in_flight_qmd_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = write_script(dir.path(), "slow-qmd.sh", "sleep 30");
+        let mut p = plugin_with_script(&script);
+        submit_search(&mut p, "slow");
+
+        let pid = wait_for_child_pid(&p);
+        assert!(
+            pid_alive(pid),
+            "precondition: the slow qmd child is running"
+        );
+
+        // Force the in-flight phase past the ceiling (the same seam the UI's
+        // own timeout tests use), then poll — the timeout arm must kill.
+        p.ui.force_search_timeout_eligible();
+        assert!(p.poll_search(), "the timeout must register a state change");
+        assert!(
+            p.search_rx.is_none(),
+            "the worker channel is dropped on timeout"
+        );
+        assert!(
+            p.search_cancel.is_none(),
+            "the kill handle is cleared on timeout"
+        );
+        assert!(
+            !pid_alive(pid),
+            "the qmd child must be SIGKILLed + reaped when the search times out"
+        );
+    }
+
+    /// KILL-BEFORE-SPAWN: a new submit must kill the superseded query's `qmd`
+    /// child BEFORE spawning its own, bounding the system to at most ONE live
+    /// qmd lineage no matter how fast the user edit+Enter cycles.
+    #[test]
+    fn new_submit_kills_the_superseded_querys_qmd_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = write_script(dir.path(), "slow-qmd.sh", "sleep 30");
+        let mut p = plugin_with_script(&script);
+
+        // Submit #1 → its slow child spawns.
+        submit_search(&mut p, "one");
+        let pid1 = wait_for_child_pid(&p);
+        assert!(pid_alive(pid1), "precondition: query #1's child is running");
+
+        // Edit + re-submit immediately (the rapid edit+Enter cycle).
+        let ctx = SearchContext {
+            collection: "",
+            index: "",
+        };
+        p.ui.handle_key(&KeyCode::Char { ch: '2' }, &ctx);
+        let out = p.ui.handle_key(&KeyCode::Enter, &ctx);
+        p.start_search_worker(out.start_search.expect("re-submit yields a request"));
+
+        // Kill-before-spawn: query #1's child is ALREADY dead when the new
+        // worker starts (the cancel runs synchronously before the spawn).
+        assert!(
+            !pid_alive(pid1),
+            "the superseded query's qmd child must be killed before the new spawn"
+        );
+
+        // Query #2 proceeds: its own child spawns under the NEW kill handle.
+        let pid2 = wait_for_child_pid(&p);
+        assert_ne!(pid1, pid2, "query #2 runs its own child");
+        assert!(pid_alive(pid2), "the live query's child keeps running");
+
+        // Teardown kills the live child too — no 30 s sleeper outlives the
+        // test (the Drop impl cancels the in-flight lineage).
+        drop(p);
+        assert!(!pid_alive(pid2), "drop must kill the remaining child");
     }
 }

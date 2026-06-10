@@ -506,6 +506,19 @@ impl SearchState {
         true
     }
 
+    /// Test-only seam: backdate the in-flight phase's `started` past the
+    /// ceiling so the next [`Self::check_timeout`] fires without waiting out
+    /// the real 8 s — the same trick the in-module timeout tests use, exposed
+    /// for the plugin's kill-on-timeout test.
+    #[cfg(test)]
+    pub(crate) fn force_timeout_eligible(&mut self) {
+        if let SearchPhase::Searching { started, .. } | SearchPhase::Refining { started, .. } =
+            &mut self.phase
+        {
+            *started = Instant::now() - (SEARCH_CEILING + Duration::from_secs(1));
+        }
+    }
+
     /// The braille spinner glyph for the current PRE-PAINT search, advanced by
     /// `started.elapsed()` so it animates across render ticks. `None` once BM25
     /// has painted (the `Refining` stage uses the subtle indicator instead) or

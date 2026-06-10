@@ -342,6 +342,14 @@ impl LearningsUi {
         self.search.is_in_flight()
     }
 
+    /// Test-only seam: backdate the in-flight search past its ceiling so the
+    /// next [`Self::check_search_timeout`] fires immediately (see
+    /// `SearchState::force_timeout_eligible`).
+    #[cfg(test)]
+    pub(crate) fn force_search_timeout_eligible(&mut self) {
+        self.search.force_timeout_eligible();
+    }
+
     /// Open the Detail pane on the Browse tab's currently-selected record.
     /// Returns `true` when a record was selectable (pane opened), `false` when
     /// the list is empty (nothing to open — a clean no-op). The Browse
