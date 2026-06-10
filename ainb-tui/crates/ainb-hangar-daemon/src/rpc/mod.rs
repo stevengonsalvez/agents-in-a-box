@@ -450,6 +450,7 @@ async fn handle(
         }
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
+        methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -703,6 +704,64 @@ fn issue_field_update_from_params(
         priority: params.priority,
         due_date,
     })
+}
+
+/// Dispatch `hangar/comment_add` (e38.5): append a comment to one issue, push the
+/// matching `CommentAdded` event, and answer with the persisted row.
+///
+/// Mirrors [`handle_issue_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), parses the author actor-ref + validates a non-empty body, then drives
+/// the workspace-scoped store insert. An `(issue_id, workspace)` pair that
+/// matches no row (an unknown id, or an issue owned by another tenant) is rejected
+/// as a not-found error — never a cross-tenant comment. Only a committed insert
+/// pushes the event. Split out of [`handle`] to keep that dispatcher within the
+/// line cap.
+async fn handle_comment_add(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::CommentAddParams =
+        parse_params(req, "{ workspace_id, issue_id, author, body }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // A blank comment is a client error, not an empty row.
+    if params.body.trim().is_empty() {
+        return Err(invalid_params("comment body must not be empty"));
+    }
+    let author = ActorRef::from_str(&params.author).map_err(|e| {
+        invalid_params(&format!(
+            "author must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let row = snapshots::comment_add(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        &params.issue_id,
+        &author,
+        &params.body,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    // No row landed: the (issue, workspace) pair matched no issue — an unknown id
+    // or a cross-tenant issue. Reject rather than ack a write that never happened.
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    };
+    // A committed insert announces the new comment to subscribers.
+    events.emit(ws.as_str(), HangarEvent::CommentAdded(row.clone()));
+    to_value(&row)
 }
 
 /// Resolve a workspace-scoped request's `{ workspace_id }` to a typed
@@ -1180,6 +1239,85 @@ mod tests {
                     "workspace_id": "default",
                     "issue_id": "no-such-issue",
                     "state": "done",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/comment_add` appends a comment to a seeded issue through the
+    /// dispatcher and answers with the persisted row (e38.5).
+    #[tokio::test]
+    async fn comment_add_appends_to_seeded_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_COMMENT_ADD,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-1",
+                    "author": "member:user-1",
+                    "body": "looks good",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        assert_eq!(v["issue_id"], "issue-1");
+        assert_eq!(v["author"], "member:user-1");
+        assert_eq!(v["body"], "looks good");
+    }
+
+    /// A blank comment body is an `INVALID_PARAMS` client error — never an empty
+    /// persisted row.
+    #[tokio::test]
+    async fn comment_add_empty_body_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_COMMENT_ADD,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-1",
+                    "author": "member:user-1",
+                    "body": "   ",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// An unknown issue id is rejected (not a silent no-op), mirroring the
+    /// mutating workspace-reject contract.
+    #[tokio::test]
+    async fn comment_add_unknown_issue_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_COMMENT_ADD,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "no-such-issue",
+                    "author": "member:user-1",
+                    "body": "hi",
                 }),
             ),
             &health(),

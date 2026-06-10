@@ -14,18 +14,21 @@
 //! picker; the real online/away signal for humans lands with presence tracking
 //! in a later phase).
 
+use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::clock::HangarClock;
-use ainb_hangar_core::ids::{AgentId, AutopilotId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, PresenceState, SkillFile, SkillRow,
-    TaskCardRow,
+    ActorRow, AutopilotRow, AutopilotRunRow, CommentRow, IssueRow, PresenceState, SkillFile,
+    SkillRow, TaskCardRow,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
+use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
@@ -565,6 +568,63 @@ pub async fn issue_update(
         due_date: issue.due_date,
         labels: issue.labels,
         pr_url,
+    }))
+}
+
+/// Append one comment to an issue, scoped to `workspace_id`, then return it as a
+/// wire [`CommentRow`] (`hangar/comment_add`, e38.5).
+///
+/// Mints a fresh ULID via `idgen`, stamps `created_at` from `clock`, and inserts
+/// through [`CommentRepo`], which scopes the write by `(issue_id, workspace_id)`
+/// at the SQL boundary (a join to `issue`). Returns `Some(row)` with the
+/// persisted comment when the insert landed, `None` when the `(issue, workspace)`
+/// pair matched no issue — the not-found / cross-tenant case the caller surfaces
+/// as an error. The `author` is the already-parsed actor-ref.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault, or a malformed minted id on the
+/// re-wrap (impossible for a ULID).
+pub async fn comment_add(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    issue_id: &str,
+    author: &ActorRef,
+    body: &str,
+) -> Result<Option<CommentRow>, sqlx::Error> {
+    let id = idgen.new_ulid();
+    let created_at = clock.now_ms();
+    let landed = CommentRepo::insert(
+        pool,
+        workspace_id,
+        &NewComment {
+            id: id.clone(),
+            issue_id: issue_id.to_string(),
+            author: author.clone(),
+            body: body.to_string(),
+            created_at,
+        },
+    )
+    .await?;
+    if !landed {
+        return Ok(None);
+    }
+    let comment_id = CommentId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
+        index: "id".to_string(),
+        source: format!("malformed comment id {id:?}: {e}").into(),
+    })?;
+    let issue = IssueId::from_str(issue_id).map_err(|e| sqlx::Error::ColumnDecode {
+        index: "issue_id".to_string(),
+        source: format!("malformed issue id {issue_id:?}: {e}").into(),
+    })?;
+    Ok(Some(CommentRow {
+        id: comment_id,
+        issue_id: issue,
+        author: format!("{}:{}", author.kind().as_str(), author.id()),
+        body: body.to_string(),
+        created_at,
     }))
 }
 
