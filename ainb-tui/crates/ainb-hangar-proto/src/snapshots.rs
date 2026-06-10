@@ -269,6 +269,70 @@ pub struct IssueUpdateParams {
     pub due_date: FieldUpdate<i64>,
 }
 
+/// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
+/// config knobs, scoped to a workspace.
+///
+/// `workspace_id` + `agent_id` identify the row (the workspace is the
+/// tenant-isolation guard — a foreign-tenant agent id touches nothing). The
+/// remaining fields are partial-update instructions: `name` is non-nullable so
+/// it uses `Option<String>` (`None` = leave); the four nullable text fields use
+/// [`FieldUpdate`] (omitted = leave, `null` = clear to the column default, value
+/// = set); and the two JSON collection fields (`cli_args` / `agent_env`) use a
+/// plain `Option` (an empty collection is a valid "no args" / "no env" value,
+/// distinct from leaving the field). `agent_env` is an ordered key-value list so
+/// it serialises deterministically.
+///
+/// This bead persists + exposes the config; the provider EXEC consumption of
+/// `model` / `cli_args` is a separate bead (e38.16).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentUpdateParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent to edit (`agent.id`).
+    pub agent_id: String,
+    /// New agent name; `None` leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New instructions; omitted leaves it, `null` clears it, a value sets it.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub instructions: FieldUpdate<String>,
+    /// New model override; omitted leaves it, `null` clears it (provider
+    /// default), a value sets it.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub model: FieldUpdate<String>,
+    /// New CLI-args list; `None` leaves it (an empty list is a valid "no args").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_args: Option<Vec<String>>,
+    /// New MCP config (raw JSON-object string); omitted leaves it, `null` clears
+    /// it, a value sets it.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub mcp_config: FieldUpdate<String>,
+    /// New thinking level; omitted leaves it, `null` clears it, a value sets it.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub thinking: FieldUpdate<String>,
+    /// New per-agent env map (ordered key-value pairs); `None` leaves it (an
+    /// empty list is a valid "no env").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_env: Option<Vec<(String, String)>>,
+}
+
+/// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
+/// un-archive one agent, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// scopes the flip by `(agent_id, workspace_id)` so a foreign-tenant agent id
+/// archives nothing. `archived: true` hides the agent from the active picker;
+/// `false` restores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentArchiveParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent to (un)archive (`agent.id`).
+    pub agent_id: String,
+    /// `true` archives (hides from the active picker); `false` restores.
+    pub archived: bool,
+}
+
 /// Params for [`crate::methods::HANGAR_COMMENT_ADD`] (e38.5): append one comment
 /// to an issue, scoped to a workspace.
 ///
@@ -578,6 +642,61 @@ mod tests {
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
             serde_json::from_str::<CommentAddParams>(&s).unwrap(),
+            params
+        );
+    }
+
+    /// `AgentUpdateParams` round-trips, and the three-state nullable wrapper keeps
+    /// "omitted" (`Keep`), "explicit null" (`Clear`), and "value" (`Set`) distinct
+    /// for the text knobs (e38.15).
+    #[test]
+    fn e38_agent_update_params_roundtrip_and_three_state() {
+        // A full edit: rename + set every config knob.
+        let full = AgentUpdateParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+            name: Some("Builder Pro".into()),
+            instructions: FieldUpdate::Set("Be precise.".into()),
+            model: FieldUpdate::Set("claude-opus-4".into()),
+            cli_args: Some(vec!["--verbose".into()]),
+            mcp_config: FieldUpdate::Set(r#"{"servers":{}}"#.into()),
+            thinking: FieldUpdate::Set("high".into()),
+            agent_env: Some(vec![("FOO".into(), "bar".into())]),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<AgentUpdateParams>(&s).unwrap(), full);
+
+        // The minimal edit (only the row identity) omits every optional field, so
+        // each decodes to its leave-unchanged variant and re-serialises byte-minimal.
+        let minimal = r#"{"workspace_id":"ws-1","agent_id":"agent-1"}"#;
+        let p: AgentUpdateParams = serde_json::from_str(minimal).unwrap();
+        assert_eq!(p.name, None, "absent name leaves it unchanged");
+        assert!(p.instructions.is_keep(), "absent instructions leaves it");
+        assert!(p.model.is_keep(), "absent model leaves it");
+        assert_eq!(p.cli_args, None, "absent cli_args leaves it");
+        assert!(p.mcp_config.is_keep(), "absent mcp_config leaves it");
+        assert!(p.thinking.is_keep(), "absent thinking leaves it");
+        assert_eq!(p.agent_env, None, "absent agent_env leaves it");
+        assert_eq!(serde_json::to_string(&p).unwrap(), minimal);
+
+        // An explicit `null` is the CLEAR instruction, distinct from omission.
+        let clear = r#"{"workspace_id":"ws-1","agent_id":"agent-1","model":null,"thinking":null}"#;
+        let p: AgentUpdateParams = serde_json::from_str(clear).unwrap();
+        assert_eq!(p.model, FieldUpdate::Clear, "null model → clear");
+        assert_eq!(p.thinking, FieldUpdate::Clear, "null thinking → clear");
+    }
+
+    /// `AgentArchiveParams` round-trips through JSON (e38.15).
+    #[test]
+    fn e38_agent_archive_params_roundtrip() {
+        let params = AgentArchiveParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+            archived: true,
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentArchiveParams>(&s).unwrap(),
             params
         );
     }

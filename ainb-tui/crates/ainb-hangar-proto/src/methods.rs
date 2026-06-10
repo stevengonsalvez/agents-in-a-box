@@ -160,6 +160,36 @@ pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 /// subscribed task-detail screen re-renders the new comment.
 pub const HANGAR_COMMENT_ADD: &str = "hangar/comment_add";
 
+/// `hangar/agent_update` — edit one agent's config knobs (e38.15).
+///
+/// Params: [`crate::snapshots::AgentUpdateParams`]
+/// (`{ workspace_id, agent_id, name?, instructions?, model?, cli_args?,
+/// mcp_config?, thinking?, agent_env? }`). Result: the refreshed
+/// [`crate::events::ActorRow`] for the edited agent, or an error. Each optional
+/// field is "leave unchanged when absent"; the nullable text fields
+/// (`instructions` / `model` / `mcp_config` / `thinking`) additionally
+/// distinguish "clear to the default" (explicit `null`) from "leave it" (key
+/// omitted) via their [`crate::snapshots::FieldUpdate`] wrapper.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_UPDATE`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op), and the update is scoped by `(agent_id, workspace_id)`
+/// so a foreign-tenant agent id touches no row (a not-found error). This bead
+/// persists + exposes the config; the provider EXEC consumption of `model`/`args`
+/// is a separate bead (e38.16).
+pub const HANGAR_AGENT_UPDATE: &str = "hangar/agent_update";
+
+/// `hangar/agent_archive` — archive or un-archive one agent (e38.15).
+///
+/// Params: [`crate::snapshots::AgentArchiveParams`]
+/// (`{ workspace_id, agent_id, archived }`). Result: the refreshed
+/// [`crate::events::ActorRow`] for the agent, or an error. `archived: true`
+/// hides the agent from the active picker; `false` restores it.
+///
+/// Mutating + workspace-scoped like [`HANGAR_AGENT_UPDATE`]: a foreign-tenant
+/// agent id flips no row and is rejected as a not-found error.
+pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -213,6 +243,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASK_TRANSITION,
     HANGAR_ISSUE_UPDATE,
     HANGAR_COMMENT_ADD,
+    HANGAR_AGENT_UPDATE,
+    HANGAR_AGENT_ARCHIVE,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -271,6 +303,8 @@ mod tests {
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
             HANGAR_COMMENT_ADD,
+            HANGAR_AGENT_UPDATE,
+            HANGAR_AGENT_ARCHIVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -305,6 +339,8 @@ mod tests {
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
             HANGAR_COMMENT_ADD,
+            HANGAR_AGENT_UPDATE,
+            HANGAR_AGENT_ARCHIVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,
