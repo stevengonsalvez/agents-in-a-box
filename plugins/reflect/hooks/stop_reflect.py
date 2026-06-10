@@ -115,6 +115,19 @@ def _main_body() -> None:
     session_id = str(data.get("session_id", "") or "").strip()
     transcript_path = str(data.get("transcript_path", "") or "").strip()
 
+    # SG4: sweep TTL-expired test-outcome state. Stop is the closest thing to
+    # a session-end hook the plugin wires; deleting the CURRENT session's
+    # state here would break cross-turn fix tracking (Stop fires per turn),
+    # so we only reap stale files — the live session's file is fresh and
+    # survives the sweep. Best-effort: never blocks the enqueue path.
+    try:
+        from test_outcome_parser import cleanup_stale  # noqa: E402
+        n = cleanup_stale()
+        if n:
+            forensics_log(_HOOK_NAME, f"test-state sweep removed {n} stale file(s)")
+    except Exception:  # noqa: BLE001
+        pass
+
     if not transcript_path:
         # Nothing useful to queue without a transcript path.
         return

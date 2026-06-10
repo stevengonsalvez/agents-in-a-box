@@ -140,7 +140,21 @@ def _main_body() -> None:
     except ImportError:  # pragma: no cover
         pass
 
-    if not loop_hit and not tool_failed(tool_response, tool_name):
+    # SG4: test-outcome parsing runs on Bash output BEFORE the failure-arm
+    # path. A confirmed fix (failures N->0) writes a HIGH-confidence learning
+    # directly inside observe_bash — nothing to arm. A regression (0->N) is a
+    # contradiction signal: arm with reason="test-regression" so the next
+    # corrective prompt is captured with test context attached.
+    test_hit = None
+    if tool_name and tool_name.lower() in ("bash", "shell", "execute"):
+        try:
+            from test_outcome_parser import observe_bash
+            test_hit = observe_bash(session_id, tool_input, tool_response)
+        except ImportError:  # pragma: no cover
+            pass
+    regression = bool(test_hit and test_hit.get("kind") == "regression")
+
+    if not loop_hit and not regression and not tool_failed(tool_response, tool_name):
         return  # Successful, non-looping tool calls don't arm.
 
     # Write armed file. Truncate large payloads — only need enough for
@@ -161,12 +175,18 @@ def _main_body() -> None:
             "tool_input": scrub_secrets(strip_private(str(tool_input))[:500]),
             "tool_response": scrub_secrets(strip_private(json.dumps(tool_response))[:500]),
             "ts": time.time(),
-            # SG5: why we armed — lets the mini-learning tag its source
-            # ('loop-correction' vs the default failure-correction).
-            "reason": "loop" if loop_hit else "failure",
+            # SG5/SG4: why we armed — lets the mini-learning tag its source
+            # ('loop-correction' / 'test-regression' vs failure-correction).
+            "reason": (
+                "loop" if loop_hit
+                else "test-regression" if regression
+                else "failure"
+            ),
         }
         if loop_hit:
             payload["loop"] = dict(loop_hit)
+        if regression:
+            payload["test_outcome"] = dict(test_hit)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
