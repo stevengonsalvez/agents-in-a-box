@@ -440,6 +440,15 @@ pub struct IssueCreateArgs {
     /// provider. The created task id is printed alongside the issue id.
     #[arg(long)]
     pub assign: Option<String>,
+    /// Task urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (default 0).
+    ///
+    /// Stamped onto the task enqueued via `--assign`: the daemon's claim loop
+    /// drains `priority DESC, created_at, id` (Multica ordering parity), so a
+    /// higher value jumps the queue while equal priorities stay FIFO. Without
+    /// `--assign` no task is enqueued and the value is inert (the issue model
+    /// itself carries no priority yet).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..=3))]
+    pub priority: i64,
 }
 
 /// Arguments for `hangar issue list`.
@@ -1266,7 +1275,7 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
                 agent_id: a.agent_id,
                 issue_id: Some(id.clone()),
                 work_dir: None,
-                priority: 0,
+                priority: args.priority,
                 created_at: now,
                 autopilot_run_id: None,
             },
@@ -2030,21 +2039,23 @@ fn issue_md_row(i: &Issue) -> String {
     )
 }
 
-/// One-line text summary of a task.
+/// One-line text summary of a task. `priority` is 0..3 = P3..P0 (higher =
+/// more urgent; the claim ordering key).
 fn task_line(t: &Task) -> String {
     format!(
-        "{}  [{}]  runtime={} agent={}",
-        t.id, t.status, t.runtime_id, t.agent_id
+        "{}  [{}]  priority={} runtime={} agent={}",
+        t.id, t.status, t.priority, t.runtime_id, t.agent_id
     )
 }
 const fn task_csv_header() -> &'static str {
-    "id,status,runtime_id,agent_id,attempt,max_attempts"
+    "id,status,priority,runtime_id,agent_id,attempt,max_attempts"
 }
 fn task_csv_row(t: &Task) -> String {
     format!(
-        "{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{}",
         csv_field(&t.id),
         csv_field(&t.status),
+        t.priority,
         csv_field(&t.runtime_id),
         csv_field(&t.agent_id),
         t.attempt,
@@ -2052,13 +2063,14 @@ fn task_csv_row(t: &Task) -> String {
     )
 }
 const fn task_md_header() -> &'static str {
-    "| id | status | runtime | agent | attempt |\n| --- | --- | --- | --- | --- |\n"
+    "| id | status | priority | runtime | agent | attempt |\n| --- | --- | --- | --- | --- | --- |\n"
 }
 fn task_md_row(t: &Task) -> String {
     format!(
-        "| {} | {} | {} | {} | {}/{} |",
+        "| {} | {} | {} | {} | {} | {}/{} |",
         md_cell(&t.id),
         md_cell(&t.status),
+        t.priority,
         md_cell(&t.runtime_id),
         md_cell(&t.agent_id),
         t.attempt,
@@ -2069,9 +2081,10 @@ fn task_md_row(t: &Task) -> String {
 /// Minimal stable JSON object for one task.
 fn task_to_json(t: &Task) -> String {
     format!(
-        "{{\"id\":{},\"status\":{},\"runtime_id\":{},\"agent_id\":{},\"attempt\":{},\"max_attempts\":{}}}",
+        "{{\"id\":{},\"status\":{},\"priority\":{},\"runtime_id\":{},\"agent_id\":{},\"attempt\":{},\"max_attempts\":{}}}",
         json_string(&t.id),
         json_string(&t.status),
+        t.priority,
         json_string(&t.runtime_id),
         json_string(&t.agent_id),
         t.attempt,
@@ -2139,6 +2152,49 @@ mod tests {
         assert_eq!(args.title, "Fix bug");
         assert_eq!(args.description.as_deref(), Some("details"));
         assert_eq!(args.state, DEFAULT_ISSUE_STATE);
+    }
+
+    #[test]
+    fn parses_issue_create_priority() {
+        // Explicit value parses through.
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Urgent",
+            "--priority",
+            "3",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 3, "--priority 3 = P0, most urgent");
+
+        // Omitted -> routine default 0 (P3).
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Routine"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 0, "priority defaults to 0 (P3)");
+    }
+
+    #[test]
+    fn issue_create_priority_rejects_out_of_range() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app.try_get_matches_from([
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Bad",
+            "--priority",
+            "4",
+        ]);
+        assert!(err.is_err(), "--priority is clamped to 0..=3 (P3..P0)");
     }
 
     #[test]
