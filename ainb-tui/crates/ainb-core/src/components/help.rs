@@ -62,6 +62,7 @@ impl HelpComponent {
             ListItem::new("  i          Stats / usage analytics (Esc closes)"),
             ListItem::new("  w          Witr process browser (quit witr to return)"),
             ListItem::new("  k          Skills browser (Esc closes)"),
+            ListItem::new("  t          Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),
             ListItem::new("Views:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),

@@ -239,3 +239,113 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
         "`{ABTOP_SESSION}` exists but isn't running abtop's monitor:\n---\n{abtop_pane}\n---"
     );
 }
+
+/// Overlay-panels parity: abtop opened FROM THE SESSION LIST (the `t`
+/// shortcut is now mirrored there, like stats/witr/skills) returns to the
+/// session list when the user quits abtop — not home.
+///
+/// Like witr, abtop is a tmux suspend/attach (`AttachAbtop` never touches
+/// `current_screen`), so resume-on-origin is automatic — this proves it
+/// end-to-end and that the new session-list `t` binding actually launches
+/// abtop. Seeds `abtop-setup-dismissed` so the first-run consent dialog
+/// doesn't intercept `t` (that leg is covered by the test above).
+#[test]
+fn abtop_opened_from_session_list_resumes_on_session_list() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    if !abtop_available() {
+        eprintln!("SKIP: real `abtop` binary not on PATH — the embed runs `abtop --exit-on-jump`");
+        return;
+    }
+
+    kill_session(ABTOP_SESSION);
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_home(home_tmp.path());
+    // Skip the one-time setup consent so `t` launches abtop directly.
+    fs::write(
+        home_tmp.path().join(".agents-in-a-box").join("abtop-setup-dismissed"),
+        b"1",
+    )
+    .expect("seed abtop-setup-dismissed");
+
+    let session = format!("tripwire-abtop-resume-{}", std::process::id());
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
+        .status()
+        .expect("tmux new-session");
+    assert!(status.success(), "tmux new-session failed");
+
+    let cmd = format!(
+        "HOME={} exec {} tui",
+        home_tmp.path().display(),
+        ainb_bin().display()
+    );
+    Command::new("tmux")
+        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .status()
+        .expect("tmux send launch cmd");
+
+    // Home → session list (plugins enabled — abtop needs the real PATH —
+    // so cold start is slower; keep the deadline generous).
+    let home_ok = poll(Instant::now() + Duration::from_secs(90), || {
+        let c = capture_pane(&session);
+        c.contains("Stats") && c.contains("[i]")
+    });
+    if !home_ok {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
+    }
+    send_key(&session, "s");
+    let on_sessions = poll(Instant::now() + Duration::from_secs(40), || {
+        capture_pane(&session).contains("del-sel")
+    });
+    if !on_sessions {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+    }
+
+    // Press `t` → ainb spawns `ainb-abtop` running the monitor and attaches.
+    send_key(&session, "t");
+    let spawned = poll(Instant::now() + Duration::from_secs(25), || {
+        has_session(ABTOP_SESSION)
+    });
+    if !spawned {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!(
+            "`t` from session list did not spawn `{ABTOP_SESSION}`; ainb pane:\n---\n{last}\n---"
+        );
+    }
+
+    // Quit abtop (`q`). Its tmux session ends and ainb's attach returns.
+    send_key(ABTOP_SESSION, "q");
+    let gone = poll(Instant::now() + Duration::from_secs(15), || {
+        !has_session(ABTOP_SESSION)
+    });
+    if !gone {
+        send_key(ABTOP_SESSION, "q");
+        let _ = poll(Instant::now() + Duration::from_secs(10), || {
+            !has_session(ABTOP_SESSION)
+        });
+    }
+
+    // Resume must land back on the SESSION LIST (origin), not home.
+    let resumed = poll(Instant::now() + Duration::from_secs(15), || {
+        let c = capture_pane(&session);
+        c.contains("del-sel") && !c.contains("Getting Started")
+    });
+    let final_cap = capture_pane(&session);
+    kill_session(ABTOP_SESSION);
+    kill_session(&session);
+
+    assert!(
+        resumed,
+        "after quitting abtop (opened from the session list) ainb did not resume on the \
+         session list within 15s. Final pane:\n---\n{final_cap}\n---"
+    );
+}
