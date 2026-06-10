@@ -19,6 +19,7 @@ Usage:
                       [--max-chars 2000]
                       [--no-cache]
                       [--cache-ttl 3600]
+                      [--no-mmr] [--mmr-lambda 0.7]
 
 Exit codes:
     0 = success (including empty results when KB absent — see D9)
@@ -89,6 +90,28 @@ CE_TIMEOUT = int(os.environ.get("RECALL_CE_TIMEOUT", "60"))
 # they sort below every scored candidate, ordered by the legacy formula
 # among themselves (they were already tail-ranked by RRF).
 CE_UNSCORED = 1e-6
+
+# R3: MMR diversity. After the rerank, the final top-k is selected with
+# Maximal Marginal Relevance — keep the top hit, then bias subsequent picks
+# AWAY from already-selected ones by embedding similarity:
+#     pick = argmax( λ·rel(d,q) − (1−λ)·max_{s∈S} sim(d,s) )
+# rel(d,q) is the rerank's own score (CE × formula, recency included)
+# normalized by the window max; sim(d,s) is the cosine in the SAME
+# all-mpnet-base-v2 space nano-graphrag indexes with (`reflect embed`, one
+# subprocess batch run concurrently with the CE rerank). Stops SessionStart
+# injecting 3 near-identical learnings — the later slots go to
+# complementary ones.
+# λ=1.0 → pure relevance, λ=0.0 → pure diversity. Disable with --no-mmr
+# (benchmarking) or RECALL_MMR=0; tune λ with --mmr-lambda or
+# RECALL_MMR_LAMBDA. Slim engines / legacy CLIs without the `embed`
+# subcommand silently degrade to plain top-k slicing.
+MMR_ENABLED = os.environ.get("RECALL_MMR", "1") != "0"
+try:
+    MMR_LAMBDA = float(os.environ.get("RECALL_MMR_LAMBDA", "0.7"))
+except ValueError:
+    MMR_LAMBDA = 0.7
+MMR_CANDIDATES = 20  # embed the same top-candidate window as the CE batch
+EMBED_TIMEOUT = int(os.environ.get("RECALL_EMBED_TIMEOUT", "60"))
 
 # R7: OOD gate. Stopword-filtered query-term coverage of the top hit; below
 # the threshold the whole result set is treated as out-of-domain noise and
@@ -241,7 +264,7 @@ def find_learnings_cli() -> Path | None:
     return None
 
 
-CACHE_VERSION = "v4-hybrid-ce"  # bump when fusion semantics change
+CACHE_VERSION = "v5-hybrid-mmr"  # bump when fusion semantics change
 
 
 def cache_path(query: str, mode: str, limit: int) -> Path:
@@ -478,6 +501,192 @@ def _coerce_ce_scores(raw: Any) -> dict[str, float] | None:
     return out or None
 
 
+def fetch_embeddings(
+    cli: Path,
+    query: str,
+    learnings: list[Learning],
+    timeout: int = EMBED_TIMEOUT,
+) -> tuple[list[float], dict[str, list[float]]] | None:
+    """R3: embed the query + top fused candidates via `reflect embed`.
+
+    The engine embeds with the SAME all-mpnet-base-v2 model nano-graphrag
+    indexes with, so MMR's similarity lives in the index's embedding space.
+
+    Returns (query_vector, {learning_key: vector}) or None on ANY failure —
+    slim build without sentence-transformers, legacy CLI without the
+    subcommand, timeout while the model loads, junk output. MMR is a
+    booster, never a blocker.
+    """
+    if not learnings:
+        return None
+    payload = json.dumps({
+        "candidates": [
+            {"id": _learning_key(lrn), "text": lrn.chunk_text[:2000]}
+            for lrn in learnings[:MMR_CANDIDATES]
+        ]
+    })
+    try:
+        proc = subprocess.run(
+            [str(cli), "embed", query],
+            input=payload,
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    return _coerce_embeddings({
+        "query": data.get("query_embedding"),
+        "docs": data.get("embeddings"),
+    })
+
+
+def _coerce_vector(raw: Any) -> list[float] | None:
+    """R3: validate one embedding vector — a non-empty list of numbers."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[float] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        out.append(float(value))
+    return out
+
+
+def _coerce_embeddings(
+    raw: Any,
+) -> tuple[list[float], dict[str, list[float]]] | None:
+    """R3: validate {"query": [...], "docs": {key: [...]}} from subprocess
+    output or a cache file.
+
+    Returns (query_vector, {key: vector}) or None on any shape problem —
+    including dimension mismatches, which would silently corrupt cosines —
+    so the caller degrades to plain top-k slicing instead of crashing.
+    """
+    if not isinstance(raw, dict):
+        return None
+    query_vec = _coerce_vector(raw.get("query"))
+    docs_raw = raw.get("docs")
+    if query_vec is None or not isinstance(docs_raw, dict) or not docs_raw:
+        return None
+    dim = len(query_vec)
+    docs: dict[str, list[float]] = {}
+    for key, value in docs_raw.items():
+        vec = _coerce_vector(value)
+        if vec is None or len(vec) != dim:
+            return None
+        docs[str(key)] = vec
+    return query_vec, docs
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """R3: cosine similarity. Engine vectors are unit-normalized, but cached
+    or hand-edited ones may not be — guard the norms instead of trusting them."""
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / math.sqrt(norm_a * norm_b)
+
+
+def mmr_select(
+    learnings: list[Learning],
+    embeddings: tuple[list[float], dict[str, list[float]]] | None,
+    k: int,
+    lam: float | None = None,
+    rel_scores: dict[str, float] | None = None,
+) -> list[Learning]:
+    """R3: Maximal Marginal Relevance selection of the final top-k.
+
+    Keeps the top reranked hit, then repeatedly picks
+        argmax( λ·rel(d,q) − (1−λ)·max_{s∈selected} cos(d, s) )
+    over the remaining embedded candidates.
+
+    rel(d,q) is the candidate's RERANK score (``rel_scores`` from
+    rerank_with_scores — the cross-encoder × formula blend, recency
+    included) normalized by the window max so it lands in (0, 1] next to
+    the cosine penalty. Deriving rel from query↔doc cosine instead would
+    silently drop the CE and recency signal for slots 2+ (eval showed it
+    resurrecting superseded conventions); the bi-encoder cosine is only a
+    fallback when scores are absent.
+
+    Candidates without an embedding (beyond the MMR_CANDIDATES window)
+    keep their reranked order and only fill slots the embedded head can't.
+    Without embeddings (slim engine, --no-mmr upstream, stale cache) this
+    is exactly ``learnings[:k]``.
+
+    Ties resolve to the earlier (higher-reranked) candidate — strict ``>``
+    comparison keeps the selection deterministic.
+    """
+    if k <= 0:
+        return []
+    if lam is None:
+        lam = MMR_LAMBDA
+    lam = min(1.0, max(0.0, lam))
+    if not embeddings or len(learnings) <= 1:
+        return learnings[:k]
+    query_vec, doc_vecs = embeddings
+    if _learning_key(learnings[0]) not in doc_vecs:
+        return learnings[:k]  # window/result mismatch — don't guess
+    head = [lrn for lrn in learnings if _learning_key(lrn) in doc_vecs]
+    tail = [lrn for lrn in learnings if _learning_key(lrn) not in doc_vecs]
+
+    max_score = 0.0
+    if rel_scores:
+        max_score = max(
+            (rel_scores.get(_learning_key(lrn), 0.0) for lrn in head),
+            default=0.0,
+        )
+
+    def _rel(lrn: Learning) -> float:
+        key = _learning_key(lrn)
+        if rel_scores and max_score > 0 and key in rel_scores:
+            return rel_scores[key] / max_score
+        return _cosine(query_vec, doc_vecs[key])
+
+    rel = {_learning_key(lrn): _rel(lrn) for lrn in head}
+    selected = [head[0]]
+    remaining = head[1:]
+    # Incrementally maintained max similarity to the selected set: O(n·k)
+    # cosines instead of recomputing the max each round.
+    max_sim = {
+        _learning_key(lrn): _cosine(
+            doc_vecs[_learning_key(lrn)], doc_vecs[_learning_key(head[0])]
+        )
+        for lrn in remaining
+    }
+    while remaining and len(selected) < k:
+        best_idx = 0
+        best_val = -math.inf
+        for idx, cand in enumerate(remaining):
+            key = _learning_key(cand)
+            val = lam * rel[key] - (1.0 - lam) * max_sim[key]
+            if val > best_val:
+                best_idx, best_val = idx, val
+        picked = remaining.pop(best_idx)
+        selected.append(picked)
+        picked_vec = doc_vecs[_learning_key(picked)]
+        for cand in remaining:
+            key = _learning_key(cand)
+            sim = _cosine(doc_vecs[key], picked_vec)
+            if sim > max_sim[key]:
+                max_sim[key] = sim
+    if len(selected) < k:
+        selected.extend(tail[: k - len(selected)])
+    return selected
+
+
 def parse_learnings_output(json_blob: str) -> list[Learning]:
     """Split a `reflect search --format json` response into Learning objects."""
     try:
@@ -525,6 +734,24 @@ def rerank(
 
     Sorts in-place and returns the same list.
     """
+    learnings, _ = rerank_with_scores(learnings, query_tags, now, ce_scores)
+    return learnings
+
+
+def rerank_with_scores(
+    learnings: list[Learning],
+    query_tags: list[str] | None = None,
+    now: datetime | None = None,
+    ce_scores: dict[str, float] | None = None,
+) -> tuple[list[Learning], dict[str, float]]:
+    """R3: :func:`rerank` + the final per-candidate scores it sorted by.
+
+    Identical ordering contract to ``rerank``; additionally returns
+    ``{learning_key: score}`` so mmr_select can reuse the rerank's OWN
+    relevance (the cross-encoder × formula blend, including recency) as
+    rel(d,q) instead of re-deriving it from bi-encoder cosines — which
+    would silently drop the CE and recency signal for slots 2+.
+    """
     now = now or datetime.now(tz=None)
     qt = set(t.lower() for t in (query_tags or []))
 
@@ -554,8 +781,11 @@ def rerank(
         ce = _ce_sigmoid(raw) if raw is not None else CE_UNSCORED
         return ce * formula(lrn)
 
-    learnings.sort(key=score, reverse=True)
-    return learnings
+    scores: dict[str, float] = {}
+    for lrn in learnings:
+        scores.setdefault(_learning_key(lrn), score(lrn))
+    learnings.sort(key=lambda lrn: scores[_learning_key(lrn)], reverse=True)
+    return learnings, scores
 
 
 def proof_count_boost(proof_count: int | None) -> float:
@@ -726,13 +956,19 @@ def recall(
     query_tags: list[str] | None = None,
     max_tokens: int = 0,
     min_overlap: float = 0.0,
+    use_mmr: bool = True,
+    mmr_lambda: float | None = None,
 ) -> RecallResult:
     """High-level API: query → ranked Learnings. Never raises on KB issues.
 
     R4: ``max_tokens`` > 0 bounds the result set by estimated tokens instead
     of count alone. R7: ``min_overlap`` > 0 suppresses out-of-domain results
     (top-hit query-term coverage below the threshold => empty set).
+    R3: ``use_mmr`` (ANDed with the RECALL_MMR env gate) selects the final
+    top-k with Maximal Marginal Relevance; ``mmr_lambda`` overrides the
+    default λ (None => MMR_LAMBDA).
     """
+    mmr_on = MMR_ENABLED and use_mmr  # R3
     cli = find_learnings_cli()
     if not cli:
         return RecallResult(
@@ -754,10 +990,17 @@ def recall(
                 for r in cached.get("results", [])
             ]
             ce_scores = _coerce_ce_scores(cached.get("ce_scores")) if CROSS_ENCODER_ENABLED else None  # R2
-            learnings = rerank(learnings, query_tags, ce_scores=ce_scores)
+            embeddings = _coerce_embeddings(cached.get("embeddings")) if mmr_on else None  # R3
+            learnings, rank_scores = rerank_with_scores(learnings, query_tags, ce_scores=ce_scores)
             learnings = filter_by_confidence(learnings, confidence.upper())
             learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
-            learnings = learnings[:limit]
+            if mmr_on:  # R3
+                learnings = mmr_select(
+                    learnings, embeddings, k=limit, lam=mmr_lambda,
+                    rel_scores=rank_scores,
+                )
+            else:
+                learnings = learnings[:limit]
             learnings = filter_by_token_budget(learnings, max_tokens)  # R4
             log_recall(query, mode, len(learnings), cached=True)
             return RecallResult(learnings, query, mode, cache_hit=True, ood_gated=gated)
@@ -797,10 +1040,28 @@ def recall(
         return RecallResult([], query, mode, error=graph_err)
 
     learnings = rrf_fuse([graph_results, qmd_results, entity_results])
-    # R2: cross-encoder scores for the fused top candidates. The cache is
-    # per-query, so the (query-dependent) CE scores are cached alongside the
-    # raw results — cache hits skip the model entirely.
-    ce_scores = fetch_ce_scores(cli, query, learnings) if CROSS_ENCODER_ENABLED else None
+    # R2: cross-encoder scores for the fused top candidates. R3: mpnet
+    # embeddings for the same window (MMR diversity). Both shell out to the
+    # engine, so they run concurrently — added MMR latency is max(), not
+    # sum(). The cache is per-query, so the (query-dependent) CE scores and
+    # embeddings are cached alongside the raw results — cache hits skip the
+    # models entirely.
+    ce_scores: dict[str, float] | None = None
+    embeddings: tuple[list[float], dict[str, list[float]]] | None = None
+    if CROSS_ENCODER_ENABLED or mmr_on:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            ce_future = (
+                pool.submit(fetch_ce_scores, cli, query, learnings)
+                if CROSS_ENCODER_ENABLED else None
+            )
+            emb_future = (
+                pool.submit(fetch_embeddings, cli, query, learnings)
+                if mmr_on else None
+            )
+            if ce_future is not None:
+                ce_scores = ce_future.result()
+            if emb_future is not None:
+                embeddings = emb_future.result()
     # persist raw results to cache before filtering (so different confidence/limit
     # combinations can reuse the same fetch)
     if use_cache:
@@ -811,6 +1072,10 @@ def recall(
                 "mode": mode,
                 "fetched_at": time.time(),
                 "ce_scores": ce_scores,
+                "embeddings": (
+                    {"query": embeddings[0], "docs": embeddings[1]}
+                    if embeddings else None
+                ),
                 "results": [
                     {
                         "chunk_text": l.chunk_text,
@@ -821,10 +1086,16 @@ def recall(
                 ],
             },
         )
-    learnings = rerank(learnings, query_tags, ce_scores=ce_scores)
+    learnings, rank_scores = rerank_with_scores(learnings, query_tags, ce_scores=ce_scores)
     learnings = filter_by_confidence(learnings, confidence.upper())
     learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
-    learnings = learnings[:limit]
+    if mmr_on:  # R3
+        learnings = mmr_select(
+            learnings, embeddings, k=limit, lam=mmr_lambda,
+            rel_scores=rank_scores,
+        )
+    else:
+        learnings = learnings[:limit]
     learnings = filter_by_token_budget(learnings, max_tokens)  # R4
     log_recall(query, mode, len(learnings), cached=False)
     return RecallResult(learnings, query, mode, ood_gated=gated)
@@ -847,6 +1118,11 @@ def main() -> int:
     ap.add_argument("--min-overlap", type=float, default=0.0,
                     help="R7: OOD gate — suppress results when the best hit's "
                          "query-term coverage is below this (0 = off)")
+    ap.add_argument("--no-mmr", action="store_true",
+                    help="R3: disable MMR diversity selection (benchmarking)")
+    ap.add_argument("--mmr-lambda", type=float, default=None,
+                    help="R3: MMR relevance↔diversity trade-off λ in [0,1] "
+                         f"(default {MMR_LAMBDA}; 1.0 = pure relevance)")
     args = ap.parse_args()
 
     query = " ".join(args.query).strip()
@@ -867,6 +1143,8 @@ def main() -> int:
         query_tags=query_tags,
         max_tokens=args.max_tokens,
         min_overlap=args.min_overlap,
+        use_mmr=not args.no_mmr,
+        mmr_lambda=args.mmr_lambda,
     )
 
     if result.error:

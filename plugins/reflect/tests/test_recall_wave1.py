@@ -137,9 +137,11 @@ def _run_recall(bin_dir: Path, tmp_path: Path, *args, env_extra=None):
         **os.environ,
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "REFLECT_STATE_DIR": str(tmp_path / "state"),
-        # R2 adds a `reflect rerank` call after fusion; disable it here so
-        # the fake CLI's call log stays a pure record of the R1 search arms.
+        # R2 adds a `reflect rerank` call after fusion and R3 a `reflect
+        # embed` call; disable both here so the fake CLI's call log stays a
+        # pure record of the R1 search arms.
         "RECALL_CROSS_ENCODER": "0",
+        "RECALL_MMR": "0",
         **(env_extra or {}),
     }
     return subprocess.run(

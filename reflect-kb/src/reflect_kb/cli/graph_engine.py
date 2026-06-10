@@ -24,6 +24,13 @@ from reflect_kb.cli.entity_store import COMPLETION_DELIMITER
 
 logger = logging.getLogger(__name__)
 
+# Embedding model shared by indexing (nano-graphrag) and `reflect embed`
+# (R3: recall's MMR diversity step) — similarity must live in ONE space.
+EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
+# mpnet truncates at 384 tokens anyway; cap inputs so giant chunks don't
+# waste tokenizer time (mirrors cross_encoder._MAX_CANDIDATE_CHARS).
+_MAX_EMBED_CHARS = 2000
+
 # Minimal placeholder entity for docs without sidecars.
 # Ensures nano-graphrag's insert() doesn't abort before persisting
 # full_docs and text_chunks (which happens when extraction returns None).
@@ -55,13 +62,34 @@ class LearningsGraphEngine:
             try:
                 from sentence_transformers import SentenceTransformer
 
-                self._model = SentenceTransformer("all-mpnet-base-v2")
+                self._model = SentenceTransformer(EMBEDDING_MODEL_NAME)
             except ImportError:
                 raise GraphEngineError(
                     "sentence-transformers not installed. "
                     "Run: uv pip install sentence-transformers"
                 )
         return self._model
+
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """Embed texts with the same all-mpnet-base-v2 model used for indexing.
+
+        Returns unit-normalized vectors (dot product == cosine similarity),
+        one per input text in input order, as plain float lists so they are
+        JSON-serializable for the `reflect embed` CLI. R3: recall's MMR
+        diversity step uses these so its similarity measure matches the
+        index's embedding space.
+
+        Raises GraphEngineError when sentence-transformers is missing
+        (slim build) — callers degrade silently.
+        """
+        if not texts:
+            return []
+        model = self._load_embedding_model()
+        vectors = model.encode(
+            [t[:_MAX_EMBED_CHARS] for t in texts],
+            normalize_embeddings=True,
+        )
+        return [[float(x) for x in vec] for vec in vectors]
 
     def _get_embedding_func(self):
         """Create nano-graphrag compatible async embedding function."""
