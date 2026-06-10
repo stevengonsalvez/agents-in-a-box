@@ -13,6 +13,8 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | `R` | Recovery |
 | `i` | Stats (usage analytics) |
 | `k` | Skills |
+| `w` | Witr (process causality) |
+| `t` | abtop (top-for-agents monitor) |
 | `I` (or `Shift`+`i`) | Inbox (notifications) |
 | `c` | Catalog |
 | `C` | Config |

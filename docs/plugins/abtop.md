@@ -17,7 +17,7 @@ abtop is a `htop`-style TUI that watches every AI coding agent (Claude Code, Cod
 
 The screen is a **host-embedded foreign TTY**, exactly like witr. abtop's value is its own live interactive monitor — there is no machine-readable wire format for the live view. Pressing `t` (or the sidebar tile 📡) queues `AsyncAction::AttachAbtop`: ainb runs `tmux new-session -A -d -s ainb-abtop "abtop --exit-on-jump"`, suspends its own TUI, and attaches full-screen to abtop's native monitor. When the user quits abtop, ainb resumes. The plugin's `render` method is never invoked for the screen; this wiring lives entirely in `ainb-core`.
 
-The **CLI** path is different: `ainb abtop [args]` dispatches through `plugin/cli_dispatch` (namespace `abtop`), which execs `abtop --once [args]` — a single non-interactive run that prints a status snapshot and exits. Args are forwarded verbatim so any abtop flag works: `ainb abtop --json`, `ainb abtop --agent claude`, etc.
+The **CLI** path is different: `ainb abtop [args]` execs `abtop --once [args]` directly, inheriting the parent terminal's stdio so abtop's `--once` snapshot prints cleanly (it only emits a one-shot snapshot against a real TTY, then exits). Args are forwarded verbatim, so any flag abtop itself accepts works: `ainb abtop --theme <name>`, etc. (The in-tree `ainb-plugin-abtop` crate also exposes the same surface over `plugin/cli_dispatch` for the plugin harness, but the live `ainb abtop` command is wired directly in `ainb-core`.)
 
 **First-launch consent** — abtop ships an optional `--setup` hook that installs a Claude Code `StatusLine` hook to feed live rate-limit data. On the very first open of the screen, ainb displays a one-time dialog so the user can opt in (or skip) before anything writes to `~/.claude`. ainb never writes `~/.claude` without an explicit "Enable" choice.
 
@@ -25,7 +25,7 @@ The **CLI** path is different: `ainb abtop [args]` dispatches through `plugin/cl
 
 | Capability | Declared value | Why it is needed |
 |---|---|---|
-| `spawn_subprocess` | `["abtop"]` | Exec `abtop --version` (detect on init) and `abtop --once` (CLI path). The list form is per-binary audit metadata. |
+| `spawn_subprocess` | `["abtop"]` | Exec `abtop --once` (CLI path) and `abtop --exit-on-jump` (the full-screen handoff). Detection is a `PATH` lookup (`which abtop`) — present/absent only, no version probe and no exec. The list form is per-binary audit metadata. |
 
 All other capabilities (`read_sessions`, `read_claude_logs`, `read_codex_logs`, `write_plugin_data`, `event_bus`, `network`) are left at their deny default.
 
@@ -49,9 +49,9 @@ On the very first time the screen is opened, ainb shows a one-time consent dialo
 |---|---|
 | **Enable** | Runs `abtop --setup` to install the Claude Code `StatusLine` hook, then opens the monitor. ainb writes to `~/.claude` only on this path. |
 | **Just open abtop** | Opens abtop without running setup. The hook is not installed. Dialog shown again next time. |
-| **Don't ask again** | Opens abtop without running setup, and suppresses future prompts. Preference persisted in ainb config. |
+| **Don't ask again** | Opens abtop without running setup, and suppresses future prompts. The choice is persisted as a marker file under `~/.agents-in-a-box/`. |
 
-You can re-run setup at any time with `ainb abtop --setup` (forwarded verbatim to the binary).
+The dialog also stops appearing once the rate-limit hook has been installed (ainb detects `~/.claude/abtop-rate-limits.json`). You can re-run the hook setup at any time by invoking `abtop --setup` directly.
 
 ### Live monitor
 
@@ -71,14 +71,14 @@ Refer to [abtop's own docs](https://github.com/graykode/abtop) for the full keyb
 
 ### CLI (`ainb abtop`)
 
-`ainb abtop` shells `abtop --once` and exits. Args are forwarded verbatim:
+`ainb abtop` shells `abtop --once` and exits. Any extra args are appended after `--once` and forwarded verbatim to the binary:
 
 ```sh
-ainb abtop                     # one-shot status snapshot (default text output)
-ainb abtop --json              # JSON output
-ainb abtop --agent claude      # filter to Claude Code agents only
-ainb abtop --setup             # run first-time rate-limit hook setup
+ainb abtop                     # one-shot status snapshot (runs `abtop --once`)
+ainb abtop --theme <name>      # forwarded verbatim → `abtop --once --theme <name>`
 ```
+
+abtop emits human-readable text only — it has no JSON mode, so there is no `--format json` variant here. Because the command always prepends `--once`, it is for snapshots; the full-screen monitor and the one-time `abtop --setup` hook are reached from the TUI (press `t`), not from `ainb abtop`.
 
 If abtop is not found on `PATH`, the CLI prints an install hint and exits with code 1.
 
