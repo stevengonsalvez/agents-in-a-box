@@ -374,3 +374,210 @@ fn issue_list_all_four_formats_are_distinct() {
     );
     assert!(md.contains("| state |"), "markdown header missing:\n{md}");
 }
+
+/// Seed one runtime + agent (`agent-1`, `Builder`) into the bootstrapped default
+/// workspace of the test's hangar home, so the `agent` CLI verbs have a real row
+/// to edit. The binary resolves `$AINB_HANGAR_HOME/hangar.db`; this opens the
+/// same file and inserts via the store repos. Must run AFTER a verb that
+/// bootstraps the workspace (e.g. `issue create`).
+fn seed_agent(home: &std::path::Path) {
+    use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.expect("open hangar db");
+        let pool = store.pool();
+        // The bootstrapped default workspace + owner already exist (issue create).
+        let workspace_id: String = sqlx::query_scalar("SELECT id FROM workspace LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("default workspace exists");
+        let owner_id: String = sqlx::query_scalar("SELECT id FROM user LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("default owner exists");
+        sqlx::query(
+            "INSERT INTO agent_runtime \
+             (id, workspace_id, daemon_id, provider, runtime_mode, status) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("rt-1")
+        .bind(&workspace_id)
+        .bind("daemon-1")
+        .bind("claude")
+        .bind("local")
+        .bind("online")
+        .execute(pool)
+        .await
+        .expect("insert runtime");
+        AgentRepo::insert(
+            pool,
+            &Agent {
+                id: "agent-1".into(),
+                workspace_id,
+                name: "Builder".into(),
+                runtime_id: "rt-1".into(),
+                instructions: None,
+                visibility: "workspace".into(),
+                owner_id,
+                archived: false,
+                model: None,
+                cli_args: Vec::new(),
+                mcp_config: None,
+                thinking: None,
+                agent_env: Vec::new(),
+            },
+        )
+        .await
+        .expect("insert agent");
+    });
+}
+
+/// The user-visible proof for e38.15 (CLI leg): `ainb hangar agent edit` persists
+/// the config knobs, observable via `agent list --format json`; `agent archive`
+/// hides the agent from the active `agent list`, and `unarchive` restores it.
+#[test]
+fn agent_edit_and_archive_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Bootstrap the default workspace, then seed an agent into its db.
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "anchor"],
+    );
+    assert!(ok, "bootstrap create failed");
+    seed_agent(tmp.path());
+
+    // The agent shows in the active list before any edit.
+    let (ok, out) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={out}");
+    assert!(out.contains("agent-1"), "seeded agent not listed:\n{out}");
+
+    // Edit: rename + set model + a CLI arg + an env var.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "edit",
+            "agent-1",
+            "--name",
+            "Builder Pro",
+            "--model",
+            "claude-opus-4",
+            // A flag-looking arg value must use the `=` form so clap reads it as a
+            // value, not a new flag.
+            "--arg=--verbose",
+            "--env",
+            "FOO=bar",
+            "--thinking",
+            "high",
+        ],
+    );
+    assert!(ok, "agent edit should exit 0; out={out}");
+    assert!(out.contains("updated agent"), "missing edit ack:\n{out}");
+
+    // The edit persisted: list as JSON and assert the new fields.
+    let (ok, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "json agent list should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"name\":\"Builder Pro\""),
+        "rename not persisted:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"model\":\"claude-opus-4\""),
+        "model not persisted:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"thinking\":\"high\""),
+        "thinking not persisted:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"FOO\":\"bar\""),
+        "env not persisted:\n{shown}"
+    );
+
+    // Archive it: the active list no longer shows it.
+    let (ok, out) = run(tmp.path(), &["hangar", "agent", "archive", "agent-1"]);
+    assert!(ok, "archive should exit 0; out={out}");
+    assert!(
+        out.contains("archived agent"),
+        "missing archive ack:\n{out}"
+    );
+    let (_, active) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(
+        !active.contains("agent-1"),
+        "archived agent must be hidden from the active list:\n{active}"
+    );
+    // `--all` still shows it (with the archived badge).
+    let (_, all) = run(tmp.path(), &["hangar", "agent", "list", "--all"]);
+    assert!(
+        all.contains("agent-1") && all.contains("[archived]"),
+        "--all must show the archived agent:\n{all}"
+    );
+
+    // Un-archive restores it to the active list.
+    let (ok, _) = run(tmp.path(), &["hangar", "agent", "unarchive", "agent-1"]);
+    assert!(ok, "unarchive should exit 0");
+    let (_, restored) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(
+        restored.contains("agent-1"),
+        "un-archived agent returns to the active list:\n{restored}"
+    );
+
+    // Clearing the model removes it (the explicit clear flag).
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "agent", "edit", "agent-1", "--clear-model"],
+    );
+    assert!(ok, "clear-model should exit 0");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains("\"model\":null"),
+        "clear-model must null the model:\n{shown}"
+    );
+}
+
+/// `ainb hangar agent edit` on an unknown id is a hard error (exit non-zero),
+/// not a silent no-op; an edit with no field flags is rejected too.
+#[test]
+fn agent_edit_unknown_id_and_empty_edit_are_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "anchor"],
+    );
+    seed_agent(tmp.path());
+
+    // Unknown id → not-found error.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "edit",
+            "no-such-agent",
+            "--name",
+            "ghost",
+        ],
+    );
+    assert!(!ok, "editing an unknown id must fail:\n{out}");
+    assert!(
+        out.contains("no agent with id"),
+        "missing not-found message:\n{out}"
+    );
+
+    // No field flags → "nothing to update".
+    let (ok, out) = run(tmp.path(), &["hangar", "agent", "edit", "agent-1"]);
+    assert!(!ok, "an empty edit must be rejected:\n{out}");
+    assert!(out.contains("nothing to update"), "missing reason:\n{out}");
+}
+
+/// `ainb hangar agent list` on an empty workspace is a clean no-op (exit 0).
+#[test]
+fn agent_list_on_empty_db_is_clean_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, out) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(ok, "agent list on empty db should exit 0; out={out}");
+    assert!(out.contains("no agents"), "expected empty marker:\n{out}");
+}

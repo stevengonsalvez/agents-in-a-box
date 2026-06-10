@@ -90,6 +90,9 @@ pub enum HangarCommand {
     /// List, inspect, and apply curated agent templates.
     #[command(subcommand)]
     Templates(TemplatesCommand),
+    /// Edit, archive, and list workspace agents.
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
@@ -191,6 +194,126 @@ pub struct AutopilotIdArgs {
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// `hangar agent <verb>`.
+///
+/// The general agent edit/archive surface (e38.15): `templates use` is the only
+/// way to *create* an agent, but this group lets the operator EDIT one's config
+/// knobs (model / CLI args / MCP / thinking / per-agent env), ARCHIVE it (hide it
+/// from the active picker without a hard delete), un-archive it, and LIST the
+/// workspace's agents (active by default, `--all` includes archived). Every verb
+/// is workspace-scoped (`--workspace`, else the bootstrapped `default`).
+///
+/// Persists + exposes the config only; the provider EXEC consumption of
+/// `model`/`args` is a separate concern (e38.16).
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// List the workspace's agents (active by default; `--all` includes archived).
+    List(AgentListArgs),
+    /// Edit an agent's config knobs (model / args / MCP / thinking / env / name).
+    Edit(AgentEditArgs),
+    /// Archive an agent (hide it from the active picker).
+    Archive(AgentArchiveArgs),
+    /// Un-archive an agent (restore it to the active picker).
+    Unarchive(AgentArchiveArgs),
+}
+
+/// Arguments for `hangar agent list`.
+#[derive(Args, Debug)]
+pub struct AgentListArgs {
+    /// Include archived agents in the listing (default: active only).
+    #[arg(long)]
+    pub all: bool,
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent edit`.
+///
+/// Edits a subset of one agent's mutable config; every field is optional and an
+/// omitted field is left unchanged. The four nullable text fields each have an
+/// explicit "clear" flag (`--clear-model`, `--clear-mcp`, `--clear-thinking`,
+/// `--clear-instructions`) so the caller can distinguish "leave as-is" from "set
+/// back to none". `--arg` and `--env` are repeatable and REPLACE the whole list
+/// when any is given (they are not append-to-existing). The edit is
+/// workspace-scoped: an agent id outside `--workspace` touches no row.
+// The four `--clear-*` flags are the deliberate CLI shape (one per nullable
+// field), not an over-boolean design smell.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Args, Debug)]
+pub struct AgentEditArgs {
+    /// Agent id (ULID) to edit.
+    pub id: String,
+    /// Rename the agent; omitted leaves the name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New instructions; omitted leaves them. Mutually exclusive with
+    /// `--clear-instructions`.
+    #[arg(long, conflicts_with = "clear_instructions")]
+    pub instructions: Option<String>,
+    /// Clear the instructions; omitted leaves them.
+    #[arg(long = "clear-instructions")]
+    pub clear_instructions: bool,
+    /// New model override (e.g. `claude-opus-4`); omitted leaves it. Mutually
+    /// exclusive with `--clear-model`.
+    #[arg(long, conflicts_with = "clear_model")]
+    pub model: Option<String>,
+    /// Clear the model override (back to the provider default); omitted leaves it.
+    #[arg(long = "clear-model")]
+    pub clear_model: bool,
+    /// A CLI arg to pass the provider (repeatable: `--arg --verbose --arg -x`).
+    /// When ANY `--arg` is given the whole arg list is REPLACED with the values.
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// New MCP config as a raw JSON-object string; omitted leaves it. Mutually
+    /// exclusive with `--clear-mcp`.
+    #[arg(long = "mcp", conflicts_with = "clear_mcp")]
+    pub mcp: Option<String>,
+    /// Clear the MCP config; omitted leaves it.
+    #[arg(long = "clear-mcp")]
+    pub clear_mcp: bool,
+    /// New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it.
+    /// Mutually exclusive with `--clear-thinking`.
+    #[arg(long, conflicts_with = "clear_thinking")]
+    pub thinking: Option<String>,
+    /// Clear the thinking level; omitted leaves it.
+    #[arg(long = "clear-thinking")]
+    pub clear_thinking: bool,
+    /// A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is
+    /// given the whole env map is REPLACED with the values.
+    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
+    pub env: Vec<(String, String)>,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent archive` / `hangar agent unarchive`.
+#[derive(Args, Debug)]
+pub struct AgentArchiveArgs {
+    /// Agent id (ULID) to (un)archive.
+    pub id: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Parse a `--env KEY=VALUE` argument into a `(key, value)` pair.
+///
+/// # Errors
+///
+/// Returns a human-readable message if the input has no `=` or an empty key.
+fn parse_env_kv(raw: &str) -> Result<(String, String), String> {
+    let (key, value) =
+        raw.split_once('=').ok_or_else(|| format!("expected KEY=VALUE, got {raw:?}"))?;
+    if key.is_empty() {
+        return Err(format!("env var name must not be empty in {raw:?}"));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 /// `hangar templates <verb>`.
@@ -618,6 +741,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
+        HangarCommand::Agent(c) => dispatch_agent(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
@@ -972,6 +1096,131 @@ async fn run_templates_use(store: &Store, args: TemplatesUseArgs) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Dispatch the `hangar agent` verbs (e38.15).
+///
+/// Opens the store, resolves the workspace the same way the skills/templates
+/// verbs do, and drives the workspace-scoped [`AgentRepo`]. `edit` maps the
+/// present flags onto an [`AgentConfigUpdate`] (rejecting an empty edit);
+/// `archive`/`unarchive` flip the archived flag; `list` shows the workspace's
+/// agents (active by default, `--all` includes archived).
+async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        AgentCommand::List(args) => run_agent_list(&store, args, format).await,
+        AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
+        AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
+        AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
+    }
+}
+
+/// `hangar agent list`: list the workspace's agents (active, or all with `--all`).
+async fn run_agent_list(store: &Store, args: AgentListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    // A missing/empty workspace lists as no agents, not an error (mirrors skills).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_agent_list(&[], format);
+        return Ok(());
+    };
+    let agents = if args.all {
+        AgentRepo::list_by_workspace_including_archived(store.pool(), &workspace_id).await
+    } else {
+        AgentRepo::list_by_workspace(store.pool(), &workspace_id).await
+    }
+    .context("list agents")?;
+    render_agent_list(&agents, format);
+    Ok(())
+}
+
+/// `hangar agent edit`: map the present flags onto an [`AgentConfigUpdate`] and
+/// drive the workspace-scoped edit. An empty edit (no field flag) is rejected;
+/// an agent id outside the workspace is reported as a not-found error.
+async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::{AgentConfigUpdate, AgentRepo};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // Each nullable text field uses its clear-flag to distinguish "clear to none"
+    // from "leave unchanged" (a clap conflict already bars setting both).
+    let instructions = clear_or_set(args.clear_instructions, args.instructions);
+    let model = clear_or_set(args.clear_model, args.model);
+    let mcp_config = clear_or_set(args.clear_mcp, args.mcp);
+    let thinking = clear_or_set(args.clear_thinking, args.thinking);
+    // `--arg` / `--env` REPLACE the list when any value is given (an empty Vec
+    // means "no flag passed" → leave unchanged).
+    let cli_args = (!args.args.is_empty()).then_some(args.args);
+    let agent_env = (!args.env.is_empty()).then_some(args.env);
+
+    let update = AgentConfigUpdate {
+        name: args.name,
+        instructions,
+        model,
+        cli_args,
+        mcp_config,
+        thinking,
+        agent_env,
+    };
+
+    if update.is_empty() {
+        anyhow::bail!(
+            "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
+             / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
+             / --env"
+        );
+    }
+
+    let touched = AgentRepo::update_config(store.pool(), &workspace_id, &args.id, &update)
+        .await
+        .with_context(|| format!("update agent {}", args.id))?;
+    if touched {
+        println!("updated agent {}", args.id);
+    } else {
+        anyhow::bail!("no agent with id {} in this workspace", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar agent archive|unarchive`: flip the archived flag, workspace-scoped.
+async fn run_agent_set_archived(
+    store: &Store,
+    args: AgentArchiveArgs,
+    archived: bool,
+) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let touched = AgentRepo::set_archived(store.pool(), &workspace_id, &args.id, archived)
+        .await
+        .with_context(|| format!("archive agent {}", args.id))?;
+    if touched {
+        let verb = if archived { "archived" } else { "un-archived" };
+        println!("{verb} agent {}", args.id);
+    } else {
+        anyhow::bail!("no agent with id {} in this workspace", args.id);
+    }
+    Ok(())
+}
+
+/// Collapse a `(clear_flag, optional_value)` pair into the store's nested-`Option`
+/// three-state: the clear flag wins (`Some(None)`), else a present value sets
+/// (`Some(Some(v))`), else leave unchanged (`None`). The clap `conflicts_with`
+/// already bars both at once.
+#[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
+fn clear_or_set(clear: bool, value: Option<String>) -> Option<Option<String>> {
+    if clear { Some(None) } else { value.map(Some) }
 }
 
 /// Dispatch the `hangar skills` verbs.
@@ -2045,6 +2294,108 @@ fn skill_to_json(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
         json_string(s.name.as_str()),
         s.files.len(),
         desc,
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Agent render helpers (e38.15) — over the store row model.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a list of agents in the requested format (id, name, archived, model,
+/// thinking, arg count, env count).
+fn render_agent_list(agents: &[ainb_hangar_store::repo::agent::Agent], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = agents.iter().map(agent_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", agent_csv_header());
+            for a in agents {
+                println!("{}", agent_csv_row(a));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", agent_md_header());
+            for a in agents {
+                println!("{}", agent_md_row(a));
+            }
+        }
+        OutputFormat::Text => {
+            if agents.is_empty() {
+                println!("no agents");
+            } else {
+                for a in agents {
+                    println!("{}", agent_line(a));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of an agent (id, name, archived badge, model).
+fn agent_line(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "{}  {}{}  model={}  args={}  env={}",
+        a.id,
+        a.name,
+        if a.archived { "  [archived]" } else { "" },
+        a.model.as_deref().unwrap_or("-"),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+const fn agent_csv_header() -> &'static str {
+    "id,name,archived,model,thinking,args,env"
+}
+fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "{},{},{},{},{},{},{}",
+        csv_field(a.id.as_str()),
+        csv_field(a.name.as_str()),
+        a.archived,
+        csv_field(a.model.as_deref().unwrap_or("")),
+        csv_field(a.thinking.as_deref().unwrap_or("")),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+const fn agent_md_header() -> &'static str {
+    "| id | name | archived | model | thinking | args | env |\n\
+     | --- | --- | --- | --- | --- | --- | --- |\n"
+}
+fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} | {} | {} |",
+        md_cell(a.id.as_str()),
+        md_cell(a.name.as_str()),
+        a.archived,
+        md_cell(a.model.as_deref().unwrap_or("-")),
+        md_cell(a.thinking.as_deref().unwrap_or("-")),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+/// Minimal stable JSON object for one agent (id, name, archived + config knobs).
+fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    let model = a.model.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let thinking = a.thinking.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let args = json_string_array(a.cli_args.iter().map(String::as_str));
+    let env = a
+        .agent_env
+        .iter()
+        .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}}}}",
+        json_string(a.id.as_str()),
+        json_string(a.name.as_str()),
+        a.archived,
+        model,
+        thinking,
+        args,
+        env,
     )
 }
 
