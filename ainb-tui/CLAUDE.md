@@ -188,6 +188,23 @@ See `config/example.config.toml` for all available options with documentation.
 | `[workspace_defaults]` | `exclude_paths` | Patterns to exclude from repo scanning |
 | `[ui_preferences]` | `show_container_status` | Show container mode icons |
 | `[ui_preferences]` | `show_git_status` | Show git changes in session list |
+| `[mcp_pool]` | `enabled` | Share one MCP server process across host sessions (default: true) |
+| `[mcp_pool]` | `idle_grace_secs` | Reap a pooled server N seconds after its last session detaches (default: 300) |
+| `[mcp_servers.*]` | `shared` | Per-server pool opt-out — set false for stateful servers (default: true) |
+
+### Shared MCP Pool
+
+With `[mcp_pool]` enabled, `ainb run` (Claude sessions) ensures a standalone
+`ainb mcp daemon` is running and merge-writes the worktree's `.mcp.json` so
+each pooled server points at the `ainb mcp proxy <socket>` stdio shim. The
+daemon spawns each MCP server ONCE (lazily, on first attach) behind a unix
+socket under `~/.agents-in-a-box/mcp/sockets/`, so N concurrent sessions
+share 1 node/bun process instead of spawning N. Inspect with
+`ainb mcp status`, stop with `ainb mcp stop`, validate end-to-end with
+`scripts/validate-mcp-pool.sh` (repo root). Host/tmux sessions only —
+Docker sessions keep their per-container MCP init. Servers whose commands
+don't resolve on the host (e.g. the built-in container-path defaults) are
+skipped automatically.
 
 ## Monorepo Context
 
