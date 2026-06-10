@@ -44,6 +44,7 @@ cd "$WORKSPACE"
 
 failures=0
 ran=0
+skips=0
 
 # run_one <package> <test-binary-name> [extra cargo args…]
 run_one() {
@@ -52,8 +53,20 @@ run_one() {
     shift 2
     ran=$((ran + 1))
     local out
-    if out="$(cargo test -p "$pkg" "$@" --test "$test_name" -- --test-threads=1 2>&1)"; then
-        printf 'ok   %s::%s\n' "$pkg" "$test_name"
+    # `--nocapture` because `skip()` reports via eprintln and the libtest
+    # harness swallows passing tests' output — without it a SKIP is invisible.
+    if out="$(cargo test -p "$pkg" "$@" --test "$test_name" -- --test-threads=1 --nocapture 2>&1)"; then
+        # A green binary may still have SKIPped (missing tmux/binaries/plugin).
+        # Surface that on success — otherwise an environment where every TUI
+        # tripwire skips reads as a genuinely green suite (the macOS-leg
+        # vacuous-green trap).
+        if printf '%s\n' "$out" | grep -q '^SKIP:'; then
+            printf 'SKIP %s::%s\n' "$pkg" "$test_name"
+            printf '%s\n' "$out" | grep '^SKIP:' | head -3
+            skips=$((skips + 1))
+        else
+            printf 'ok   %s::%s\n' "$pkg" "$test_name"
+        fi
     else
         printf 'FAIL %s::%s\n' "$pkg" "$test_name" >&2
         printf '%s\n' "$out" | tail -20 >&2
@@ -91,5 +104,5 @@ for f in "$REPO_ROOT"/plugins/hangar-tui/tests/tripwire_*.rs; do
 done
 
 echo "─────────────────────────────────────────"
-echo "hangar tripwires: ran=$ran failed=$failures"
+echo "hangar tripwires: ran=$ran failed=$failures skipped=$skips"
 exit "$failures"
