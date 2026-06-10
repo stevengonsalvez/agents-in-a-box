@@ -94,6 +94,12 @@ echo
 # query and got a fully DISJOINT result set — i.e. the first recall didn't
 # satisfy. High rate = tune rerank weights / graph arm budget / OOD threshold.
 python3 "$COST_PY" --since "$WINDOW" --followup
+echo
+# Subscription quota (M3): per-window rate-limit snapshot the drainer ingested
+# from its own claude -p runs, plus whether the writer gate is open or closed.
+# A CLOSED gate means drains are deferred (reason=quota_near_limit) — queue
+# entries are retained and replay automatically once the quota recovers.
+python3 "$COST_PY" --quota
 ```
 
 For a machine-readable view, add `--json`.

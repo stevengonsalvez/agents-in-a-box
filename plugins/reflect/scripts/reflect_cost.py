@@ -15,11 +15,17 @@ recorded ``cost_usd`` from ``claude -p`` and an *estimate* otherwise.
 Usage:
     reflect_cost.py [--since 30d] [--by day|transcript|model|outcome|writer]
                     [--top N] [--json] [--state-dir DIR]
-                    [--followup] [--metrics-path FILE]
+                    [--followup] [--metrics-path FILE] [--quota]
 
 ``--by writer`` groups on the M2 writer-output classification
 (``writer_class``: valid/prose/idle/poisoned/malformed) recorded per run by
 the drainer — the writer-health view. Pre-M2 events show as ``?``.
+
+``--quota`` (M3) switches to the subscription-quota view: the per-window
+rate-limit snapshot the drainer ingested from its ``claude -p`` runs
+(``quota-state.json``) plus whether the writer gate is currently open or
+closed and any standing 'quota_near_limit' deferral. Reads disk state only —
+never issues an API call.
 
 ``--followup`` (A4) switches to the recall-quality diagnostic: reads the
 op="recall_search" lines recall.py appends to ``~/.learnings/metrics.jsonl``
@@ -319,9 +325,26 @@ def main() -> None:
     ap.add_argument("--metrics-path", default="",
                     help="A4: metrics.jsonl location (default "
                          "~/.learnings/metrics.jsonl or $REFLECT_METRICS_PATH)")
+    ap.add_argument("--quota", action="store_true",
+                    help="M3: report the subscription-quota windows and "
+                         "writer-gate state instead of drain spend")
     args = ap.parse_args()
 
     window = _parse_since(args.since)
+
+    if args.quota:  # M3: subscription-quota view
+        sd = state_dir(args.state_dir)
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import quota_store  # noqa: PLC0415
+        except ImportError:
+            print("quota_store.py not found — update the reflect plugin (M3+).")
+            return
+        if args.json:
+            print(json.dumps(quota_store.status_payload(sd), indent=2))
+        else:
+            print(quota_store.render_status(sd))
+        return
 
     if args.followup:  # A4: recall-quality diagnostic view
         mp = metrics_path(args.metrics_path)

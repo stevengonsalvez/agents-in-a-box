@@ -21,6 +21,13 @@
 #                           path in transcript_path; the drain bypasses the
 #                           cascade, re-runs the /reflect skill-edit step on the
 #                           stale skill, and clears its staleness flag on success.
+# - Quota-aware (M3): consults quota_store.py before each queue entry; when the
+#                           subscription quota nears a wall (rate_limit telemetry
+#                           ingested from each claude -p run; 429/529 stderr
+#                           fallback) the queue is DEFERRED with
+#                           reason='quota_near_limit' — entries stay queued and
+#                           replay once the gate reopens. No API call is ever
+#                           issued purely to check quota.
 # - Always exits 0 so the calling SessionStart hook never thinks bootstrap broke.
 #
 # Configuration (env)
@@ -41,6 +48,9 @@
 # REFLECT_DRAIN_INVALID_THRESHOLD  Consecutive non-valid writer       Default: 3
 #                             outputs before the writer-drift breaker
 #                             poisons the transcript (M2).
+# REFLECT_QUOTA_GATE          If "0", skip the subscription-quota     Default: 1
+#                             gate entirely (M3).
+# REFLECT_QUOTA_TTL_SEC       Quota snapshot freshness window (s).    Default: 3600
 # REFLECT_DISABLED            If "1", drainer is a hard no-op.        Default: 0
 #
 # Circuit-breaker rationale (2026-05-31 incident: a single drain ran 223 Opus
@@ -83,11 +93,13 @@ DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
 CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
 DRAIN_CWD="${REFLECT_DRAIN_CWD:-$HOME}"          # W5: neutral cwd for claude -p
 INVALID_THRESHOLD="${REFLECT_DRAIN_INVALID_THRESHOLD:-3}"  # M2: writer-drift breaker
+QUOTA_GATE_ENABLED="${REFLECT_QUOTA_GATE:-1}"    # M3: subscription-quota gate
 
 # Locate sibling scripts (cascade, classifier) relative to this hook, robust to symlinks.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASCADE_SCRIPT="${SCRIPT_DIR}/../scripts/reflect_cascade.py"
 CLASSIFIER_SCRIPT="${SCRIPT_DIR}/../scripts/output_classifier.py"
+QUOTA_SCRIPT="${SCRIPT_DIR}/../scripts/quota_store.py"
 
 mkdir -p "$STATE_DIR"
 
@@ -289,6 +301,47 @@ print(json.dumps({
     "writer_class": writer_class,
 }))
 PY
+}
+
+# ── Quota gate (M3) ───────────────────────────────────────────────────────────
+# Consults the persisted subscription-quota snapshot (quota_store.py) before
+# each queue entry. Reads ONLY disk state — never issues an API call. The
+# snapshot is fed by `quota_ingest` after every claude -p run (rate_limit
+# telemetry in the result envelope, 429/529 stderr fallback) and expires on a
+# TTL so a stale reading can never wedge the gate shut.
+QUOTA_REASON=""
+quota_gate_closed() {
+    [[ "$QUOTA_GATE_ENABLED" == "1" && -f "$QUOTA_SCRIPT" ]] || return 1
+    local verdict abort
+    verdict=$(python3 "$QUOTA_SCRIPT" check --state-dir "$STATE_DIR" 2>/dev/null || echo '{}')
+    abort=$(printf '%s' "$verdict" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("abort") else "false")' 2>/dev/null || echo "false")
+    if [[ "$abort" == "true" ]]; then
+        QUOTA_REASON=$(printf '%s' "$verdict" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason",""))' 2>/dev/null || echo "")
+        return 0
+    fi
+    return 1
+}
+
+# Defer the whole queue: entries are NOT consumed (they replay on the next
+# drain once the gate reopens); the marker makes the deferral observable via
+# `quota_store.py status` and /reflect:cost. entries=0 so the deferral never
+# burns daily-cap budget.
+defer_queue_for_quota() {
+    log "quota gate CLOSED (${QUOTA_REASON:-unknown}): deferring queue (reason=quota_near_limit); entries stay queued for replay"
+    python3 "$QUOTA_SCRIPT" defer --state-dir "$STATE_DIR" \
+        --reason quota_near_limit --detail "${QUOTA_REASON:-}" >/dev/null 2>&1 || true
+    emit_error warn drain_quota_deferred "quota_near_limit: ${QUOTA_REASON:-}" ""
+    record_cost_event 0 "" "quota_deferred"
+}
+
+# Feed one claude -p run's output (+ captured stderr) into the quota store so
+# the next gate check sees fresh telemetry. Zero extra API calls — this parses
+# output the run already produced. Best-effort, silent-fail.
+quota_ingest() {
+    local out_json="$1" stderr_file="$2"
+    [[ "$QUOTA_GATE_ENABLED" == "1" && -f "$QUOTA_SCRIPT" ]] || return 0
+    printf '%s' "$out_json" | python3 "$QUOTA_SCRIPT" ingest \
+        --state-dir "$STATE_DIR" --stderr-file "$stderr_file" >/dev/null 2>&1 || true
 }
 
 # ── Retry counters (sidecar JSONL keyed by transcript_path) ───────────────────
@@ -505,18 +558,28 @@ Belief revision: if the input contains a 'Related existing learnings' section, p
 When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
     fi
 
-    local out_json exit_code
+    local out_json exit_code stderr_tmp
     # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
     # triggered it, so reflect used to run inside a random repo (the incident
     # ran in research-tech while analysing a cochilli transcript). Pin it to a
     # neutral dir so reflect can't accidentally touch a project tree.
+    # stderr goes to a temp capture first (M3: the quota store scans it for
+    # 429/529 markers) and is then appended to the drain log as before.
+    stderr_tmp=$(mktemp)
     out_json=$(cd "$DRAIN_CWD" && _to "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
         -p "$prompt" \
         --model "$DRAIN_MODEL" \
         --output-format json \
         --permission-mode bypassPermissions \
-        --max-turns "$MAX_TURNS" 2>>"$LOG_FILE")
+        --max-turns "$MAX_TURNS" 2>"$stderr_tmp")
     exit_code=$?
+    cat "$stderr_tmp" >> "$LOG_FILE" 2>/dev/null || true
+
+    # M3: refresh the quota store from this run's telemetry (result envelope
+    # rate_limit fields, 429/529 stderr fallback) so the gate check before the
+    # NEXT entry sees the freshest subscription state. No extra API calls.
+    quota_ingest "$out_json" "$stderr_tmp"
+    rm -f "$stderr_tmp"
 
     # Slice is consumed — remove it regardless of how the run turns out.
     [[ -n "$slice_path" ]] && rm -f "$slice_path"
@@ -694,6 +757,16 @@ main() {
         line="${line#"${line%%[![:space:]]*}"}"  # ltrim
         [[ -z "$line" ]] && continue
         if [[ "$count" -ge "$run_max" ]]; then break; fi
+
+        # M3: consult the quota gate before EACH entry — a result envelope
+        # ingested by the previous entry can close the gate mid-run. Closed
+        # gate = defer the rest of the queue (entries stay queued, replay
+        # once quota recovers) instead of burning the daily cap into a wall.
+        if quota_gate_closed; then
+            defer_queue_for_quota
+            break
+        fi
+
         count=$((count + 1))
 
         log "[entry $count/$run_max]"
