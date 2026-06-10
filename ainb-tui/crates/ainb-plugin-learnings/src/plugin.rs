@@ -30,11 +30,16 @@ use crate::data::{
     DataError, QmdCli, QmdSearch, SearchHit, SearchMode, parse_community_reports,
     resolve_config_path, scan_learnings_dir_report, search as run_search,
 };
-use crate::ui::{LearningsUi, SearchContext, SearchRequest, render as render_ui};
+use crate::ui::{LearningsUi, SearchContext, SearchRequest, SearchStage, render as render_ui};
 
-/// A worker result handed back over the channel: the submit `token` it answers
-/// plus the parsed hits (or a typed error the UI degrades to empty).
-type SearchOutcome = (u64, std::result::Result<Vec<SearchHit>, DataError>);
+/// One STAGE of a two-stage worker result handed back over the channel: the
+/// submit `token` it answers, which `stage` (BM25 fast paint vs semantic rerank)
+/// produced it, and the parsed hits (or a typed error the UI degrades to empty).
+type SearchOutcome = (
+    u64,
+    SearchStage,
+    std::result::Result<Vec<SearchHit>, DataError>,
+);
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
@@ -127,63 +132,87 @@ impl LearningsPlugin {
         }
     }
 
-    /// Spawn the `qmd` search for `request` on a dedicated worker thread and arm
-    /// the result channel. Runtime-agnostic: uses `std::thread` + `mpsc` (the
-    /// in-module + integration tests call into the plugin without guaranteeing a
-    /// tokio runtime on the calling thread, so `spawn_blocking` is unsafe here).
-    /// The worker runs the (slow) subprocess and sends `(token, result)` back;
-    /// the plugin polls the receiver each render. Dropping the previous receiver
-    /// here orphans any prior worker — its result is ignored by token mismatch.
+    /// Spawn the TWO-STAGE `qmd` search for `request` on a dedicated worker
+    /// thread and arm the result channel. Runtime-agnostic: uses `std::thread` +
+    /// `mpsc` (the in-module + integration tests call into the plugin without
+    /// guaranteeing a tokio runtime on the calling thread, so `spawn_blocking` is
+    /// unsafe here). Dropping the previous receiver here orphans any prior worker
+    /// — its results are ignored by token mismatch.
+    ///
+    /// The single worker runs `qmd` twice, both tagged with the SAME `token`:
+    ///
+    /// 1. **BM25** (`run_bm25` / `qmd search --json`, no LLM — effectively
+    ///    instant): sent first for the fast first paint.
+    /// 2. **Semantic** (`run_query` / `qmd query --json -C 20`, the LLM rerank):
+    ///    sent second to swap in the reranked results.
+    ///
+    /// The plugin polls the receiver each render and applies each stage in turn
+    /// ([`Self::poll_search`]); the channel is kept until the SEMANTIC stage
+    /// lands (or the ceiling fires), so both stages reach the UI.
     fn start_search_worker(&mut self, request: SearchRequest) {
         let (tx, rx) = mpsc::channel::<SearchOutcome>();
         let runner = Arc::clone(&self.search_runner);
         let collection = self.config.qmd_collection.clone();
         let index = self.config.qmd_index.clone();
         let SearchRequest { token, query } = request;
-        // TODO(perf): two-stage BM25 fast-paint — the `QmdCli::run_bm25`
-        // (`qmd search`, no LLM) path is wired and ready; fire it first for an
-        // instant paint, then run the semantic `query` and swap in the reranked
-        // hits. Single-stage semantic is shipped here; the BM25 seam exists so a
-        // follow-up can layer the fast paint on without touching the worker
-        // plumbing or the `SearchMode` enum.
         std::thread::spawn(move || {
-            let result = run_search(
+            // Stage 1 — BM25 fast paint (no LLM, returns ~instantly).
+            let bm25 = run_search(
+                runner.as_ref(),
+                &query,
+                &collection,
+                &index,
+                SearchMode::Bm25,
+            );
+            // A failed send means the receiver is already gone (superseded /
+            // timed-out search) — bail without running the slow semantic pass.
+            if tx.send((token, SearchStage::Bm25, bm25)).is_err() {
+                return;
+            }
+            // Stage 2 — semantic rerank (the slow LLM path).
+            let semantic = run_search(
                 runner.as_ref(),
                 &query,
                 &collection,
                 &index,
                 SearchMode::Semantic,
             );
-            // The receiver may already be gone (superseded/timed-out search);
-            // a failed send is the expected "nobody's listening" case.
-            let _ = tx.send((token, result));
+            let _ = tx.send((token, SearchStage::Semantic, semantic));
         });
         self.search_rx = Some(rx);
     }
 
-    /// Poll the in-flight search worker (non-blocking) and enforce the timeout.
-    /// Called at the top of every render so a settled result paints on the next
-    /// frame and a hung search is abandoned at the ceiling. Returns `true` if
-    /// either applied a state change (so the caller bumps generation).
+    /// Poll the in-flight two-stage search worker (non-blocking) and enforce the
+    /// timeout. Called at the top of every render so a settled stage paints on
+    /// the next frame and a hung search is abandoned at the ceiling. Returns
+    /// `true` if any stage / the timeout applied a state change (so the caller
+    /// bumps generation).
     fn poll_search(&mut self) -> bool {
         let mut changed = false;
-        // 1. Drain any worker result that landed.
-        if let Some(rx) = self.search_rx.as_ref() {
+        // 1. Drain every stage result that landed this frame (BM25 then
+        // semantic) — both may arrive between two renders. The channel is
+        // retained until the SEMANTIC stage is applied, so the BM25 fast paint
+        // doesn't prematurely close it.
+        while let Some(rx) = self.search_rx.as_ref() {
             match rx.try_recv() {
-                Ok((token, result)) => {
-                    changed |= self.ui.apply_search_result(token, result);
-                    // The worker is done; drop the channel.
-                    self.search_rx = None;
+                Ok((token, stage, result)) => {
+                    changed |= self.ui.apply_search_result(token, stage, result);
+                    // The semantic stage is the worker's last message — drop the
+                    // channel once it's been delivered.
+                    if stage == SearchStage::Semantic {
+                        self.search_rx = None;
+                    }
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker thread ended without sending (shouldn't happen, but
-                    // be defensive) — drop the dead channel.
+                    // Worker ended without sending the remaining stage(s) — drop
+                    // the dead channel (the UI keeps whatever already painted).
                     self.search_rx = None;
                 }
             }
         }
-        // 2. Enforce the ceiling on whatever's still in flight.
+        // 2. Enforce the ceiling on whatever's still in flight (covers the WHOLE
+        // two-stage; if BM25 painted, the UI keeps those results on timeout).
         if self.ui.check_search_timeout() {
             changed = true;
             // Abandon the worker channel; the orphan thread finishes on its own.

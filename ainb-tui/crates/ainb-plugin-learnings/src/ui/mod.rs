@@ -33,7 +33,7 @@ use detail::DetailState;
 use graph::GraphState;
 use picker::{PickerItem, PickerState};
 use search::SearchState;
-pub use search::{SearchContext, SearchRequest};
+pub use search::{SearchContext, SearchRequest, SearchStage};
 
 /// Outcome of routing one key into the shell: did state change, and did a fresh
 /// Search submit ask the plugin to run a `qmd` worker?
@@ -305,16 +305,25 @@ impl LearningsUi {
         }
     }
 
-    /// Apply a completed `qmd` worker result into the Search tab. The plugin
-    /// calls this each render with whatever the worker channel yielded. A result
-    /// whose token is stale (superseded query) is dropped inside [`SearchState`].
-    /// Returns `true` if the result was applied (so the plugin bumps generation).
+    /// Apply one STAGE of a two-stage `qmd` worker result into the Search tab.
+    /// The plugin calls this each render with whatever the worker channel yielded
+    /// (BM25 then semantic). A result whose token is stale (superseded query) is
+    /// dropped inside [`SearchState`]. Returns `true` if it was applied (so the
+    /// plugin bumps generation).
     pub fn apply_search_result(
         &mut self,
         token: u64,
+        stage: SearchStage,
         result: Result<Vec<SearchHit>, DataError>,
     ) -> bool {
-        self.search.apply_result(token, result)
+        self.search.apply_stage_result(token, stage, result)
+    }
+
+    /// `true` while the subtle "refining…" indicator is up (BM25 painted, the
+    /// semantic rerank still upgrading). Exposed for the plugin/tests.
+    #[must_use]
+    pub const fn search_refining(&self) -> bool {
+        self.search.is_refining()
     }
 
     /// Enforce the in-flight search ceiling. The plugin calls this each render;
@@ -324,11 +333,13 @@ impl LearningsUi {
         self.search.check_timeout()
     }
 
-    /// `true` while a `qmd` search is in flight (so the plugin keeps ticking
-    /// redraws to animate the spinner).
+    /// `true` while EITHER stage of a two-stage `qmd` search is in flight — the
+    /// pre-paint spinner stage OR the refining stage (so the plugin keeps ticking
+    /// redraws to animate the spinner AND to keep polling the worker channel for
+    /// the semantic stage).
     #[must_use]
     pub const fn search_in_flight(&self) -> bool {
-        self.search.is_searching()
+        self.search.is_in_flight()
     }
 
     /// Open the Detail pane on the Browse tab's currently-selected record.
@@ -399,11 +410,12 @@ impl LearningsUi {
 
     /// Whether the screen wants another frame without input — surfaced to the
     /// host via `Plugin::wants_redraw`. Two animations request redraws: the map's
-    /// recentre grow, and an in-flight `qmd` search (so its spinner animates and
-    /// the plugin keeps polling the worker channel for the result).
+    /// recentre grow, and an in-flight `qmd` search — across BOTH stages (the
+    /// pre-paint spinner AND the refining stage) so the spinner animates and the
+    /// plugin keeps polling the worker channel for the second (semantic) stage.
     #[must_use]
     pub fn wants_redraw(&self) -> bool {
-        self.graph.map_wants_redraw() || self.search.is_searching()
+        self.graph.map_wants_redraw() || self.search.is_in_flight()
     }
 
     /// `true` while the Detail pane is open (exposed for tests).

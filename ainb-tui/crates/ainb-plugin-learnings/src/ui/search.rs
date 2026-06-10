@@ -21,12 +21,29 @@
 //! run the subprocess — it transitions to [`SearchPhase::Searching`] with a
 //! fresh monotonic token and returns a [`SearchRequest`] telling the plugin to
 //! spawn the query on a worker thread. The plugin polls the worker each render
-//! and feeds the result back via [`SearchState::apply_result`]; a result whose
+//! and feeds results back via [`SearchState::apply_stage_result`]; a result whose
 //! token doesn't match the current [`query_seq`](SearchState) is dropped (that's
 //! how a superseded query is coalesced / cancelled). An 8 s ceiling
 //! ([`SEARCH_CEILING`]) bounds a hung `qmd` — past it the tab shows an honest
-//! "search timed out" state. While searching, an animated spinner renders and
-//! the plugin keeps ticking redraws so the spinner animates.
+//! "search timed out" state.
+//!
+//! **Two-stage fast paint.** A single worker runs `qmd` TWICE per query, both
+//! stages carrying the same token:
+//!
+//! 1. **BM25** ([`SearchStage::Bm25`], `qmd search --json`, no LLM — effectively
+//!    instant): the first hits paint immediately. Before this paint the FULL
+//!    `Searching…` spinner shows.
+//! 2. **Semantic** ([`SearchStage::Semantic`], `qmd query --json -C 20`, the LLM
+//!    rerank): swaps in the reranked results once it lands.
+//!
+//! Between the BM25 paint and the semantic swap the tab is in
+//! [`SearchPhase::Refining`] — results are already visible, so only a SUBTLE
+//! "refining…" indicator shows (not the full spinner; the user can already read
+//! and act on the lexical results). If the semantic pass errors or times out
+//! AFTER BM25 painted, the BM25 results STAY on screen and the refining
+//! indicator clears — they are never blanked. If BM25 itself errors, the tab
+//! falls through to the semantic pass; only if BOTH yield nothing does it show
+//! the honest "no results" state.
 //!
 //! Result→record resolution maps a qmd hit (a `#docid` + a `qmd://…` file +
 //! a title) back to a parsed fixture/real record via [`resolve_hit`], matching
@@ -70,32 +87,68 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// How often the spinner glyph advances.
 const SPINNER_TICK: Duration = Duration::from_millis(80);
 
+/// Which stage of the two-stage search a worker result came from. Both stages
+/// of one query carry the same token; the stage tag tells the UI whether this is
+/// the fast first paint (BM25) or the reranked swap-in (semantic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchStage {
+    /// `qmd search --json` — BM25 full-text, the instant fast paint (stage 1).
+    Bm25,
+    /// `qmd query --json -C 20` — the LLM-reranked swap-in (stage 2, final).
+    Semantic,
+}
+
 /// Lifecycle of a single submitted query. The worker runs OFF the dispatch
-/// thread; the plugin drives the transitions [`Idle`](SearchPhase::Idle) →
-/// [`Searching`](SearchPhase::Searching) → [`Done`](SearchPhase::Done).
+/// thread; the plugin drives the transitions
+/// [`Idle`](SearchPhase::Idle) → [`Searching`](SearchPhase::Searching) →
+/// [`Refining`](SearchPhase::Refining) → [`Done`](SearchPhase::Done) (the
+/// `Refining` step is skipped when BM25 returns nothing useful).
 #[derive(Debug, Clone, Copy, Default)]
 enum SearchPhase {
     /// No query has been submitted (or the query was edited, invalidating the
     /// last one). The pre-submit hint renders. The default phase.
     #[default]
     Idle,
-    /// A query is in flight on the worker thread. `token` ties the eventual
-    /// result back to THIS submit (a superseded query's stale result is
-    /// dropped); `started` bounds it against [`SEARCH_CEILING`] and animates the
+    /// A query is in flight and NOTHING has painted yet (before the BM25 result).
+    /// The FULL `Searching…` spinner shows. `token` ties the eventual result back
+    /// to THIS submit (a superseded query's stale result is dropped); `started`
+    /// bounds the whole two-stage against [`SEARCH_CEILING`] and animates the
     /// spinner.
     Searching { token: u64, started: Instant },
-    /// The in-flight query settled — results applied (possibly empty), or the
-    /// search timed out. The results table / empty state renders.
+    /// BM25 results have painted and are visible; the semantic rerank is still in
+    /// flight. Only a SUBTLE "refining…" indicator shows — the results are
+    /// already actionable, so the full spinner would be jarring. Carries the same
+    /// `token` + `started` as the originating `Searching`, so the ceiling still
+    /// covers the semantic pass and a superseded query is still droppable.
+    Refining { token: u64, started: Instant },
+    /// The query settled — semantic results applied, OR the semantic pass
+    /// errored/timed-out while BM25 results stay on screen, OR both stages were
+    /// empty, OR the search timed out before any paint. The results table /
+    /// empty state renders; no indicator.
     Done,
 }
 
-/// A request the plugin must service by spawning the `qmd` worker: run `query`
-/// for `token`, and send `(token, result)` back on the plugin's channel. The
-/// plugin feeds the result to [`SearchState::apply_result`] on the next render.
+impl SearchPhase {
+    /// The in-flight `(token, started)` of this phase, if any (both `Searching`
+    /// and `Refining` are in-flight; `Idle`/`Done` are settled).
+    fn in_flight(&self) -> Option<(u64, Instant)> {
+        match *self {
+            SearchPhase::Searching { token, started }
+            | SearchPhase::Refining { token, started } => Some((token, started)),
+            _ => None,
+        }
+    }
+}
+
+/// A request the plugin must service by spawning the `qmd` worker: run the
+/// two-stage search (BM25 then semantic) for `query`, tagged with `token`, and
+/// send each stage's `(token, stage, result)` back on the plugin's channel. The
+/// plugin feeds them to [`SearchState::apply_stage_result`] on subsequent
+/// renders.
 #[derive(Debug, Clone)]
 pub struct SearchRequest {
-    /// The monotonic token identifying this submit. The worker echoes it back so
-    /// a superseded query's result can be dropped.
+    /// The monotonic token identifying this submit. The worker echoes it on BOTH
+    /// stages so a superseded query's results can be dropped.
     pub token: u64,
     /// The (trimmed-non-empty) query string to run.
     pub query: String,
@@ -199,11 +252,31 @@ impl SearchState {
         self.results.get(self.selected)
     }
 
-    /// `true` while a `qmd` search is in flight (so the shell keeps ticking
-    /// redraws to animate the spinner — see `LearningsUi::wants_redraw`).
+    /// `true` while the FULL `Searching…` spinner is up — i.e. a query is in
+    /// flight and NOTHING has painted yet (the pre-BM25 stage). This is the gate
+    /// the help bar / results pane use to choose the spinner over the table.
     #[must_use]
     pub const fn is_searching(&self) -> bool {
         matches!(self.phase, SearchPhase::Searching { .. })
+    }
+
+    /// `true` while the subtle "refining…" indicator is up — i.e. BM25 results
+    /// are visible and the semantic rerank is still upgrading them.
+    #[must_use]
+    pub const fn is_refining(&self) -> bool {
+        matches!(self.phase, SearchPhase::Refining { .. })
+    }
+
+    /// `true` while EITHER stage of a two-stage search is in flight (spinner OR
+    /// refining). The shell keeps ticking redraws while this holds so the spinner
+    /// animates AND the plugin keeps polling the worker channel for the next
+    /// stage — see `LearningsUi::wants_redraw`.
+    #[must_use]
+    pub const fn is_in_flight(&self) -> bool {
+        matches!(
+            self.phase,
+            SearchPhase::Searching { .. } | SearchPhase::Refining { .. }
+        )
     }
 
     /// Route a Search-tab key. `records` is the parsed KB used to resolve a
@@ -272,9 +345,11 @@ impl SearchState {
         _ctx: &SearchContext<'_>,
         records: &[LearningRecord],
     ) -> SearchKeyOutcome {
-        // After a settled submit with results, a second Enter opens the
-        // selected hit. While a search is still in flight, Enter is a no-op
-        // (there's nothing to open yet) — it must NOT re-submit.
+        // Before the FIRST paint (the BM25 spinner stage) there's nothing to
+        // open and Enter must NOT re-submit, so it's a no-op. Once BM25 has
+        // painted (the `Refining` stage) results ARE visible, so Enter opens the
+        // selected hit just like the settled state — the `submitted && !results`
+        // branch below covers both `Refining` and `Done`.
         if self.is_searching() {
             return SearchKeyOutcome::unchanged();
         }
@@ -326,57 +401,115 @@ impl SearchState {
         }
     }
 
-    /// Apply a worker result back into the view. The plugin calls this each
-    /// render with whatever the worker channel yielded. A result whose `token`
-    /// doesn't match the current in-flight token is DROPPED — that's how a
-    /// superseded (coalesced) query's stale result is discarded. A runner error
-    /// degrades to an empty result set rather than failing the render — the
-    /// empty state is the honest user-visible outcome. Returns `true` if the
-    /// result was applied (so the plugin bumps its render generation).
-    pub fn apply_result(&mut self, token: u64, result: Result<Vec<SearchHit>, DataError>) -> bool {
-        // Only the current in-flight token's result counts.
-        match self.phase {
-            SearchPhase::Searching { token: cur, .. } if cur == token => {}
-            _ => return false,
-        }
-        self.results = match result {
-            Ok(hits) => hits,
-            Err(err) => {
-                tracing::warn!(%err, "qmd search failed — empty results");
-                Vec::new()
-            }
+    /// Apply one STAGE of a two-stage worker result back into the view. The
+    /// plugin calls this each render with whatever the worker channel yielded
+    /// (BM25 first, semantic second). A result whose `token` doesn't match the
+    /// current in-flight token is DROPPED — that's how a superseded (coalesced)
+    /// query's stale results are discarded (across BOTH stages). Returns `true`
+    /// if the result was applied (so the plugin bumps its render generation).
+    ///
+    /// Stage handling:
+    /// - **BM25** (stage 1): if it returns hits, paint them and enter
+    ///   [`SearchPhase::Refining`] (results visible, semantic still upgrading).
+    ///   If it errors or is empty, STAY in [`SearchPhase::Searching`] (spinner
+    ///   up) and wait for the semantic pass — BM25 failing must not blank the
+    ///   pane or settle early, because the semantic pass may still have hits.
+    /// - **Semantic** (stage 2, final): swap in the reranked hits and settle to
+    ///   [`SearchPhase::Done`]. On an error, KEEP whatever's on screen (the BM25
+    ///   results, if any) and settle — never blank a visible result set. If both
+    ///   stages were empty, the settled empty state shows "no results".
+    pub fn apply_stage_result(
+        &mut self,
+        token: u64,
+        stage: SearchStage,
+        result: Result<Vec<SearchHit>, DataError>,
+    ) -> bool {
+        // Only the current in-flight token's result counts (either stage).
+        let Some((cur, started)) = self.phase.in_flight() else {
+            return false;
         };
-        self.selected = 0;
-        self.timed_out = false;
-        self.phase = SearchPhase::Done;
-        true
+        if cur != token {
+            return false;
+        }
+
+        match stage {
+            SearchStage::Bm25 => match result {
+                Ok(hits) if !hits.is_empty() => {
+                    // Fast paint: show the lexical hits, keep refining.
+                    self.results = hits;
+                    self.selected = 0;
+                    self.timed_out = false;
+                    self.phase = SearchPhase::Refining { token, started };
+                    true
+                }
+                Ok(_) => false, // empty BM25 — stay on the spinner for semantic.
+                Err(err) => {
+                    tracing::warn!(%err, "qmd BM25 search failed — awaiting semantic");
+                    false // BM25 error — stay on the spinner for semantic.
+                }
+            },
+            SearchStage::Semantic => {
+                match result {
+                    Ok(hits) => {
+                        // Reranked swap-in (may be empty → settled no-results).
+                        self.results = hits;
+                        self.selected = 0;
+                    }
+                    Err(err) => {
+                        // Keep whatever painted (the BM25 results, if any) — do
+                        // NOT blank a visible set on a semantic error.
+                        tracing::warn!(%err, "qmd semantic search failed — keeping BM25 results");
+                    }
+                }
+                self.timed_out = false;
+                self.phase = SearchPhase::Done; // refining cleared.
+                true
+            }
+        }
     }
 
-    /// Check the in-flight search against [`SEARCH_CEILING`]. The plugin calls
-    /// this each render. If the deadline has passed, the tab gives up: it shows
-    /// the honest "search timed out" empty state and supersedes the query (so
-    /// the orphaned worker's eventual result is dropped). Returns `true` if a
-    /// timeout fired (so the plugin bumps its render generation + stops the
-    /// worker). A no-op when not searching or still within the ceiling.
+    /// Check the in-flight search against [`SEARCH_CEILING`] (covering the WHOLE
+    /// two-stage). The plugin calls this each render. On deadline:
+    /// - **Before any paint** (`Searching`): give up to the honest "search timed
+    ///   out" empty state.
+    /// - **After BM25 painted** (`Refining`): KEEP the BM25 results on screen,
+    ///   just clear the refining indicator and settle — the semantic pass overran
+    ///   but the user still has the lexical hits.
+    ///
+    /// Either way the query is superseded so the orphaned worker's late results
+    /// are dropped. Returns `true` if a timeout fired (so the plugin bumps its
+    /// render generation + stops the worker). A no-op when settled or within the
+    /// ceiling.
     pub fn check_timeout(&mut self) -> bool {
-        let SearchPhase::Searching { started, .. } = self.phase else {
-            return false;
-        };
-        if started.elapsed() <= SEARCH_CEILING {
-            return false;
+        match self.phase {
+            SearchPhase::Searching { started, .. } => {
+                if started.elapsed() <= SEARCH_CEILING {
+                    return false;
+                }
+                // Nothing painted → honest timeout empty state.
+                self.results.clear();
+                self.selected = 0;
+                self.timed_out = true;
+            }
+            SearchPhase::Refining { started, .. } => {
+                if started.elapsed() <= SEARCH_CEILING {
+                    return false;
+                }
+                // BM25 already painted → keep results, just stop refining.
+                self.timed_out = false;
+            }
+            _ => return false,
         }
-        self.results.clear();
-        self.selected = 0;
-        self.timed_out = true;
         self.phase = SearchPhase::Done;
         // Supersede so a late worker result for this query is dropped.
         self.query_seq = self.query_seq.wrapping_add(1);
         true
     }
 
-    /// The braille spinner glyph for the current in-flight search, advanced by
-    /// `started.elapsed()` so it animates across render ticks. `None` when not
-    /// searching.
+    /// The braille spinner glyph for the current PRE-PAINT search, advanced by
+    /// `started.elapsed()` so it animates across render ticks. `None` once BM25
+    /// has painted (the `Refining` stage uses the subtle indicator instead) or
+    /// when settled.
     fn spinner_glyph(&self) -> Option<&'static str> {
         let SearchPhase::Searching { started, .. } = self.phase else {
             return None;
@@ -577,8 +710,10 @@ fn render_empty(buf: &mut RBuffer, area: RRect, state: &SearchState) {
 }
 
 /// Bottom help bar for the Search tab. `⏎ search`/`⏎ open` reflect the live
-/// two-stage Enter; `↑↓ select` is live once there are results; while a search
-/// is in flight the bar reads `searching…`.
+/// two-stage Enter; `↑↓ select` is live once there are results; while the FIRST
+/// (BM25) stage is still running the bar reads `searching…`; once BM25 has
+/// painted and the semantic rerank is upgrading it, a subtle `⟳ refining…`
+/// marker trails the live select/open keys (results stay actionable).
 fn render_help_bar(buf: &mut RBuffer, area: RRect, state: &SearchState) {
     let mut spans = vec![Span::raw(" ")];
     if state.is_searching() {
@@ -593,6 +728,16 @@ fn render_help_bar(buf: &mut RBuffer, area: RRect, state: &SearchState) {
         spans.extend(help_key("Bksp", "edit"));
     }
     spans.extend(help_key("Tab", "pane"));
+    // Subtle refining marker: results are visible + actionable, the semantic
+    // rerank is still upgrading them. Distinct from the full `Searching…`
+    // spinner (which only shows pre-first-paint). The `refining…` token is the
+    // one tests lock.
+    if state.is_refining() {
+        spans.push(Span::styled(
+            "  ⟳ refining…",
+            Style::default().fg(CORNFLOWER_BLUE).add_modifier(RModifier::ITALIC),
+        ));
+    }
     Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
@@ -648,10 +793,36 @@ mod tests {
         }
     }
 
-    /// Drive a submit to completion synchronously: route the key, run the fake
-    /// runner for the returned request, and apply the parsed result — the
-    /// in-module stand-in for the plugin's worker + render poll. Returns the
-    /// original outcome so callers can inspect `open_record`.
+    /// Run the fake through both `qmd` stages (BM25 then semantic) for a request,
+    /// applying each stage to the state — the in-module stand-in for the plugin's
+    /// two-stage worker + render poll.
+    fn settle_both_stages(
+        st: &mut SearchState,
+        fake: &Fake,
+        c: &SearchContext<'_>,
+        req: &SearchRequest,
+    ) {
+        let bm25 = crate::data::search(
+            fake,
+            &req.query,
+            c.collection,
+            c.index,
+            crate::data::SearchMode::Bm25,
+        );
+        st.apply_stage_result(req.token, SearchStage::Bm25, bm25);
+        let semantic = crate::data::search(
+            fake,
+            &req.query,
+            c.collection,
+            c.index,
+            crate::data::SearchMode::Semantic,
+        );
+        st.apply_stage_result(req.token, SearchStage::Semantic, semantic);
+    }
+
+    /// Drive a submit to completion synchronously: route the key, then run the
+    /// fake through both stages and apply them. Returns the original outcome so
+    /// callers can inspect `open_record`.
     fn submit_and_settle(
         st: &mut SearchState,
         fake: &Fake,
@@ -660,14 +831,7 @@ mod tests {
     ) -> SearchKeyOutcome {
         let out = st.handle_key(&KeyCode::Enter, c, recs);
         if let Some(req) = &out.start_search {
-            let hits = crate::data::search(
-                fake,
-                &req.query,
-                c.collection,
-                c.index,
-                crate::data::SearchMode::Semantic,
-            );
-            st.apply_result(req.token, hits);
+            settle_both_stages(st, fake, c, req);
         }
         out
     }
@@ -712,16 +876,32 @@ mod tests {
         let req = out.start_search.expect("submit yields a worker request");
         assert_eq!(req.query, "query");
 
-        // Apply the worker result for the matching token → results land.
-        let hits = crate::data::search(
+        // Apply the BM25 stage → results paint, phase goes Refining (fast paint).
+        let bm25 = crate::data::search(
+            &fake,
+            &req.query,
+            c.collection,
+            c.index,
+            crate::data::SearchMode::Bm25,
+        );
+        assert!(st.apply_stage_result(req.token, SearchStage::Bm25, bm25));
+        assert!(st.is_refining(), "BM25 paint enters the refining stage");
+        assert!(
+            !st.is_searching(),
+            "the full spinner is gone after BM25 paints"
+        );
+        assert_eq!(st.results.len(), 2);
+
+        // Apply the semantic stage → swaps in the reranked set, settles to Done.
+        let semantic = crate::data::search(
             &fake,
             &req.query,
             c.collection,
             c.index,
             crate::data::SearchMode::Semantic,
         );
-        assert!(st.apply_result(req.token, hits));
-        assert!(!st.is_searching(), "applying the result settles the search");
+        assert!(st.apply_stage_result(req.token, SearchStage::Semantic, semantic));
+        assert!(!st.is_in_flight(), "semantic stage settles the search");
         assert_eq!(st.results.len(), 2);
         assert_eq!(st.results[0].id, "#1");
         assert_eq!(st.results[1].id, "#2");
@@ -879,14 +1059,7 @@ mod tests {
         );
         // Settle it so the next Backspace edit starts from a clean settled state.
         let req = out.start_search.unwrap();
-        let hits = crate::data::search(
-            &fake,
-            &req.query,
-            c.collection,
-            c.index,
-            crate::data::SearchMode::Semantic,
-        );
-        st.apply_result(req.token, hits);
+        settle_both_stages(&mut st, &fake, &c, &req);
         assert_eq!(st.results.len(), 1, "re-submit applied fresh results");
 
         // Backspace must ALSO invalidate results (same staleness hazard).
@@ -953,7 +1126,8 @@ mod tests {
         let req2 = out2.start_search.expect("second submit yields a request");
         assert_ne!(req1.token, req2.token, "tokens must be distinct");
 
-        // Apply the STALE first result → dropped (still searching, no results).
+        // Apply the STALE first result (either stage) → dropped (still searching,
+        // no results) — coalescing covers BOTH stages of the superseded query.
         let stale = Ok(vec![SearchHit {
             id: "#stale".into(),
             score: 0.9,
@@ -961,20 +1135,20 @@ mod tests {
             file: None,
         }]);
         assert!(
-            !st.apply_result(req1.token, stale),
+            !st.apply_stage_result(req1.token, SearchStage::Bm25, stale),
             "a superseded token's result must be dropped"
         );
         assert!(st.is_searching(), "still searching for the live query");
         assert!(st.results.is_empty(), "no stale results applied");
 
-        // Apply the LIVE second result → lands.
+        // Apply the LIVE second result's semantic stage → lands.
         let live = Ok(vec![SearchHit {
             id: "#live".into(),
             score: 0.9,
             title: "live".into(),
             file: None,
         }]);
-        assert!(st.apply_result(req2.token, live));
+        assert!(st.apply_stage_result(req2.token, SearchStage::Semantic, live));
         assert_eq!(st.results.len(), 1);
         assert_eq!(st.results[0].id, "#live");
     }
@@ -1004,7 +1178,7 @@ mod tests {
         assert!(!st.is_searching(), "timeout settles the phase");
         assert!(st.timed_out, "timeout flag set for the honest empty state");
 
-        // A late worker result for the timed-out token is now dropped.
+        // A late worker result (either stage) for the timed-out token is dropped.
         let late = Ok(vec![SearchHit {
             id: "#late".into(),
             score: 0.9,
@@ -1012,7 +1186,7 @@ mod tests {
             file: None,
         }]);
         assert!(
-            !st.apply_result(req.token, late),
+            !st.apply_stage_result(req.token, SearchStage::Bm25, late),
             "a result for a timed-out query must be dropped"
         );
         assert!(st.results.is_empty());
@@ -1032,5 +1206,204 @@ mod tests {
             st.spinner_glyph().is_some(),
             "searching renders a spinner glyph"
         );
+    }
+
+    // ---- Two-stage BM25 fast paint ----
+
+    /// Submit a query and return the live token (state is left in `Searching`).
+    fn submit_query(st: &mut SearchState, c: &SearchContext<'_>, query: &str) -> u64 {
+        st.focus();
+        for ch in query.chars() {
+            st.handle_key(&KeyCode::Char { ch }, c, &[]);
+        }
+        let out = st.handle_key(&KeyCode::Enter, c, &[]);
+        out.start_search.expect("submit yields a request").token
+    }
+
+    fn hit(id: &str) -> SearchHit {
+        SearchHit {
+            id: id.into(),
+            score: 0.9,
+            title: id.into(),
+            file: None,
+        }
+    }
+
+    #[test]
+    fn bm25_paints_then_semantic_swaps_in_reranked_results() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+        assert!(st.spinner_glyph().is_some(), "pre-paint: full spinner up");
+
+        // BM25 lands → lexical hits paint, phase = Refining (no full spinner).
+        assert!(st.apply_stage_result(token, SearchStage::Bm25, Ok(vec![hit("#bm25")])));
+        assert!(st.is_refining(), "BM25 paint enters Refining");
+        assert!(
+            st.spinner_glyph().is_none(),
+            "no full spinner during refining"
+        );
+        assert_eq!(st.results.len(), 1);
+        assert_eq!(st.results[0].id, "#bm25", "BM25 lexical hit is visible");
+
+        // Semantic lands → reranked set REPLACES the BM25 set, phase = Done.
+        assert!(st.apply_stage_result(
+            token,
+            SearchStage::Semantic,
+            Ok(vec![hit("#sem-a"), hit("#sem-b")])
+        ));
+        assert!(!st.is_in_flight(), "semantic settles the search");
+        assert!(!st.is_refining());
+        assert_eq!(st.results.len(), 2, "reranked set swapped in");
+        assert_eq!(st.results[0].id, "#sem-a");
+    }
+
+    #[test]
+    fn refining_active_between_bm25_paint_and_semantic_swap() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+        assert!(!st.is_refining(), "not refining before any paint");
+        st.apply_stage_result(token, SearchStage::Bm25, Ok(vec![hit("#bm25")]));
+        assert!(st.is_refining(), "refining between BM25 and semantic");
+        st.apply_stage_result(token, SearchStage::Semantic, Ok(vec![hit("#sem")]));
+        assert!(
+            !st.is_refining(),
+            "refining cleared after the semantic swap"
+        );
+    }
+
+    #[test]
+    fn semantic_error_after_bm25_keeps_bm25_results_visible() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+        st.apply_stage_result(token, SearchStage::Bm25, Ok(vec![hit("#bm25")]));
+        assert!(st.is_refining());
+
+        // Semantic ERRORS → keep the BM25 results, just settle + stop refining.
+        let err = Err(DataError::Subprocess("qmd died".into()));
+        assert!(st.apply_stage_result(token, SearchStage::Semantic, err));
+        assert!(!st.is_in_flight(), "settled after semantic error");
+        assert!(!st.is_refining(), "refining cleared");
+        assert_eq!(st.results.len(), 1, "BM25 results stay on screen");
+        assert_eq!(st.results[0].id, "#bm25");
+        assert!(!st.timed_out, "an error is not a timeout");
+    }
+
+    #[test]
+    fn bm25_error_stays_on_spinner_then_semantic_lands() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+
+        // BM25 errors → must NOT settle / blank; stay on the full spinner.
+        let err = Err(DataError::Subprocess("bm25 died".into()));
+        assert!(
+            !st.apply_stage_result(token, SearchStage::Bm25, err),
+            "a BM25 error must not change state (await semantic)"
+        );
+        assert!(
+            st.is_searching(),
+            "still on the full spinner after BM25 error"
+        );
+        assert!(st.results.is_empty());
+
+        // Semantic then lands with hits → they paint and settle.
+        assert!(st.apply_stage_result(token, SearchStage::Semantic, Ok(vec![hit("#sem")])));
+        assert!(!st.is_in_flight());
+        assert_eq!(st.results.len(), 1);
+        assert_eq!(st.results[0].id, "#sem");
+    }
+
+    #[test]
+    fn empty_bm25_stays_on_spinner_until_semantic() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+
+        // Empty BM25 → no paint, stay on the spinner (semantic may still hit).
+        assert!(
+            !st.apply_stage_result(token, SearchStage::Bm25, Ok(vec![])),
+            "empty BM25 must not settle early"
+        );
+        assert!(st.is_searching(), "still searching after empty BM25");
+
+        // Semantic also empty → settle to the honest no-results empty state.
+        assert!(st.apply_stage_result(token, SearchStage::Semantic, Ok(vec![])));
+        assert!(!st.is_in_flight());
+        assert!(st.results.is_empty());
+        assert!(st.submitted, "submitted → render_empty shows `no results`");
+        assert!(!st.timed_out);
+    }
+
+    #[test]
+    fn timeout_after_bm25_keeps_results_and_clears_refining() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token = submit_query(&mut st, &c, "rebase");
+        st.apply_stage_result(token, SearchStage::Bm25, Ok(vec![hit("#bm25")]));
+        assert!(st.is_refining());
+
+        // Force the refining `started` past the ceiling → timeout fires, but the
+        // BM25 results MUST stay (not blanked) and refining clears.
+        if let SearchPhase::Refining { started, .. } = &mut st.phase {
+            *started = Instant::now() - (SEARCH_CEILING + Duration::from_secs(1));
+        }
+        assert!(
+            st.check_timeout(),
+            "the refining stage times out at the ceiling"
+        );
+        assert!(!st.is_in_flight(), "settled after the timeout");
+        assert!(!st.is_refining());
+        assert_eq!(st.results.len(), 1, "BM25 results survive the timeout");
+        assert_eq!(st.results[0].id, "#bm25");
+        assert!(
+            !st.timed_out,
+            "a refining timeout keeps results — NOT the timed-out empty state"
+        );
+
+        // A late semantic result for the (now superseded) token is dropped.
+        assert!(!st.apply_stage_result(token, SearchStage::Semantic, Ok(vec![hit("#late")])));
+        assert_eq!(
+            st.results[0].id, "#bm25",
+            "late semantic must not overwrite"
+        );
+    }
+
+    #[test]
+    fn coalescing_drops_both_stages_of_a_superseded_query() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        let token1 = submit_query(&mut st, &c, "first");
+
+        // Apply BM25 for query #1 → it paints (Refining).
+        st.apply_stage_result(token1, SearchStage::Bm25, Ok(vec![hit("#q1-bm25")]));
+        assert!(st.is_refining());
+
+        // Edit + re-submit → query #2 supersedes #1 (new token, back to spinner).
+        st.handle_key(&KeyCode::Char { ch: '2' }, &c, &[]);
+        let out2 = st.handle_key(&KeyCode::Enter, &c, &[]);
+        let token2 = out2.start_search.expect("second submit yields a request").token;
+        assert_ne!(token1, token2);
+        assert!(st.is_searching(), "back to the full spinner for query #2");
+        assert!(st.results.is_empty(), "the edit cleared query #1's results");
+
+        // BOTH stages of the stale query #1 are now dropped.
+        assert!(!st.apply_stage_result(token1, SearchStage::Bm25, Ok(vec![hit("#q1-late-bm25")])));
+        assert!(!st.apply_stage_result(
+            token1,
+            SearchStage::Semantic,
+            Ok(vec![hit("#q1-late-sem")])
+        ));
+        assert!(st.results.is_empty(), "no stale query #1 result applied");
+        assert!(st.is_searching(), "still awaiting query #2");
+
+        // Query #2's stages land normally.
+        st.apply_stage_result(token2, SearchStage::Bm25, Ok(vec![hit("#q2-bm25")]));
+        assert_eq!(st.results[0].id, "#q2-bm25");
+        st.apply_stage_result(token2, SearchStage::Semantic, Ok(vec![hit("#q2-sem")]));
+        assert_eq!(st.results[0].id, "#q2-sem");
+        assert!(!st.is_in_flight());
     }
 }

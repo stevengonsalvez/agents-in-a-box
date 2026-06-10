@@ -153,6 +153,81 @@ impl QmdSearch for EchoRunner {
     }
 }
 
+/// A two-stage runner with DISTINCT BM25 and semantic result sets, so a test can
+/// see the lexical (BM25) set paint first and the reranked (semantic) set replace
+/// it. `run_bm25` returns the lexical set instantly; `run_query` (semantic)
+/// BLOCKS until the test releases [`SemanticGate`] — making the BM25-paint /
+/// refining window deterministic instead of relying on a fixed sleep racing the
+/// render cadence (which flakes under parallel test load).
+struct TwoStageRunner {
+    gate: SemanticGate,
+    /// `true` → the semantic pass fails after the gate (BM25 must stay visible).
+    semantic_error: bool,
+}
+
+/// A one-shot release gate the test holds: the semantic stage waits on it, and
+/// the test releases it once it has observed the BM25 paint / refining frame.
+/// Cloneable so the runner and the test share the same gate.
+#[derive(Clone)]
+struct SemanticGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl SemanticGate {
+    fn new() -> Self {
+        Self(std::sync::Arc::new((
+            std::sync::Mutex::new(false),
+            std::sync::Condvar::new(),
+        )))
+    }
+
+    /// Release the gate so any waiting semantic stage may proceed.
+    fn release(&self) {
+        let (lock, cvar) = &*self.0;
+        *lock.lock().expect("gate lock") = true;
+        cvar.notify_all();
+    }
+
+    /// Block until the gate is released by the test.
+    fn wait(&self) {
+        let (lock, cvar) = &*self.0;
+        let mut released = lock.lock().expect("gate lock");
+        while !*released {
+            released = cvar.wait(released).expect("gate wait");
+        }
+    }
+}
+
+/// A docid unique to the BM25 (lexical) stage.
+const BM25_ID: &str = "#bm25lex";
+/// A docid unique to the semantic (reranked) stage.
+const SEMANTIC_ID: &str = "#semrank";
+
+impl QmdSearch for TwoStageRunner {
+    fn run_bm25(&self, _query: &str, _collection: &str, _index: &str) -> Result<String, DataError> {
+        // Instant lexical paint.
+        Ok(serde_json::json!([
+            { "docid": BM25_ID, "score": 0.50, "title": "lexical hit" }
+        ])
+        .to_string())
+    }
+
+    fn run_query(
+        &self,
+        _query: &str,
+        _collection: &str,
+        _index: &str,
+    ) -> Result<String, DataError> {
+        // Block until the test has observed the BM25 paint / refining frame.
+        self.gate.wait();
+        if self.semantic_error {
+            return Err(DataError::Subprocess("semantic qmd died".to_string()));
+        }
+        Ok(serde_json::json!([
+            { "docid": SEMANTIC_ID, "score": 0.95, "title": "reranked hit" }
+        ])
+        .to_string())
+    }
+}
+
 /// Fake `qmd query --json` payload. Row 0's `docid` is a real fixture record id
 /// (`lrn-audit-after-rebase`) so selecting it resolves to a fixture record and
 /// opens its Detail pane. The remaining rows carry distinct ids/titles/scores
@@ -221,6 +296,27 @@ async fn render_until(
     }
 }
 
+/// Re-render in a bounded poll loop until `token` DISAPPEARS, returning the first
+/// frame without it. The dual of [`render_until`] — used to settle a transient
+/// indicator (e.g. `refining…`) clearing once the semantic stage resolves.
+async fn render_until_gone(
+    h: &mut ainb_plugin_testkit::Harness,
+    token: &str,
+    deadline: Duration,
+) -> String {
+    let start = std::time::Instant::now();
+    loop {
+        let text = buffer_text(&h.render(VIEWPORT).await.expect("render poll"));
+        if !text.contains(token) {
+            return text;
+        }
+        if start.elapsed() >= deadline {
+            panic!("token {token:?} did not clear within {deadline:?}; last frame:\n{text}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Build a `plugin/handle_key` notification for a single key with no mods.
 fn key_params(code: KeyCode) -> HandleKeyParams {
     HandleKeyParams {
@@ -255,8 +351,11 @@ const RESULT_SCORE_TOKEN: &str = "0.93";
 const DETAIL_BODY_TOKEN: &str = "## Solution";
 /// The honest empty-state token (no query / no hits).
 const EMPTY_TOKEN: &str = "no results";
-/// The in-flight spinner token (rendered while the worker is running).
+/// The in-flight spinner token (rendered while the worker is running, before the
+/// first BM25 paint).
 const SEARCHING_TOKEN: &str = "Searching…";
+/// The subtle refining indicator (BM25 painted, semantic still upgrading).
+const REFINING_TOKEN: &str = "refining…";
 /// The abandoned-search empty-state token (search overran the ceiling).
 const TIMEOUT_TOKEN: &str = "search timed out";
 /// Generous deadline for settling a fast fake worker (microseconds in practice).
@@ -673,6 +772,185 @@ async fn hung_search_times_out_to_honest_state() {
         !timed_out.contains(SEARCHING_TOKEN),
         "the spinner must clear once the search times out:\n{timed_out}"
     );
+
+    h.close().await.expect("clean close");
+}
+
+// --- Two-stage BM25 fast paint (end-to-end) ---
+
+/// Init a plugin with a gated [`TwoStageRunner`] over the fixture KB. Returns the
+/// harness plus the [`SemanticGate`] the test releases to let the semantic stage
+/// proceed — deterministic, no sleeps racing the render cadence.
+async fn init_two_stage(semantic_error: bool) -> (ainb_plugin_testkit::Harness, SemanticGate) {
+    let gate = SemanticGate::new();
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(TwoStageRunner {
+        gate: gate.clone(),
+        semantic_error,
+    }));
+    let mut h = run_plugin(plugin);
+    h.init_with_config(fixture_config()).await.expect("init two-stage");
+    (h, gate)
+}
+
+#[tokio::test]
+async fn bm25_paints_early_then_semantic_replaces_on_a_later_render() {
+    // The two-stage proof: BM25 (instant) paints the lexical hit FIRST while the
+    // semantic stage is gated; the test observes the BM25-only frame, releases
+    // the gate, and then the semantic rerank REPLACES the BM25 hit.
+    let (mut h, gate) = init_two_stage(false).await;
+
+    open_search(&mut h).await;
+    type_query(&mut h, "audit").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit two-stage");
+
+    // BM25 paints the lexical hit; the gated semantic hit is NOT there yet.
+    let lexical = render_until(&mut h, BM25_ID, SETTLE).await;
+    assert!(
+        !lexical.contains(SEMANTIC_ID),
+        "the semantic reranked hit must NOT be present during the BM25 stage:\n{lexical}"
+    );
+    assert!(
+        !lexical.contains(SEARCHING_TOKEN),
+        "the full spinner must be gone once BM25 painted:\n{lexical}"
+    );
+
+    // Release the semantic stage → the reranked hit REPLACES the BM25 hit.
+    gate.release();
+    let reranked = render_until(&mut h, SEMANTIC_ID, SETTLE).await;
+    assert!(
+        !reranked.lines().any(|l| l.contains(BM25_ID)),
+        "the semantic rerank must swap OUT the BM25 lexical hit:\n{reranked}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn refining_indicator_shows_between_bm25_paint_and_semantic_swap() {
+    // While BM25 is painted and the (gated) semantic rerank is still running, a
+    // SUBTLE `refining…` marker shows (NOT the full spinner). It clears once the
+    // semantic stage is released and lands.
+    let (mut h, gate) = init_two_stage(false).await;
+
+    open_search(&mut h).await;
+    type_query(&mut h, "audit").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit two-stage");
+
+    // BM25 painted, semantic gated → the refining indicator is up and the full
+    // spinner is gone (results visible + actionable).
+    let refining = render_until(&mut h, REFINING_TOKEN, SETTLE).await;
+    assert!(
+        refining.contains(BM25_ID),
+        "BM25 results must be visible while refining:\n{refining}"
+    );
+    assert!(
+        !refining.contains(SEARCHING_TOKEN),
+        "the full `Searching…` spinner must NOT show during refining:\n{refining}"
+    );
+
+    // Release semantic → the refining indicator clears after the swap.
+    gate.release();
+    let settled = render_until(&mut h, SEMANTIC_ID, SETTLE).await;
+    assert!(
+        !settled.contains(REFINING_TOKEN),
+        "the refining indicator must clear once the semantic rerank lands:\n{settled}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn semantic_error_after_bm25_keeps_bm25_results_and_clears_refining() {
+    // If the (gated) semantic pass ERRORS after BM25 painted, the BM25 results
+    // must STAY on screen and the refining indicator must clear — never blanked.
+    let (mut h, gate) = init_two_stage(true).await; // semantic errors
+
+    open_search(&mut h).await;
+    type_query(&mut h, "audit").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit two-stage");
+
+    // BM25 paints the lexical hit (refining).
+    let lexical = render_until(&mut h, REFINING_TOKEN, SETTLE).await;
+    assert!(
+        lexical.contains(BM25_ID),
+        "BM25 hit painted (refining):\n{lexical}"
+    );
+
+    // Release the gate → semantic errors. Poll until refining clears, then assert
+    // the BM25 results are STILL there and nothing blanked.
+    gate.release();
+    let after = render_until_gone(&mut h, REFINING_TOKEN, SETTLE).await;
+    assert!(
+        after.contains(BM25_ID),
+        "BM25 results must survive a semantic error (not blanked):\n{after}"
+    );
+    assert!(
+        !after.contains(SEMANTIC_ID),
+        "no semantic hit (it errored):\n{after}"
+    );
+    assert!(
+        !after.contains(EMPTY_TOKEN) && !after.contains(TIMEOUT_TOKEN),
+        "a semantic error with BM25 results is NOT an empty/timeout state:\n{after}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn coalescing_supersedes_a_refining_query_end_to_end() {
+    // End-to-end coalescing: a second submit supersedes the first query WHILE it
+    // is refining (BM25 painted, semantic gated). The plugin must not get stuck /
+    // double-apply — query #2 reaches its own settled semantic state and query
+    // #1's late semantic (released afterwards) must not reintroduce the refining
+    // indicator or re-open the search. (Token-mismatch dropping of BOTH stages is
+    // proven rigorously with DISTINCT ids in the in-module
+    // `coalescing_drops_both_stages_of_a_superseded_query` unit test.)
+    let (mut h, gate) = init_two_stage(false).await;
+
+    open_search(&mut h).await;
+    // Submit #1, let its BM25 paint → refining (semantic gated, still in flight).
+    type_query(&mut h, "audit").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit #1");
+    let q1 = render_until(&mut h, REFINING_TOKEN, SETTLE).await;
+    assert!(
+        q1.contains(BM25_ID),
+        "query #1 BM25 painted (refining):\n{q1}"
+    );
+
+    // Edit + submit #2 BEFORE releasing query #1's semantic → supersedes it.
+    type_query(&mut h, "X").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit #2");
+
+    // Now release the gate. The runner is shared, so BOTH workers' semantic
+    // stages unblock; query #2 reaches its settled semantic result, and query
+    // #1's (now stale-token) semantic is dropped on arrival.
+    gate.release();
+    let q2 = render_until(&mut h, SEMANTIC_ID, SETTLE).await;
+    assert!(
+        !q2.contains(REFINING_TOKEN),
+        "query #2 must reach its settled (semantic) state:\n{q2}"
+    );
+
+    // Drain frames; the settled state must persist — query #1's late semantic
+    // must NOT reopen refining or re-search.
+    for _ in 0..6 {
+        let frame = buffer_text(&h.render(VIEWPORT).await.expect("drain frame"));
+        assert!(
+            frame.contains(SEMANTIC_ID) && !frame.contains(REFINING_TOKEN),
+            "settled query #2 state must persist past query #1's late semantic:\n{frame}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     h.close().await.expect("clean close");
 }
