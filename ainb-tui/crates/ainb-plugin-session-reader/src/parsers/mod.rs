@@ -69,6 +69,13 @@ where
     let path_str = path.to_string_lossy().into_owned();
     let stat = stat_for_cache(path);
     ctx.counters.files_statted = ctx.counters.files_statted.saturating_add(1);
+    if stat.is_none() {
+        // A file that fails to stat can still parse (metadata denied,
+        // contents readable) — it would be invisible to the recent
+        // fingerprint memo, so it must poison the unchanged-snapshot
+        // short-circuit for this scan.
+        ctx.stat_failures = ctx.stat_failures.saturating_add(1);
+    }
 
     if let (Some(watermark), Some((mtime, size))) = (ctx.watermark_nanos, stat) {
         if mtime < watermark {
@@ -85,6 +92,9 @@ where
                 }
             }
         }
+        // Recent file under an incremental scan: record its
+        // fingerprint for the unchanged-snapshot short-circuit.
+        ctx.recent_present.push((path_str.clone(), mtime, size));
     }
 
     read_one_cached(path, &path_str, stat, ctx, parse)

@@ -5647,6 +5647,7 @@ mod scan_progress_tests {
             scanned,
             total,
             current_project: project.into(),
+            done: false,
         }
     }
 
