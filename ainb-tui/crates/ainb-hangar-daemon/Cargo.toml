@@ -86,8 +86,12 @@ dirs = { workspace = true }
 # Unix process-group signalling: the runner spawns the provider in its own
 # process group so a timeout can SIGKILL the whole tree (the provider plus any
 # `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
-# EOFs immediately instead of blocking on the orphaned grandchild.
-nix = { workspace = true, features = ["signal"] }
+# EOFs immediately instead of blocking on the orphaned grandchild. The `user`
+# feature backs the RPC server's same-uid peer-credential gate (e38.1).
+nix = { workspace = true, features = ["signal", "user"] }
+# e38.1 socket-auth: the CSPRNG behind the boot-time daemon-token mint
+# (`rpc::auth::ensure_socket_token` passes `OsRng` into the core mint seam).
+rand = "0.8"
 # Resolves the `bd` binary on PATH (or validates an explicit path) so the
 # adapter can fail fast with `BdNotInstalled` instead of an opaque exec error
 # when the issue tracker is absent. Used by `BdClient::new`.

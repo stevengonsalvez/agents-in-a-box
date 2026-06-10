@@ -22,6 +22,7 @@
 //! state, so two plugins (e.g. a TUI + a CLI probe) can be served in parallel
 //! without coordination.
 
+pub mod auth;
 pub mod snapshots;
 
 use std::path::{Path, PathBuf};
@@ -94,21 +95,30 @@ pub fn socket_path_in(store_dir: &Path) -> PathBuf {
     store_dir.join("hangar.sock")
 }
 
-/// Bind the listener at `socket_path`, removing any stale socket file first.
+/// Bind the listener at `socket_path`, removing any stale socket file first,
+/// and tighten the socket file to `0600` (owner-only).
+///
+/// The mode is set immediately after the bind so no other local user can even
+/// connect to the control plane; the per-connection peer-uid + token gates in
+/// [`serve`] are defence in depth behind it.
 ///
 /// # Errors
 ///
-/// Returns an error if the parent directory is missing/unwritable or the bind
+/// Returns an error if the parent directory is missing/unwritable, the bind
 /// fails for a reason other than a stale socket file (which is removed and
-/// retried once).
+/// retried once), or the permission tightening fails.
 pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     // A leftover socket file from a previous (crashed) daemon would make `bind`
     // fail with AddrInUse even though nothing is listening. Remove it first —
     // this is safe because only one daemon owns a given hangar home at a time.
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
-    UnixListener::bind(socket_path)
+    let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 /// Accept connections forever, serving each on its own task.
@@ -133,15 +143,43 @@ pub async fn serve(listener: UnixListener, pool: SqlitePool, health: DaemonHealt
     }
 }
 
-/// Serve one plugin connection: read framed requests, dispatch, write responses,
-/// until EOF.
+/// Serve one plugin connection: gate it (same-uid peer credentials, then the
+/// `auth/hello` token handshake on the first frame), then read framed
+/// requests, dispatch, write responses, until EOF.
 async fn serve_conn(
     stream: UnixStream,
     pool: SqlitePool,
     health: DaemonHealth,
 ) -> std::io::Result<()> {
+    // Gate 1 — kernel peer credentials: only this user's processes may talk to
+    // the control plane. Reject + close on mismatch (or on a cred-read fault).
+    if !auth::same_uid_peer(&stream).unwrap_or(false) {
+        tracing::warn!("hangar rpc: rejected connection from foreign-uid peer");
+        return Ok(());
+    }
+
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
+
+    // Gate 2 — first-frame token auth: the connection's first frame must be a
+    // valid `auth/hello`. Unauthenticated or wrong-token connections get an
+    // UNAUTHORIZED error envelope back, then the connection closes — no
+    // `hangar/*` method is dispatched.
+    let Some(first) = read_frame(&mut reader).await? else {
+        return Ok(());
+    };
+    match auth::authenticate_first_frame(&pool, &first).await {
+        Ok(ack) => {
+            write_half.write_all(&encode_frame(&ack)).await?;
+            write_half.flush().await?;
+        }
+        Err(rejection) => {
+            write_half.write_all(&encode_frame(&rejection)).await?;
+            write_half.flush().await?;
+            return Ok(());
+        }
+    }
+
     while let Some(body) = read_frame(&mut reader).await? {
         let resp = match serde_json::from_slice::<RpcRequest>(&body) {
             Ok(req) => dispatch(&pool, &req, &health).await,

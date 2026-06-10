@@ -197,21 +197,40 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // connections on a background task. A bind failure is non-fatal — the
     // daemon's claim loop must still run even if no plugin can reach it (and a
     // stale socket from a crashed daemon is removed in `rpc::bind`).
+    //
+    // e38.1: the socket-auth credential is ensured BEFORE the bind so the
+    // token file exists by the time a client can dial (clients read it and
+    // present it on their first frame). A mint failure disables the listener
+    // (an unauthenticated control plane must never come up) but stays
+    // non-fatal to the claim loop, mirroring the bind-failure path.
     let socket_path = rpc::socket_path_in(&dir);
-    match rpc::bind(&socket_path) {
-        Ok(listener) => {
-            let health = rpc::DaemonHealth {
-                socket_path: socket_path.to_string_lossy().into_owned(),
-                pid: std::process::id(),
-                started_at: std::time::Instant::now(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                stats: stats.clone(),
-            };
-            tracing::info!(socket = %socket_path.display(), "hangar rpc listening");
-            tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
-        }
+    match rpc::auth::ensure_socket_token(store.pool(), &dir).await {
+        Ok(token_path) => match rpc::bind(&socket_path) {
+            Ok(listener) => {
+                let health = rpc::DaemonHealth {
+                    socket_path: socket_path.to_string_lossy().into_owned(),
+                    pid: std::process::id(),
+                    started_at: std::time::Instant::now(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    stats: stats.clone(),
+                };
+                tracing::info!(
+                    socket = %socket_path.display(),
+                    token_file = %token_path.display(),
+                    "hangar rpc listening"
+                );
+                tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed");
+            }
+        },
         Err(e) => {
-            tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed")
+            tracing::warn!(
+                error = %e,
+                socket = %socket_path.display(),
+                "hangar rpc socket-token mint failed; rpc listener disabled"
+            );
         }
     }
 
