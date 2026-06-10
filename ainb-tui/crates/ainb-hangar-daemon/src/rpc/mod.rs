@@ -761,6 +761,24 @@ async fn handle_comment_add(
     };
     // A committed insert announces the new comment to subscribers.
     events.emit(ws.as_str(), HangarEvent::CommentAdded(row.clone()));
+    // e38.7 — the collaboration trigger: now that the comment has committed,
+    // parse its @-mentions and enqueue a task for every agent that resolves in
+    // this workspace. Firing AFTER the commit means a spawn-side fault can never
+    // lose the comment; an unknown handle resolves to nothing and is ignored. A
+    // store fault here is logged, not surfaced — the comment already landed and a
+    // failed trigger must not turn a successful comment into an RPC error.
+    if let Err(e) = snapshots::spawn_mention_tasks(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        row.issue_id.as_str(),
+        &params.body,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "comment mention task spawn failed");
+    }
     to_value(&row)
 }
 

@@ -628,6 +628,93 @@ pub async fn comment_add(
     }))
 }
 
+/// Resolve the `@handle` mentions in a just-committed comment to agents in
+/// `workspace_id`, and enqueue an issue task for each that matches (e38.7).
+///
+/// This is the comment-triggered task-spawn path: the `comment_add` handler
+/// calls it AFTER the comment commits, so a user `@`-mentioning an agent in a
+/// comment spawns that agent's task on the comment's issue. The trigger fires
+/// after the write so a spawn-side failure can never roll back (or lose) the
+/// comment — matching the bead's "fires from inside `comment_add` after the
+/// comment commits" contract and side-stepping Multica's mid-write expansion race.
+///
+/// Resolution is by agent **name**, **workspace-scoped**: the candidate set is
+/// [`AgentRepo::list_by_workspace`] for the comment's workspace, so a foreign
+/// tenant's agent sharing the handle never gets a task. An unknown handle resolves
+/// to no agent and is silently ignored — never an error. Each matched agent is
+/// enqueued through the ordinary [`TaskRepo::insert`] path (no claim/dispatch
+/// logic is duplicated), bound to the comment's `issue_id` with the agent's
+/// resolved `runtime_id`. A handle matching no live runtime is skipped (the agent
+/// has nowhere to run); a duplicate enqueue (the agent already has a pending task
+/// on this issue — the per-`(issue, agent)` unique index) is coalesced, not an
+/// error, so the trigger is idempotent.
+///
+/// Returns the agent ids that actually got a task enqueued (for the caller's
+/// logging / future event push), empty when no mention resolved.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] only on an unexpected store fault — the expected
+/// "agent has no runtime" and "duplicate pending task" cases are handled inline
+/// (skip / coalesce) rather than surfaced, so a single bad mention never poisons
+/// the whole comment.
+pub async fn spawn_mention_tasks(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    issue_id: &str,
+    body: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    use crate::mentions::parse_mentions;
+    use ainb_hangar_store::repo::task::NewTask;
+
+    let handles = parse_mentions(body);
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The workspace's agents are the only resolution candidates: a foreign
+    // tenant's agent sharing a handle is never in this list, so it cannot be
+    // mention-triggered here.
+    let agents = AgentRepo::list_by_workspace(pool, workspace_id).await?;
+    let now = clock.now_ms();
+    let mut spawned = Vec::new();
+    for handle in &handles {
+        // Resolve by name; an unknown handle simply matches no agent (ignored).
+        let Some(agent) = agents.iter().find(|a| &a.name == handle) else {
+            continue;
+        };
+        let task = NewTask {
+            id: idgen.new_ulid(),
+            workspace_id: workspace_id.to_string(),
+            runtime_id: agent.runtime_id.clone(),
+            agent_id: agent.id.clone(),
+            issue_id: Some(issue_id.to_string()),
+            work_dir: None,
+            // A mention is a direct, user-initiated ask: default urgency (P3),
+            // drained FIFO among equals — the same default the autopilot path uses.
+            priority: 0,
+            created_at: now,
+            autopilot_run_id: None,
+        };
+        match TaskRepo::insert(pool, &task).await {
+            Ok(_) => spawned.push(agent.id.clone()),
+            // The agent already has a pending task on this issue (the per-(issue,
+            // agent) unique index): coalesce, don't error. The trigger is
+            // idempotent — re-mentioning an already-queued agent is a no-op.
+            Err(e) if is_unique_violation(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(spawned)
+}
+
+/// Whether a `sqlx` error is a UNIQUE-constraint violation (the per-`(issue,
+/// agent)` pending-task index coalescing a duplicate mention enqueue).
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
 /// Snapshot the registered runtimes of `workspace` for the daemon-health pane.
 ///
 /// Maps each `agent_runtime` row to a wire [`RuntimeHealthRow`] for
@@ -688,4 +775,137 @@ pub enum AutopilotFireError {
     /// The fire/enqueue transaction failed (agent deleted, FK violation).
     #[error(transparent)]
     Fire(#[from] FireError),
+}
+
+#[cfg(test)]
+mod mention_spawn_tests {
+    use super::spawn_mention_tasks;
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_store::Store;
+
+    /// How many tasks `agent-1` has queued/started on `issue-3` in the fixture
+    /// workspace.
+    async fn count_for_issue3(store: &Store) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_queue \
+             WHERE agent_id = 'agent-1' AND issue_id = 'issue-3'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+    }
+
+    /// A body mentioning the seeded `claude-agent` (id `agent-1`) enqueues one
+    /// task on the issue and reports the spawned agent id.
+    #[tokio::test]
+    async fn spawns_one_task_per_resolved_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            "@claude-agent please do X",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spawned, vec!["agent-1".to_string()]);
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// Re-mentioning an agent that already has a pending task on the issue
+    /// coalesces (the per-(issue, agent) unique index) — the second call spawns
+    /// nothing and is not an error, so the trigger is idempotent.
+    #[tokio::test]
+    async fn re_mention_coalesces_and_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let first = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            "@claude-agent do X",
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, vec!["agent-1".to_string()]);
+
+        // A second mention while the first task is still pending must coalesce.
+        let second = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            "@claude-agent again",
+        )
+        .await
+        .unwrap();
+        assert!(
+            second.is_empty(),
+            "a duplicate pending task is coalesced, not re-spawned"
+        );
+        assert_eq!(
+            count_for_issue3(&store).await,
+            1,
+            "still exactly one pending task on the issue"
+        );
+    }
+
+    /// A handle that mentions the same agent twice in one body collapses to a
+    /// single enqueue (the parser de-dupes, and a second insert would coalesce
+    /// anyway).
+    #[tokio::test]
+    async fn duplicate_handle_in_one_body_spawns_one_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            "@claude-agent and also @claude-agent",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spawned, vec!["agent-1".to_string()]);
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// A body with no resolvable mention (unknown handle + plain text) enqueues
+    /// nothing and reports an empty spawn set.
+    #[tokio::test]
+    async fn unknown_handle_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            "@nobody hello and @ghost too",
+        )
+        .await
+        .unwrap();
+
+        assert!(spawned.is_empty());
+        assert_eq!(count_for_issue3(&store).await, 0);
+    }
 }
