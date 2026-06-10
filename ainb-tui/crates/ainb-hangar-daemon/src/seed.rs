@@ -188,6 +188,12 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
             instructions: None,
             visibility: "workspace".into(),
             owner_id: "user-1".into(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
         },
     )
     .await?;

@@ -141,6 +141,12 @@ async fn seed_agent(
             instructions: None,
             visibility: "workspace".to_string(),
             owner_id: owner_id.to_string(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
         },
     )
     .await
