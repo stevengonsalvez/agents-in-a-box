@@ -229,6 +229,17 @@ impl RuntimeHandle {
         self.inner.snapshots.payload(&Topic::from(topic))
     }
 
+    /// Read a snapshot payload plus its monotonic store version.
+    ///
+    /// The version lets pollers act once per publish — track the last
+    /// version seen and only react when it advances. Used by the host's
+    /// event loop to consume `ui.close_request` publishes without a
+    /// subscriber channel.
+    #[must_use]
+    pub fn snapshot_get_versioned(&self, topic: &str) -> Option<(Bytes, u64)> {
+        self.inner.snapshots.get(&Topic::from(topic))
+    }
+
     /// Forward a single normalized key event to the plugin owning the
     /// focused screen. Non-blocking — the per-plugin tokio task picks
     /// the command up off its mpsc inbox and writes the

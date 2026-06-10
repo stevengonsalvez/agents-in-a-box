@@ -49,5 +49,6 @@ pub use ainb_plugin_protocol::{
         RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
         SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
     },
+    topics,
     wire_buffer::{Cell, Color, Coord, WireBuffer},
 };

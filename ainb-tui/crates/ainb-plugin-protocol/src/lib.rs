@@ -11,6 +11,7 @@
 //! - [`manifest`]    — Manifest v2 schema (TOML &harr; Rust)
 //! - [`methods`]     — JSON-RPC method-name constants
 //! - [`params`]      — request/response param structs for every method
+//! - [`topics`]      — reserved snapshot-topic names with host semantics
 //! - [`wire_buffer`] — `WireBuffer` cell-based render output
 
 pub mod errors;
@@ -18,6 +19,7 @@ pub mod framing;
 pub mod manifest;
 pub mod methods;
 pub mod params;
+pub mod topics;
 pub mod wire_buffer;
 
 pub use errors::{ProtocolError, RpcError};

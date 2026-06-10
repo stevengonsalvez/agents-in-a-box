@@ -47,4 +47,5 @@ pub use ainb_plugin_protocol::params::{
     HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent,
     KeyKind, Viewport,
 };
+pub use ainb_plugin_protocol::topics;
 pub use ainb_plugin_protocol::wire_buffer::WireBuffer;
