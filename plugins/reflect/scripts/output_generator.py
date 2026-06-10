@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -109,6 +110,56 @@ def ensure_directories(*dirs: Path):
     """Ensure all required directories exist."""
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# History sidecars (S6: non-destructive note updates)
+# ---------------------------------------------------------------------------
+
+
+def get_history_sidecar_path(note_path: Path) -> Path:
+    """`docs/solutions/{cat}/{slug}.md` -> `{slug}.history.yaml` sibling."""
+    return note_path.with_name(f"{note_path.stem}.history.yaml")
+
+
+def append_history_sidecar(
+    note_path: Path,
+    previous_content: str,
+    reason: str = "update",
+) -> Optional[Path]:
+    """S6: archive the previous form of a knowledge note before overwrite.
+
+    Appends one YAML list item to ``{slug}.history.yaml`` next to the note.
+    The sidecar is append-only and hand-emitted (deterministic literal block
+    scalars, no yaml-lib reflow), so a git diff of an UPDATE shows exactly
+    one added entry — the audit trail is reviewable in the PR itself.
+
+    Returns the sidecar path, or None on failure (silent-fail shaped:
+    a broken snapshot must never block the note write itself).
+    """
+    try:
+        sidecar = get_history_sidecar_path(note_path)
+        content_hash = hashlib.sha256(
+            previous_content.encode("utf-8")
+        ).hexdigest()[:16]
+        # Literal block scalar: every content line indented 4 spaces;
+        # whitespace-only lines emitted empty to keep the block unambiguous.
+        indented = "\n".join(
+            f"    {line}" if line.strip() else ""
+            for line in previous_content.splitlines()
+        )
+        entry = (
+            f'- snapshot_at: "{datetime.now().isoformat()}"\n'
+            f'  reason: "{reason}"\n'
+            f'  content_hash: "{content_hash}"\n'
+            f"  previous: |\n"
+            f"{indented}\n"
+        )
+        with open(sidecar, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+        return sidecar
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +323,16 @@ def create_knowledge_note(
                     content += f"\n## Context\n\n{context}\n"
     except ImportError:  # pragma: no cover — verifier is best-effort
         pass
+
+    # S6: UPDATE (note already on disk, new form differs) → snapshot the old
+    # form into the git-readable `.history.yaml` sidecar before overwriting.
+    if filepath.exists():
+        try:
+            previous = filepath.read_text()
+        except OSError:
+            previous = ""
+        if previous and previous != content:
+            append_history_sidecar(filepath, previous, reason="update")
 
     filepath.write_text(content)
     return filepath, slug

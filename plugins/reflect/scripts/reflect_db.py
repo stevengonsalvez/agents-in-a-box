@@ -275,6 +275,19 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
+_LEARNING_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS learning_history (
+    id              TEXT PRIMARY KEY,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    change_type     TEXT NOT NULL DEFAULT 'update',
+    changed_fields  TEXT NOT NULL DEFAULT '[]',
+    snapshot_json   TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT NOT NULL DEFAULT '',
+    actor           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -287,6 +300,8 @@ CREATE INDEX IF NOT EXISTS idx_index_jobs_learning_id ON index_jobs(learning_id)
 CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_recall_events_learning_id ON recall_events(learning_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_learning_id ON artifacts(learning_id);
+CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
+    ON learning_history(learning_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
@@ -301,6 +316,7 @@ _SCHEMA_DDL = (
     + _INDEX_JOBS_DDL
     + _RECALL_EVENTS_DDL
     + _ARTIFACTS_DDL
+    + _LEARNING_HISTORY_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -449,16 +465,33 @@ def _rebuild_table(
     create_sql: str,
     columns: tuple[str, ...],
 ) -> None:
-    temp_table = f"{table}_old"
+    temp_table = f"{table}_new"
     column_list = ", ".join(columns)
-    with conn:
-        conn.execute(f"ALTER TABLE {table} RENAME TO {temp_table}")
-        conn.execute(create_sql)
-        conn.execute(
-            f"INSERT INTO {table} ({column_list}) "
-            f"SELECT {column_list} FROM {temp_table}"
-        )
-        conn.execute(f"DROP TABLE {temp_table}")
+    # Build the replacement under a temp name, then drop-and-rename. The
+    # naive rename-old-first approach makes ALTER TABLE rewrite every other
+    # table's FOREIGN KEY clause to point at the doomed *_old name (sqlite
+    # rewrites FK references on RENAME), leaving learning_history, artifacts,
+    # index_jobs, and recall_events with dangling FKs once the temp table is
+    # dropped ("no such table: main.learnings_old" on their next insert).
+    # Renaming the *_new table instead rewrites nothing — no FK references
+    # it. foreign_keys must be OFF so dropping the referenced table and the
+    # transient name swap don't trip enforcement (no-op inside a transaction,
+    # so it is toggled outside the ``with conn:`` block).
+    temp_create_sql = create_sql.replace(
+        f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE TABLE {temp_table}", 1
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with conn:
+            conn.execute(temp_create_sql)
+            conn.execute(
+                f"INSERT INTO {temp_table} ({column_list}) "
+                f"SELECT {column_list} FROM {table}"
+            )
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table}")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
@@ -600,6 +633,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_INDEX_JOBS_DDL)
         conn.execute(_RECALL_EVENTS_DDL)
         conn.execute(_ARTIFACTS_DDL)
+        conn.execute(_LEARNING_HISTORY_DDL)
 
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -812,6 +846,15 @@ def update_learning_status(
         details["commit_hash"] = commit_hash
 
     with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_learning_history(
+            learning_id,
+            change_type="status_change",
+            changed_fields=["status", *extras.keys()],
+            reason=revert_reason or f"status -> {status}",
+            conn=conn,
+            autocommit=False,
+        )
         conn.execute(
             f"UPDATE learnings SET {', '.join(set_parts)} WHERE id = ?",
             params,
@@ -901,6 +944,15 @@ def add_learning_proof(
 
     new_proof_count = max(1, int(row.get("proof_count") or 1)) + 1
     with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_learning_history(
+            learning_id,
+            change_type="proof_added",
+            changed_fields=["source_memory_ids", "proof_count"],
+            reason=f"proof_count {row.get('proof_count') or 1} -> {new_proof_count}",
+            conn=conn,
+            autocommit=False,
+        )
         conn.execute(
             "UPDATE learnings SET source_memory_ids = ?, proof_count = ? WHERE id = ?",
             (json.dumps(sources), new_proof_count, learning_id),
@@ -917,6 +969,112 @@ def add_learning_proof(
             autocommit=False,
         )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Learning history (S6: non-destructive belief revision)
+# ---------------------------------------------------------------------------
+
+
+def snapshot_learning_history(
+    learning_id: str,
+    *,
+    change_type: str = "update",
+    changed_fields: Optional[list[str]] = None,
+    reason: str = "",
+    actor: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+    autocommit: bool = True,
+) -> Optional[str]:
+    """S6: snapshot the CURRENT form of a learning before it is mutated.
+
+    Called at the top of every UPDATE path so belief revision is
+    non-destructive — 'why did we change this rule?' stays answerable
+    from the ``learning_history`` audit trail. The whole row is stored
+    as canonical JSON in ``snapshot_json``; ``changed_fields`` records
+    which columns the caller is about to touch.
+
+    Returns the history row id, or None when *learning_id* doesn't
+    exist (nothing to snapshot — mirrors the no-op semantics of the
+    UPDATE paths themselves).
+
+    Like :func:`add_event`, pass ``autocommit=False`` when calling from
+    inside an open ``with conn:`` block so the snapshot commits (or
+    rolls back) atomically with the mutation it precedes.
+    """
+    conn = conn or get_conn()
+    row = get_learning(learning_id, conn=conn)
+    if row is None:
+        return None
+
+    hid = _new_id()
+    sql = """
+        INSERT INTO learning_history
+            (id, learning_id, change_type, changed_fields, snapshot_json,
+             reason, actor, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        hid,
+        learning_id,
+        change_type,
+        json.dumps(sorted(changed_fields or [])),
+        json.dumps(row, sort_keys=True, default=str),
+        reason,
+        actor,
+        _now_iso(),
+    )
+    if autocommit:
+        with conn:
+            conn.execute(sql, params)
+    else:
+        conn.execute(sql, params)
+    return hid
+
+
+def get_learning_history(
+    learning_id: str,
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return history snapshots for a learning, newest first."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM learning_history
+           WHERE learning_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (learning_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_update_counts(
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Per-learning update counts from the history table (most-updated first).
+
+    Powers the reflect-status 'update count per learning' view. Titles
+    come from a LEFT JOIN so snapshots survive even if the learning row
+    is later removed.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT h.learning_id AS learning_id,
+                  COUNT(*) AS update_count,
+                  MAX(h.created_at) AS last_updated_at,
+                  COALESCE(l.title, '') AS title
+           FROM learning_history h
+           LEFT JOIN learnings l ON l.id = h.learning_id
+           GROUP BY h.learning_id
+           ORDER BY update_count DESC, last_updated_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1416,7 +1574,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Reflect SQLite manager")
     parser.add_argument(
         "command",
-        choices=["init", "stats", "events", "doctor"],
+        choices=["init", "stats", "events", "history", "doctor"],
         help="Action to perform",
     )
     parser.add_argument("--limit", type=int, default=20)
@@ -1437,6 +1595,7 @@ def main() -> None:
             "index_jobs",
             "recall_events",
             "artifacts",
+            "learning_history",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
@@ -1447,6 +1606,16 @@ def main() -> None:
                 f"  [{ev['created_at']}] {ev['type']}  "
                 f"learning={ev['learning_id'] or '-'}  "
                 f"{ev['details_json']}"
+            )
+
+    elif args.command == "history":
+        counts = get_update_counts(limit=args.limit, conn=conn)
+        if not counts:
+            print("  no learning updates recorded")
+        for row in counts:
+            print(
+                f"  {row['learning_id']}  updates={row['update_count']}  "
+                f"last={row['last_updated_at']}  {row['title']}"
             )
 
     elif args.command == "doctor":

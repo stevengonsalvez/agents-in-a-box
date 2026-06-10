@@ -158,6 +158,27 @@ programmatic use.
 **If repeat gaps exist**: Suggest capturing learnings for those topics via
 `/reflect` or `/reflect:ingest` — once indexed, the gap stops recurring.
 
+### 8. Learning Update History
+
+Every UPDATE to a learning snapshots its old form into the `learning_history`
+table in `~/.reflect/reflect.db` (and, for knowledge notes, an append-only
+`{slug}.history.yaml` sidecar next to the note). Show the update count per
+learning:
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_db.py history
+```
+
+Shows, per learning (most-updated first):
+- Learning id
+- Update count (history snapshots recorded)
+- Last-updated timestamp
+- Title
+
+**If a learning has an unusually high update count**: its belief keeps getting
+revised — inspect the snapshots (`learning_history.snapshot_json` or the
+`.history.yaml` sidecar) to see why the rule kept changing.
+
 ## Review Mode
 
 When invoked as `reflect review` or when there are pending items, enter review mode.
@@ -266,6 +287,12 @@ Knowledge gap — users keep asking about these with no learnings:
 - **istio sidecar injection failures** — 3 sessions, 5 asks, last 2026-04-11
 - **bun workspace hoisting** — 2 sessions, 2 asks, last 2026-04-09
 Suggest: capture learnings for these topics, then /reflect:ingest
+
+## Learning Update History
+| Learning | Updates | Last Updated |
+|----------|---------|--------------|
+| never use var in this codebase | 4 | 2026-04-12 |
+| prefer uv over pip | 2 | 2026-04-10 |
 
 ## Pending Reviews: 2
 1. [MEDIUM] "Consider cursor-based pagination for large datasets" (5 days)
