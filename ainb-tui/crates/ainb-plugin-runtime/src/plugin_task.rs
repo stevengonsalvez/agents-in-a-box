@@ -150,20 +150,114 @@ pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
 /// plugin screen can't queue behind a backlog of `HandleEvent` chunks.
 pub type MouseInbox = mpsc::UnboundedSender<HandleMouseParams>;
 
-/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
-/// subscriber notifications when a plugin issues `host/snapshot/publish`.
-/// Shared (clone-able `Arc`) with `Runtime`, which maintains it
-/// alongside the public plugin handle map.
+/// Map of `plugin_id → inbox` for snapshot fan-out.
+///
+/// Used by [`PluginTask`] to fan out subscriber notifications when a
+/// plugin issues `host/snapshot/publish`. Shared (clone-able `Arc`) with
+/// `Runtime`, which maintains it alongside the public plugin handle map.
 pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 
-/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`] —
-/// when a plugin's `host/snapshot/publish` fans out to subscribers,
-/// each subscriber's flag is set so the host's render-tick loop knows
-/// to kick a `plugin/render` for it. Without this the dirty bit set
-/// on the host-side `publish_snapshot` path would miss every
-/// plugin→plugin publish (session-reader → burndown is the load-bearing
-/// case).
+/// Map of `plugin_id → render-dirty flag`.
+///
+/// Mirrors [`InboxMap`] — when a plugin's `host/snapshot/publish` fans
+/// out to subscribers, each subscriber's flag is set so the host's
+/// render-tick loop knows to kick a `plugin/render` for it. Without this
+/// the dirty bit set on the host-side `publish_snapshot` path would miss
+/// every plugin→plugin publish (session-reader → burndown is the
+/// load-bearing case).
 pub type DirtyMap = Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::atomic::AtomicBool>>>>;
+
+/// Maximum number of *consecutive* self-requested redraw frames the host
+/// will honor before it stops re-marking the plugin's render-dirty flag.
+///
+/// `RenderResult.redraw` is a `requestAnimationFrame` analogue: a plugin
+/// returns `redraw = true` to ask the host to paint it again next tick
+/// without waiting for input. A well-behaved plugin uses it for short,
+/// self-terminating animations (the radial-map recentre is ~6 frames; a
+/// search spinner runs for the search duration — seconds). A buggy or
+/// malicious plugin can return `redraw = true` *forever*, sustaining a
+/// ~30 FPS render+repaint loop with no input — real battery/CPU drain
+/// with no designed defense (the 33 ms input poll in `main.rs` is an
+/// incidental backstop, not a cap).
+///
+/// At the host's ~30 FPS render cadence this bound is ≈ 20 s of
+/// uninterrupted self-animation. That comfortably clears every
+/// legitimate animation we ship or expect (a multi-second spinner is
+/// ~150-300 frames) while bounding a runaway: once the streak exceeds
+/// the cap the host logs one `warn!` and stops honoring the hint until
+/// the streak is broken by an input event or a `redraw = false` frame,
+/// either of which resets the counter and re-arms the animation.
+pub const MAX_CONSECUTIVE_REDRAWS: u32 = 600;
+
+/// Per-plugin runaway-redraw guard.
+///
+/// Counts *uninterrupted* `redraw = true` frames — a streak with no
+/// intervening input event and no `redraw = false` render. While the
+/// streak is at or below [`MAX_CONSECUTIVE_REDRAWS`] each redraw hint is
+/// honored (the dirty flag is re-marked, kicking the next paint). Once
+/// the streak exceeds the cap the governor latches "tripped": it stops
+/// honoring redraw hints (returns `false` from
+/// [`should_honor_redraw`](Self::should_honor_redraw)) and logs exactly
+/// one warning. Any input-driven render or `redraw = false` frame calls
+/// [`reset`](Self::reset), clearing the streak and the latch so a fresh
+/// animation can run.
+#[derive(Debug, Default)]
+struct RedrawGovernor {
+    /// Length of the current uninterrupted `redraw = true` streak.
+    consecutive: u32,
+    /// `true` once the streak first exceeded the cap; suppresses both
+    /// further honoring and repeat warnings until the next `reset`.
+    tripped: bool,
+}
+
+impl RedrawGovernor {
+    /// Record one `redraw = true` frame and decide whether to honor it.
+    ///
+    /// `honor` is `true` while the consecutive-redraw streak is within the
+    /// [`MAX_CONSECUTIVE_REDRAWS`] budget (re-mark dirty), `false` once it
+    /// has been exceeded (drop the hint). `just_tripped` is `true` exactly
+    /// on the frame the cap is first crossed, so the caller can emit a
+    /// single `warn!`.
+    const fn observe_redraw(&mut self) -> RedrawDecision {
+        if self.tripped {
+            // Already over budget — keep dropping hints silently until a
+            // reset re-arms the animation.
+            return RedrawDecision {
+                honor: false,
+                just_tripped: false,
+            };
+        }
+        self.consecutive = self.consecutive.saturating_add(1);
+        if self.consecutive > MAX_CONSECUTIVE_REDRAWS {
+            self.tripped = true;
+            RedrawDecision {
+                honor: false,
+                just_tripped: true,
+            }
+        } else {
+            RedrawDecision {
+                honor: true,
+                just_tripped: false,
+            }
+        }
+    }
+
+    /// Break the streak: an input-driven render or a `redraw = false`
+    /// frame arrived, so the next self-animation starts from a clean
+    /// budget. Clears both the counter and the tripped latch.
+    const fn reset(&mut self) {
+        self.consecutive = 0;
+        self.tripped = false;
+    }
+}
+
+/// Outcome of [`RedrawGovernor::observe_redraw`].
+struct RedrawDecision {
+    /// Honor the redraw hint (re-mark the plugin's render-dirty flag)?
+    honor: bool,
+    /// Did this frame just cross the cap (emit the one-shot warning)?
+    just_tripped: bool,
+}
 
 /// Spawn a per-plugin task and return its command inbox, key inbox, and
 /// render cache.
@@ -209,6 +303,7 @@ pub fn spawn(
         respawn_attempts: 0,
         last_used: Instant::now(),
         child: None,
+        redraw_governor: RedrawGovernor::default(),
     };
     handle.spawn(task.run());
     (tx, key_tx, mouse_tx, cache, state)
@@ -272,6 +367,10 @@ struct PluginTask {
     respawn_attempts: usize,
     last_used: Instant,
     child: Option<ChildState>,
+    /// Runaway-redraw guard. Bounds how many uninterrupted
+    /// `RenderResult.redraw = true` frames the host will honor before it
+    /// stops re-marking the render-dirty flag — see [`RedrawGovernor`].
+    redraw_governor: RedrawGovernor,
 }
 
 impl PluginTask {
@@ -292,13 +391,11 @@ impl PluginTask {
                 // 100k+ call dataset) would starve Esc and other
                 // navigation keys until the chunks drained.
                 biased;
-                key = self.key_rx.recv() => match key {
-                    Some(params) => self.handle_key_command(params).await,
-                    None => {}
+                key = self.key_rx.recv() => if let Some(params) = key {
+                    self.handle_key_command(params).await;
                 },
-                mouse = self.mouse_rx.recv() => match mouse {
-                    Some(params) => self.handle_mouse_command(params).await,
-                    None => {}
+                mouse = self.mouse_rx.recv() => if let Some(params) = mouse {
+                    self.handle_mouse_command(params).await;
                 },
                 cmd = self.rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
@@ -322,6 +419,11 @@ impl PluginTask {
     /// priority channel rather than the multiplexed command channel.
     async fn handle_key_command(&mut self, params: HandleKeyParams) {
         self.last_used = Instant::now();
+        // A keystroke is interactivity: re-arm the redraw governor so a
+        // self-animation that follows the input (e.g. a recentre kicked
+        // off by an arrow key) starts from a fresh frame budget even if a
+        // prior animation had tripped the cap.
+        self.redraw_governor.reset();
         if self.child.is_none() {
             // No process to push to. A key pressed before the plugin
             // is spawned has no plausible destination — the user
@@ -339,6 +441,9 @@ impl PluginTask {
     /// sourced from the priority mouse channel.
     async fn handle_mouse_command(&mut self, params: HandleMouseParams) {
         self.last_used = Instant::now();
+        // Mouse input is interactivity too — re-arm the redraw governor
+        // for the same reason as `handle_key_command`.
+        self.redraw_governor.reset();
         if self.child.is_none() {
             // No process to push to — a click before the plugin spawns
             // has no plausible destination, so drop it rather than replay.
@@ -591,10 +696,38 @@ impl PluginTask {
                             // again next tick. Re-mark its render-dirty flag
                             // so the host's render loop kicks another
                             // `plugin/render` without waiting for input.
+                            //
+                            // Bounded by the per-plugin `redraw_governor`:
+                            // a finite N-frame animation gets all N
+                            // re-marks, but an unbounded `redraw = true`
+                            // stream is cut off after
+                            // `MAX_CONSECUTIVE_REDRAWS` so a buggy/malicious
+                            // plugin can't sustain a battery-draining
+                            // render loop forever. A `redraw = false` frame
+                            // here resets the streak, re-arming the
+                            // governor for the next animation (input events
+                            // reset it too — see `handle_key_command` /
+                            // `handle_mouse_command`).
                             if rr.redraw {
-                                if let Some(flag) = self.dirty.read().get(&self.plugin.id) {
-                                    flag.store(true, std::sync::atomic::Ordering::Release);
+                                let decision = self.redraw_governor.observe_redraw();
+                                if decision.just_tripped {
+                                    warn!(
+                                        plugin = %self.plugin.id,
+                                        cap = MAX_CONSECUTIVE_REDRAWS,
+                                        "plugin exceeded consecutive self-redraw cap; \
+                                         ignoring its redraw hint until the next input \
+                                         or non-redraw frame"
+                                    );
                                 }
+                                if decision.honor {
+                                    if let Some(flag) = self.dirty.read().get(&self.plugin.id) {
+                                        flag.store(true, std::sync::atomic::Ordering::Release);
+                                    }
+                                }
+                            } else {
+                                // A settled (non-redraw) frame ends any
+                                // active self-animation streak.
+                                self.redraw_governor.reset();
                             }
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
@@ -679,7 +812,7 @@ impl PluginTask {
             debug!(plugin = %self.plugin.id, id, bytes = body.len(), "host->plugin response: writing");
             match write_frame(&mut cs.stdin, &body).await {
                 Ok(()) => {
-                    debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK")
+                    debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK");
                 }
                 Err(e) => warn!(plugin = %self.plugin.id, id, "write response: {e}"),
             }
@@ -736,11 +869,11 @@ impl PluginTask {
             .map_err(|e| RpcError::invalid_params(format!("read_dir {}: {e}", p.path)))?;
         for entry in read.flatten() {
             let meta = entry.metadata();
-            let is_dir = meta.as_ref().map(std::fs::Metadata::is_dir).unwrap_or(false);
+            let is_dir = meta.as_ref().is_ok_and(std::fs::Metadata::is_dir);
             let size = if is_dir {
                 0
             } else {
-                meta.map(|m| m.len()).unwrap_or(0)
+                meta.map_or(0, |m| m.len())
             };
             entries.push(FsDirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
@@ -1169,7 +1302,10 @@ mod tests {
     //! the keyword (or reorders the branches) trips a unit-level
     //! regression rather than a TUI freeze observed in production.
 
-    use super::{HandleKeyParams, collect_granted_capabilities, resolve_against_existing_ancestor};
+    use super::{
+        HandleKeyParams, MAX_CONSECUTIVE_REDRAWS, RedrawGovernor, collect_granted_capabilities,
+        resolve_against_existing_ancestor,
+    };
     use ainb_plugin_protocol::manifest::{
         Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, Subscribes,
     };
@@ -1332,5 +1468,110 @@ mod tests {
             }
             assert_eq!(remaining, 100);
         });
+    }
+
+    /// A finite, self-terminating animation must get *every* frame
+    /// honored — the governor only bounds runaways, never clips a
+    /// legitimate animation. Models the radial-map recentre (~6 frames)
+    /// and, by clearing the cap, a multi-second spinner.
+    #[test]
+    fn governor_honors_full_finite_animation() {
+        let mut gov = RedrawGovernor::default();
+
+        // (a) A short animation: a handful of redraw frames, all honored.
+        for frame in 0..6 {
+            let d = gov.observe_redraw();
+            assert!(d.honor, "finite animation frame {frame} must be honored");
+            assert!(!d.just_tripped, "short animation must not trip the cap");
+        }
+        // A settled (non-redraw) frame ends the animation and re-arms the
+        // budget — exactly what the runtime does in the `else` arm.
+        gov.reset();
+
+        // (b) A long-but-finite spinner that runs right up to the cap:
+        // every one of `MAX_CONSECUTIVE_REDRAWS` frames is still honored,
+        // and the cap is never crossed.
+        for frame in 0..MAX_CONSECUTIVE_REDRAWS {
+            let d = gov.observe_redraw();
+            assert!(
+                d.honor,
+                "spinner frame {frame} (≤ cap) must be honored, streak still in budget"
+            );
+            assert!(!d.just_tripped, "frame {frame} (≤ cap) must not trip");
+        }
+        // The plugin then settles — animation done, no warning ever fired.
+        gov.reset();
+        assert_eq!(gov.consecutive, 0, "reset clears the streak");
+        assert!(!gov.tripped, "a finite animation never trips the latch");
+    }
+
+    /// An unbounded `redraw = true` stream is cut off once it exceeds the
+    /// cap: the governor stops honoring the hint and signals the one-shot
+    /// warning exactly once. After an input event (`reset`) the animation
+    /// is re-armed and honored again.
+    #[test]
+    fn governor_cuts_off_runaway_and_resumes_after_input() {
+        let mut gov = RedrawGovernor::default();
+
+        // Frames 1..=cap are honored (proven above); drive straight to the
+        // budget edge.
+        for _ in 0..MAX_CONSECUTIVE_REDRAWS {
+            assert!(gov.observe_redraw().honor);
+        }
+
+        // The very next frame crosses the cap: dropped, and the one-shot
+        // warning fires exactly here.
+        let trip = gov.observe_redraw();
+        assert!(!trip.honor, "frame past the cap must be dropped");
+        assert!(
+            trip.just_tripped,
+            "crossing the cap must signal the warning"
+        );
+
+        // Every subsequent runaway frame is dropped *silently* — no repeat
+        // warnings, no re-marks — for as long as the plugin keeps spamming.
+        for _ in 0..10_000 {
+            let d = gov.observe_redraw();
+            assert!(!d.honor, "runaway frame must stay dropped");
+            assert!(!d.just_tripped, "the warning must fire only once");
+        }
+
+        // An input event resets the governor (the runtime calls `reset`
+        // from `handle_key_command` / `handle_mouse_command`). The next
+        // self-animation is honored again from a clean budget.
+        gov.reset();
+        let after_input = gov.observe_redraw();
+        assert!(
+            after_input.honor,
+            "redraw after an input event must be honored again"
+        );
+        assert!(!after_input.just_tripped);
+        assert_eq!(gov.consecutive, 1, "streak restarts at 1 after reset");
+    }
+
+    /// A `redraw = false` frame mid-stream resets the streak just like an
+    /// input event would — a brief settle between animations never trips
+    /// the cap even if the total frame count exceeds it.
+    #[test]
+    fn governor_resets_on_non_redraw_frame() {
+        let mut gov = RedrawGovernor::default();
+
+        // Two back-to-back animations, each just under the cap, separated
+        // by a settle. Without the reset their combined length would trip
+        // the cap; with it, neither does.
+        for _ in 0..MAX_CONSECUTIVE_REDRAWS {
+            assert!(gov.observe_redraw().honor);
+        }
+        gov.reset(); // models the runtime's `redraw = false` else-arm
+        for _ in 0..MAX_CONSECUTIVE_REDRAWS {
+            assert!(
+                gov.observe_redraw().honor,
+                "second animation after a settle must be fully honored"
+            );
+        }
+        assert!(
+            !gov.tripped,
+            "a settle between animations must avoid the trip"
+        );
     }
 }
