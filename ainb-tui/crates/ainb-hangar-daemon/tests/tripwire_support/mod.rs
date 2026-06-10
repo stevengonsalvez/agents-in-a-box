@@ -81,6 +81,61 @@ pub async fn seed_world(pool: &SqlitePool) -> SeededIds {
     ids
 }
 
+/// Seed a `codex` runtime + agent into an already-seeded world (e38.16 routing
+/// tripwire). Returns the new `(runtime_id, agent_id)`.
+///
+/// The agent carries a `model` override (`gpt-5-codex`) and a `cli_args`
+/// (`["--full-auto"]`) so the routing test can also assert the daemon threads
+/// the migration-0015 config onto the codex argv.
+pub async fn seed_codex_agent(pool: &SqlitePool, ids: &SeededIds) -> (String, String) {
+    let runtime_id = "rt-codex".to_string();
+    let agent_id = "agent-codex".to_string();
+    sqlx::query(
+        "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&runtime_id)
+    .bind(&ids.workspace_id)
+    .bind("daemon-codex")
+    .bind("codex")
+    .bind("local")
+    .execute(pool)
+    .await
+    .expect("insert codex runtime");
+    sqlx::query(
+        "INSERT INTO agent \
+         (id, workspace_id, name, runtime_id, visibility, owner_id, max_concurrent_tasks, \
+          model, cli_args) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&agent_id)
+    .bind(&ids.workspace_id)
+    .bind("CodexAgent")
+    .bind(&runtime_id)
+    .bind("workspace")
+    .bind("user-trip")
+    .bind(5_i64)
+    .bind("gpt-5-codex")
+    .bind(r#"["--full-auto"]"#)
+    .execute(pool)
+    .await
+    .expect("insert codex agent");
+    (runtime_id, agent_id)
+}
+
+/// Write an executable `fake-codex.sh` that mimics `codex exec`: it emits a
+/// `system` line carrying `session_id`, echoes its own argv as a plain line (so
+/// the routing test can assert the `exec` subcommand + `-m <model>` landed),
+/// then a `result` line, and exits 0.
+pub fn fake_codex_happy(dir: &Path, session_id: &str) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\necho '{{\"type\":\"system\",\"session_id\":\"{session_id}\"}}'\n\
+         echo \"ARGV=$*\"\n\
+         echo '{{\"type\":\"result\",\"content\":\"codex-ok\"}}'\nexit 0\n"
+    );
+    write_executable(dir, "fake-codex.sh", &body)
+}
+
 /// Write an executable `fake-claude.sh` that emits a `system` line carrying
 /// `session_id`, then a `result` line, then exits 0.
 pub fn fake_claude_happy(dir: &Path, session_id: &str) -> PathBuf {
