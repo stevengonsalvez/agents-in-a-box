@@ -12,6 +12,7 @@ members = [
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
     "crates/ainb-plugin-witr",
+    "crates/ainb-plugin-abtop",
     "crates/ainb-hangar-core",
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",

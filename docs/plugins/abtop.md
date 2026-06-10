@@ -1,0 +1,120 @@
+---
+title: "abtop plugin"
+description: "Integrates the external abtop binary (top-for-agents) as a full-screen ainb screen, CLI, and sidebar entry — real-time monitoring of every AI coding agent on your machine."
+---
+
+`abtop` surfaces real-time AI coding-agent monitoring inside ainb by wrapping the external [`abtop`](https://github.com/graykode/abtop) binary. It is a **subprocess-wrapping** plugin in the same pattern as [`witr`](./witr.md): pressing `t` in ainb hands the full terminal to abtop's own native TUI, returning to ainb on quit — every abtop key works natively, no translation layer.
+
+![abtop full journey — sidebar select, first-launch consent, live monitor, return to ainb](../assets/screenshots/abtop-journey.gif)
+
+*Press `t` from any ainb screen (or select the `abtop` sidebar tile) to open abtop's live agent-monitor full-screen. First launch shows the rate-limit consent dialog.*
+
+## What is abtop?
+
+abtop is a `htop`-style TUI that watches every AI coding agent (Claude Code, Codex, and others) running on the machine: token usage, rate-limit headroom, cost burn, active sessions, and hook-triggered status updates. It is maintained by [graykode](https://github.com/graykode/abtop) and is never bundled into ainb — it is detected at runtime.
+
+## How it works
+
+The screen is a **host-embedded foreign TTY**, exactly like witr. abtop's value is its own live interactive monitor — there is no machine-readable wire format for the live view. Pressing `t` (or the sidebar tile 📡) queues `AsyncAction::AttachAbtop`: ainb runs `tmux new-session -A -d -s ainb-abtop "abtop --exit-on-jump"`, suspends its own TUI, and attaches full-screen to abtop's native monitor. When the user quits abtop, ainb resumes. The plugin's `render` method is never invoked for the screen; this wiring lives entirely in `ainb-core`.
+
+The **CLI** path is different: `ainb abtop [args]` execs `abtop --once [args]` directly, inheriting the parent terminal's stdio so abtop's `--once` snapshot prints cleanly (it only emits a one-shot snapshot against a real TTY, then exits). Args are forwarded verbatim, so any flag abtop itself accepts works: `ainb abtop --theme <name>`, etc. (The in-tree `ainb-plugin-abtop` crate also exposes the same surface over `plugin/cli_dispatch` for the plugin harness, but the live `ainb abtop` command is wired directly in `ainb-core`.)
+
+**First-launch consent** — abtop ships an optional `--setup` hook that installs a Claude Code `StatusLine` hook to feed live rate-limit data. On the very first open of the screen, ainb displays a one-time dialog so the user can opt in (or skip) before anything writes to `~/.claude`. ainb never writes `~/.claude` without an explicit "Enable" choice.
+
+## Capabilities
+
+| Capability | Declared value | Why it is needed |
+|---|---|---|
+| `spawn_subprocess` | `["abtop"]` | Exec `abtop --once` (CLI path) and `abtop --exit-on-jump` (the full-screen handoff). Detection is a `PATH` lookup (`which abtop`) — present/absent only, no version probe and no exec. The list form is per-binary audit metadata. |
+
+All other capabilities (`read_sessions`, `read_claude_logs`, `read_codex_logs`, `write_plugin_data`, `event_bus`, `network`) are left at their deny default.
+
+## Using it
+
+### Screen (`t` key)
+
+Press `t` from any ainb screen, or select the `abtop` / "top-for-agents" entry in the sidebar (shortcut `t`, icon 📡).
+
+ainb suspends and full-screen-attaches to abtop's native TUI running inside a managed tmux session (`ainb-abtop`). Every abtop key works natively — ainb does not intercept or translate them. Press `q` (or abtop's quit binding) to close abtop and return to ainb.
+
+If abtop is not on `PATH`, the screen renders an install empty-state with the canonical install command for your platform rather than silently failing.
+
+### First-launch consent dialog
+
+![abtop first-launch consent — Enable / Just open abtop / Don't ask again](../assets/screenshots/abtop-consent.gif)
+
+On the very first time the screen is opened, ainb shows a one-time consent dialog:
+
+| Choice | What happens |
+|---|---|
+| **Enable** | Runs `abtop --setup` to install the Claude Code `StatusLine` hook, then opens the monitor. ainb writes to `~/.claude` only on this path. |
+| **Just open abtop** | Opens abtop without running setup. The hook is not installed. Dialog shown again next time. |
+| **Don't ask again** | Opens abtop without running setup, and suppresses future prompts. The choice is persisted as a marker file under `~/.agents-in-a-box/`. |
+
+The dialog also stops appearing once the rate-limit hook has been installed (ainb detects `~/.claude/abtop-rate-limits.json`). You can re-run the hook setup at any time by invoking `abtop --setup` directly.
+
+### Live monitor
+
+![abtop live agent monitor](../assets/screenshots/abtop-monitor.gif)
+
+Once open, you are in abtop's own interactive TUI. All of abtop's modal keys pass through natively. Common navigation (taken directly from abtop):
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Select an agent row |
+| `Enter` | Jump to the selected agent's tmux pane (then exits abtop back to ainb, via `--exit-on-jump`) |
+| `x` | Kill the selected session |
+| `/` | Filter sessions |
+| `v` | View menu (tree, timeline, panel toggles) |
+| `c` | Config overlay |
+| `?` | Help — abtop's full keybinding list |
+| `q` | Quit abtop, return to ainb |
+
+These are abtop's own keys (verified against the v0.4.7 footer bar), not ainb's — press `?` inside abtop, or see [abtop's docs](https://github.com/graykode/abtop), for the complete reference.
+
+### CLI (`ainb abtop`)
+
+`ainb abtop` shells `abtop --once` and exits. Any extra args are appended after `--once` and forwarded verbatim to the binary:
+
+```sh
+ainb abtop                     # one-shot status snapshot (runs `abtop --once`)
+ainb abtop --theme <name>      # forwarded verbatim → `abtop --once --theme <name>`
+```
+
+abtop emits human-readable text only — it has no JSON mode, so there is no `--format json` variant here. Because the command always prepends `--once`, it is for snapshots; the full-screen monitor and the one-time `abtop --setup` hook are reached from the TUI (press `t`), not from `ainb abtop`.
+
+If abtop is not found on `PATH`, the CLI prints an install hint and exits with code 1.
+
+## Installing abtop
+
+abtop is an external binary maintained by [graykode](https://github.com/graykode/abtop). ainb detects it at runtime — install whichever way fits your environment:
+
+**macOS (Homebrew — recommended)**
+
+```sh
+brew install graykode/tap/abtop
+```
+
+**Linux (installer script)**
+
+```sh
+curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh
+```
+
+**Any platform (Cargo)**
+
+```sh
+cargo install abtop
+```
+
+After installing, confirm it is on `PATH`:
+
+```sh
+abtop --version
+```
+
+ainb picks up the binary on the next launch; no ainb restart is required within an existing session.
+
+## Source
+
+`crates/ainb-plugin-abtop` — detects the external `abtop` binary, owns the `ainb abtop` CLI via `abtop --once` exec, handles first-launch consent state, and renders the missing/install empty state; the foreign-TTY screen handoff (`t` → `abtop --exit-on-jump`) is wired in `ainb-core`.
