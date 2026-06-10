@@ -91,7 +91,7 @@ impl LayoutComponent {
                 Constraint::Length(3), // Top status bar
                 Constraint::Min(0),    // Main content area
                 Constraint::Length(3), // Session info (single line + borders)
-                Constraint::Length(5), // Bottom menu bar (3 lines + borders)
+                Constraint::Length(6), // Bottom menu bar (4 lines + borders)
             ])
             .split(frame.size());
 
@@ -233,11 +233,11 @@ impl LayoutComponent {
         let sep = || Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER));
         let red = Color::Rgb(230, 100, 100);
 
-        // Line 1: Navigation + selection + inbox. The inbox shortcut lives
-        // here because line 1 has the most slack; its unread badge can grow
-        // and must not push the bar past the 80-col minimum (see the
+        // Line 1: Navigation + selection. Panel shortcuts (inbox/stats/
+        // witr/skills) moved to line 4 so the unread badge can grow
+        // without pushing this line past the 80-col minimum (see the
         // `menu_bar_keys_not_truncated_at_80_cols` test).
-        let mut line1_spans = vec![
+        let line1_spans = vec![
             key("n", GOLD),
             desc("ew "),
             key("E", GOLD),
@@ -256,27 +256,6 @@ impl LayoutComponent {
             key("s", GOLD),
             desc("tar"),
         ];
-
-        // ainb-hooks inbox shortcut on the menu bar. Always shown so users
-        // can discover the Inbox screen even on a fresh install with zero
-        // events. When the store reports unread + non-dismissed rows, a
-        // `● N` glyph is rendered alongside the `b inbox` hint. The count is
-        // capped at `99+` so a large backlog can't widen the bar unbounded.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
-        line1_spans.push(sep());
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            line1_spans.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
-        line1_spans.push(key("b", GOLD));
-        line1_spans.push(desc(" inbox"));
 
         // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
         let line2_spans = vec![
@@ -299,7 +278,7 @@ impl LayoutComponent {
             desc(" commit"),
         ];
 
-        // Line 3: Tools + System
+        // Line 3: Tools
         let line3_spans = vec![
             key("c", WARNING_ORANGE),
             desc("laude "),
@@ -311,17 +290,51 @@ impl LayoutComponent {
             desc(" cleanup"),
             sep(),
             key("A", MUTED_GRAY),
-            desc(" re-auth "),
+            desc(" re-auth"),
+        ];
+
+        // Line 4: Panels + System. Every panel screen mirrors its
+        // home-menu letter here (the session-list key handler binds the
+        // same set), and closing a panel returns to this screen. The
+        // inbox hint is always shown so users can discover the Inbox
+        // screen even on a fresh install with zero events. When the
+        // store reports unread + non-dismissed rows, a `● N` glyph is
+        // rendered alongside the `b inbox` hint, capped at `99+` so a
+        // large backlog can't widen the bar unbounded.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut line4_spans = Vec::new();
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            line4_spans.push(Span::styled(
+                badge,
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        line4_spans.extend([
+            key("b", GOLD),
+            desc(" inbox "),
+            key("i", GOLD),
+            desc(" stats "),
+            key("w", GOLD),
+            desc(" witr "),
+            key("k", GOLD),
+            desc(" skills"),
+            sep(),
             key("?/H", CORNFLOWER_BLUE),
             desc(" help "),
             key("q", CORNFLOWER_BLUE),
             desc(" home"),
-        ];
+        ]);
 
         let menu_lines = vec![
             Line::from(line1_spans),
             Line::from(line2_spans),
             Line::from(line3_spans),
+            Line::from(line4_spans),
         ];
 
         let menu = Paragraph::new(menu_lines)
@@ -1055,7 +1068,7 @@ mod menu_bar_tests {
 
     /// Render the menu bar at the conventional 80-column minimum and assert
     /// every advertised key token survives — i.e. nothing is silently
-    /// truncated off either end of the centered three-line bar. This guards
+    /// truncated off either end of the centered four-line bar. This guards
     /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
     /// inbox) overflowed 80 cols and clipped the inbox shortcut.
     #[test]
@@ -1066,7 +1079,7 @@ mod menu_bar_tests {
 
         let layout = LayoutComponent::new();
         let state = AppState::default();
-        let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
         terminal
             .draw(|f| {
                 let area = f.size();
@@ -1101,6 +1114,9 @@ mod menu_bar_tests {
             "?/H",      // help
             "home",     // q
             "inbox",    // b
+            "stats",    // i — analytics panel
+            "witr",     // w — process-causality browser
+            "skills",   // k — skills browser
         ] {
             assert!(
                 rendered.contains(token),
@@ -1109,12 +1125,12 @@ mod menu_bar_tests {
         }
 
         // Stronger guard: the centered Paragraph truncates from both ends when
-        // a line is wider than the inner area. Each of the 3 content rows
-        // (rows 1..=3; rows 0 and 4 are the rounded border) must therefore
+        // a line is wider than the inner area. Each of the 4 content rows
+        // (rows 1..=4; rows 0 and 5 are the rounded border) must therefore
         // keep at least one space of padding against both inner edges — if a
         // row filled edge-to-edge it would mean content was clipped.
         let buf = terminal.backend().buffer();
-        for y in 1..=3u16 {
+        for y in 1..=4u16 {
             let left = buf.get(1, y).symbol().to_string();
             let right = buf.get(78, y).symbol().to_string();
             assert!(

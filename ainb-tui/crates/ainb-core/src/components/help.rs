@@ -55,7 +55,13 @@ impl HelpComponent {
             ListItem::new("Tools:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  c          Toggle Claude chat"),
+            ListItem::new(""),
+            ListItem::new("Panels (Esc returns here):")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  b          Inbox"),
+            ListItem::new("  i          Stats (usage analytics)"),
+            ListItem::new("  w          Witr (process browser)"),
+            ListItem::new("  k          Skills browser"),
             ListItem::new(""),
             ListItem::new("Views:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
