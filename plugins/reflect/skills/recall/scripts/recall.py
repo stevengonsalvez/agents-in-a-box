@@ -41,7 +41,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +190,42 @@ _STOPWORDS = frozenset(
 # synthetic cwd/branch strings, not genuine asks, and would surface as fake
 # gaps every session).
 GAP_LOG_ENABLED = os.environ.get("RECALL_GAP_LOG", "1") != "0"
+
+# A4: followup-rate diagnostic (agentmemory smart-search shape). The most
+# recent search per session is tracked in ~/.reflect/recent-searches.json;
+# when the NEXT recall in the same session arrives within the window (default
+# 30s) asking something different and returning a result set fully DISJOINT
+# from the prior one, the search counts as a "followup" — the empirical
+# "recall didn't satisfy the first time" signal. Every tracked search appends
+# an op="recall_search" line (followup: true/false) to the engine's
+# metrics.jsonl (~/.learnings/metrics.jsonl) so the followup rate is
+# computable offline (`reflect_cost.py --followup`, surfaced by the
+# /reflect:cost skill). Skip rules match the source: no session anchor → not
+# tracked; empty result sets are retrieval failures (SG6 logs those as
+# knowledge gaps), not reader failures; an identical query inside the window
+# is a retry, not a followup. Disable with RECALL_FOLLOWUP=0 or the
+# --no-followup flag (the SessionStart hook passes the flag — its synthetic
+# cwd/branch queries chased by a genuine first ask would inflate the rate
+# every session). Window tunable via RECALL_FOLLOWUP_WINDOW_SECONDS.
+FOLLOWUP_ENABLED = os.environ.get("RECALL_FOLLOWUP", "1") != "0"
+DEFAULT_FOLLOWUP_WINDOW_SECONDS = 30.0
+# State-file pruning horizon — the on-read analog of agentmemory's hourly
+# TTL sweep over its recent-searches scope: entries older than this are
+# dropped on every write so the file can't grow without bound.
+FOLLOWUP_STATE_MAX_AGE_SECONDS = 3600.0
+
+
+def _followup_window_seconds() -> float:
+    """A4: detection window, env-tunable, floored at 1s (source's
+    Math.max(1, …) guard); unparseable values fall back to the default."""
+    raw = os.environ.get("RECALL_FOLLOWUP_WINDOW_SECONDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    return max(1.0, value)
 
 # R9: fuzzy cache tier (ByteRover query-executor Tier 0/1 shape). The exact
 # per-query cache only hits on byte-identical queries; sessions re-ask slight
@@ -1669,6 +1705,148 @@ def log_knowledge_gap(query: str, session_id: str | None = None) -> None:
         pass
 
 
+def _recent_searches_path() -> Path:
+    """A4: per-session most-recent-search state file."""
+    base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
+    return base / "recent-searches.json"
+
+
+def _metrics_jsonl_path() -> Path:
+    """A4: the engine's append-only metrics log (~/.learnings/metrics.jsonl,
+    the file reflect-kb's write_metric appends to). REFLECT_METRICS_PATH
+    overrides for tests / relocated installs."""
+    override = (os.environ.get("REFLECT_METRICS_PATH") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".learnings" / "metrics.jsonl"
+
+
+def track_followup(
+    query: str,
+    result_ids: list[str],
+    session_id: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    """A4: record this search as the session's most recent and report whether
+    it is a followup to the previous one.
+
+    A followup = the session's prior search happened within the window,
+    asked something DIFFERENT (same query inside the window is a retry from
+    a flaky caller, not a followup), and its result-id set shares NOTHING
+    with this one — the agent searched again because the first answer didn't
+    satisfy. Stale per-session entries are pruned on every write (the
+    on-read analog of agentmemory's hourly sweep). State-file IO is
+    best-effort: an unreadable/corrupt file means "no prior", never a crash.
+    """
+    now = time.time() if now is None else now
+    path = _recent_searches_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        data = {}
+
+    prior = data.get(session_id)
+    max_age = max(_followup_window_seconds(), FOLLOWUP_STATE_MAX_AGE_SECONDS)
+    data = {
+        sid: entry
+        for sid, entry in data.items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("at"), (int, float))
+        and 0 <= now - entry["at"] <= max_age
+    }
+    data[session_id] = {
+        "query": query,
+        "result_ids": [str(rid) for rid in result_ids],
+        "at": now,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+    if not isinstance(prior, dict):
+        return False
+    prior_at = prior.get("at")
+    if not isinstance(prior_at, (int, float)):
+        return False
+    if not 0 <= now - prior_at <= _followup_window_seconds():
+        return False
+    if prior.get("query") == query:
+        return False  # retry, not a followup
+    raw_prior_ids = prior.get("result_ids")
+    prior_ids = (
+        {str(rid) for rid in raw_prior_ids}
+        if isinstance(raw_prior_ids, list)
+        else set()
+    )
+    if not prior_ids:
+        return False
+    return prior_ids.isdisjoint(str(rid) for rid in result_ids)
+
+
+def log_followup_metric(
+    query: str, session_id: str, followup: bool, result_count: int,
+) -> None:
+    """A4: append the search's followup verdict to metrics.jsonl.
+
+    Same record shape as the engine's write_metric ({ts, op, …}); the
+    followup rate over a window = mean(followup) across op="recall_search"
+    lines. Silent-fail like every other log writer in this script.
+    """
+    path = _metrics_jsonl_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "op": "recall_search",
+                        "session_id": session_id,
+                        "followup": bool(followup),
+                        "window_seconds": _followup_window_seconds(),
+                        "result_count": result_count,
+                        "query": query[:200],
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+def record_followup_diagnostic(
+    query: str,
+    learnings: list[Learning],
+    session_id: str | None,
+    enabled: bool,
+) -> None:
+    """A4: shared tail for both recall() return paths. Never raises.
+
+    Skips: diagnostic disabled (env gate ANDed with the caller's flag),
+    empty result set (retrieval failure — SG6's territory, counting it
+    would inflate the rate on every miss), or no session anchor (explicit
+    --session-id, then $CLAUDE_SESSION_ID; SG6's per-day pseudo-id fallback
+    is NOT used here — it would conflate parallel anonymous sessions inside
+    the 30s window).
+    """
+    if not (FOLLOWUP_ENABLED and enabled) or not learnings:
+        return
+    sid = (session_id or os.environ.get("CLAUDE_SESSION_ID", "") or "").strip()
+    if not sid:
+        return
+    try:
+        ids = [_learning_key(lrn) for lrn in learnings]
+        followup = track_followup(query, ids, sid)
+        log_followup_metric(query, sid, followup, len(ids))
+    except Exception:
+        pass  # diagnostics must never break the recall path
+
+
 # --- Core entry ----------------------------------------------------------
 
 def recall(
@@ -1687,6 +1865,7 @@ def recall(
     mmr_lambda: float | None = None,
     session_id: str | None = None,
     gap_log: bool = True,
+    followup_track: bool = True,
 ) -> RecallResult:
     """High-level API: query → ranked Learnings. Never raises on KB issues.
 
@@ -1701,6 +1880,10 @@ def recall(
     ``session_id``; ``gap_log=False`` (ANDed with the RECALL_GAP_LOG env
     gate) opts a synthetic-query caller out. Infra errors (CLI missing,
     search failed) are NOT gaps and never logged.
+    A4: non-empty results with a session anchor feed the followup-rate
+    diagnostic (a second, different search within 30s returning a disjoint
+    result set = recall didn't satisfy); ``followup_track=False`` (ANDed
+    with the RECALL_FOLLOWUP env gate) opts a synthetic-query caller out.
     """
     mmr_on = MMR_ENABLED and use_mmr  # R3
     # R6: parse a natural-language date phrase out of the query up front so
@@ -1755,6 +1938,9 @@ def recall(
             )
             if gap_log and not learnings:  # SG6
                 log_knowledge_gap(query, session_id)
+            record_followup_diagnostic(  # A4
+                query, learnings, session_id, followup_track,
+            )
             return RecallResult(
                 learnings, query, mode, cache_hit=True,
                 cache_tier=cache_tier, ood_gated=gated,
@@ -1873,6 +2059,7 @@ def recall(
     log_recall(query, mode, len(learnings), cached=False)
     if gap_log and not learnings:  # SG6
         log_knowledge_gap(query, session_id)
+    record_followup_diagnostic(query, learnings, session_id, followup_track)  # A4
     return RecallResult(
         learnings, query, mode, ood_gated=gated, scores=rank_scores,
         temporal=temporal,
@@ -1908,6 +2095,10 @@ def main() -> int:
     ap.add_argument("--no-gap-log", action="store_true",
                     help="SG6: don't record a 0-result run as a knowledge gap "
                          "(synthetic-query callers like the SessionStart hook)")
+    ap.add_argument("--no-followup", action="store_true",
+                    help="A4: don't feed this search into the followup-rate "
+                         "diagnostic (synthetic-query callers like the "
+                         "SessionStart hook)")
     ap.add_argument("--field", default=None, metavar="NAME",
                     help="S1: project each hit to ONE structured frontmatter "
                          "field (e.g. rule, fix, root_cause, problem) instead "
@@ -1937,6 +2128,7 @@ def main() -> int:
         mmr_lambda=args.mmr_lambda,
         session_id=args.session_id,
         gap_log=not args.no_gap_log,
+        followup_track=not args.no_followup,
     )
 
     if result.error:

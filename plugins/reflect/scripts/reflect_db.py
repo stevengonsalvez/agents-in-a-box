@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -288,6 +289,8 @@ CREATE TABLE IF NOT EXISTS recall_events (
     source_context  TEXT NOT NULL DEFAULT '',
     rank            INTEGER,
     feedback        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    followup        INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL
 );
 """
@@ -384,6 +387,7 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
 CREATE INDEX IF NOT EXISTS idx_index_jobs_learning_id ON index_jobs(learning_id);
 CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_recall_events_learning_id ON recall_events(learning_id);
+CREATE INDEX IF NOT EXISTS idx_recall_events_session_id ON recall_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_learning_id ON artifacts(learning_id);
 CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
     ON learning_history(learning_id);
@@ -754,6 +758,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_CONCEPT_INDEX_DDL)
         conn.execute(_SKILLS_DDL)
         conn.execute(_SLOTS_DDL)
+
+    # A4: pre-existing recall_events tables predate the followup-rate
+    # diagnostic (session anchor + followup flag).
+    recall_event_columns = _table_columns(conn, "recall_events")
+    recall_event_alters = [
+        (
+            "session_id",
+            "ALTER TABLE recall_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "followup",
+            "ALTER TABLE recall_events ADD COLUMN followup INTEGER NOT NULL DEFAULT 0",
+        ),
+    ]
+    with conn:
+        for column, sql in recall_event_alters:
+            if column not in recall_event_columns:
+                conn.execute(sql)
 
     # R13: pre-existing skills tables predate the staleness flag.
     skill_columns = _table_columns(conn, "skills")
@@ -2203,9 +2225,18 @@ def add_recall_event(
     rank: Optional[int] = None,
     feedback: str = "",
     query_hash: str = "",
+    session_id: str = "",
+    followup: bool = False,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
-    """Record a recall hit and update recall telemetry on the learning row."""
+    """Record a recall hit and update recall telemetry on the learning row.
+
+    A4: ``session_id`` anchors the hit to a session for the followup-rate
+    diagnostic; ``followup`` marks hits belonging to a search that arrived
+    within the followup window with a result set disjoint from the session's
+    previous search (computed by :func:`record_recall_search` — callers
+    recording isolated hits leave both at their defaults).
+    """
     conn = conn or get_conn()
     rid = _new_id()
     now = _now_iso()
@@ -2228,8 +2259,9 @@ def add_recall_event(
     with conn:
         conn.execute(
             """INSERT INTO recall_events
-               (id, learning_id, query, query_hash, source_context, rank, feedback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, learning_id, query, query_hash, source_context, rank,
+                feedback, session_id, followup, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 rid,
                 learning_id,
@@ -2238,6 +2270,8 @@ def add_recall_event(
                 source_context,
                 rank,
                 feedback,
+                str(session_id or "").strip(),
+                1 if followup else 0,
                 now,
             ),
         )
@@ -2261,6 +2295,180 @@ def add_recall_event(
             autocommit=False,
         )
     return rid
+
+
+# ---------------------------------------------------------------------------
+# Followup-rate diagnostic (A4: agentmemory smart-search followup shape)
+# ---------------------------------------------------------------------------
+
+# A4: a second search in the SAME session arriving within this window with a
+# result set fully disjoint from the first is a "followup" — the empirical
+# signal that the first recall didn't satisfy. agentmemory ships 30s via
+# AGENTMEMORY_FOLLOWUP_WINDOW_SECONDS; ours is RECALL_FOLLOWUP_WINDOW_SECONDS
+# (one knob shared with recall.py's session-side tracker).
+FOLLOWUP_WINDOW_ENV = "RECALL_FOLLOWUP_WINDOW_SECONDS"
+DEFAULT_FOLLOWUP_WINDOW_SECONDS = 30.0
+# A4: metrics counters carrying the diagnostic (followup rate =
+# followups / searches).
+FOLLOWUP_SEARCHES_METRIC = "recall_searches_total"
+FOLLOWUP_HITS_METRIC = "recall_followups_total"
+
+
+def followup_window_seconds() -> float:
+    """A4: the followup detection window, env-tunable, floored at 1s.
+
+    The floor mirrors the source's ``Math.max(1, windowSeconds)`` guard —
+    a zero/negative window would disable detection silently instead of
+    erroring; unparseable values fall back to the default.
+    """
+    raw = os.environ.get(FOLLOWUP_WINDOW_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    return max(1.0, value)
+
+
+def _latest_recall_search(
+    conn: sqlite3.Connection, session_id: str,
+) -> Optional[dict[str, Any]]:
+    """A4: the session's most recent recorded search, with its full id set.
+
+    A "search" is the group of recall_events rows sharing (session_id,
+    query_hash, created_at) — :func:`record_recall_search` inserts every
+    hit of one search under a single timestamp.
+    """
+    row = conn.execute(
+        """SELECT query, query_hash, created_at FROM recall_events
+           WHERE session_id = ?
+           ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    id_rows = conn.execute(
+        """SELECT learning_id FROM recall_events
+           WHERE session_id = ? AND query_hash = ? AND created_at = ?""",
+        (session_id, row["query_hash"], row["created_at"]),
+    ).fetchall()
+    return {
+        "query": row["query"],
+        "created_at": row["created_at"],
+        "learning_ids": {r["learning_id"] for r in id_rows},
+    }
+
+
+def record_recall_search(
+    query: str,
+    learning_ids: list[str],
+    *,
+    session_id: str = "",
+    source_context: str = "",
+    feedback: str = "",
+    window_seconds: Optional[float] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """A4: record one SEARCH (a ranked set of recalled learnings) and flag
+    followups.
+
+    Inserts one ``recall_events`` row per learning (rank = list position,
+    all sharing one timestamp) and computes the ``followup`` flag for the
+    whole group: the flag is set when the session's PREVIOUS search landed
+    within the followup window (default 30s), asked something different,
+    and its result set is fully disjoint from this one — recall didn't
+    satisfy the first time, so the agent searched again.
+
+    Skip rules (the agentmemory smart-search shape):
+
+    - no ``session_id`` → rows are still inserted but the search is not
+      counted and can never be a followup (no session anchor);
+    - empty ``learning_ids`` → nothing recorded: an empty result set is a
+      retrieval failure (SG6 logs it as a knowledge gap), not a
+      reader-failure signal — counting it would inflate the rate;
+    - identical query within the window → a retry, not a followup;
+    - ANY overlap between the two result sets → not a followup.
+
+    Counted searches bump the ``recall_searches_total`` metric; detected
+    followups additionally bump ``recall_followups_total`` (followup rate =
+    followups / searches — see :func:`get_followup_stats`).
+
+    Returns ``{"followup": bool, "counted": bool, "recall_event_ids": [...]}``.
+    """
+    conn = conn or get_conn()
+    sid = str(session_id or "").strip()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in learning_ids or []:
+        lid = str(raw).strip()
+        if lid and lid not in seen:
+            seen.add(lid)
+            ordered.append(lid)
+    if not ordered:
+        return {"followup": False, "counted": False, "recall_event_ids": []}
+
+    window = (
+        followup_window_seconds()
+        if window_seconds is None
+        else max(1.0, float(window_seconds))
+    )
+    counted = bool(sid)
+    followup = False
+    if counted:
+        prior = _latest_recall_search(conn, sid)
+        if prior is not None and prior["learning_ids"]:
+            prior_at = _parse_forget_after(prior["created_at"])
+            if prior_at is not None:
+                age = (datetime.now(timezone.utc) - prior_at).total_seconds()
+                followup = (
+                    0 <= age <= window
+                    and prior["query"] != query
+                    and prior["learning_ids"].isdisjoint(ordered)
+                )
+
+    event_ids = [
+        add_recall_event(
+            lid,
+            query,
+            source_context=source_context,
+            rank=position,
+            feedback=feedback,
+            session_id=sid,
+            followup=followup,
+            conn=conn,
+        )
+        for position, lid in enumerate(ordered, start=1)
+    ]
+    if counted:
+        increment_metric(FOLLOWUP_SEARCHES_METRIC, conn=conn)
+        if followup:
+            increment_metric(FOLLOWUP_HITS_METRIC, conn=conn)
+    return {"followup": followup, "counted": counted, "recall_event_ids": event_ids}
+
+
+def get_followup_stats(*, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
+    """A4: the followup-rate diagnostic read-back (powers /reflect:cost).
+
+    ``rate`` is followups / searches — high means recall keeps failing to
+    satisfy on the first ask (tune rerank weights / graph budget / OOD
+    threshold). Directional: rapid topic switches may overcount.
+    """
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    conn = conn or get_conn()
+    searches = _as_int(get_metric(FOLLOWUP_SEARCHES_METRIC, 0, conn=conn))
+    followups = _as_int(get_metric(FOLLOWUP_HITS_METRIC, 0, conn=conn))
+    return {
+        "searches": searches,
+        "followups": followups,
+        "rate": (followups / searches) if searches else 0.0,
+    }
 
 
 def add_artifact(

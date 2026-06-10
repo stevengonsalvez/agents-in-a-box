@@ -5,9 +5,11 @@ description: |
   (cache_read), uncached writes (cache_creation), and io (input+output), with a
   $ estimate, grouped by day / outcome / model / transcript. Reads the drainer's
   cost log and surfaces outlier runs and cache-reuse health (the 41.5M-token
-  failure mode = low cache reuse + high cache writes). Use to answer "what is
-  reflection costing me" for the last day / week.
-version: "4.0.0"
+  failure mode = low cache reuse + high cache writes). Also reports the recall
+  followup rate (the recall-quality self-monitor: how often a session searched
+  again within 30s and got disjoint results). Use to answer "what is
+  reflection costing me" for the last day / week, or "is recall satisfying".
+version: "4.1.0"
 user-invocable: true
 triggers:
   - reflect:cost
@@ -86,9 +88,35 @@ echo
 # all `valid`; prose/idle/poisoned/malformed rows mean the writer is drifting
 # (3 consecutive invalids poison the transcript as writer_drift).
 python3 "$COST_PY" --since "$WINDOW" --by writer
+echo
+# Recall quality (A4): the followup-rate diagnostic. A "followup" = the same
+# session searched again within the window (default 30s) with a DIFFERENT
+# query and got a fully DISJOINT result set — i.e. the first recall didn't
+# satisfy. High rate = tune rerank weights / graph arm budget / OOD threshold.
+python3 "$COST_PY" --since "$WINDOW" --followup
 ```
 
 For a machine-readable view, add `--json`.
+
+## Reading the followup rate
+
+```
+recall followup rate — last 7d
+
+  searches tracked : 42
+  followups        : 6 (re-search within 30s, disjoint results)
+  followup rate    : 14%
+```
+
+- **searches tracked** — session-anchored, non-empty recalls (SessionStart's
+  synthetic boot queries are excluded; empty result sets are knowledge gaps,
+  not followups, and don't count).
+- **followup rate** — the recall-quality self-monitor. Near 0% = first
+  results are landing. Sustained high (>30%) = recall isn't satisfying on
+  the first ask: consider rerank-weight tuning, more graph-arm budget, or a
+  lower OOD threshold. The signal is *directional* — rapid legitimate topic
+  switches inside 30s overcount.
+- Window is tunable via `RECALL_FOLLOWUP_WINDOW_SECONDS` (default 30).
 
 ## If tokens show 0 (historical / pre-v4 events)
 

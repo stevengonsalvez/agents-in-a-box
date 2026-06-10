@@ -384,6 +384,10 @@ def _main_body() -> NoReturn:
                 # sessions — recording them as knowledge gaps would surface
                 # the project name as a fake gap every session.
                 "--no-gap-log",
+                # A4: same synthetic-query reasoning for the followup-rate
+                # diagnostic — a boot-time inject chased by a genuine first
+                # ask within 30s would count as a fake followup every session.
+                "--no-followup",
             ],
             capture_output=True,
             text=True,
