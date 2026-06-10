@@ -2355,8 +2355,18 @@ def upsert_skill(
     return path
 
 
-def get_skills(*, conn: Optional[sqlite3.Connection] = None) -> list[dict[str, Any]]:
-    """Return every indexed skill (tags decoded to a list), name-ordered."""
+def get_skills(
+    *,
+    compute_stale: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return every indexed skill (tags decoded to a list), name-ordered.
+
+    R14: with ``compute_stale=True`` each row's ``is_stale`` is recomputed
+    on read (stored R13 flag OR any in-scope learning updated after
+    ``last_refreshed_at`` — see :func:`compute_skills_staleness`). The
+    stored column is untouched; only the returned records are annotated.
+    """
     conn = conn or get_conn()
     rows = conn.execute("SELECT * FROM skills ORDER BY name, path").fetchall()
     out: list[dict[str, Any]] = []
@@ -2364,6 +2374,10 @@ def get_skills(*, conn: Optional[sqlite3.Connection] = None) -> list[dict[str, A
         record = dict(r)
         record["tags"] = _decode_tags(record.get("tags"))
         out.append(record)
+    if compute_stale and out:
+        computed = compute_skills_staleness(skills=out, conn=conn)
+        for record in out:
+            record["is_stale"] = 1 if computed.get(record["path"]) else 0
     return out
 
 
@@ -2458,6 +2472,187 @@ def get_stale_skills(
         record["tags"] = _decode_tags(record.get("tags"))
         out.append(record)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Per-skill computed staleness (R14: hindsight compute_mental_model_is_stale
+# shape — is_stale flips true iff any in-scope learning changed after the
+# skill was last refreshed)
+# ---------------------------------------------------------------------------
+
+# R14 scope tokenizer — MUST stay in lockstep with
+# ``reflect_cascade._content_tokens`` / ``skills_backing_learning`` (the R13
+# event-driven trigger). Both sides answer the same question ("is this
+# learning in this skill's scope?"); if they drift, the computed flag and
+# the stored flag disagree about which learnings back a skill.
+_SCOPE_TOKEN_RE = re.compile(r"[a-z0-9_+./-]+")
+_SCOPE_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "has", "have", "here", "in", "into", "is", "it", "its", "of", "on", "or",
+    "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "to", "was", "were", "when", "which", "with", "you", "your",
+})
+
+
+def _scope_tokens(text: str) -> set[str]:
+    """Lowercased content-word tokens (stopwords + 1-char noise dropped)."""
+    return {
+        tok
+        for tok in _SCOPE_TOKEN_RE.findall((text or "").lower())
+        if len(tok) >= 2 and tok not in _SCOPE_STOPWORDS
+    }
+
+
+def _tag_specs(tags: Any) -> list[tuple[str, frozenset[str]]]:
+    """Normalize skill tags to (lowercased tag, content-token set) pairs."""
+    specs: list[tuple[str, frozenset[str]]] = []
+    for tag in tags or []:
+        tag = str(tag).strip().lower()
+        if tag:
+            specs.append((tag, frozenset(_scope_tokens(tag))))
+    return specs
+
+
+def _scope_hit(
+    tag_specs: list[tuple[str, frozenset[str]]],
+    title_tokens: set[str],
+    category: str,
+) -> bool:
+    """One skill-vs-learning scope test over precomputed token sets."""
+    for tag, tag_tokens in tag_specs:
+        if category and tag == category:
+            return True
+        if tag_tokens and tag_tokens <= title_tokens:
+            return True
+    return False
+
+
+def skill_scope_matches(tags: Any, title: str, category: str = "") -> bool:
+    """R14: True when a learning (title/category) is in a skill's scope.
+
+    A learning is in scope when any skill tag either equals the learning's
+    category (case-insensitive) or has ALL of its content tokens present in
+    the learning's title — multi-word tags must match whole, so the tag
+    "belief revision" doesn't fire on every title that merely says
+    "revision". Same semantics as ``reflect_cascade.skills_backing_learning``
+    (the R13 event-driven side of the contract). A skill with no tags has an
+    empty scope: nothing matches.
+    """
+    return _scope_hit(
+        _tag_specs(tags),
+        _scope_tokens(title),
+        str(category or "").strip().lower(),
+    )
+
+
+# Per-learning effective update timestamp: creation counts as an update (a
+# NEW in-scope learning stales a skill just like a revision), and every
+# mutation path snapshots into learning_history first (S6), so the newest
+# history row's created_at is the row's last-modified time.
+_LEARNING_UPDATES_SQL = """
+SELECT l.id, l.title, l.category, l.created_at,
+       MAX(h.created_at) AS last_history_at
+FROM learnings l
+LEFT JOIN learning_history h ON h.learning_id = l.id
+GROUP BY l.id
+"""
+
+
+def compute_skills_staleness(
+    *,
+    skills: Optional[list[dict[str, Any]]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, bool]:
+    """R14: map of skill path -> computed ``is_stale`` (hindsight
+    ``compute_mental_model_is_stale`` shape, recomputed on read).
+
+    A skill is stale iff:
+
+    - its STORED flag is set (the R13 event-driven trigger fired and the
+      SKILL.md hasn't been regenerated yet), OR
+    - any in-scope learning (see :func:`skill_scope_matches`) was created
+      or mutated after the skill's ``last_refreshed_at``. This computed
+      half catches writes that never pass through the R13 trigger
+      (``add_learning``, ``add_learning_proof``, ``update_learning_status``,
+      contradiction demotion).
+
+    Nothing is persisted — the stored flag stays R13's. Timestamp parsing
+    is tolerant (the A3 ``forget_after`` rules): a learning with an
+    unparseable timestamp never flips a skill, and a skill with an
+    unparseable ``last_refreshed_at`` falls back to its stored flag alone
+    (never stale on bad data).
+
+    One learnings pass for the whole index: rows older than the OLDEST
+    ``last_refreshed_at`` are pruned before any scope matching, and token
+    sets are computed once per skill/candidate — cheap (<10ms) even with
+    dozens of skills over hundreds of learnings.
+    """
+    conn = conn or get_conn()
+    if skills is None:
+        skills = get_skills(conn=conn)
+    if not skills:
+        return {}
+
+    floors: dict[str, Optional[datetime]] = {
+        str(s.get("path", "")): _parse_forget_after(s.get("last_refreshed_at"))
+        for s in skills
+    }
+    valid_floors = [f for f in floors.values() if f is not None]
+
+    # (title_tokens, category, updated_at) for every learning that could
+    # possibly flip at least one skill.
+    candidates: list[tuple[set[str], str, datetime]] = []
+    if valid_floors:
+        oldest_floor = min(valid_floors)
+        for row in conn.execute(_LEARNING_UPDATES_SQL).fetchall():
+            updated = _parse_forget_after(row["created_at"])
+            history_at = _parse_forget_after(row["last_history_at"])
+            if history_at is not None and (updated is None or history_at > updated):
+                updated = history_at
+            if updated is None or updated <= oldest_floor:
+                continue
+            candidates.append((
+                _scope_tokens(str(row["title"] or "")),
+                str(row["category"] or "").strip().lower(),
+                updated,
+            ))
+
+    result: dict[str, bool] = {}
+    for skill in skills:
+        path = str(skill.get("path", ""))
+        if skill.get("is_stale"):
+            result[path] = True
+            continue
+        floor = floors[path]
+        if floor is None:
+            result[path] = False
+            continue
+        tag_specs = _tag_specs(skill.get("tags"))
+        if not tag_specs:
+            result[path] = False
+            continue
+        result[path] = any(
+            updated > floor and _scope_hit(tag_specs, title_tokens, category)
+            for title_tokens, category, updated in candidates
+        )
+    return result
+
+
+def compute_skill_is_stale(
+    path: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[bool]:
+    """R14: computed staleness for ONE indexed skill (None when not indexed)."""
+    if not path:
+        return None
+    conn = conn or get_conn()
+    row = conn.execute("SELECT * FROM skills WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["tags"] = _decode_tags(record.get("tags"))
+    return compute_skills_staleness(skills=[record], conn=conn)[path]
 
 
 # ---------------------------------------------------------------------------
