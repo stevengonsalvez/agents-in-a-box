@@ -191,7 +191,23 @@ pub fn forward_key_to_focused_plugin(
         return EventOutcome::Handled;
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    if !delivered
+        && matches!(
+            key.code,
+            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
+        )
+    {
+        // Plugin unregistered or its task is gone — the screen is
+        // showing the "plugin unavailable" placeholder and the key
+        // just got dropped on the floor. Esc/q must stay escapable
+        // there (the central dispatch resolves them to PanelBack), or
+        // the user is trapped with only Ctrl+C. Other keys stay
+        // claimed so the session-list fallthrough's destructive
+        // bindings (`d` delete, `n` new session, …) can't fire from a
+        // dead plugin screen.
+        return EventOutcome::NotHandled;
+    }
     EventOutcome::Handled
 }
 
@@ -873,11 +889,10 @@ mod tests {
             CtKey::Char('H'),
             KeyModifiers::NONE
         )));
-        // Esc is reserved: it must always bubble to the host so the
-        // screen pops back to home — see the doc on
-        // `is_host_reserved_key`. Plugins use `Backspace` for pop-state
-        // semantics instead.
-        assert!(is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
+        // Esc is plugin-owned (overlay-panels redesign): the plugin pops
+        // one internal level per press and publishes `ui.close_request`
+        // at its root — see the doc on `is_host_reserved_key`.
+        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
@@ -905,5 +920,58 @@ mod tests {
         // Non-plugin screens return None so the forwarder bails early.
         assert_eq!(plugin_id_for_screen(ids::HOME), None);
         assert_eq!(plugin_id_for_screen("nonsense"), None);
+    }
+
+    /// Regression (PR #249 review HIGH-1): with the runtime up but the
+    /// plugin NOT registered — exactly the "[plugin unavailable]"
+    /// placeholder state — `send_key` drops the keystroke. Esc/q must
+    /// fall through to the central dispatch (→ PanelBack) so the
+    /// placeholder stays escapable; every other key stays claimed so
+    /// session-list bindings (`d` delete, `n` new session, …) can't
+    /// fire from a dead plugin screen.
+    #[test]
+    fn undelivered_esc_and_q_fall_through_on_placeholder_screen() {
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        // Real runtime, zero plugins registered → lifecycle_state(burndown)
+        // is None and send_key returns false.
+        let (runtime, handle) =
+            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
+        let mut state = crate::app::state::AppState::default();
+        state.plugin_runtime = Some(handle);
+        state.current_screen = ids::ANALYTICS.to_string();
+
+        let mk = |code| CtEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Esc)),
+                EventOutcome::NotHandled
+            ),
+            "undelivered Esc must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('q'))),
+                EventOutcome::NotHandled
+            ),
+            "undelivered q must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('d'))),
+                EventOutcome::Handled
+            ),
+            "undelivered non-nav keys stay claimed — no destructive fallthrough"
+        );
+
+        runtime.shutdown();
     }
 }
