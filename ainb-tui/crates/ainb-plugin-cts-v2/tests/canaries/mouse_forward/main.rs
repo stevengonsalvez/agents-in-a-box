@@ -35,8 +35,8 @@ struct MouseForward {
     count: Arc<Mutex<usize>>,
 }
 
-fn kind_label(kind: &MouseKind) -> String {
-    fn btn(b: &MouseButton) -> &'static str {
+fn kind_label(kind: MouseKind) -> String {
+    const fn btn(b: MouseButton) -> &'static str {
         match b {
             MouseButton::Left => "left",
             MouseButton::Right => "right",
@@ -63,7 +63,7 @@ impl Plugin for MouseForward {
 
     async fn handle_mouse(&mut self, _host: &HostClient, p: HandleMouseParams) -> Result<()> {
         *self.last.lock().await = Some(LastMouse {
-            kind: kind_label(&p.mouse.kind),
+            kind: kind_label(p.mouse.kind),
             col: p.mouse.col,
             row: p.mouse.row,
             mods: p.mouse.mods,
@@ -86,10 +86,10 @@ impl Plugin for MouseForward {
     ) -> Result<CliOutput> {
         match argv.first().map(String::as_str) {
             Some("last") => {
-                let out = match &*self.last.lock().await {
-                    Some(m) => format!("{}:{},{}:{}\n", m.kind, m.col, m.row, m.mods),
-                    None => "none\n".into(),
-                };
+                let out = self.last.lock().await.as_ref().map_or_else(
+                    || "none\n".to_string(),
+                    |m| format!("{}:{},{}:{}\n", m.kind, m.col, m.row, m.mods),
+                );
                 Ok(CliOutput::ok(out))
             }
             Some("count") => {

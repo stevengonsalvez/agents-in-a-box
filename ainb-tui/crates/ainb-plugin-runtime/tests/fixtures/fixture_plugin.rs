@@ -7,16 +7,16 @@
 //!
 //! - `plugin/init` → reply with name/version echo.
 //! - `plugin/render` → reply with a 1×1 buffer carrying "X" at (0,0).
-//! - `plugin/cli_dispatch` → reply with stdout "ok\n", exit_code 0.
+//! - `plugin/cli_dispatch` → reply with stdout "ok\n", `exit_code` 0.
 //! - `plugin/handle_event` → notification, just record (host-side test
 //!   asserts via the followup snapshot publish round-trip).
 //! - `host/action/invoke` → reply with payload echo (so the runtime
-//!   test's invoke_action() round-trips).
+//!   test's `invoke_action()` round-trips).
 //! - `plugin/shutdown` → notification; exit 0.
 //!
 //! On startup the fixture publishes a snapshot under topic
 //! `fixture.greeting` with the payload `b"hello"` so the runtime
-//! integration test can assert host/snapshot/publish + snapshot_get
+//! integration test can assert `host/snapshot/publish` + `snapshot_get`
 //! end-to-end.
 //!
 //! Special env-var behaviours (used by the SIGKILL injection test):
@@ -69,11 +69,11 @@ fn main() {
                 if std::env::var("FIXTURE_HANG_ON_INIT").is_ok() {
                     // Reply OK then deliberately stop reading stdin.
                     if let Some(id) = id {
-                        write_response(&mut writer, id, init_result());
+                        write_response(&mut writer, id, &init_result());
                     }
                     std::thread::park();
                 } else if let Some(id) = id {
-                    write_response(&mut writer, id, init_result());
+                    write_response(&mut writer, id, &init_result());
                 }
             }
             methods::PLUGIN_RENDER => {
@@ -85,7 +85,7 @@ fn main() {
                         redraw: false,
                     })
                     .expect("RenderResult serializable");
-                    write_response(&mut writer, id, result);
+                    write_response(&mut writer, id, &result);
                 }
             }
             methods::PLUGIN_CLI_DISPATCH => {
@@ -96,7 +96,7 @@ fn main() {
                         exit_code: 0,
                     })
                     .expect("CliDispatchResult serializable");
-                    write_response(&mut writer, id, result);
+                    write_response(&mut writer, id, &result);
                 }
             }
             methods::PLUGIN_HANDLE_EVENT => {
@@ -124,7 +124,7 @@ fn main() {
                         payload: bytes::Bytes::from(payload),
                     })
                     .expect("ActionInvokeResult serializable");
-                    write_response(&mut writer, id, result);
+                    write_response(&mut writer, id, &result);
                 }
             }
             methods::PLUGIN_SHUTDOWN => {
@@ -163,7 +163,7 @@ fn init_result() -> Value {
     .expect("PluginInitResult serializable")
 }
 
-fn write_response<W: Write>(w: &mut W, id: u64, result: Value) {
+fn write_response<W: Write>(w: &mut W, id: u64, result: &Value) {
     let body = json!({
         "jsonrpc": "2.0",
         "id": id,

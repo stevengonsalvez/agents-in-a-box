@@ -416,6 +416,11 @@ async fn handle_method<P: Plugin>(
             let mut guard = plugin.lock().await;
             let buf = guard.render(host, p).await?;
             let redraw = guard.wants_redraw();
+            // Release the lock before serialising the reply — the JSON
+            // encode doesn't touch plugin state, so the mutex must not
+            // span it. This keeps the critical section to exactly
+            // render + the redraw read.
+            drop(guard);
             Ok(serde_json::to_value(RenderResult {
                 buffer: buf,
                 redraw,
