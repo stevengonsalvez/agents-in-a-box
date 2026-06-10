@@ -174,6 +174,13 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
         f"{orig_tokens}-token transcript ({prep.slice_tokens} tokens).\n"
         f"# Only correction/approval/knowledge exchanges are kept.\n\n"
     )
+    # M6: the slice is the LLM-bound payload — strip <private> spans and
+    # machine-context wrapper tags before anything reaches the drain model.
+    try:
+        from privacy_filter import strip_private  # noqa: E402
+        sliced = strip_private(sliced)
+    except ImportError:  # pragma: no cover
+        pass  # filter is best-effort; the cascade must never hard-fail on it
     Path(out_path).write_text(header + sliced, encoding="utf-8")
     prep.slice_path = str(out_path)
     return prep
