@@ -21,6 +21,7 @@
 //! | `HANGAR_CODEX_PATH` | `codex` provider binary path (e38.16) | `codex` (resolved on `PATH`) |
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
+//! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | Multica running TTL (2.5h) |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | Multica default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
@@ -38,10 +39,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::service::claim::{ClaimTaskService, ClaimedTask};
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::fail::FailTaskService;
+use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
 
@@ -72,6 +75,11 @@ pub struct DaemonConfig {
     pub codex_path: PathBuf,
     /// Interval between claim polls.
     pub poll_interval: Duration,
+    /// Hard wall-clock deadline for each provider run; the subprocess is killed
+    /// past it ([`FailureReason::Timeout`]). Defaults to the Multica running TTL
+    /// (2.5h); overridable via `HANGAR_PROVIDER_MAX_RUNTIME_MS` so an e2e test can
+    /// drive the timeout-kill path within a bounded budget.
+    pub provider_max_runtime: Duration,
     /// Sweeper thresholds + cadence.
     pub sweeper: SweeperConfig,
     /// When `true`, skip the claim loop entirely (sweepers still run). Used by
@@ -96,6 +104,8 @@ impl DaemonConfig {
             .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
+        let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
+            .map_or(PROVIDER_MAX_RUNTIME, Duration::from_millis);
 
         let mut sweeper = SweeperConfig::default();
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_INTERVAL_MS") {
@@ -116,6 +126,7 @@ impl DaemonConfig {
             claude_path,
             codex_path,
             poll_interval,
+            provider_max_runtime,
             sweeper,
             disable_claim,
             sandbox,
@@ -184,7 +195,7 @@ pub async fn run(
     let runner = Runner::new(RunnerConfig {
         claude_path: cfg.claude_path.clone(),
         codex_path: cfg.codex_path.clone(),
-        max_runtime: PROVIDER_MAX_RUNTIME,
+        max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
         // e38.23: confine every provider spawn in the OS-level FS sandbox by
         // default. Overridable via `HANGAR_DAEMON_DISABLE_SANDBOX=1` (see
@@ -412,9 +423,52 @@ async fn execute_claimed(
                 clock,
             );
             tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
+            // F06 retry chain: a retryable (infra) failure with attempts
+            // remaining spawns a fresh `queued` child carrying `parent_task_id`,
+            // which the next claim pass re-dispatches. A terminal reason
+            // (`agent_error` / `user_cancel` / `timeout`) or an exhausted
+            // `max_attempts` is a no-op. The retry insert can collide with the
+            // per-issue pending-unique index — that is a benign already-pending
+            // outcome (a sibling holds the slot), logged not propagated, so one
+            // failed retry never downs the claim loop.
+            maybe_spawn_retry(pool, &task.id, clock).await;
         }
     }
     Ok(())
+}
+
+/// Evaluate the just-failed `task_id` for an automatic retry and, if eligible,
+/// spawn a `parent_task_id`-chained child row (F06).
+///
+/// Re-reads the failed row (so `attempt` / `max_attempts` / `failure_reason`
+/// reflect the fail that just committed), mints a fresh child id via the
+/// production [`SystemIdGen`], and delegates the eligibility + atomic child
+/// INSERT to [`RetryService::maybe_retry_failed`]. Every fault here is
+/// best-effort and swallowed (logged): a missing row, a DB read error, or the
+/// per-issue pending-unique collision must never propagate out of the claim
+/// loop and down the daemon — the failed parent already committed for audit.
+async fn maybe_spawn_retry(pool: &SqlitePool, task_id: &str, clock: &dyn HangarClock) {
+    let failed = match TaskRepo::get_by_id(pool, task_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error = %e, "retry: re-read failed task errored");
+            return;
+        }
+    };
+    let new_id = SystemIdGen.new_ulid();
+    match RetryService::maybe_retry_failed(pool, &failed, &new_id, clock).await {
+        Ok(RetryDecision::Spawned { new_task_id }) => {
+            tracing::info!(parent_task_id = %task_id, child_task_id = %new_task_id, "task retry spawned");
+        }
+        Ok(RetryDecision::DoNotRetry) => {}
+        Err(e) => {
+            // The single atomic insert can collide with the per-(issue, agent)
+            // pending-unique index when another pending task already holds the
+            // slot — a benign "already pending" outcome, not a daemon fault.
+            tracing::warn!(parent_task_id = %task_id, error = %e, "retry child insert failed (likely already-pending slot); skipping");
+        }
+    }
 }
 
 /// Publish a [`TaskStarted`](ainb_hangar_proto::events::HangarEvent::TaskStarted)
