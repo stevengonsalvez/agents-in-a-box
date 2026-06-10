@@ -667,6 +667,30 @@ async fn dispatch_inner(
         );
     }
 
+    // `--hard`: tell session-reader to wipe its caches and rebuild
+    // from source before we poll for data. This is the ONE place the
+    // CLI publishes a refresh itself — the normal path relies on
+    // burndown's on_init publish (re-publishing incrementals here
+    // would queue redundant rescans and starve cli_dispatch).
+    //
+    // The payload is the msgpack encoding of the wire type
+    // `ainb_plugin_types_sessions::RefreshRequest { hard: true }`
+    // (`to_vec_named`: fixmap{ "hard": true }). Hand-pinned bytes so
+    // the host CLI stays decoupled from the plugin codec crates; the
+    // canonical encoding is asserted byte-for-byte by
+    // `refresh_request_hard_wire_bytes_are_pinned` in
+    // ainb-plugin-types-sessions — change one, that test fails.
+    if argv.iter().any(|a| a == "--hard") {
+        const HARD_REFRESH_MSGPACK: [u8; 7] = [0x81, 0xA4, b'h', b'a', b'r', b'd', 0xC3];
+        handle.publish_snapshot(
+            "sessions.refresh_request",
+            bytes::Bytes::from_static(&HARD_REFRESH_MSGPACK),
+        );
+        if trace {
+            eprintln!("[usage-cli] --hard: published hard refresh_request");
+        }
+    }
+
     // Retry contract: burndown reports `exit_code = 1` + empty stdout +
     // a stderr containing this exact byte sequence when `self.data` is
     // None. Any *other* exit/stdout/stderr shape (including a real

@@ -547,6 +547,34 @@ mod tests {
     }
 
     #[test]
+    fn refresh_request_roundtrip_and_default() {
+        let bytes = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).unwrap();
+        let back: RefreshRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(back.hard);
+
+        // Empty map (a publisher encoding `{}`) → hard defaults off.
+        let back: RefreshRequest = rmp_serde::from_slice(&[0x80]).unwrap();
+        assert!(!back.hard);
+    }
+
+    /// Wire-format pin: the host CLI (`ainb-core/src/cli/registry.rs`,
+    /// `--hard` branch of `dispatch_inner`) publishes this exact byte
+    /// sequence WITHOUT linking this crate, to stay decoupled from the
+    /// plugin codec. If the canonical `to_vec_named` encoding of
+    /// `RefreshRequest { hard: true }` ever drifts from those
+    /// hand-pinned bytes, this test fails and both sides must move
+    /// together.
+    #[test]
+    fn refresh_request_hard_wire_bytes_are_pinned() {
+        const HARD_REFRESH_MSGPACK: [u8; 7] = [0x81, 0xA4, b'h', b'a', b'r', b'd', 0xC3];
+        let canonical = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).unwrap();
+        assert_eq!(
+            canonical, HARD_REFRESH_MSGPACK,
+            "host CLI pinned bytes drifted"
+        );
+    }
+
+    #[test]
     fn envelope_roundtrip() {
         let env = UsageDataEvent {
             version: WIRE_VERSION,
