@@ -130,24 +130,51 @@ def _main_body() -> None:
     tool_input = data.get("tool_input", "")
     tool_response = data.get("tool_response", data.get("response", {}))
 
-    if not tool_failed(tool_response, tool_name):
-        return  # Successful tool calls don't arm.
+    # SG5: loop detection runs BEFORE the failure check — a loop of
+    # *successful* identical calls is still a stall, and the user's next
+    # prompt correcting it is the highest-signal learning in the session.
+    loop_hit = None
+    try:
+        from loop_detector import record_call
+        loop_hit = record_call(session_id, tool_name, tool_input)
+    except ImportError:  # pragma: no cover
+        pass
+
+    if not loop_hit and not tool_failed(tool_response, tool_name):
+        return  # Successful, non-looping tool calls don't arm.
 
     # Write armed file. Truncate large payloads — only need enough for
     # the mini-learning context, not full transcripts.
     try:
+        # M6: armed payloads later land in LLM-bound mini-learnings — strip
+        # <private> spans before scrubbing/truncating. Best-effort import so a
+        # missing filter can never break the hook.
+        try:
+            from privacy_filter import strip_private
+        except ImportError:  # pragma: no cover
+            def strip_private(text: str) -> str:  # type: ignore[no-redef]
+                return text
         path = armed_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "tool": tool_name,
-            "tool_input": scrub_secrets(str(tool_input)[:500]),
-            "tool_response": scrub_secrets(json.dumps(tool_response)[:500]),
+            "tool_input": scrub_secrets(strip_private(str(tool_input))[:500]),
+            "tool_response": scrub_secrets(strip_private(json.dumps(tool_response))[:500]),
             "ts": time.time(),
+            # SG5: why we armed — lets the mini-learning tag its source
+            # ('loop-correction' vs the default failure-correction).
+            "reason": "loop" if loop_hit else "failure",
         }
+        if loop_hit:
+            payload["loop"] = dict(loop_hit)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
-        forensics_log(_HOOK_NAME, f"armed for session={session_id[:8]} tool={tool_name}")
+        forensics_log(
+            _HOOK_NAME,
+            f"armed for session={session_id[:8]} tool={tool_name} "
+            f"reason={payload['reason']}",
+        )
     except Exception:
         # If even the armed write fails, we silently move on.
         pass
