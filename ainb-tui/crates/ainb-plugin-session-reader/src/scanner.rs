@@ -1067,6 +1067,126 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::sync::{Arc, Mutex};
 
+    /// Profiling harness for issue #255 — NOT a correctness test.
+    ///
+    /// Replays one steady-state incremental refresh phase by phase
+    /// against a copy of the real on-disk cache + the real `$HOME`
+    /// session data, printing wall-clock per phase. Run manually:
+    ///
+    /// ```sh
+    /// cargo test -p ainb-plugin-session-reader --release \
+    ///   profile_real_refresh_phases -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "profiling harness against real $HOME data — run manually"]
+    fn profile_real_refresh_phases() {
+        use std::time::Instant;
+
+        let Some(db) = crate::cache::default_db_path() else {
+            eprintln!("profile: no resolvable cache path; skipping");
+            return;
+        };
+        if !db.exists() {
+            eprintln!("profile: no real cache at {}; skipping", db.display());
+            return;
+        }
+        // Copy the live db (plus WAL/SHM so an in-flight write is
+        // recoverable) — never contend with a running plugin instance.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let copy = tmp.path().join("usage.sqlite");
+        std::fs::copy(&db, &copy).expect("copy db");
+        for sfx in ["-wal", "-shm"] {
+            let mut src = db.as_os_str().to_owned();
+            src.push(sfx);
+            let src = std::path::PathBuf::from(src);
+            if src.exists() {
+                let mut dst = copy.as_os_str().to_owned();
+                dst.push(sfx);
+                std::fs::copy(&src, std::path::PathBuf::from(dst)).expect("copy sidecar");
+            }
+        }
+        let mut cache = Some(crate::cache::UsageCache::open(&copy).expect("open copy"));
+
+        let t = Instant::now();
+        let stored = cache.as_ref().unwrap().load_stable().unwrap_or_default();
+        let load_stable_t = t.elapsed();
+        let Some(stored) = stored else {
+            eprintln!("profile: no stable rollup in cache; run a refresh first");
+            return;
+        };
+        eprintln!(
+            "load_stable: {load_stable_t:?} (folded={} stable_calls={})",
+            stored.folded.len(),
+            stored.state.calls.len()
+        );
+
+        // Reuse the rollup's own watermark so the stored fingerprint
+        // set stays valid (steady-state path, no rebuild pass).
+        let watermark = stored.watermark_nanos;
+        let roots = ProviderRoots::defaults();
+
+        let t = Instant::now();
+        let mut ctx = ScanCtx::incremental(&mut cache, watermark, StablePolicy::Skip);
+        let mut reporter = ProgressReporter::noop();
+        let recent_calls = walk_providers(&roots, &mut ctx, &mut reporter);
+        let walk_t = t.elapsed();
+        eprintln!(
+            "pass1 walk (stat + recent hydrate): {walk_t:?} \
+             (statted={} parsed={} cache_hits={} stable_skipped={} recent_calls={})",
+            ctx.counters.files_statted,
+            ctx.counters.parsed,
+            ctx.counters.cache_hits,
+            ctx.counters.stable_skipped,
+            recent_calls.len()
+        );
+        let mut stable_present = std::mem::take(&mut ctx.stable_present);
+        stable_present.sort_unstable();
+        eprintln!(
+            "stable set match: {} (walk={} stored={})",
+            stable_present == stored.folded,
+            stable_present.len(),
+            stored.folded.len()
+        );
+
+        let t = Instant::now();
+        let folded_recent = fold(recent_calls);
+        eprintln!("fold(recent): {:?}", t.elapsed());
+
+        let t = Instant::now();
+        // Deliberate clone: this measures exactly the clone the
+        // production merge path pays per refresh.
+        #[allow(clippy::redundant_clone)]
+        let mut merged = stored.state.clone();
+        eprintln!("stable.state.clone(): {:?}", t.elapsed());
+
+        let t = Instant::now();
+        merged.absorb(folded_recent);
+        eprintln!("absorb: {:?}", t.elapsed());
+
+        let t = Instant::now();
+        let data = emit(merged);
+        eprintln!("emit: {:?} (total_calls={})", t.elapsed(), data.calls.len());
+
+        let t = Instant::now();
+        let chunks = crate::plugin::chunk_usage_data(data, 0, false, 2 * 1024 * 1024);
+        eprintln!(
+            "chunk_usage_data: {:?} ({} chunks)",
+            t.elapsed(),
+            chunks.len()
+        );
+
+        let t = Instant::now();
+        let total: usize = chunks
+            .iter()
+            .map(|c| rmp_serde::to_vec_named(c).map(|b| b.len()).unwrap_or(0))
+            .sum();
+        eprintln!(
+            "final encode all chunks: {:?} ({} bytes)",
+            t.elapsed(),
+            total
+        );
+    }
+
     #[test]
     fn progress_reporter_emits_on_first_file() {
         let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
