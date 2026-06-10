@@ -5,6 +5,12 @@ created: {{ISO_TIMESTAMP}}
 updated: {{ISO_TIMESTAMP}}
 scope: {{SCOPE}}
 confidence: {{CONFIDENCE}}
+# S3: continuous confidence 0.0–1.0 — the value recall RANKS by; `confidence`
+# above is just the display bucket (>=0.8 HIGH, >=0.5 MEDIUM, else LOW).
+# Prefer a calibrated float (e.g. 0.75) over snapping to the bucket midpoints
+# (HIGH→0.9, MEDIUM→0.6, LOW→0.3) — the midpoints are only the migration
+# defaults for legacy tier-only notes.
+confidence_num: {{CONFIDENCE_NUM}}
 learning_type: {{LEARNING_TYPE}}
 title: "{{TITLE}}"
 tags: [{{TAGS}}]
@@ -24,7 +30,7 @@ entities: [{{ENTITIES}}]                # specific named tech/tools/errors invol
 causal_relations:                       # cause -> effect chains ([] when none)
   - source: "{{CAUSE_ENTITY}}"
     target: "{{EFFECT_ENTITY}}"
-    type: caused_by
+    type: caused_by                     # or causes | enables | prevents (S2 typed links)
 links: []
 source_episodes: [{{EPISODE_ID}}]
 superseded_by: null

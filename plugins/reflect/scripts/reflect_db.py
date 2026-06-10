@@ -78,6 +78,7 @@ _LEARNING_COLUMNS = (
     "title",
     "category",
     "confidence",
+    "confidence_num",
     "status",
     "scope",
     "source_tool",
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     title                   TEXT NOT NULL,
     category                TEXT NOT NULL DEFAULT 'Unknown',
     confidence              TEXT NOT NULL DEFAULT 'LOW',
+    confidence_num          REAL NOT NULL DEFAULT 0.3,
     status                  TEXT NOT NULL DEFAULT '{LearningStatus.PENDING.value}'
                             CHECK (status IN ({_quoted_csv(LEARNING_STATUS_VALUES)})),
     scope                   TEXT NOT NULL DEFAULT 'project',
@@ -608,6 +610,27 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             if column not in learning_columns:
                 conn.execute(sql)
 
+    # S3: numeric confidence (0–1) beside the display tier. Runs exactly once
+    # (gated on the column being absent): the ALTER's constant DEFAULT covers
+    # the column add, then the backfill maps each existing row's tier to its
+    # bucket midpoint — HIGH→0.9, MEDIUM→0.6, LOW→0.3 (the Hindsight
+    # memory_units.confidence_score shape; tiers stay as display buckets).
+    if "confidence_num" not in learning_columns:
+        with conn:
+            conn.execute(
+                "ALTER TABLE learnings ADD COLUMN "
+                "confidence_num REAL NOT NULL DEFAULT 0.3"
+            )
+            conn.execute(
+                """UPDATE learnings SET confidence_num = CASE upper(confidence)
+                       WHEN 'HIGH' THEN 0.9
+                       WHEN 'MEDIUM' THEN 0.6
+                       WHEN 'MED' THEN 0.6
+                       WHEN 'LOW' THEN 0.3
+                       ELSE 0.6
+                   END"""
+            )
+
     learning_sql = _table_sql(conn, "learnings")
     if learning_sql and not all(f"'{status}'" in learning_sql for status in LEARNING_STATUS_VALUES):
         _rebuild_table(conn, "learnings", _LEARNINGS_DDL, _LEARNING_COLUMNS)
@@ -755,6 +778,44 @@ def get_events_by_type(
 # Learnings
 # ---------------------------------------------------------------------------
 
+# S3: display tier → canonical numeric confidence (bucket midpoints). The
+# float is the stored source of truth (Hindsight memory_units.confidence_score
+# FLOAT 0..1); HIGH/MEDIUM/LOW are display buckets mapped at the edges.
+CONFIDENCE_TIER_NUMS: dict[str, float] = {
+    "HIGH": 0.9,
+    "MEDIUM": 0.6,
+    "MED": 0.6,
+    "LOW": 0.3,
+}
+# Unknown/blank tiers land mid-bucket — same neutral treatment recall's
+# reranker gives unrecognized tiers.
+DEFAULT_CONFIDENCE_NUM = 0.6
+
+
+def confidence_num_from_tier(tier: Any) -> float:
+    """S3: map a display tier to its numeric midpoint (HIGH→0.9, MEDIUM→0.6,
+    LOW→0.3; unknown→0.6). Case-insensitive; tolerates None/odd types."""
+    if tier is None or isinstance(tier, bool):
+        return DEFAULT_CONFIDENCE_NUM
+    return CONFIDENCE_TIER_NUMS.get(str(tier).strip().upper(), DEFAULT_CONFIDENCE_NUM)
+
+
+def _coerce_confidence_num(value: Any, tier: Any) -> float:
+    """S3: normalize a caller-supplied numeric confidence to [0, 1].
+
+    None / unparseable values fall back to the tier midpoint so the two
+    fields can never disagree wildly; numeric values are clamped, never
+    rejected (a typo'd 1.2 becomes 1.0, not a crash)."""
+    if value is None or isinstance(value, bool):
+        return confidence_num_from_tier(tier)
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return confidence_num_from_tier(tier)
+    if num != num:  # NaN guard — NaN compares false to everything
+        return confidence_num_from_tier(tier)
+    return min(1.0, max(0.0, num))
+
 
 def _dedupe_source_ids(values: Any) -> list[str]:
     """Normalize a source_memory_ids payload to a unique, order-preserving
@@ -787,6 +848,7 @@ def add_learning(
     source_path: str = "",
     content_hash: str = "",
     *,
+    confidence_num: Optional[float] = None,
     status: str = LearningStatus.PENDING.value,
     scope: str = "project",
     source_provider: str = "",
@@ -823,10 +885,17 @@ def add_learning(
     when the caller already aggregated evidence) and stores
     ``source_memory_ids`` as a unique, order-preserving JSON list. The
     UPDATE half of the contract lives in :func:`add_learning_proof`.
+
+    S3 numeric confidence: ``confidence_num`` is the continuous 0–1 value
+    ranking uses; ``confidence`` stays the display bucket. When the caller
+    omits the float it is derived from the tier midpoint (HIGH→0.9,
+    MEDIUM→0.6, LOW→0.3) so both fields are always present and consistent.
+    Out-of-range values are clamped to [0, 1].
     """
     conn = conn or get_conn()
     lid = _new_id()
     provider = source_provider or source_tool
+    effective_confidence_num = _coerce_confidence_num(confidence_num, confidence)
     quote_hash = source_quote_hash or (_stable_text_hash(source_quote) if source_quote else "")
     memory_ids = _dedupe_source_ids(source_memory_ids)
     effective_proof_count = max(1, int(proof_count))
@@ -834,19 +903,21 @@ def add_learning(
     with conn:
         conn.execute(
             """INSERT INTO learnings
-               (id, title, category, confidence, status, scope, source_tool,
+               (id, title, category, confidence, confidence_num, status,
+                scope, source_tool,
                 source_provider, source_kind, source_path, source_quote,
                 source_quote_hash, content_hash, source_memory_ids,
                 proof_count, session_id, thread_id,
                 privacy_level, artifact_path, sidecar_path, commit_hash,
                 supersedes_learning_id, superseded_by_learning_id,
                 forget_after, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lid,
                 title,
                 category,
                 confidence,
+                effective_confidence_num,
                 status,
                 scope,
                 source_tool,

@@ -167,6 +167,30 @@ def append_history_sidecar(
 # ---------------------------------------------------------------------------
 
 
+# S3: display tier → numeric confidence midpoint (the reflect.db backfill
+# mapping). The float is what recall ranks by; tiers are display buckets.
+_CONFIDENCE_TIER_NUMS = {"HIGH": 0.9, "MEDIUM": 0.6, "MED": 0.6, "LOW": 0.3}
+_DEFAULT_CONFIDENCE_NUM = 0.6
+
+
+def _confidence_num(confidence: str, confidence_num: Optional[float]) -> float:
+    """S3: resolve the numeric confidence for a new note.
+
+    An explicit caller value wins (clamped to [0, 1]); otherwise the tier
+    is mapped to its bucket midpoint so every new note carries BOTH fields.
+    """
+    if confidence_num is not None and not isinstance(confidence_num, bool):
+        try:
+            num = float(confidence_num)
+            if num == num:  # NaN guard
+                return min(1.0, max(0.0, num))
+        except (TypeError, ValueError):
+            pass
+    return _CONFIDENCE_TIER_NUMS.get(
+        str(confidence or "").strip().upper(), _DEFAULT_CONFIDENCE_NUM
+    )
+
+
 def _one_liner(text: str, cap: int = 200) -> str:
     """S1: distil prose to a single-line summary for structured frontmatter.
 
@@ -197,6 +221,7 @@ def create_knowledge_note(
     solution: str,
     context: str = "",
     confidence: str = "high",
+    confidence_num: Optional[float] = None,
     language: str = "",
     framework: str = "",
     source_tool: str = "",
@@ -243,6 +268,9 @@ def create_knowledge_note(
         'key_insight': key_insight,
         'created': datetime.now().strftime('%Y-%m-%d'),
         'confidence': confidence,
+        # S3: continuous 0–1 confidence beside the display tier — recall
+        # ranks by this float; omitted callers get the tier midpoint.
+        'confidence_num': _confidence_num(confidence, confidence_num),
     }
     # S1: structured extraction fields — only written when populated so legacy
     # callers keep producing the exact same frontmatter as before.

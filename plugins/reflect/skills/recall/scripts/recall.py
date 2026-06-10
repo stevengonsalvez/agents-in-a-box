@@ -113,6 +113,12 @@ RECENCY_WINDOW_DAYS = 365.0
 # R8: confidence tier → [0, 1] norm. MEDIUM (and unknown) sit exactly at
 # the neutral 0.5 baseline so the boost collapses to 1.0 for them.
 CONFIDENCE_NORMS = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.0}
+# S3: display tier → canonical numeric confidence (bucket midpoints — the
+# same mapping the reflect.db migration backfills: HIGH→0.9, MEDIUM→0.6,
+# LOW→0.3). The float is what ranking uses; tiers are display buckets.
+# Unknown tiers land mid-bucket, mirroring CONFIDENCE_NORMS' neutral 0.5.
+CONFIDENCE_TIER_NUMS = {"HIGH": 0.9, "MEDIUM": 0.6, "MED": 0.6, "LOW": 0.3}
+DEFAULT_CONFIDENCE_NUM = 0.6
 CHUNK_SEPARATOR = "--New Chunk--"
 ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 
@@ -330,6 +336,31 @@ class Learning:
                 return "MEDIUM"
             return "LOW"
         return str(raw).upper()
+
+    @property
+    def confidence_num(self) -> float:
+        """S3: continuous confidence 0–1 — the value ranking uses.
+
+        Lookup order: explicit ``confidence_num`` frontmatter → a numeric
+        ``confidence`` (instinct-style 0.0–1.0 notes) → the tier midpoint
+        (HIGH→0.9, MEDIUM→0.6, LOW→0.3; unknown→0.6). The midpoint fallback
+        is anchored so tier-only legacy notes rank EXACTLY as they did
+        before S3 (see :func:`confidence_num_norm`). Values are clamped to
+        [0, 1]; malformed values degrade to the tier path, never crash.
+        """
+        raw = self.frontmatter.get("confidence_num")
+        if raw is None:
+            legacy = self.frontmatter.get("confidence")
+            if isinstance(legacy, (int, float)) and not isinstance(legacy, bool):
+                raw = legacy
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                num = float(raw)
+                if num == num:  # NaN guard
+                    return min(1.0, max(0.0, num))
+            except (ValueError, TypeError):
+                pass
+        return CONFIDENCE_TIER_NUMS.get(self.confidence, DEFAULT_CONFIDENCE_NUM)
 
     @property
     def tags(self) -> list[str]:
@@ -1231,8 +1262,10 @@ def rerank_with_scores(
     def formula(lrn: Learning) -> float:
         # R8 + R16: product of bounded multiplicative boosts — each signal
         # worth at most ±α/2, so no single one can dominate the ordering.
+        # S3: confidence rides the continuous 0–1 value (confidence_num),
+        # normed so tier-only notes score exactly as before.
         return (
-            bounded_boost(confidence_norm(lrn.confidence), CONFIDENCE_ALPHA)
+            bounded_boost(confidence_num_norm(lrn.confidence_num), CONFIDENCE_ALPHA)
             * bounded_boost(recency_norm(lrn.archived_at, now), RECENCY_ALPHA)
             * bounded_boost(tag_norm(qt, lrn.tags), TAG_ALPHA)
             * proof_count_boost(lrn.proof_count)
@@ -1325,8 +1358,26 @@ def project_norm(current_project: str, hit_project: str) -> float:
 
 def confidence_norm(tier: str) -> float:
     """R8: confidence tier → [0, 1]. HIGH=1.0, MEDIUM=0.5 (neutral),
-    LOW=0.0; unknown tiers sit at the neutral baseline."""
+    LOW=0.0; unknown tiers sit at the neutral baseline.
+
+    S3 note: the rerank formula now goes through
+    :func:`confidence_num_norm`; this tier version is kept for bucket-edge
+    consumers (``--confidence`` filtering, display) and is anchored to it —
+    ``confidence_num_norm(tier midpoint) == confidence_norm(tier)``.
+    """
     return CONFIDENCE_NORMS.get(tier, 0.5)
+
+
+def confidence_num_norm(num: float) -> float:
+    """S3: numeric confidence (0–1) → [0, 1] boost norm.
+
+    Linear rescale anchored on the tier midpoints so tier-only legacy notes
+    keep their EXACT pre-S3 norms — 0.9→1.0, 0.6→0.5 (neutral), 0.3→0.0 —
+    while notes carrying a calibrated ``confidence_num`` land proportionally
+    between bucket edges (the finer-grained ranking S3 buys). Clamped, so
+    <=0.3 floors at 0.0 and >=0.9 ceilings at 1.0.
+    """
+    return min(1.0, max(0.0, (num - 0.3) / 0.6))
 
 
 def recency_norm(archived_at: str | None, now: datetime) -> float:
@@ -1501,6 +1552,9 @@ def render_json(
             "title": lrn.title,
             "key_insight": lrn.key_insight,
             "confidence": lrn.confidence,
+            # S3: the continuous value ranking used (tier above is the
+            # display bucket — Hindsight maps to buckets at API edges only).
+            "confidence_num": lrn.confidence_num,
             "tags": lrn.tags,
             "how_to_apply": lrn.how_to_apply,
             "archived_at": lrn.archived_at,
