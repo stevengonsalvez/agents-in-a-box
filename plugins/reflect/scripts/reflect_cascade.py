@@ -103,8 +103,9 @@ _STOPWORDS = frozenset({
     "to", "was", "were", "when", "which", "with", "you", "your",
 })
 
-# Statuses a revision must never target again — retired/replaced beliefs.
-_RETIRED_STATUSES = ("reverted", "superseded", "rejected")
+# Statuses a revision must never target again — retired/replaced beliefs
+# (including A3 TTL-archived rows from the forget sweep).
+_RETIRED_STATUSES = ("reverted", "superseded", "rejected", "archived")
 
 # C1: per-ingest semantic-dedup adjudication (Hindsight consolidator shape).
 # A CREATE whose text is >= this cosine to an existing learning is held for a
@@ -722,12 +723,18 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                             _merge_adjudication(content, twin, dedup_threshold())
                         )
                         continue
+                # A3: the drain may flag clearly time-bounded knowledge
+                # (incident workaround, sprint/migration scope) with an
+                # optional forget_after ISO timestamp; the hourly forget
+                # sweep archives the row once it passes. Absent = permanent.
+                forget_after = str(raw.get("forget_after", "") or "").strip()
                 reflect_db.add_learning(
                     title=content[:200],
                     category=str(raw.get("category", "") or "Unknown"),
                     confidence=str(raw.get("confidence", "") or "MEDIUM"),
                     content_hash=str(raw.get("content_hash", "") or ""),
                     source_memory_ids=[sid] if sid else None,
+                    forget_after=forget_after or None,
                 )
                 summary["created"] += 1
             else:

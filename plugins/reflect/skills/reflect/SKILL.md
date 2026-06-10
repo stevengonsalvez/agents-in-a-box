@@ -248,6 +248,12 @@ Field rules:
 - **`causal_relations`**: cause→effect chains between entities
   (`type: caused_by`, mirroring sidecar relationship types). `[]` when
   the learning has no causal structure.
+- **`forget_after` (A3, optional)**: ISO-timestamp TTL for clearly
+  time-bounded knowledge — incident workarounds ("avoid X service, it's
+  down"), sprint/migration/quarter-scoped rules. The hourly forget sweep
+  archives the learning once the timestamp passes. Leave `null` (the
+  template default) for durable rules; when in doubt, omit — permanent
+  is the safe default.
 
 The prose body (Problem/Solution/Anti-Pattern/Context) stays mandatory —
 fields complement it, never replace it. Older free-form notes without
@@ -385,13 +391,20 @@ exactly ONE structured action instead of unconditionally creating a new note:
 - Be very conservative with `DELETE` — only when directly contradicted or
   superseded, never just because a learning is old.
 - Every action carries a one-sentence `reason` (audited to catch duplicate creates).
+- **Time-bounded CREATEs (A3)**: when the new knowledge is clearly scoped to a
+  window — an incident workaround, a sprint/migration/quarter-specific rule —
+  add an optional `forget_after: "<ISO timestamp>"` so the hourly forget sweep
+  archives it once the window closes. Omit for durable knowledge; permanent is
+  the default.
 
 **Action contract** (JSON array handed to the cascade):
 
 ```json
 [{"action": "UPDATE", "target_id": "<id>", "reason": "restates existing rule"},
  {"action": "DELETE", "target_id": "<id>", "reason": "superseded by new fix"},
- {"action": "CREATE", "content": "<one-line learning>", "reason": "no existing match"}]
+ {"action": "CREATE", "content": "<one-line learning>", "reason": "no existing match"},
+ {"action": "CREATE", "content": "<incident workaround>", "reason": "scoped to incident",
+  "forget_after": "2026-07-01T00:00:00+00:00"}]
 ```
 
 Execute via the cascade (stdlib-only, no engine deps):

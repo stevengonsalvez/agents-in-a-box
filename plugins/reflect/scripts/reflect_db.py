@@ -97,6 +97,7 @@ _LEARNING_COLUMNS = (
     "commit_hash",
     "supersedes_learning_id",
     "superseded_by_learning_id",
+    "forget_after",
     "created_at",
     "approved_at",
     "indexed_at",
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     commit_hash             TEXT,
     supersedes_learning_id  TEXT,
     superseded_by_learning_id TEXT,
+    forget_after            TEXT,
     created_at              TEXT NOT NULL,
     approved_at             TEXT,
     indexed_at              TEXT,
@@ -582,6 +584,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "superseded_by_learning_id",
             "ALTER TABLE learnings ADD COLUMN superseded_by_learning_id TEXT",
         ),
+        ("forget_after", "ALTER TABLE learnings ADD COLUMN forget_after TEXT"),
         ("reverted_at", "ALTER TABLE learnings ADD COLUMN reverted_at TEXT"),
         ("revert_reason", "ALTER TABLE learnings ADD COLUMN revert_reason TEXT"),
         ("last_recalled_at", "ALTER TABLE learnings ADD COLUMN last_recalled_at TEXT"),
@@ -800,9 +803,15 @@ def add_learning(
     commit_hash: Optional[str] = None,
     supersedes_learning_id: Optional[str] = None,
     superseded_by_learning_id: Optional[str] = None,
+    forget_after: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Insert a new learning row. Returns the generated id.
+
+    A3 per-row TTL: ``forget_after`` is an optional ISO-8601 timestamp.
+    When set, the hourly forget sweep (``reflect_forget_sweep.py``)
+    archives the row once the timestamp passes. Absent (None) means the
+    learning is permanent — the agentmemory ``Memory.forgetAfter`` shape.
 
     ``source_quote`` is captured raw regardless of ``privacy_level`` —
     redaction is applied at read-time by callers that surface the quote
@@ -830,8 +839,9 @@ def add_learning(
                 source_quote_hash, content_hash, source_memory_ids,
                 proof_count, session_id, thread_id,
                 privacy_level, artifact_path, sidecar_path, commit_hash,
-                supersedes_learning_id, superseded_by_learning_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                supersedes_learning_id, superseded_by_learning_id,
+                forget_after, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lid,
                 title,
@@ -856,6 +866,7 @@ def add_learning(
                 commit_hash,
                 supersedes_learning_id,
                 superseded_by_learning_id,
+                forget_after or None,
                 now,
             ),
         )
@@ -1155,11 +1166,12 @@ def get_update_counts(
 CONTRADICTION_EVENT_TYPE = "contradiction_detected"
 
 # Statuses that never resurface as contradiction candidates — retired beliefs
-# (same set the S5 revision recall excludes).
+# (same set the S5 revision recall excludes, plus A3 TTL-archived rows).
 _CONTRADICTION_RETIRED_STATUSES = (
     LearningStatus.REVERTED.value,
     LearningStatus.SUPERSEDED.value,
     LearningStatus.REJECTED.value,
+    LearningStatus.ARCHIVED.value,
 )
 
 
@@ -1368,6 +1380,125 @@ def get_contradiction_count(*, conn: Optional[sqlite3.Connection] = None) -> int
         (CONTRADICTION_EVENT_TYPE,),
     ).fetchone()
     return int(row[0])
+
+
+# ---------------------------------------------------------------------------
+# Forget sweep (A3: per-row TTL, agentmemory forgetAfter + auto-forget shape)
+# ---------------------------------------------------------------------------
+
+FORGET_EVENT_TYPE = "learning_forgotten"
+
+
+def _parse_forget_after(value: Any) -> Optional[datetime]:
+    """Parse a ``forget_after`` value to an aware UTC datetime.
+
+    Tolerant: ISO-8601 with or without offset ('Z' accepted); naive
+    timestamps are treated as UTC. Returns None for empty/unparseable
+    values — a learning with a malformed TTL is treated as permanent
+    (never archive on bad data).
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _coerce_now(now: Any = None) -> datetime:
+    """Normalize the sweep's *now* (None / ISO string / datetime) to UTC."""
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        return now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    parsed = _parse_forget_after(now)
+    return parsed if parsed is not None else datetime.now(timezone.utc)
+
+
+def get_expired_learnings(
+    *,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Learnings whose ``forget_after`` TTL has passed and aren't archived yet.
+
+    Rows with NULL/empty ``forget_after`` are permanent and never returned
+    (agentmemory semantics: absent = keep forever). Timestamps are compared
+    in Python via ``datetime.fromisoformat`` so mixed offset formats and
+    'Z' suffixes compare correctly; unparseable values are skipped.
+    """
+    conn = conn or get_conn()
+    cutoff = _coerce_now(now)
+    rows = conn.execute(
+        """SELECT * FROM learnings
+           WHERE forget_after IS NOT NULL
+             AND forget_after != ''
+             AND status != ?
+           ORDER BY created_at""",
+        (LearningStatus.ARCHIVED.value,),
+    ).fetchall()
+    expired: list[dict[str, Any]] = []
+    for row in rows:
+        ttl = _parse_forget_after(row["forget_after"])
+        if ttl is not None and ttl <= cutoff:
+            expired.append(dict(row))
+    return expired
+
+
+def sweep_expired_learnings(
+    *,
+    now: Any = None,
+    dry_run: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """A3 sweep body: archive every learning past its ``forget_after`` TTL.
+
+    Non-destructive (archives, never deletes — the reflect flavour of
+    agentmemory's auto-forget): each expired row gets an S6 history
+    snapshot first, then ``status = 'archived'`` + ``is_latest = 0``, plus
+    a ``learning_forgotten`` audit event. Archived rows stop surfacing as
+    contradiction candidates and the sweep is idempotent — an already
+    archived row never expires twice.
+
+    Returns the (pre-archive) rows that expired; with ``dry_run=True``
+    nothing is mutated.
+    """
+    conn = conn or get_conn()
+    expired = get_expired_learnings(now=now, conn=conn)
+    if dry_run:
+        return expired
+    archived_at = _now_iso()
+    for row in expired:
+        lid = row["id"]
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                lid,
+                change_type="forget_sweep",
+                changed_fields=["status", "is_latest"],
+                reason=f"forget_after TTL expired ({row['forget_after']})",
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                "UPDATE learnings SET status = ?, is_latest = 0 WHERE id = ?",
+                (LearningStatus.ARCHIVED.value, lid),
+            )
+            add_event(
+                FORGET_EVENT_TYPE,
+                lid,
+                {
+                    "title": row["title"],
+                    "forget_after": row["forget_after"],
+                    "archived_at": archived_at,
+                },
+                conn=conn,
+                autocommit=False,
+            )
+    return expired
 
 
 # ---------------------------------------------------------------------------

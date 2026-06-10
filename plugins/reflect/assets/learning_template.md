@@ -28,6 +28,11 @@ causal_relations:                       # cause -> effect chains ([] when none)
 links: []
 source_episodes: [{{EPISODE_ID}}]
 superseded_by: null
+# A3: per-row TTL. ISO timestamp after which the hourly forget sweep archives
+# this learning; null = permanent. Set ONLY for clearly time-bounded knowledge
+# ("avoid X service during the incident", "valid for the current migration /
+# sprint / quarter") — durable rules must stay null.
+forget_after: null
 provenance:
   source_tool: "{{SOURCE_TOOL}}"      # claude | codex | copilot | gemini
   source_path: "{{SOURCE_PATH}}"
