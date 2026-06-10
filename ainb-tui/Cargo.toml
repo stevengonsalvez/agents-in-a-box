@@ -16,6 +16,7 @@ members = [
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",
     "crates/ainb-hangar-proto",
+    "crates/ainb-hangar-sandbox",
     "crates/ainb-hangar-daemon",
     "../plugins/hangar-tui",
     "xtask",
