@@ -80,6 +80,42 @@ pub struct Issue {
     pub labels: Vec<String>,
 }
 
+/// A partial-edit instruction for one issue's mutable fields (e38.8).
+///
+/// Each field is an `Option` of "leave unchanged" vs "set to this value". The
+/// two nullable columns (`assignee`, `due_date`) nest a second `Option` so the
+/// caller can distinguish *clear to NULL* (`Some(None)`) from *leave unchanged*
+/// (`None`) — a single layer would conflate the two. `priority` and `state` are
+/// non-nullable, so a single `Option` suffices.
+///
+/// `Default` is all-`None` (a no-op edit); callers fill in only the fields they
+/// touch (`IssueFieldUpdate { priority: Some(2), ..Default::default() }`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFieldUpdate {
+    /// New lifecycle state, or `None` to leave it unchanged.
+    pub state: Option<String>,
+    /// New assignee: `None` leaves it, `Some(None)` clears it (unassign),
+    /// `Some(Some(actor))` assigns it.
+    pub assignee: Option<Option<ActorRef>>,
+    /// New urgency `0..3`, or `None` to leave it unchanged.
+    pub priority: Option<i64>,
+    /// New due date (epoch ms): `None` leaves it, `Some(None)` clears the
+    /// deadline, `Some(Some(ts))` sets it.
+    pub due_date: Option<Option<i64>>,
+}
+
+impl IssueFieldUpdate {
+    /// `true` when no field is set, so [`IssueRepo::update_fields`] would write
+    /// nothing — the handler uses this to skip a pointless UPDATE.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.state.is_none()
+            && self.assignee.is_none()
+            && self.priority.is_none()
+            && self.due_date.is_none()
+    }
+}
+
 /// Stateless typed wrapper over the `issue` table.
 pub struct IssueRepo;
 
@@ -160,6 +196,76 @@ impl IssueRepo {
             .execute(pool)
             .await?;
         Ok(())
+    }
+
+    /// Edit a subset of one issue's mutable fields, scoped to a workspace
+    /// (e38.8).
+    ///
+    /// Only the fields set in `update` are written; absent fields are left as-is.
+    /// The two nullable columns can be cleared (`Some(None)`) or set
+    /// (`Some(Some(_))`). The write is **workspace-scoped**: the `WHERE` clause
+    /// matches `(id, workspace_id)`, so an issue id from another tenant matches
+    /// zero rows and changes nothing (a no-op, never a cross-tenant edit).
+    ///
+    /// Returns `true` when exactly one row was updated, `false` when the
+    /// `(id, workspace_id)` pair matched no issue (a foreign tenant, an unknown
+    /// id, or — defensively — an empty `update`, which is a deliberate no-op).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails (e.g. a `state`/`priority`
+    /// value the schema's constraints reject).
+    pub async fn update_fields(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        id: &str,
+        update: &IssueFieldUpdate,
+    ) -> Result<bool, sqlx::Error> {
+        // An empty edit is a deliberate no-op: building an UPDATE with no SET
+        // clause would be invalid SQL, so short-circuit before constructing it.
+        if update.is_empty() {
+            return Ok(false);
+        }
+
+        // Build the SET list dynamically from only the present fields, binding
+        // positionally in the same order so the `query.bind(...)` chain below
+        // matches the placeholders. The nullable actor splits into its two
+        // columns (`assignee_type`, `assignee_id`) when present.
+        let mut sets: Vec<&str> = Vec::new();
+        if update.state.is_some() {
+            sets.push("state = ?");
+        }
+        if update.assignee.is_some() {
+            sets.push("assignee_type = ?");
+            sets.push("assignee_id = ?");
+        }
+        if update.priority.is_some() {
+            sets.push("priority = ?");
+        }
+        if update.due_date.is_some() {
+            sets.push("due_date = ?");
+        }
+        let sql = format!(
+            "UPDATE issue SET {} WHERE id = ? AND workspace_id = ?",
+            sets.join(", ")
+        );
+
+        let mut query = sqlx::query(&sql);
+        if let Some(state) = &update.state {
+            query = query.bind(state);
+        }
+        if let Some(assignee) = &update.assignee {
+            let (assignee_type, assignee_id) = split_actor(assignee.as_ref());
+            query = query.bind(assignee_type).bind(assignee_id);
+        }
+        if let Some(priority) = &update.priority {
+            query = query.bind(priority);
+        }
+        if let Some(due_date) = &update.due_date {
+            query = query.bind(due_date);
+        }
+        let res = query.bind(id).bind(workspace_id).execute(pool).await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// List issues in a workspace filtered by `state`, ordered by `created_at`.

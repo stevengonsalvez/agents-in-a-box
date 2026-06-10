@@ -222,6 +222,171 @@ async fn update_state_overwrites_lifecycle_state() {
 }
 
 #[tokio::test]
+async fn update_fields_edits_state_assignee_priority_and_due_date() {
+    use ainb_hangar_store::repo::issue::IssueFieldUpdate;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let workspace_id = seed_workspace(&store).await;
+
+    let new = NewIssue {
+        id: "issue-edit".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Edit me".to_string(),
+        description: None,
+        state: "open".to_string(),
+        assignee: None,
+        creator: ActorRef::new(ActorKind::Member, "user-1").expect("actor"),
+        created_at: 1_700_000_000_000,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
+    };
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
+
+    // A full edit: change state, assign an agent, bump priority, set a due date.
+    let touched = IssueRepo::update_fields(
+        store.pool(),
+        &workspace_id,
+        "issue-edit",
+        &IssueFieldUpdate {
+            state: Some("in_progress".to_string()),
+            assignee: Some(Some(
+                ActorRef::new(ActorKind::Agent, "agent-7").expect("actor"),
+            )),
+            priority: Some(3),
+            due_date: Some(Some(1_700_000_900_000)),
+        },
+    )
+    .await
+    .expect("update fields");
+    assert!(
+        touched,
+        "an in-workspace issue id must edit exactly one row"
+    );
+
+    let got: Issue = IssueRepo::get_by_id(store.pool(), "issue-edit")
+        .await
+        .expect("get issue")
+        .expect("issue present");
+    assert_eq!(got.state, "in_progress", "state edited");
+    assert_eq!(
+        got.assignee,
+        Some(ActorRef::new(ActorKind::Agent, "agent-7").expect("actor")),
+        "assignee set to an agent"
+    );
+    assert_eq!(got.priority, 3, "priority edited");
+    assert_eq!(got.due_date, Some(1_700_000_900_000), "due_date set");
+
+    // A partial edit (only priority) leaves every other field untouched.
+    IssueRepo::update_fields(
+        store.pool(),
+        &workspace_id,
+        "issue-edit",
+        &IssueFieldUpdate {
+            priority: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("partial update");
+    let got = IssueRepo::get_by_id(store.pool(), "issue-edit")
+        .await
+        .expect("get issue")
+        .expect("issue present");
+    assert_eq!(got.priority, 1, "priority re-edited");
+    assert_eq!(
+        got.state, "in_progress",
+        "state left unchanged by partial edit"
+    );
+    assert_eq!(
+        got.assignee,
+        Some(ActorRef::new(ActorKind::Agent, "agent-7").expect("actor")),
+        "assignee left unchanged by partial edit"
+    );
+    assert_eq!(
+        got.due_date,
+        Some(1_700_000_900_000),
+        "due_date left unchanged by partial edit"
+    );
+
+    // Clearing nullable fields (explicit Some(None)) sets them back to NULL.
+    IssueRepo::update_fields(
+        store.pool(),
+        &workspace_id,
+        "issue-edit",
+        &IssueFieldUpdate {
+            assignee: Some(None),
+            due_date: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("clear nullable fields");
+    let got = IssueRepo::get_by_id(store.pool(), "issue-edit")
+        .await
+        .expect("get issue")
+        .expect("issue present");
+    assert_eq!(got.assignee, None, "assignee cleared to NULL");
+    assert_eq!(got.due_date, None, "due_date cleared to NULL");
+}
+
+#[tokio::test]
+async fn update_fields_is_workspace_scoped_no_cross_tenant_edit() {
+    use ainb_hangar_store::repo::issue::IssueFieldUpdate;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let workspace_id = seed_workspace(&store).await;
+
+    // A second tenant workspace.
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+        .bind("ws-2")
+        .bind("beta")
+        .bind("Beta")
+        .bind(0_i64)
+        .execute(store.pool())
+        .await
+        .expect("insert second workspace");
+
+    let new = NewIssue {
+        id: "issue-tenant".to_string(),
+        workspace_id, // belongs to ws-1
+        title: "Tenant A's issue".to_string(),
+        description: None,
+        state: "open".to_string(),
+        assignee: None,
+        creator: ActorRef::new(ActorKind::Member, "user-1").expect("actor"),
+        created_at: 1_700_000_000_000,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
+    };
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
+
+    // Editing the issue scoped to the WRONG workspace must touch no row.
+    let touched = IssueRepo::update_fields(
+        store.pool(),
+        "ws-2",
+        "issue-tenant",
+        &IssueFieldUpdate {
+            state: Some("done".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cross-tenant update is not an error, just a no-op");
+    assert!(!touched, "a cross-tenant edit must touch zero rows");
+
+    // The issue is untouched: still open in its real workspace.
+    let got = IssueRepo::get_by_id(store.pool(), "issue-tenant")
+        .await
+        .expect("get issue")
+        .expect("issue present");
+    assert_eq!(got.state, "open", "cross-tenant edit must not change state");
+}
+
+#[tokio::test]
 async fn insert_issue_with_invalid_assignee_type_fails_at_check_constraint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
