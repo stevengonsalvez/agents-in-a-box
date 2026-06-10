@@ -70,10 +70,31 @@ sleep 1
 # entries in ~/.claude.json; removed on cleanup is not needed — paths are
 # /tmp throwaways.
 pretrust() {
-  local dir="$1" cfg="$HOME/.claude.json"
+  # Trust both the literal path and the canonical one (/tmp -> /private/tmp
+  # on macOS — claude records the resolved path).
+  local dir="$1" cfg="$HOME/.claude.json" resolved
+  resolved="$(cd "$dir" && pwd -P)"
   [ -f "$cfg" ] || echo '{}' > "$cfg"
-  jq --arg p "$dir" '.projects[$p] = ((.projects[$p] // {}) + {"enableAllProjectMcpServers": true, "hasTrustDialogAccepted": true})' \
-    "$cfg" > "$cfg.tmp.$$" && mv "$cfg.tmp.$$" "$cfg"
+  for p in "$dir" "$resolved"; do
+    jq --arg p "$p" '.projects[$p] = ((.projects[$p] // {}) + {"enableAllProjectMcpServers": true, "hasTrustDialogAccepted": true})' \
+      "$cfg" > "$cfg.tmp.$$" && mv "$cfg.tmp.$$" "$cfg"
+  done
+}
+
+# Belt + braces: if a session still shows the folder-trust dialog, accept it.
+accept_trust_prompts() {
+  for _ in $(seq 1 12); do
+    local pending=0
+    for i in $(seq 1 "$N"); do
+      local s="tmux_${RUN_ID}-s${i}"
+      if tmux capture-pane -t "$s" -p 2>/dev/null | grep -q "Is this a project you created or one you trust"; then
+        tmux send-keys -t "$s" Enter
+        pending=1
+      fi
+    done
+    [ "$pending" -eq 0 ] && return 0
+    sleep 3
+  done
 }
 
 # --------------------------------------------------------------- spawn ----
@@ -86,6 +107,9 @@ for i in $(seq 1 "$N"); do
       --dangerously-skip-permissions >/dev/null) \
     || { bad "ainb run session $i"; exit 1; }
 done
+
+sleep 5
+accept_trust_prompts
 
 # .mcp.json shim entries written?
 for i in $(seq 1 "$N"); do
@@ -133,7 +157,7 @@ fi
 # -------------------------------------------------- tool call per session --
 say "tool call from every session (tmux drive, generous timeouts)"
 for i in $(seq 1 "$N"); do
-  T="tmux_${RUN_ID}-s${i}:0"
+  T="tmux_${RUN_ID}-s${i}"  # plain session target — active window (base-index may be 1)
   MARK="POOLTEST_OK_${i}"
   tmux send-keys -t "$T" "Use the context7 MCP tool resolve-library-id with libraryName 'react'. If you get any result at all, reply with exactly ${MARK} and nothing else." C-m
   found=0
