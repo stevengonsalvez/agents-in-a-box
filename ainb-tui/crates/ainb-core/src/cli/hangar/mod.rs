@@ -1266,6 +1266,7 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
                 agent_id: a.agent_id,
                 issue_id: Some(id.clone()),
                 work_dir: None,
+                priority: 0,
                 created_at: now,
                 autopilot_run_id: None,
             },

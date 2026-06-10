@@ -140,6 +140,7 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             agent_id: "agent-1".into(),
             issue_id: Some("issue-1".into()),
             work_dir: None,
+            priority: 0,
             created_at: now,
             autopilot_run_id: None,
         },

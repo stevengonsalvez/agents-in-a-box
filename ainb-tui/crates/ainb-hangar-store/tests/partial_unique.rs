@@ -96,6 +96,7 @@ fn new_task(id: &str, issue_id: Option<&str>) -> NewTask {
         agent_id: "agent-1".to_string(),
         issue_id: issue_id.map(str::to_string),
         work_dir: None,
+        priority: 0,
         created_at: 1_700_000_000_000,
         autopilot_run_id: None,
     }

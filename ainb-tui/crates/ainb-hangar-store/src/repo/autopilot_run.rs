@@ -132,6 +132,9 @@ pub async fn fire_autopilot_tick(
             agent_id: autopilot.agent_id.clone(),
             issue_id: None,
             work_dir: None,
+            // Autopilot ticks are routine background work: default urgency
+            // (priority 0 = P3), drained FIFO among equals at claim time.
+            priority: 0,
             created_at: now,
             autopilot_run_id: Some(run_id.clone()),
         },

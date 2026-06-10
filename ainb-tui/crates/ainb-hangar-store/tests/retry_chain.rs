@@ -113,6 +113,7 @@ async fn seed_failed_task(
             agent_id: "agent-1".to_string(),
             issue_id: issue_id.map(str::to_string),
             work_dir: work_dir.map(str::to_string),
+            priority: 0,
             created_at: 1,
             autopilot_run_id: None,
         },
@@ -191,6 +192,51 @@ async fn failure_reason_runtime_offline_spawns_child_row() {
 }
 
 #[tokio::test]
+async fn child_inherits_parent_priority() {
+    // A retried urgent task must stay urgent: the child row inherits the
+    // parent's `priority` (0..3 = P3..P0, higher = more urgent) so it keeps
+    // its place in the claim ordering (`priority DESC, created_at, id`).
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-urgent",
+        None,
+        None,
+        1,
+        2,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    sqlx::query("UPDATE agent_task_queue SET priority = 3 WHERE id = ?")
+        .bind(&parent_seed.id)
+        .execute(store.pool())
+        .await
+        .expect("escalate parent to P0");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.priority, 3, "parent escalated to P0");
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-urgent", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-urgent".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-urgent")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    assert_eq!(child.priority, 3, "child inherits the parent's priority");
+}
+
+#[tokio::test]
 async fn child_row_is_created_atomically_with_retry_columns_set() {
     // Regression guard for the non-atomic two-statement child creation: the child
     // row must be inserted with attempt = parent.attempt + 1 and
@@ -253,6 +299,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
             agent_id: "agent-1".to_string(),
             issue_id: Some(issue.clone()),
             work_dir: None,
+            priority: 0,
             created_at: 6,
             autopilot_run_id: None,
         },
@@ -452,6 +499,7 @@ async fn partial_unique_index_blocks_retry_when_existing_pending() {
             agent_id: "agent-1".to_string(),
             issue_id: Some(issue.clone()),
             work_dir: None,
+            priority: 0,
             created_at: 5,
             autopilot_run_id: None,
         },

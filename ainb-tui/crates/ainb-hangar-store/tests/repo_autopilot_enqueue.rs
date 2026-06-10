@@ -256,6 +256,7 @@ async fn task_kind_is_autopilot() {
             agent_id: "agent-1".to_string(),
             issue_id: Some("issue-1".to_string()),
             work_dir: None,
+            priority: 0,
             created_at: T0,
             autopilot_run_id: None,
         },

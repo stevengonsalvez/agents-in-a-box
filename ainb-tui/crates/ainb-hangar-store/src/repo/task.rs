@@ -49,6 +49,10 @@ pub struct NewTask {
     pub issue_id: Option<String>,
     /// Working directory the run executes in, or `None` if unset at enqueue.
     pub work_dir: Option<String>,
+    /// Claim urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (migration
+    /// 0013). `0` (P3) is the routine default; the claim loop drains
+    /// `priority DESC, created_at, id`, so equal priorities stay FIFO.
+    pub priority: i64,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
     /// The autopilot firing this task belongs to (`autopilot_run.id`), or `None`
@@ -87,6 +91,9 @@ pub struct Task {
     pub parent_task_id: Option<String>,
     /// Last failure reason, or `None` if not failed.
     pub failure_reason: Option<String>,
+    /// Claim urgency: 0..3 mapping P3..P0, higher = more urgent (see
+    /// [`NewTask::priority`]).
+    pub priority: i64,
     /// Creation timestamp (epoch milliseconds) — the queued-at time.
     pub created_at: i64,
     /// When the task was claimed (`queued -> dispatched`), epoch milliseconds,
@@ -145,9 +152,9 @@ impl TaskRepo {
     ) -> Result<String, sqlx::Error> {
         sqlx::query(
             "INSERT INTO agent_task_queue \
-             (id, workspace_id, runtime_id, agent_id, issue_id, work_dir, created_at, \
-              autopilot_run_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, workspace_id, runtime_id, agent_id, issue_id, work_dir, priority, \
+              created_at, autopilot_run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.id)
         .bind(&task.workspace_id)
@@ -155,6 +162,7 @@ impl TaskRepo {
         .bind(&task.agent_id)
         .bind(&task.issue_id)
         .bind(&task.work_dir)
+        .bind(task.priority)
         .bind(task.created_at)
         .bind(&task.autopilot_run_id)
         .execute(&mut **tx)
@@ -288,7 +296,7 @@ impl TaskRepo {
 /// reads them. Shared by every `SELECT` so the read shape stays in one place.
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
-     created_at, dispatched_at, started_at, finished_at, autopilot_run_id";
+     priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -306,6 +314,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         max_attempts: row.try_get("max_attempts")?,
         parent_task_id: row.try_get("parent_task_id")?,
         failure_reason: row.try_get("failure_reason")?,
+        priority: row.try_get("priority")?,
         created_at: row.try_get("created_at")?,
         dispatched_at: row.try_get("dispatched_at")?,
         started_at: row.try_get("started_at")?,

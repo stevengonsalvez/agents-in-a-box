@@ -124,6 +124,7 @@ fn new_task(
         agent_id: agent_id.to_string(),
         issue_id: issue_id.map(str::to_string),
         work_dir: None,
+        priority: 0,
         created_at,
         autopilot_run_id: None,
     }

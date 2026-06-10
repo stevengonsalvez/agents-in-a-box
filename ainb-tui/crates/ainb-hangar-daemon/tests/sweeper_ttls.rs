@@ -93,6 +93,7 @@ async fn seed_task(
             agent_id: "agent-1".to_string(),
             issue_id: None,
             work_dir: None,
+            priority: 0,
             created_at,
             autopilot_run_id: None,
         },

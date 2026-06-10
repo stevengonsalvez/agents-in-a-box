@@ -87,6 +87,7 @@ async fn seed_task_in_state(store: &Store, id: &str, status: &str) {
             agent_id: "agent-1".to_string(),
             issue_id: None,
             work_dir: None,
+            priority: 0,
             created_at: 1,
             autopilot_run_id: None,
         },

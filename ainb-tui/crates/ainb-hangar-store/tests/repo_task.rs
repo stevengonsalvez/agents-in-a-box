@@ -61,6 +61,7 @@ fn new_task(id: &str, ws: &str, rt: &str, agent: &str, created_at: i64) -> NewTa
         agent_id: agent.into(),
         issue_id: None,
         work_dir: None,
+        priority: 0,
         created_at,
         autopilot_run_id: None,
     }
@@ -109,6 +110,30 @@ async fn list_by_workspace_returns_all_statuses_scoped() {
     assert_eq!(tasks[0].id, "a-2");
     assert_eq!(tasks[1].id, "a-1");
     assert_eq!(tasks[1].status, "done");
+}
+
+/// `insert` persists `priority` (0..3 = P3..P0, higher = more urgent) and
+/// `get_by_id` reads it back; the helper's default is 0 (P3).
+#[tokio::test]
+async fn insert_roundtrips_priority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    seed_two_workspaces(&store).await;
+
+    let mut urgent = new_task("a-urgent", "ws-a", "rt-a", "agent-a", 100);
+    urgent.priority = 3;
+    TaskRepo::insert(store.pool(), &urgent).await.unwrap();
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("a-routine", "ws-a", "rt-a", "agent-a", 200),
+    )
+    .await
+    .unwrap();
+
+    let urgent = TaskRepo::get_by_id(store.pool(), "a-urgent").await.unwrap().unwrap();
+    assert_eq!(urgent.priority, 3, "explicit priority persists");
+    let routine = TaskRepo::get_by_id(store.pool(), "a-routine").await.unwrap().unwrap();
+    assert_eq!(routine.priority, 0, "default priority is 0 (P3)");
 }
 
 /// `transition_status` is workspace-scoped: a transition keyed on the wrong

@@ -5,8 +5,9 @@
 //! attempt. A *retryable* failure (the runtime went away, not the agent) with
 //! attempts remaining spawns a fresh `queued` child row whose `parent_task_id`
 //! chains back to the failed task and whose `attempt` is `parent.attempt + 1`.
-//! Everything else (workspace / runtime / agent / issue / work_dir / max_attempts)
-//! is inherited verbatim; all per-run timestamps and outputs reset.
+//! Everything else (workspace / runtime / agent / issue / work_dir / priority /
+//! max_attempts) is inherited verbatim; all per-run timestamps and outputs
+//! reset.
 //!
 //! # Retry eligibility (Multica migration 055)
 //!
@@ -63,14 +64,17 @@ pub enum RetryDecision {
 /// (`attempt`, `max_attempts`, `parent_task_id`) in one statement, so the child
 /// is correct-or-absent rather than transiently carrying the schema defaults.
 /// Every per-run column (`result`, `session_id`, `failure_reason`,
-/// `started_at`, `finished_at`, `dispatched_at`) resets by being omitted (NULL).
+/// `started_at`, `finished_at`, `dispatched_at`) resets by being omitted (NULL);
+/// `priority` is inherited from the parent so a retried urgent task stays
+/// urgent in the claim ordering.
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
-/// `work_dir`, `attempt`, `max_attempts`, `parent_task_id`, `created_at`.
+/// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
+/// `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
- (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, \
+ (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
   attempt, max_attempts, parent_task_id, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)";
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -116,6 +120,7 @@ impl RetryService {
             .bind(&failed_task.agent_id)
             .bind(&failed_task.issue_id)
             .bind(&failed_task.work_dir)
+            .bind(failed_task.priority)
             .bind(attempt)
             .bind(failed_task.max_attempts)
             .bind(&failed_task.id)

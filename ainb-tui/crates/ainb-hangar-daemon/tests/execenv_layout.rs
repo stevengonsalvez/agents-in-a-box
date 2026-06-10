@@ -43,6 +43,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         max_attempts: 3,
         parent_task_id: None,
         failure_reason: None,
+        priority: 0,
         created_at: BASE_MS,
         dispatched_at: Some(BASE_MS),
         started_at: None,
