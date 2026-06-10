@@ -322,7 +322,9 @@ impl LayoutComponent {
             key("w", GOLD),
             desc(" witr "),
             key("k", GOLD),
-            desc(" skills"),
+            desc(" skills "),
+            key("t", GOLD),
+            desc(" abtop"),
             sep(),
             key("?/H", CORNFLOWER_BLUE),
             desc(" help "),
@@ -1117,6 +1119,7 @@ mod menu_bar_tests {
             "stats",    // i — analytics panel
             "witr",     // w — process-causality browser
             "skills",   // k — skills browser
+            "abtop",    // t — top-for-agents monitor
         ] {
             assert!(
                 rendered.contains(token),
