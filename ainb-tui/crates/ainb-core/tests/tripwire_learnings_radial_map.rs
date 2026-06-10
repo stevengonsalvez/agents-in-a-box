@@ -141,7 +141,12 @@ where
     None
 }
 
-fn poll_capture_resending<F>(session: &str, key: &str, deadline: Instant, mut ok: F) -> Option<String>
+fn poll_capture_resending<F>(
+    session: &str,
+    key: &str,
+    deadline: Instant,
+    mut ok: F,
+) -> Option<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -218,7 +223,10 @@ fn learnings_radial_map_renders_and_responds() {
 
     // HomeScreen.
     let home_deadline = Instant::now() + Duration::from_secs(45);
-    if poll_capture(&session, home_deadline, |c| c.contains("Stats") && c.contains("[i]")).is_none()
+    if poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
     {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -239,12 +247,16 @@ fn learnings_radial_map_renders_and_responds() {
 
     // `g` reaches the Graph tab + focuses the entity neighbourhood (idempotent).
     let graph_deadline = Instant::now() + Duration::from_secs(30);
-    if poll_capture_resending(&session, "g", graph_deadline, |c| c.contains(NEIGHBOURHOOD_EDGE))
-        .is_none()
+    if poll_capture_resending(&session, "g", graph_deadline, |c| {
+        c.contains(NEIGHBOURHOOD_EDGE)
+    })
+    .is_none()
     {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!("`g` did not paint the neighbourhood ({NEIGHBOURHOOD_EDGE:?}); last:\n---\n{last}\n---");
+        panic!(
+            "`g` did not paint the neighbourhood ({NEIGHBOURHOOD_EDGE:?}); last:\n---\n{last}\n---"
+        );
     }
 
     // `v` toggles into the radial map — sent ONCE then polled (a re-send would
@@ -283,8 +295,9 @@ fn learnings_radial_map_renders_and_responds() {
     send_key(&session, "Down");
     thread::sleep(Duration::from_millis(300));
     let recentre_deadline = Instant::now() + Duration::from_secs(30);
-    let recentred =
-        send_once_then_poll(&session, "Enter", recentre_deadline, |c| c.contains(RECENTRED_HEADER));
+    let recentred = send_once_then_poll(&session, "Enter", recentre_deadline, |c| {
+        c.contains(RECENTRED_HEADER)
+    });
     if recentred.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
