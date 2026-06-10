@@ -30,7 +30,12 @@ by cwd.
 ```bash
 ainb fleet standup                       # text table (default)
 ainb fleet --format json standup         # JSON for piping
+ainb fleet standup --no-enrich           # 0-token roster (env AINB_FLEET_ENRICH=0)
 ```
+
+The workflow-backed briefing (`/ainb-fleet:hangar` verb=standup) drafts the
+per-session "what it's doing" lines in a **single batched agent**, not one per
+session. `--no-enrich` skips that entirely.
 
 ## Output fields (JSON)
 
