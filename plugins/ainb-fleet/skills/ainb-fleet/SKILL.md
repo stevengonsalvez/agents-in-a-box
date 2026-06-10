@@ -37,7 +37,7 @@ sub-skill with focused docs.
 ## Architecture (1-line)
 
 ```
-discover (ainb + peers + jobs)  ──▶  state read  ──▶  send (peers-first, tmux fallback)
+discover (ainb + peers + jobs)  ──▶  state read  ──▶  send (tmux-first, broker fallback)
 ```
 
 ## Global flag
@@ -45,10 +45,43 @@ discover (ainb + peers + jobs)  ──▶  state read  ──▶  send (peers-fi
 `--format json|text|csv|markdown` (default `text`). Prefer `--format json`
 when an LLM is the consumer.
 
+## Transport — tmux is primary
+
+Writes (broadcast / sequence / daemon / answer-routing) go out over **tmux
+send-keys by default**. The claude-peers broker is opt-in / fallback only,
+because in practice it has proven flaky (silent delivery gaps). The primitives
+the fleet uses are exactly: `tmux send-keys -l` (write), `tmux capture-pane -p
+-S -<n>` (read, incl. scrollback), and the session JSONL transcript
+(`~/.claude/projects/<cwd-slug>/<sid>.jsonl`) as ground-truth read.
+
+Select the write channel with `AINB_FLEET_TRANSPORT`:
+
+| value | behaviour |
+|---|---|
+| unset / `tmux` / `tmux-first` | tmux send-keys first, broker fallback (**default**) |
+| `tmux-only` | tmux send-keys only — never touch the broker |
+| `peers` / `broker` / `peers-first` | legacy: broker first, tmux fallback |
+
+```
+            ┌──────────────┐  tmux send-keys -l   ┌─────────────┐
+  send ────▶│ tmux pane?   │─────────────────────▶│  delivered  │
+            └──────┬───────┘                       └─────────────┘
+                   │ no live pane (or peers-first)
+                   ▼
+            ┌──────────────┐  broker /send-message ┌─────────────┐
+            │ peer + broker│──────────────────────▶│  delivered  │
+            │   healthy?   │                        └─────────────┘
+            └──────────────┘
+```
+
 ## Discovery sources
 
+Discovery is independent of the write transport — peers are still *read* for
+visibility (PID, `summary`, `WAITING:` markers) even when writes go via tmux.
+
 - **ainb** — every session ainb has spawned via `ainb run`
-- **peers** — sessions registered with the claude-peers broker (`~/.claude-peers.db`)
+- **peers** — sessions registered with the claude-peers broker (`~/.claude-peers.db`),
+  read directly from its sqlite (no HTTP), so discovery survives a down broker
 - **jobs** — bg-session dirs under `~/.claude/jobs/`
 
 Merged + deduped by `cwd` so the same session in two sources collapses
@@ -59,10 +92,11 @@ into one record with `sources: ["ainb", "peers"]`.
 | var | default | use |
 |---|---|---|
 | `AINB_BIN` | `ainb` | override binary the discover layer shells to (tests) |
-| `AINB_FLEET_PEER_ID` | `ainb-fleet-cp` | peer id the daemon registers as |
+| `AINB_FLEET_TRANSPORT` | `tmux-first` | write channel: `tmux` / `tmux-only` / `peers` |
+| `AINB_FLEET_PEER_ID` | `ainb-fleet-cp` | from-id used when a write does fall back to the broker |
 | `AINB_FLEET_JOBS_DIR` | `~/.claude/jobs` | bg-job scan root |
-| `CLAUDE_PEERS_DB` | `~/.claude-peers.db` | broker sqlite path |
-| `CLAUDE_PEERS_PORT` | `7899` | broker HTTP port |
+| `CLAUDE_PEERS_DB` | `~/.claude-peers.db` | broker sqlite path (discovery) |
+| `CLAUDE_PEERS_PORT` | `7899` | broker HTTP port (fallback writes only) |
 
 ## See also
 

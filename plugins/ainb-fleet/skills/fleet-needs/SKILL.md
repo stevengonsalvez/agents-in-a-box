@@ -41,6 +41,9 @@ SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs
 | Fallback writes | peers/broker via `ainb fleet broadcast` | only when no tmux_session known; broker has a known delivery gap |
 
 All write routing below uses tmux first. Broker is a last resort, not the default.
+This matches the binary's default `AINB_FLEET_TRANSPORT=tmux-first`; set
+`tmux-only` to disable the broker fallback entirely, or `peers` to restore the
+legacy broker-first order.
 
 ## Step 0 — gate check (fallback if workflows off)
 

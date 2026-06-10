@@ -74,7 +74,7 @@ Each row in the output array:
     "marker": "WAITING:",
     "text": "…the post-marker text…"
   },
-  "route_hint": "broker" | "tmux" | "none"
+  "route_hint": "tmux" | "broker" | "none"   // advisory; send is tmux-first
 }
 ```
 
@@ -128,15 +128,26 @@ options so the user can click rather than type.
 
 ## Route the answers back
 
-Once Stevie answers each, route via the existing send-route:
+Writes are **tmux-first**. Prefer driving the target pane directly — it lands
+reliably and is verifiable with `capture-pane`:
+
+```bash
+# default, most reliable: write keystrokes straight to the pane
+tmux send-keys -t "<tmux_session>" -l "<answer>"
+tmux send-keys -t "<tmux_session>" Enter
+# verify it landed
+tmux capture-pane -t "<tmux_session>" -p -S -40 | grep -F "<answer>" && echo "✓"
+```
+
+Or go through the verb, which honours `AINB_FLEET_TRANSPORT` (tmux-first):
 
 ```bash
 ainb fleet broadcast "<answer>" --filter "<exact tmux_session>"
 ```
 
-`route_hint` tells you what'll happen:
-- `broker` — clean send through claude-peers HTTP
-- `tmux` — `tmux send-keys -l` literal mode (works for any tmux pane)
+`route_hint` is advisory — it mirrors the default tmux-first order:
+- `tmux` — a live tmux pane exists → `tmux send-keys -l` (the normal case)
+- `broker` — no tmux pane, but a healthy broker peer → claude-peers HTTP fallback
 - `none` — bg job or no targets; can't auto-route; tell user manually
 
 ## Composition example
