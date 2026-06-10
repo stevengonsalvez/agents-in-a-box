@@ -127,21 +127,20 @@ fn apply_landlock(read_roots: &[PathBuf], write_roots: &[PathBuf]) -> std::io::R
 
     let ruleset = ruleset
         .add_rules(
-            path_beneath_rules(read_roots.iter().map(PathBuf::as_path), read_access).filter_map(
-                |r| match r {
-                    Ok(rule) => Some(Ok(rule)),
-                    // A missing read root (e.g. /lib64 absent on this distro) is not
-                    // fatal — skip it rather than fail the whole spawn.
-                    Err(_) => None,
-                },
-            ),
+            // A missing read root (e.g. /lib64 absent on this distro) is not
+            // fatal — keep the resolvable rules and drop the errors. `filter`
+            // (not a re-wrapping `filter_map`) preserves the iterator's
+            // `Result<_, RulesetError>` item type, so `add_rules` can infer the
+            // error type (a re-wrapped `Ok(rule)` leaves it unconstrained → E0283).
+            path_beneath_rules(read_roots.iter().map(PathBuf::as_path), read_access)
+                .filter(|r| r.is_ok()),
         )
         .map_err(to_io)?;
 
     let status = ruleset
         .add_rules(
             path_beneath_rules(write_roots.iter().map(PathBuf::as_path), write_access)
-                .filter_map(|r| r.ok().map(Ok)),
+                .filter(|r| r.is_ok()),
         )
         .map_err(to_io)?
         .restrict_self()
