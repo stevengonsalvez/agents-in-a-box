@@ -184,6 +184,31 @@ _STOPWORDS = frozenset(
 # gaps every session).
 GAP_LOG_ENABLED = os.environ.get("RECALL_GAP_LOG", "1") != "0"
 
+# R9: fuzzy cache tier (ByteRover query-executor Tier 0/1 shape). The exact
+# per-query cache only hits on byte-identical queries; sessions re-ask slight
+# variants ("how does auth work" vs "auth flow") constantly. A sidecar index
+# (~/.reflect/recall_cache/index.json) records the stopword-filtered token
+# set per cached fetch; when the exact-hash lookup misses, the index is
+# scanned for the best Jaccard-similarity match ≥ the threshold whose cached
+# payload is still TTL/KB-mtime valid — that prior result is reused instead
+# of re-running the retrieval arms. Pure latency win; disable with
+# RECALL_FUZZY_CACHE=0. The bead pins the threshold at 0.85 (conservative —
+# ByteRover ships 0.6 for its in-memory tier); tune via
+# RECALL_FUZZY_THRESHOLD.
+FUZZY_CACHE_ENABLED = os.environ.get("RECALL_FUZZY_CACHE", "1") != "0"
+try:
+    FUZZY_CACHE_THRESHOLD = min(
+        1.0, max(0.0, float(os.environ.get("RECALL_FUZZY_THRESHOLD", "0.85")))
+    )
+except ValueError:
+    FUZZY_CACHE_THRESHOLD = 0.85
+# ByteRover guard: queries with fewer than 2 meaningful tokens are too
+# ambiguous to fuzzy-match ("redis" alone would alias every redis query).
+FUZZY_MIN_TOKENS = 2
+# On-disk analog of ByteRover's LRU maxSize: the index is capped to the
+# newest entries so it can't grow without bound across sessions.
+FUZZY_INDEX_MAX_ENTRIES = 200
+
 # R6: query-time date parsing. Natural-language date phrases ("last week",
 # "in march", "since 2026-01-01") are extracted from every query into a
 # TemporalRange and surfaced on RecallResult / the JSON output. Extraction
@@ -322,6 +347,9 @@ class RecallResult:
     query: str
     mode: str
     cache_hit: bool = False
+    # R9: which cache tier answered — "exact" (hash hit), "fuzzy" (Jaccard
+    # match over a prior near-identical query), or None (full retrieval).
+    cache_tier: str | None = None
     error: str | None = None
     ood_gated: bool = False  # R7: True when the OOD gate suppressed results
     # M1: final per-candidate rank scores keyed by _learning_key — the staged
@@ -380,10 +408,15 @@ def cache_path(query: str, mode: str, limit: int) -> Path:
     digest = hashlib.sha1(
         f"{CACHE_VERSION}|{query}|{mode}|{limit}".encode()
     ).hexdigest()[:16]
-    base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
-    cache_dir = base / "recall_cache"
+    cache_dir = _cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"{digest}.json"
+
+
+def _cache_dir() -> Path:
+    """Recall cache directory under the (overridable) reflect state dir."""
+    base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
+    return base / "recall_cache"
 
 
 def kb_last_modified() -> float:
@@ -417,6 +450,137 @@ def write_cache(path: Path, payload: dict) -> None:
         # issues (e.g. $HOME on a read-only volume).
         if os.environ.get("REFLECT_RECALL_DEBUG"):
             print(f"recall: cache write failed: {e}", file=sys.stderr)
+
+
+# --- R9: fuzzy cache tier --------------------------------------------------
+
+def query_token_set(query: str) -> set[str]:
+    """R9: stopword-filtered token set for Jaccard matching.
+
+    Reuses :func:`_content_terms` — the SAME tokenizer the R7 OOD gate and
+    SG6 gap normalization use — so one notion of "meaningful query term"
+    holds across the whole recall path. (ByteRover's tokenizeQuery keeps
+    2-char tokens; _content_terms requires 3+, a slightly stricter filter.)
+    """
+    return _content_terms(query)
+
+
+def jaccard_similarity(a: set[str], b: set[str]) -> float:
+    """R9: |a ∩ b| / |a ∪ b| in [0, 1]. Two empty sets are identical (1.0);
+    one empty set shares nothing (0.0) — ByteRover jaccardSimilarity shape."""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _cache_index_path() -> Path:
+    return _cache_dir() / "index.json"
+
+
+def read_cache_index() -> dict[str, Any]:
+    """R9: load the fuzzy-tier sidecar index ({digest: entry}). Returns {} on
+    any problem — a corrupt index degrades to exact-only caching, never an
+    error."""
+    try:
+        data = json.loads(_cache_index_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _index_entry_age(entry: Any) -> float:
+    if not isinstance(entry, dict):
+        return 0.0
+    try:
+        return float(entry.get("stored_at", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def update_cache_index(
+    query: str, mode: str, limit: int, cache_file: Path
+) -> None:
+    """R9: record this fetch's token set in the fuzzy index.
+
+    Keyed by the cache file's digest stem so a fuzzy hit can resolve back to
+    the exact payload file (whose TTL/KB-mtime validity :func:`read_cache`
+    still enforces). Entries whose payload file has vanished are pruned and
+    the index is capped to the newest FUZZY_INDEX_MAX_ENTRIES (the on-disk
+    analog of ByteRover's LRU maxSize). Silent-fail like :func:`write_cache`.
+    """
+    if not FUZZY_CACHE_ENABLED:
+        return
+    try:
+        cache_dir = _cache_dir()
+        index = read_cache_index()
+        index[cache_file.stem] = {
+            "query": query[:200],
+            "tokens": sorted(query_token_set(query)),
+            "mode": mode,
+            "limit": limit,
+            "version": CACHE_VERSION,
+            "stored_at": time.time(),
+        }
+        index = {
+            digest: entry
+            for digest, entry in index.items()
+            if isinstance(entry, dict)
+            and (cache_dir / f"{digest}.json").exists()
+        }
+        if len(index) > FUZZY_INDEX_MAX_ENTRIES:
+            newest = sorted(
+                index.items(), key=lambda kv: _index_entry_age(kv[1]),
+                reverse=True,
+            )
+            index = dict(newest[:FUZZY_INDEX_MAX_ENTRIES])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _cache_index_path().write_text(json.dumps(index))
+    except OSError as e:
+        if os.environ.get("REFLECT_RECALL_DEBUG"):
+            print(f"recall: cache index write failed: {e}", file=sys.stderr)
+
+
+def fuzzy_read_cache(
+    query: str, mode: str, limit: int, ttl: int
+) -> dict | None:
+    """R9: Tier-1 fuzzy lookup — best Jaccard match over the cached token
+    sets (ByteRover ``findSimilar``), tried AFTER the exact-hash read misses.
+
+    Only entries with the same (version, mode, limit) compete — a fuzzy hit
+    must be interchangeable with what the exact key would have fetched.
+    Candidates are tried best-similarity-first and the first whose payload
+    passes :func:`read_cache` (TTL + KB-mtime — TTL is still respected) wins;
+    expired or vanished payloads are simply skipped. Returns the cached
+    payload dict or None.
+    """
+    if not FUZZY_CACHE_ENABLED:
+        return None
+    tokens = query_token_set(query)
+    if len(tokens) < FUZZY_MIN_TOKENS:
+        return None  # too ambiguous to alias (ByteRover guard)
+    candidates: list[tuple[float, str]] = []
+    for digest, entry in read_cache_index().items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("version") != CACHE_VERSION:
+            continue
+        if entry.get("mode") != mode or entry.get("limit") != limit:
+            continue
+        raw = entry.get("tokens")
+        if not isinstance(raw, list):
+            continue
+        sim = jaccard_similarity(tokens, {str(t) for t in raw})
+        if sim >= FUZZY_CACHE_THRESHOLD:
+            candidates.append((sim, str(digest)))
+    candidates.sort(reverse=True)  # best similarity first; digest tiebreak
+    for _sim, digest in candidates:
+        payload = read_cache(_cache_dir() / f"{digest}.json", ttl)
+        if payload is not None:
+            return payload
+    return None
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -1260,8 +1424,15 @@ def render_json(
     )
 
 
-def log_recall(query: str, mode: str, count: int, cached: bool) -> None:
-    """D_phase6: append-only jsonl for future helpfulness tracking."""
+def log_recall(
+    query: str, mode: str, count: int, cached: bool,
+    cache_tier: str | None = None,
+) -> None:
+    """D_phase6: append-only jsonl for future helpfulness tracking.
+
+    R9: ``cache_tier`` records WHICH tier answered ("exact" / "fuzzy" /
+    None) so the fuzzy hit-rate over a session is measurable from the log.
+    """
     base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
     log = base / "recall_log.jsonl"
     try:
@@ -1275,6 +1446,7 @@ def log_recall(query: str, mode: str, count: int, cached: bool) -> None:
                         "mode": mode,
                         "count": count,
                         "cached": cached,
+                        "cache_tier": cache_tier,
                     }
                 )
                 + "\n"
@@ -1391,7 +1563,15 @@ def recall(
     fetched_limit = max(limit * 2, 10)
     cache_file = cache_path(query, mode, fetched_limit)
     if use_cache:
+        # R9: Tier 0 — exact-hash hit; Tier 1 — fuzzy fallback over the
+        # token-set index (Jaccard ≥ FUZZY_CACHE_THRESHOLD, TTL still
+        # enforced by read_cache inside fuzzy_read_cache).
         cached = read_cache(cache_file, cache_ttl)
+        cache_tier = "exact" if cached else None
+        if cached is None:
+            cached = fuzzy_read_cache(query, mode, fetched_limit, cache_ttl)
+            if cached is not None:
+                cache_tier = "fuzzy"
         if cached:
             learnings = [
                 Learning(
@@ -1414,11 +1594,15 @@ def recall(
             else:
                 learnings = learnings[:limit]
             learnings = filter_by_token_budget(learnings, max_tokens)  # R4
-            log_recall(query, mode, len(learnings), cached=True)
+            log_recall(
+                query, mode, len(learnings), cached=True,
+                cache_tier=cache_tier,  # R9
+            )
             if gap_log and not learnings:  # SG6
                 log_knowledge_gap(query, session_id)
             return RecallResult(
-                learnings, query, mode, cache_hit=True, ood_gated=gated,
+                learnings, query, mode, cache_hit=True,
+                cache_tier=cache_tier, ood_gated=gated,
                 scores=rank_scores, temporal=temporal,
             )
 
@@ -1517,6 +1701,9 @@ def recall(
                 ],
             },
         )
+        # R9: register this fetch's token set so near-identical future
+        # queries can fuzzy-hit the payload just written.
+        update_cache_index(query, mode, fetched_limit, cache_file)
     learnings, rank_scores = rerank_with_scores(learnings, query_tags, ce_scores=ce_scores)
     learnings = filter_by_confidence(learnings, confidence.upper())
     learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
