@@ -1,3 +1,11 @@
+# M4: active reflect mode — picks the references/modes/{id}.json bundle
+# (learning types + concepts + signal patterns + prompts + locale). Single-
+# level parent--override inheritance, e.g. "engineering--zh" inherits
+# "engineering". The per-project persisted choice (`mode_loader.py set <id>`
+# writing .reflect/config.json) and the REFLECT_MODE env var both override
+# this key.
+mode = "engineering"
+
 [storage]
 db_path = "~/.reflect/reflect.db"
 artifacts_dir = "docs/solutions"

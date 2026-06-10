@@ -67,6 +67,9 @@ def _project_override_path() -> Path:
 def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     """Apply REFLECT_* environment variables on top of *cfg*."""
     env_map: dict[str, tuple[list[str], type]] = {
+        # M4: pluggable mode — highest-priority override for the active mode
+        # id (mode_loader.py also consults this before the TOML cascade).
+        "REFLECT_MODE": (["mode"], str),
         "REFLECT_DB_PATH": (["storage", "db_path"], str),
         "REFLECT_ARTIFACTS_DIR": (["storage", "artifacts_dir"], str),
         "REFLECT_PROVIDERS": (["discovery", "enabled_providers"], list),
@@ -121,6 +124,10 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _BUILTIN_DEFAULTS: dict[str, Any] = {
+    # M4: active reflect mode (references/modes/{id}.json, parent--override
+    # inheritance via mode_loader.py). The default `engineering` mode is the
+    # historical taxonomy expressed declaratively — zero behaviour change.
+    "mode": "engineering",
     "storage": {
         "db_path": "~/.reflect/reflect.db",
         "artifacts_dir": "docs/solutions",

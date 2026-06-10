@@ -1,0 +1,204 @@
+{
+  "name": "Engineering",
+  "description": "Software engineering reflect taxonomy — the historical default behaviour, expressed declaratively.",
+  "version": "1.0.0",
+  "locale": "en",
+  "learning_types": [
+    {
+      "id": "pattern",
+      "label": "Pattern",
+      "description": "Reusable technique or approach worth preserving",
+      "emoji": "◆"
+    },
+    {
+      "id": "correction",
+      "label": "Correction",
+      "description": "Wrong approach identified; the behaviour to use instead",
+      "emoji": "↻"
+    },
+    {
+      "id": "bug-fix",
+      "label": "Bug Fix",
+      "description": "Problem diagnosed and solved, with root cause",
+      "emoji": "●"
+    },
+    {
+      "id": "decision",
+      "label": "Decision",
+      "description": "Chose X over Y with rationale",
+      "emoji": "⚖"
+    },
+    {
+      "id": "anti-pattern",
+      "label": "Anti-Pattern",
+      "description": "What NOT to do, discovered through failure",
+      "emoji": "⚠"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "code-style",
+      "label": "Code Style",
+      "description": "Naming, formatting, and language-idiom conventions"
+    },
+    {
+      "id": "architecture",
+      "label": "Architecture",
+      "description": "Structure, layering, and design decisions"
+    },
+    {
+      "id": "process",
+      "label": "Process",
+      "description": "Workflow, branching, review, and deployment practices"
+    },
+    {
+      "id": "domain",
+      "label": "Domain",
+      "description": "Business rules and domain knowledge"
+    },
+    {
+      "id": "tools",
+      "label": "Tools",
+      "description": "CLI, environment, and tooling configuration"
+    },
+    {
+      "id": "security",
+      "label": "Security",
+      "description": "Vulnerabilities, secrets handling, and hardening"
+    },
+    {
+      "id": "new-skill",
+      "label": "New Skill",
+      "description": "Non-trivial workarounds and fixes worth a reusable skill"
+    }
+  ],
+  "signal_patterns": {
+    "high": [
+      [
+        "\\b(never|don't|do not|stop doing|wrong|not like that|incorrect)\\b",
+        "correction"
+      ],
+      [
+        "\\b(should not|shouldn't|must not|mustn't)\\b",
+        "prohibition"
+      ],
+      [
+        "\\b(always|must|required|the rule is|correct way)\\b",
+        "requirement"
+      ],
+      [
+        "(I already told you|again\\?|not again|how many times)",
+        "frustration"
+      ],
+      [
+        "(the rule is|you should know|remember that|don't forget)",
+        "explicit_rule"
+      ],
+      [
+        "\\b(root cause was|the issue was|the problem was|the bug was)\\b",
+        "root_cause"
+      ],
+      [
+        "\\b(fixed by|the fix was|the solution was|resolved by|solved by)\\b",
+        "fix_confirmed"
+      ],
+      [
+        "\\b(chose .+ over|decided to|went with)\\b",
+        "explicit_decision"
+      ],
+      [
+        "\\b(turns out|figured out|found it)\\b",
+        "breakthrough"
+      ]
+    ],
+    "medium": [
+      [
+        "\\b(perfect|exactly|that's right|yes, like that|correct)\\b",
+        "approval"
+      ],
+      [
+        "\\b(good|great job|well done|nice|excellent)\\b",
+        "positive_feedback"
+      ],
+      [
+        "\\b(keep doing|continue with|stick with)\\b",
+        "continuation"
+      ],
+      [
+        "(spent|took)\\s+\\d+\\s*(hour|min|day|h|m)",
+        "time_investment"
+      ],
+      [
+        "\\b(the docs say .+ but|undocumented|misleading error)\\b",
+        "docs_vs_reality"
+      ],
+      [
+        "\\b(make sure to|requires .+ installed|only works)\\b",
+        "env_gotcha"
+      ]
+    ],
+    "low": [
+      [
+        "\\b(maybe|perhaps|might want to|consider)\\b",
+        "suggestion"
+      ],
+      [
+        "\\b(seems like|appears to|looks like)\\b",
+        "observation"
+      ],
+      [
+        "\\b(interesting|good idea|could work)\\b",
+        "tentative"
+      ],
+      [
+        "\\b(seems to work|this approach works|so far so good)\\b",
+        "implicit_success"
+      ],
+      [
+        "\\b(discovered|switched (to|from)|replaced .+ with)\\b",
+        "tool_discovery"
+      ]
+    ],
+    "categories": {
+      "code-style": [
+        "\\b(naming|convention|style|format|indent|case|camelCase|snake_case|PascalCase)\\b",
+        "\\b(variable|function|class|method|parameter)\\s+name",
+        "\\b(TypeScript|JavaScript|Python|Go|Rust|Java)\\b",
+        "\\b(var|const|let|type|interface|enum)\\b",
+        "\\b(semicolon|quote|string|bracket|brace)\\b"
+      ],
+      "architecture": [
+        "\\b(pattern|architecture|design|structure|module|component)\\b",
+        "\\b(separation|coupling|cohesion|dependency|layer)\\b"
+      ],
+      "process": [
+        "\\b(workflow|process|step|procedure|protocol)\\b",
+        "\\b(commit|branch|merge|review|deploy)\\b"
+      ],
+      "domain": [
+        "\\b(business|domain|logic|rule|requirement)\\b",
+        "\\b(customer|user|client|account|order)\\b"
+      ],
+      "tools": [
+        "\\b(tool|cli|command|terminal|shell|git|npm|docker)\\b",
+        "\\b(config|setting|environment|variable)\\b"
+      ],
+      "security": [
+        "\\b(security|vulnerability|exploit|injection|xss|csrf)\\b",
+        "\\b(password|secret|credential|token|key)\\s+(expos|leak|hardcod)",
+        "\\b(validation|sanitiz|escap|encrypt|hash)\\b",
+        "\\b(OWASP|CVE|RLS|row.level.security)\\b"
+      ],
+      "new-skill": [
+        "\\b(workaround|trick|hack|solution|fix|debug)\\b",
+        "\\b(error|bug|issue|problem)\\s+(was|is|fixed|solved)\\b",
+        "(took|spent)\\s+\\d+\\s*(min|hour|day)"
+      ]
+    }
+  },
+  "prompts": {
+    "drain_writer": "/reflect\n\nProcess the transcript at: {target}\n\nExtract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow.\n\nBelief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.{speculative_note}\n\nWhen done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving.",
+    "skill_refresh": "/reflect\n\nSkill refresh (auto-triggered): the skill '{skill_name}' at {transcript} is marked stale — a learning that backs it was revised (learning: {learning_id}; reason: {reason}).\n\nRe-run the skill-edit step on this skill: read the SKILL.md, check the current learnings covering its domain (reflect search, or the learnings table in reflect.db), and EDIT the SKILL.md in place so its guidance matches the revised corpus — fold in the new rule, and update or remove any guidance the revision contradicts. Keep the edit surgical and additive where possible; do not rewrite unrelated sections.\n\nWhen done, summarize what you changed. Do NOT touch the queue file — the drain script handles archiving.",
+    "speculative_idle": "\n\nThis reflection was triggered by session IDLENESS (no transcript activity for the idle window), NOT an explicit session end — the session may still resume and overturn these conclusions. Treat every finding as provisional: add the tag 'speculative' to the tags list of EVERY learning you write, and cap confidence at MEDIUM (never HIGH)."
+  }
+}

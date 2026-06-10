@@ -139,22 +139,83 @@ def _get_auto_approve_threshold() -> float:
     return float(cfg.get("policies", {}).get("auto_approve_threshold", 0.8))
 
 
+# ---------------------------------------------------------------------------
+# M4: mode-driven pattern sets (reviewer side of the pluggable mode system)
+# ---------------------------------------------------------------------------
+
+# Concept-id -> Category mapping derived from the enum values themselves
+# ("Code Style" -> "code-style"), so mode files use stable kebab-case ids.
+_CATEGORY_BY_CONCEPT_ID = {
+    cat.value.lower().replace(" ", "-"): cat for cat in Category
+}
+
+# Cache keyed by the active mode id so repeated per-line detection doesn't
+# re-resolve the mode. (mode_id, (high, medium, low, categories))
+_PATTERN_CACHE: Optional[tuple[str, tuple]] = None
+
+
+def _reset_pattern_cache() -> None:
+    """Test hook: drop the cached mode-derived pattern sets."""
+    global _PATTERN_CACHE
+    _PATTERN_CACHE = None
+
+
+def _pattern_sets() -> tuple[list, list, list, dict]:
+    """(high, medium, low, categories) for the active mode (M4).
+
+    The default engineering mode carries the exact builtin pattern sets, so
+    behaviour is unchanged unless a different mode is selected. Any failure
+    (missing mode file, malformed JSON, bad shape) silently falls back to the
+    builtins — the reviewer gate must never crash on mode problems.
+    """
+    global _PATTERN_CACHE
+    builtin = (HIGH_PATTERNS, MEDIUM_PATTERNS, LOW_PATTERNS, CATEGORY_PATTERNS)
+    try:
+        from mode_loader import get_signal_patterns, load_mode, resolve_active_mode_id
+
+        mode_id = resolve_active_mode_id()
+        if _PATTERN_CACHE is not None and _PATTERN_CACHE[0] == mode_id:
+            return _PATTERN_CACHE[1]
+
+        sp = get_signal_patterns(load_mode(mode_id))
+        high = [(str(p), str(t)) for p, t in sp.get("high", [])]
+        medium = [(str(p), str(t)) for p, t in sp.get("medium", [])]
+        low = [(str(p), str(t)) for p, t in sp.get("low", [])]
+        categories: dict[Category, list[str]] = {}
+        for concept_id, patterns in (sp.get("categories", {}) or {}).items():
+            cat = _CATEGORY_BY_CONCEPT_ID.get(str(concept_id).strip().lower())
+            if cat is not None and isinstance(patterns, list):
+                categories[cat] = [str(p) for p in patterns]
+
+        sets = (
+            high or HIGH_PATTERNS,
+            medium or MEDIUM_PATTERNS,
+            low or LOW_PATTERNS,
+            categories or CATEGORY_PATTERNS,
+        )
+        _PATTERN_CACHE = (mode_id, sets)
+        return sets
+    except Exception:
+        return builtin
+
+
 def detect_confidence(text: str) -> tuple[Confidence, str]:
-    """Detect confidence level from text patterns."""
+    """Detect confidence level from text patterns (active-mode pattern sets)."""
     text_lower = text.lower()
+    high, medium, low, _ = _pattern_sets()
 
     # Check high confidence patterns
-    for pattern, pattern_type in HIGH_PATTERNS:
+    for pattern, pattern_type in high:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return Confidence.HIGH, pattern_type
 
     # Check medium confidence patterns
-    for pattern, pattern_type in MEDIUM_PATTERNS:
+    for pattern, pattern_type in medium:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return Confidence.MEDIUM, pattern_type
 
     # Check low confidence patterns
-    for pattern, pattern_type in LOW_PATTERNS:
+    for pattern, pattern_type in low:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return Confidence.LOW, pattern_type
 
@@ -162,10 +223,11 @@ def detect_confidence(text: str) -> tuple[Confidence, str]:
 
 
 def detect_category(text: str) -> Category:
-    """Detect category from text content."""
+    """Detect category from text content (active-mode concept patterns)."""
     text_lower = text.lower()
+    _, _, _, category_patterns = _pattern_sets()
 
-    for category, patterns in CATEGORY_PATTERNS.items():
+    for category, patterns in category_patterns.items():
         for pattern in patterns:
             if re.search(pattern, text_lower, re.IGNORECASE):
                 return category

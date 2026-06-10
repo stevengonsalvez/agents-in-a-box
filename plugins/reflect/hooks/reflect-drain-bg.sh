@@ -100,6 +100,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASCADE_SCRIPT="${SCRIPT_DIR}/../scripts/reflect_cascade.py"
 CLASSIFIER_SCRIPT="${SCRIPT_DIR}/../scripts/output_classifier.py"
 QUOTA_SCRIPT="${SCRIPT_DIR}/../scripts/quota_store.py"
+MODE_LOADER_SCRIPT="${SCRIPT_DIR}/../scripts/mode_loader.py"   # M4: pluggable modes
 
 mkdir -p "$STATE_DIR"
 
@@ -531,13 +532,32 @@ process_entry() {
     # rather than ending explicitly, so it may resume and overturn whatever
     # the writer concludes — tag the learnings 'speculative' (recall
     # down-ranks that tag) and cap confidence.
+    # M4: pluggable modes — the writer prompt (template + taxonomy + locale)
+    # comes from the active mode (mode_loader.py resolves REFLECT_MODE /
+    # .reflect/config.json / TOML cascade and reads references/modes/*.json
+    # with parent--override inheritance). The default engineering mode renders
+    # the exact inline prompt below, so behaviour is unchanged until a
+    # different mode is selected; loader failure falls back to the inline
+    # prompt so the drain never stalls on a mode problem.
+    local prompt=""
+    if [[ -f "$MODE_LOADER_SCRIPT" ]]; then
+        prompt=$(python3 "$MODE_LOADER_SCRIPT" drain-prompt \
+            --target "$reflect_target" \
+            --trigger "$trigger" \
+            --skill-name "$skill_name" \
+            --transcript "$transcript" \
+            --learning-id "$refresh_learning_id" \
+            --reason "$refresh_reason" \
+            2>>"$LOG_FILE") || prompt=""
+    fi
+    if [[ -z "$prompt" ]]; then
+    # Fallback: inline engineering prompt (pre-M4 behaviour, byte-identical).
     local speculative_note=""
     if [[ "$trigger" == "idle" ]]; then
         speculative_note="
 
 This reflection was triggered by session IDLENESS (no transcript activity for the idle window), NOT an explicit session end — the session may still resume and overturn these conclusions. Treat every finding as provisional: add the tag 'speculative' to the tags list of EVERY learning you write, and cap confidence at MEDIUM (never HIGH)."
     fi
-    local prompt
     if [[ "$trigger" == "skill_refresh" ]]; then
         prompt="/reflect
 
@@ -557,6 +577,7 @@ Belief revision: if the input contains a 'Related existing learnings' section, p
 
 When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
     fi
+    fi  # M4: end inline-prompt fallback
 
     local out_json exit_code stderr_tmp
     # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
