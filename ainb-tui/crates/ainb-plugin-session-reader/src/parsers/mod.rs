@@ -38,14 +38,19 @@ pub(crate) fn stat_for_cache(path: &std::path::Path) -> Option<(u64, u64)> {
     Some((mtime, meta.len()))
 }
 
-/// Cache-aware read-and-parse for one provider session file.
+/// Cache- and watermark-aware read-and-parse for one provider session
+/// file, routed through the scan context.
 ///
 /// 1. `stat(path)` → `(mtime, size)`.
-/// 2. If a cache is supplied and `lookup(path, mtime, size)` hits, return
-///    the cached `Vec<ProviderCall>` with no filesystem read.
-/// 3. Otherwise read the file, call `parse(&content)`, hash the bytes
-///    with FNV-1a 64, and persist `(mtime, size, fingerprint, parsed)`
-///    via `cache.insert`.
+/// 2. When the context has a watermark and `mtime` predates it, the
+///    file is *stable*: its fingerprint is recorded and — under
+///    `StablePolicy::Skip` — the file is neither read nor looked up
+///    (its calls already ride the persisted stable aggregate). Under
+///    `Collect` it takes the cached-read path and its calls route to
+///    `ctx.stable_calls` instead of the return value.
+/// 3. Recent files (or any file in a full scan): if the cache hits on
+///    `(path, mtime, size)`, return the cached calls with no
+///    filesystem read; otherwise read, `parse`, and persist.
 ///
 /// Any cache I/O / SQL failure is logged at `warn` and the call falls
 /// through to a fresh parse — the cache is never allowed to break the
@@ -53,18 +58,57 @@ pub(crate) fn stat_for_cache(path: &std::path::Path) -> Option<(u64, u64)> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_file_cached<F>(
     path: &std::path::Path,
-    cache: &mut Option<crate::cache::UsageCache>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
     parse: F,
 ) -> Vec<ainb_plugin_types_sessions::ProviderCall>
 where
     F: FnOnce(&str) -> Vec<ainb_plugin_types_sessions::ProviderCall>,
 {
+    use crate::scanner::StablePolicy;
+
     let path_str = path.to_string_lossy().into_owned();
     let stat = stat_for_cache(path);
+    ctx.counters.files_statted = ctx.counters.files_statted.saturating_add(1);
 
-    if let (Some(cache_ref), Some((mtime, size))) = (cache.as_ref(), stat) {
-        match cache_ref.lookup(&path_str, mtime, size) {
-            Ok(Some(hit)) => return hit,
+    if let (Some(watermark), Some((mtime, size))) = (ctx.watermark_nanos, stat) {
+        if mtime < watermark {
+            ctx.stable_present.push((path_str.clone(), mtime, size));
+            match ctx.stable_policy {
+                StablePolicy::Skip => {
+                    ctx.counters.stable_skipped = ctx.counters.stable_skipped.saturating_add(1);
+                    return Vec::new();
+                }
+                StablePolicy::Collect => {
+                    let calls = read_one_cached(path, &path_str, stat, ctx, parse);
+                    ctx.stable_calls.extend(calls);
+                    return Vec::new();
+                }
+            }
+        }
+    }
+
+    read_one_cached(path, &path_str, stat, ctx, parse)
+}
+
+/// The cached read-parse-insert core shared by the recent and
+/// stable-collect routes.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_one_cached<F>(
+    path: &std::path::Path,
+    path_str: &str,
+    stat: Option<(u64, u64)>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
+    parse: F,
+) -> Vec<ainb_plugin_types_sessions::ProviderCall>
+where
+    F: FnOnce(&str) -> Vec<ainb_plugin_types_sessions::ProviderCall>,
+{
+    if let (Some(cache_ref), Some((mtime, size))) = (ctx.cache.as_ref(), stat) {
+        match cache_ref.lookup(path_str, mtime, size) {
+            Ok(Some(hit)) => {
+                ctx.counters.cache_hits = ctx.counters.cache_hits.saturating_add(1);
+                return hit;
+            }
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
@@ -90,10 +134,11 @@ where
     };
 
     let calls = parse(&content);
+    ctx.counters.parsed = ctx.counters.parsed.saturating_add(1);
 
-    if let (Some(cache_ref), Some((mtime, size))) = (cache.as_mut(), stat) {
+    if let (Some(cache_ref), Some((mtime, size))) = (ctx.cache.as_mut(), stat) {
         let fingerprint = crate::cache::fingerprint(content.as_bytes());
-        if let Err(err) = cache_ref.insert(&path_str, mtime, size, fingerprint, &calls) {
+        if let Err(err) = cache_ref.insert(path_str, mtime, size, fingerprint, &calls) {
             tracing::warn!(
                 path = %path.display(),
                 error = %err,

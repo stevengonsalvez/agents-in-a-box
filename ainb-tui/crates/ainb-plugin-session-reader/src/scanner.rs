@@ -172,6 +172,99 @@ fn cursor_default_root(home: &Path) -> PathBuf {
     }
 }
 
+/// Per-scan instrumentation. Counted in the per-file read path so
+/// tests (and refresh logs) can assert what a scan actually did —
+/// "0 reparses on a no-change refresh" is a counted fact, not an
+/// inference from wall-clock time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounters {
+    /// Files visited by the cached walks (each costs one `stat`).
+    pub files_statted: u32,
+    /// Files read from disk and parsed (cache miss or no cache).
+    pub parsed: u32,
+    /// Files served from the per-file parse cache (deserialize only).
+    pub cache_hits: u32,
+    /// Files older than the watermark that were skipped entirely —
+    /// no read, no cache lookup (their contribution rides the stable
+    /// aggregate).
+    pub stable_skipped: u32,
+    /// `true` when the persisted stable aggregate was valid and reused
+    /// (no rebuild pass ran).
+    pub stable_reused: bool,
+}
+
+/// What the per-file read path does with files older than the
+/// watermark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StablePolicy {
+    /// Fast path: record `(path, mtime, size)` and skip the file —
+    /// its calls are already in the persisted stable aggregate.
+    Skip,
+    /// Rebuild pass: read the file (cache-served when warm) and route
+    /// its calls into [`ScanCtx::stable_calls`].
+    Collect,
+}
+
+/// Mutable per-scan context threaded through the cached provider
+/// walks in place of the bare cache handle. Carries the watermark
+/// partition policy, the routed stable output, and the counters.
+pub(crate) struct ScanCtx<'a> {
+    /// Per-file parse cache (None = cache-less, every file parses).
+    pub(crate) cache: &'a mut Option<crate::cache::UsageCache>,
+    /// Files with `mtime < watermark` are stable. `None` disables the
+    /// partition entirely — every file is "recent" (the legacy full
+    /// scan, byte-for-byte).
+    pub(crate) watermark_nanos: Option<u64>,
+    pub(crate) stable_policy: StablePolicy,
+    /// `(path, mtime_nanos, size)` of every stable file seen.
+    pub(crate) stable_present: Vec<(String, u64, u64)>,
+    /// Stable files' calls — populated only under
+    /// [`StablePolicy::Collect`].
+    pub(crate) stable_calls: Vec<ProviderCall>,
+    pub(crate) counters: ScanCounters,
+}
+
+impl<'a> ScanCtx<'a> {
+    /// Full-scan context: no watermark, no partition — the legacy
+    /// behavior every existing entry point keeps.
+    pub(crate) fn full(cache: &'a mut Option<crate::cache::UsageCache>) -> Self {
+        Self {
+            cache,
+            watermark_nanos: None,
+            stable_policy: StablePolicy::Skip,
+            stable_present: Vec::new(),
+            stable_calls: Vec::new(),
+            counters: ScanCounters::default(),
+        }
+    }
+
+    /// Watermark-partitioned context for the incremental path.
+    pub(crate) fn incremental(
+        cache: &'a mut Option<crate::cache::UsageCache>,
+        watermark_nanos: u64,
+        stable_policy: StablePolicy,
+    ) -> Self {
+        Self {
+            cache,
+            watermark_nanos: Some(watermark_nanos),
+            stable_policy,
+            stable_present: Vec::new(),
+            stable_calls: Vec::new(),
+            counters: ScanCounters::default(),
+        }
+    }
+}
+
+/// Result of an incremental scan: the snapshot, what the scan did,
+/// and the (reused or rebuilt) stable aggregate the caller should
+/// persist when `stable_rebuilt` is set.
+pub(crate) struct ScanOutcome {
+    pub(crate) data: UsageData,
+    pub(crate) counters: ScanCounters,
+    pub(crate) stable: StableAggregate,
+    pub(crate) stable_rebuilt: bool,
+}
+
 /// Run every provider parser, aggregate, return a snapshot.
 ///
 /// Cache-less convenience wrapper around [`scan_with_cache`] for
@@ -250,27 +343,122 @@ pub fn scan_with_cache_and_progress(
         reporter.set_total(u32::try_from(total).unwrap_or(u32::MAX));
     }
 
-    let mut all_calls = Vec::new();
+    let mut ctx = ScanCtx::full(cache);
+    let all_calls = walk_providers(roots, &mut ctx, reporter);
+    aggregate(all_calls)
+}
+
+/// Walk every provider through `ctx`. Claude and Codex go through the
+/// cached, watermark-aware per-file path; Gemini / Copilot / Cursor
+/// parsers are uncached and always contribute to the returned (recent)
+/// calls — identically in the full and incremental paths, so the
+/// partition stays a valid split of the same total.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk_providers(
+    roots: &ProviderRoots,
+    ctx: &mut ScanCtx<'_>,
+    reporter: &mut ProgressReporter,
+) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
-        all_calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
-            root, cache, reporter,
+        calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
+            root, ctx, reporter,
         ));
     }
     if let Some(root) = &roots.codex_sessions {
-        all_calls.extend(crate::parsers::codex::parse_dir_cached_with_progress(
-            root, cache, reporter,
+        calls.extend(crate::parsers::codex::parse_dir_cached_with_progress(
+            root, ctx, reporter,
         ));
     }
     if let Some(root) = &roots.gemini_sessions {
-        all_calls.extend(crate::parsers::gemini::parse_dir(root));
+        calls.extend(crate::parsers::gemini::parse_dir(root));
     }
     if let Some(root) = &roots.copilot_sessions {
-        all_calls.extend(crate::parsers::copilot::parse_dir(root));
+        calls.extend(crate::parsers::copilot::parse_dir(root));
     }
     if let Some(root) = &roots.cursor_sessions {
-        all_calls.extend(crate::parsers::cursor::parse_dir(root));
+        calls.extend(crate::parsers::cursor::parse_dir(root));
     }
-    aggregate(all_calls)
+    calls
+}
+
+/// Incremental scan: re-aggregate only files newer than the watermark
+/// and fold the persisted stable rollup in via [`AggState::absorb`].
+///
+/// Pass 1 walks with [`StablePolicy::Skip`]: recent files take the
+/// normal cached-read path; stable files cost one `stat` each and are
+/// recorded, not read. If the recorded stable set exactly matches
+/// `stored.folded`, the stored state is reused (`stable_reused`).
+///
+/// Any mismatch — a file aged past the watermark, was deleted, or
+/// changed `(mtime, size)` — triggers one rebuild pass with
+/// [`StablePolicy::Collect`]: stable files are read (cache-served when
+/// warm, so typically deserialize-only) and folded into a fresh stable
+/// state, which the caller persists. This set-equality contract is
+/// what makes appended/edited old files impossible to double-count:
+/// an appended file's mtime moves it to the recent side AND breaks
+/// equality, so its stale contribution is rebuilt out.
+///
+/// The published snapshot is `emit(stable ⊕ fold(recent))`, sharing
+/// [`emit`]/[`fold`] with [`aggregate`] — the property tests pin the
+/// result byte-identical to a one-shot full scan of the same tree.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // wired into the plugin dispatch in P5
+pub(crate) fn scan_incremental(
+    roots: &ProviderRoots,
+    cache: &mut Option<crate::cache::UsageCache>,
+    stored: Option<StableAggregate>,
+    watermark_nanos: u64,
+    reporter: &mut ProgressReporter,
+) -> ScanOutcome {
+    // Pass 1: skip stable files, parse-or-cache recent ones.
+    let mut ctx = ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Skip);
+    let recent_calls = walk_providers(roots, &mut ctx, reporter);
+    let mut counters = ctx.counters;
+    let mut stable_present = std::mem::take(&mut ctx.stable_present);
+    stable_present.sort_unstable();
+
+    let (stable, stable_rebuilt, recent_calls) = match stored {
+        Some(st) if st.folded == stable_present => {
+            counters.stable_reused = true;
+            (st, false, recent_calls)
+        }
+        _ => {
+            // Rebuild pass: read stable files too (cache-served when
+            // warm) and fold a fresh rollup. Progress already ticked
+            // in pass 1, so this pass reports to a noop sink.
+            let mut rebuild_ctx =
+                ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Collect);
+            let mut noop = ProgressReporter::noop();
+            let recent2 = walk_providers(roots, &mut rebuild_ctx, &mut noop);
+            counters.files_statted += rebuild_ctx.counters.files_statted;
+            counters.parsed += rebuild_ctx.counters.parsed;
+            counters.cache_hits += rebuild_ctx.counters.cache_hits;
+            let mut folded = std::mem::take(&mut rebuild_ctx.stable_present);
+            folded.sort_unstable();
+            let state = fold(std::mem::take(&mut rebuild_ctx.stable_calls));
+            (
+                StableAggregate {
+                    watermark_nanos,
+                    folded,
+                    state,
+                },
+                true,
+                recent2,
+            )
+        }
+    };
+
+    let mut merged = stable.state.clone();
+    merged.absorb(fold(recent_calls));
+    let data = emit(merged);
+
+    ScanOutcome {
+        data,
+        counters,
+        stable,
+        stable_rebuilt,
+    }
 }
 
 /// Count `.jsonl` files in the Claude layout: `<root>/<project>/<session>.jsonl`.
@@ -638,10 +826,6 @@ impl AggState {
     /// On key collisions buckets merge and sets union; for the
     /// project-path last-write the side with the greater
     /// `(timestamp, id)` wins, mirroring fold's iteration order.
-    // Exercised by the byte-identity property tests today; production
-    // call site is `scan_incremental` (P4, same branch). Remove the
-    // allow when that lands.
-    #[allow(dead_code)]
     pub(crate) fn absorb(&mut self, other: Self) {
         // Merge two (timestamp, id)-sorted call vecs; `self` first on
         // (impossible-in-practice) equal keys to mirror stable sort.
@@ -709,7 +893,6 @@ impl AggState {
     }
 }
 
-#[allow(dead_code)] // wired in by scan_incremental (P4)
 fn merge_bucket_acc(into: &mut BucketAccumulator, from: BucketAccumulator) {
     merge(&mut into.bucket, &from.bucket);
     add_cost_nanos(&mut into.cost_nanos, from.cost_nanos);
@@ -752,7 +935,6 @@ struct ProjectAccumulator {
 }
 
 impl ProjectAccumulator {
-    #[allow(dead_code)] // wired in by scan_incremental (P4)
     fn absorb(&mut self, other: Self) {
         if other.last_path_key >= self.last_path_key {
             self.path = other.path;
@@ -776,7 +958,6 @@ struct SessionAccumulator {
 }
 
 impl SessionAccumulator {
-    #[allow(dead_code)] // wired in by scan_incremental (P4)
     fn absorb(&mut self, other: &Self) {
         if other.first_timestamp < self.first_timestamp {
             self.first_timestamp = other.first_timestamp;
@@ -1326,6 +1507,356 @@ mod tests {
     #[test]
     fn aggregate_empty_still_returns_default_usage_data() {
         assert_eq!(aggregate(Vec::new()), UsageData::default());
+    }
+
+    // ── incremental scan integration (L1 counters + L2 oracle) ──────
+    //
+    // Every scenario asserts the incremental snapshot is byte-identical
+    // to a cache-less full scan (`scan`) of the SAME tree state — the
+    // legacy path is the oracle — plus the counter facts that prove
+    // what the scan actually did.
+
+    use tempfile::TempDir;
+
+    fn claude_line(ts: &str, session: &str, input: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"{session}","cwd":"/tmp/proj","gitBranch":"main","message":{{"model":"claude-3-5-sonnet","content":[{{"type":"text","text":"hi"}},{{"type":"tool_use","name":"Read"}}],"usage":{{"input_tokens":{input},"output_tokens":{output},"cache_read_input_tokens":7}}}}}}"#
+        )
+    }
+
+    struct IncrFixture {
+        _tmp: TempDir,
+        claude_root: PathBuf,
+        roots: ProviderRoots,
+        cache_dir: TempDir,
+    }
+
+    impl IncrFixture {
+        fn new() -> Self {
+            let tmp = TempDir::new().expect("tempdir");
+            let claude_root = tmp.path().join("claude/projects");
+            std::fs::create_dir_all(&claude_root).expect("mkdir");
+            let roots = ProviderRoots {
+                claude_projects: Some(claude_root.clone()),
+                ..ProviderRoots::default()
+            };
+            let cache_dir = TempDir::new().expect("cache dir");
+            Self {
+                _tmp: tmp,
+                claude_root,
+                roots,
+                cache_dir,
+            }
+        }
+
+        fn write_file(&self, project: &str, name: &str, lines: &[String]) {
+            let dir = self.claude_root.join(project);
+            std::fs::create_dir_all(&dir).expect("mkdir project");
+            std::fs::write(dir.join(name), lines.join("\n")).expect("write jsonl");
+        }
+
+        fn open_cache(&self) -> Option<crate::cache::UsageCache> {
+            Some(
+                crate::cache::UsageCache::open(&self.cache_dir.path().join("usage.sqlite"))
+                    .expect("open cache"),
+            )
+        }
+
+        fn oracle_bytes(&self) -> Vec<u8> {
+            encode(&scan(&self.roots))
+        }
+    }
+
+    fn now_nanos() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    /// Sleep long enough for the filesystem mtime clock to tick past
+    /// `now` so a watermark captured between writes cleanly splits them.
+    fn tick() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn incremental_cold_rebuild_matches_full_scan_oracle() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let out = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+
+        assert!(out.stable_rebuilt, "no stored stable => rebuild");
+        assert!(!out.counters.stable_reused);
+        assert_eq!(out.stable.folded.len(), 1, "old.jsonl folded");
+        assert_eq!(
+            encode(&out.data),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_no_change_refresh_parses_zero_and_reuses_stable() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+
+        // Second refresh, nothing changed on disk: the CPU-fix gate.
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            &mut reporter,
+        );
+
+        assert!(
+            second.counters.stable_reused,
+            "stable set unchanged => reuse"
+        );
+        assert!(!second.stable_rebuilt);
+        assert_eq!(
+            second.counters.parsed, 0,
+            "no-change refresh parses ZERO files"
+        );
+        assert_eq!(
+            second.counters.stable_skipped, 1,
+            "old file skipped entirely"
+        );
+        assert_eq!(
+            second.counters.cache_hits, 1,
+            "recent file served from cache"
+        );
+        assert_eq!(
+            encode(&second.data),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_new_recent_file_parses_only_it() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+
+        fx.write_file(
+            "proj-b",
+            "new2.jsonl",
+            &[claude_line("2026-06-02T11:00:00Z", "s3", 5, 5)],
+        );
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            &mut reporter,
+        );
+
+        assert!(second.counters.stable_reused, "stable side untouched");
+        assert_eq!(second.counters.parsed, 1, "only the new file parses");
+        assert_eq!(
+            encode(&second.data),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_aged_out_file_rebuilds_without_double_count() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "a.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let wm1 = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "b.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, wm1, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 1);
+
+        // The watermark advances past b.jsonl — it ages into the
+        // stable set, breaking fingerprint equality.
+        let wm2 = now_nanos();
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            wm2,
+            &mut reporter,
+        );
+
+        assert!(second.stable_rebuilt, "aged-in file forces rebuild");
+        assert_eq!(second.stable.folded.len(), 2, "both files folded now");
+        assert_eq!(
+            second.counters.parsed, 0,
+            "rebuild is cache-served, no reparse"
+        );
+        assert_eq!(
+            encode(&second.data),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_deleted_old_file_drops_its_contribution() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "doomed.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        fx.write_file(
+            "proj-a",
+            "keeper.jsonl",
+            &[claude_line("2026-05-02T10:00:00Z", "s9", 1, 1)],
+        );
+        tick();
+        let watermark = now_nanos();
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 2);
+
+        std::fs::remove_file(fx.claude_root.join("proj-a/doomed.jsonl")).expect("rm");
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            &mut reporter,
+        );
+
+        assert!(
+            second.stable_rebuilt,
+            "deletion breaks fingerprint equality"
+        );
+        assert_eq!(
+            second.stable.folded.len(),
+            1,
+            "only the keeper remains folded"
+        );
+        assert_eq!(
+            encode(&second.data),
+            fx.oracle_bytes(),
+            "matches post-delete oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_appended_old_file_moves_to_recent_without_double_count() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "grow.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 1, "grow.jsonl folded as stable");
+
+        // Append a line: mtime bumps past the watermark, so the file
+        // flips to the recent side AND vanishes from the stable set —
+        // its old contribution must be rebuilt out, not double-counted.
+        let path = fx.claude_root.join("proj-a/grow.jsonl");
+        let mut content = std::fs::read_to_string(&path).expect("read");
+        content.push('\n');
+        content.push_str(&claude_line("2026-05-01T10:05:00Z", "s1", 11, 22));
+        std::fs::write(&path, content).expect("append");
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            &mut reporter,
+        );
+
+        assert!(second.stable_rebuilt, "stable set lost the appended file");
+        assert!(second.stable.folded.is_empty(), "nothing stable remains");
+        assert_eq!(
+            second.data.grand_total.call_count, 2,
+            "old + appended call, counted once each"
+        );
+        assert_eq!(
+            encode(&second.data),
+            fx.oracle_bytes(),
+            "matches post-append oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_without_stored_stable_on_empty_tree_is_default() {
+        let fx = IncrFixture::new();
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let out = scan_incremental(&fx.roots, &mut cache, None, now_nanos(), &mut reporter);
+        assert_eq!(encode(&out.data), encode(&UsageData::default()));
+        assert!(out.stable.folded.is_empty());
     }
 
     #[test]
