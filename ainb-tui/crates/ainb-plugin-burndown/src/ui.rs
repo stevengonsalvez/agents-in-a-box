@@ -4,10 +4,10 @@
 use chrono::{Datelike, Local, NaiveDate};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph, Row, Table, Tabs},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs},
 };
 
 use ainb_plugin_types_sessions::ScanProgressEvent;
@@ -373,6 +373,11 @@ pub struct UsageViewState {
     /// after a successful `y` clipboard copy. Cleared on the next
     /// handled key so it flashes briefly then disappears.
     pub copy_flash: Option<String>,
+    /// `R` pressed: the ⚠ hard-refresh confirm overlay is up. `y`
+    /// publishes the hard refresh; any other key cancels. Gated
+    /// behind a confirm because a hard refresh re-parses ALL session
+    /// history from source — the CPU-heavy path.
+    pub confirm_hard: bool,
 }
 
 /// Per-column width step applied by `<` / `>` in the zoom table.
@@ -410,6 +415,7 @@ impl Default for UsageViewState {
             zoom_col_deltas: Vec::new(),
             zoom_cols_panel: None,
             copy_flash: None,
+            confirm_hard: false,
         }
     }
 }
@@ -1085,6 +1091,65 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     }
 
     render_help_bar(buf, layout[help_idx], state);
+
+    // Drawn last so it overlays whatever the dashboard painted.
+    if state.confirm_hard {
+        render_hard_refresh_confirm(buf, area);
+    }
+}
+
+/// Centered ⚠ confirm overlay for the hard refresh (`R`). A hard
+/// refresh wipes the parse cache + stable rollup and re-parses ALL
+/// session history from source — CPU-heavy on large `$HOME` datasets —
+/// so it never fires from a single keypress. `Esc` is host-reserved
+/// (pops the screen), so cancel rides `n` / any other key.
+fn render_hard_refresh_confirm(buf: &mut Buffer, area: Rect) {
+    let w = 56.min(area.width.saturating_sub(2)).max(20);
+    let h = 7.min(area.height.saturating_sub(2)).max(5);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    ratatui::widgets::Widget::render(Clear, rect, buf);
+    let block = Block::default()
+        .title(Span::styled(
+            " ⚠ Hard refresh ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(rect);
+    ratatui::widgets::Widget::render(block, rect, buf);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Re-parses ALL session history from source.",
+            Style::default().fg(SOFT_WHITE),
+        )),
+        Line::from(Span::styled(
+            "High CPU for a while on large histories.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" rebuild everything   ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("n", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
+        ]),
+    ];
+    ratatui::widgets::Widget::render(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        inner,
+        buf,
+    );
 }
 
 /// Render a slim one-row scan-progress banner above the dashboard. Different
@@ -4384,8 +4449,10 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     spans.extend_from_slice(&[
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("r/R", Style::default().fg(GOLD)),
+        Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("R", Style::default().fg(GOLD)),
+        Span::styled(" hard refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("F", Style::default().fg(GOLD)),
         Span::styled(" flush cache  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("Esc", Style::default().fg(GOLD)),
@@ -4885,6 +4952,63 @@ mod cross_filter_tests {
             .collect();
         assert!(flat.contains("By Branch"), "panel title missing: {flat}");
         assert!(flat.contains("main"), "branch label missing: {flat}");
+    }
+
+    /// The ⚠ hard-refresh confirm overlay must paint over the
+    /// dashboard when `confirm_hard` is set, with the warning copy and
+    /// both key affordances visible — and stay invisible when unset.
+    #[test]
+    fn hard_refresh_confirm_overlay_renders_when_pending() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut state = UsageViewState::default();
+        state.data = Some(std::sync::Arc::new(fixture()));
+        state.confirm_hard = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                render(frame.buffer_mut(), area, &state);
+            })
+            .expect("render with confirm overlay must not panic");
+
+        let buffer = terminal.backend().buffer();
+        let flat: String = (0..buffer.area().height)
+            .flat_map(|y| (0..buffer.area().width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer.get(x, y).symbol().to_string())
+            .collect();
+        assert!(
+            flat.contains("Hard refresh"),
+            "overlay title missing: {flat}"
+        );
+        assert!(
+            flat.contains("Re-parses ALL session history"),
+            "warning copy missing"
+        );
+        assert!(flat.contains("rebuild everything"), "y affordance missing");
+        assert!(flat.contains("cancel"), "n affordance missing");
+
+        // And without the flag the overlay must not paint.
+        state.confirm_hard = false;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                render(frame.buffer_mut(), area, &state);
+            })
+            .expect("render without overlay must not panic");
+        let buffer = terminal.backend().buffer();
+        let flat: String = (0..buffer.area().height)
+            .flat_map(|y| (0..buffer.area().width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer.get(x, y).symbol().to_string())
+            .collect();
+        assert!(
+            !flat.contains("Re-parses ALL session history"),
+            "overlay leaked into normal render"
+        );
     }
 
     #[test]

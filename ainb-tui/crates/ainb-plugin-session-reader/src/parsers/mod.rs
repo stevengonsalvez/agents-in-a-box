@@ -135,6 +135,12 @@ where
 
     let calls = parse(&content);
     ctx.counters.parsed = ctx.counters.parsed.saturating_add(1);
+    // Pace the expensive op: a sub-millisecond breather per parsed
+    // file keeps a cold/hard scan from pegging a core flat-out while
+    // costing a warm refresh (0–2 parses) nothing. The crate forbids
+    // unsafe code, so macOS thread-QoS FFI isn't available — this
+    // duty-cycle yield is the portable softening.
+    std::thread::sleep(std::time::Duration::from_micros(500));
 
     if let (Some(cache_ref), Some((mtime, size))) = (ctx.cache.as_mut(), stat) {
         let fingerprint = crate::cache::fingerprint(content.as_bytes());
