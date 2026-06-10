@@ -48,6 +48,34 @@ explicit, higher-limit path.
 | `/reflect:recall <query> --format json` | Structured output for programmatic use |
 | `/reflect:recall <query> --no-cache` | Skip cache, force fresh query |
 
+## Staged recall (3-layer workflow — preferred for deep digs)
+
+When you need more than the one-shot top-N — e.g. tracing how a problem
+evolved, or hydrating several related learnings — use the staged pipeline in
+`scripts/recall_stages.py` instead of repeated full recalls. It is the
+token-cheap discipline (~10x savings vs. hydrating everything up front):
+
+```bash
+# Step 0 — print the contract (self-documenting bootstrap)
+uv run {{HOME_TOOL_DIR}}/skills/recall/scripts/recall_stages.py workflow
+
+# Step 1 — compact ID-only index: {id, title, score, project, date}
+#          (~50-100 tokens/result)
+uv run {{HOME_TOOL_DIR}}/skills/recall/scripts/recall_stages.py index "$QUERY" --limit 20
+
+# Step 2 — chronological neighbours around an interesting hit
+#          (anchor by ID, or pass a query to find the anchor automatically)
+uv run {{HOME_TOOL_DIR}}/skills/recall/scripts/recall_stages.py timeline --anchor <ID> --depth-before 3 --depth-after 3
+
+# Step 3 — full bodies + entity sidecars, ONLY for the filtered IDs
+#          (~500-1000 tokens/result; always batch 2+ ids)
+uv run {{HOME_TOOL_DIR}}/skills/recall/scripts/recall_stages.py hydrate <ID> [<ID> ...]
+```
+
+**Never run Step 3 without filtering through Steps 1-2 first.** The index and
+timeline rows are deliberately ID-only so you can triage many results cheaply
+and hydrate only what survives.
+
 ## Workflow
 
 1. **Build the query** — combine the user's question with project context:

@@ -235,6 +235,10 @@ class RecallResult:
     cache_hit: bool = False
     error: str | None = None
     ood_gated: bool = False  # R7: True when the OOD gate suppressed results
+    # M1: final per-candidate rank scores keyed by _learning_key — the staged
+    # pipeline (recall_stages.py reflect_index) surfaces them as compact
+    # ID-only index rows. Empty on error returns.
+    scores: dict[str, float] = field(default_factory=dict)
 
 
 # --- Helpers -------------------------------------------------------------
@@ -1003,7 +1007,10 @@ def recall(
                 learnings = learnings[:limit]
             learnings = filter_by_token_budget(learnings, max_tokens)  # R4
             log_recall(query, mode, len(learnings), cached=True)
-            return RecallResult(learnings, query, mode, cache_hit=True, ood_gated=gated)
+            return RecallResult(
+                learnings, query, mode, cache_hit=True, ood_gated=gated,
+                scores=rank_scores,
+            )
 
     # Fan out vector search (reflect CLI), QMD (BM25), and — R1 — the graph
     # arm (reflect `--mode local`, entity-neighborhood expansion) in parallel.
@@ -1098,7 +1105,7 @@ def recall(
         learnings = learnings[:limit]
     learnings = filter_by_token_budget(learnings, max_tokens)  # R4
     log_recall(query, mode, len(learnings), cached=False)
-    return RecallResult(learnings, query, mode, ood_gated=gated)
+    return RecallResult(learnings, query, mode, ood_gated=gated, scores=rank_scores)
 
 
 def main() -> int:
