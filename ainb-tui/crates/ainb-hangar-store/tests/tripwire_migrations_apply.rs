@@ -611,6 +611,24 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
 }
 
 #[tokio::test]
+async fn migration_0013_adds_task_priority_column() {
+    // `priority` (0..3 = P3..P0, higher = more urgent; default 0 = P3) feeds
+    // the claim ordering `ORDER BY priority DESC, created_at, id` (Multica
+    // ordering parity). ALTER TABLE ADD COLUMN rewrites the catalog SQL, so
+    // the column shows up in `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let tq = table_sql(&pool, "agent_task_queue").await;
+    assert!(
+        tq.contains("priority INTEGER NOT NULL DEFAULT 0"),
+        "agent_task_queue.priority default 0: {tq}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn all_migrations_create_exactly_seventeen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;

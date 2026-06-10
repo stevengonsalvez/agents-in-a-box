@@ -201,13 +201,16 @@ async fn migration_0012_upgrades_populated_database_in_place() {
     assert_eq!(before.len(), 3, "seeded population: {before:?}");
 
     // Upgrade: the embedded migrator skips 0001..0011 (already recorded) and
-    // applies exactly 0012.
+    // applies 0012 (plus any later migrations in the embedded set — those have
+    // their own coverage; this test pins 0012's upgrade semantics).
     apply_migrations(&pool).await.expect("upgrade applies 0012");
-    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-        .fetch_one(&pool)
-        .await
-        .expect("read migration version");
-    assert_eq!(latest, NEW_MIGRATION_VERSION, "0012 recorded as applied");
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
+            .bind(NEW_MIGRATION_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("read migration version");
+    assert_eq!(recorded, 1, "0012 recorded as applied");
 
     // 1. Every pre-existing row survives intact.
     let after = task_snapshot(&pool).await;
