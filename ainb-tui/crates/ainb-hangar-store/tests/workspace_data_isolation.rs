@@ -99,6 +99,9 @@ async fn seed_issue(store: &Store, id: &str, workspace_id: &str, title: &str) {
             assignee: None,
             creator,
             created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
         },
     )
     .await

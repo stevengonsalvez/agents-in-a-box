@@ -1259,6 +1259,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
         creator,
         created_at: now,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 

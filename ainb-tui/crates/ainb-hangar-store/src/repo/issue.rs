@@ -40,6 +40,15 @@ pub struct NewIssue {
     pub creator: ActorRef,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// Urgency: `0..3` mapping `P3..P0` (HIGHER = MORE URGENT). The schema
+    /// defaults this to `0` (P3, routine); mirrors `agent_task_queue.priority`.
+    pub priority: i64,
+    /// Optional deadline as epoch milliseconds; `None` when unset.
+    pub due_date: Option<i64>,
+    /// Free-form labels (e.g. `["bug", "p0"]`). Stored as a single JSON-array
+    /// column — the minimal persistence the create flow needs (the full labels
+    /// table + attach/detach is a separate concern).
+    pub labels: Vec<String>,
 }
 
 /// A fully-materialised `issue` row read back from the database.
@@ -63,6 +72,12 @@ pub struct Issue {
     pub creator: ActorRef,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// Urgency: `0..3` mapping `P3..P0` (HIGHER = MORE URGENT; default `0`).
+    pub priority: i64,
+    /// Optional deadline as epoch milliseconds; `None` when unset.
+    pub due_date: Option<i64>,
+    /// Free-form labels, re-assembled from the JSON-array `labels` column.
+    pub labels: Vec<String>,
 }
 
 /// Stateless typed wrapper over the `issue` table.
@@ -81,11 +96,13 @@ impl IssueRepo {
     pub async fn insert(pool: &SqlitePool, issue: &NewIssue) -> Result<(), sqlx::Error> {
         let (assignee_type, assignee_id) = split_actor(issue.assignee.as_ref());
         let (creator_type, creator_id) = split_actor(Some(&issue.creator));
+        let labels_json = labels_to_json(&issue.labels);
         sqlx::query(
             "INSERT INTO issue \
              (id, workspace_id, title, description, state, \
-              assignee_type, assignee_id, creator_type, creator_id, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              assignee_type, assignee_id, creator_type, creator_id, created_at, \
+              priority, due_date, labels) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&issue.id)
         .bind(&issue.workspace_id)
@@ -97,6 +114,9 @@ impl IssueRepo {
         .bind(creator_type)
         .bind(creator_id)
         .bind(issue.created_at)
+        .bind(issue.priority)
+        .bind(issue.due_date)
+        .bind(labels_json)
         .execute(pool)
         .await?;
         Ok(())
@@ -112,7 +132,8 @@ impl IssueRepo {
     pub async fn get_by_id(pool: &SqlitePool, id: &str) -> Result<Option<Issue>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
-             assignee_type, assignee_id, creator_type, creator_id, created_at \
+             assignee_type, assignee_id, creator_type, creator_id, created_at, \
+             priority, due_date, labels \
              FROM issue WHERE id = ?",
         )
         .bind(id)
@@ -156,7 +177,8 @@ impl IssueRepo {
     ) -> Result<Vec<Issue>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
-             assignee_type, assignee_id, creator_type, creator_id, created_at \
+             assignee_type, assignee_id, creator_type, creator_id, created_at, \
+             priority, due_date, labels \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -223,6 +245,7 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         "creator",
     )?
     .ok_or_else(|| decode_err("creator", "creator columns must be non-null"))?;
+    let labels = labels_from_json(&row.try_get::<String, _>("labels")?)?;
     Ok(Issue {
         id: row.try_get("id")?,
         workspace_id: row.try_get("workspace_id")?,
@@ -232,5 +255,30 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         assignee,
         creator,
         created_at: row.try_get("created_at")?,
+        priority: row.try_get("priority")?,
+        due_date: row.try_get("due_date")?,
+        labels,
     })
+}
+
+/// Serialize a label list into the JSON-array text the `labels` column stores.
+///
+/// An empty list yields `"[]"` (the column default), so a label-less issue is
+/// byte-identical to a row written by the schema default.
+fn labels_to_json(labels: &[String]) -> String {
+    // serde_json::to_string of a Vec<String> is infallible (no map keys, no
+    // non-finite floats), so the fallback can never fire — it just keeps the
+    // signature panic-free.
+    serde_json::to_string(labels).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Re-assemble a label list from the `labels` column's JSON-array text.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error::ColumnDecode`] if the stored text is not a JSON
+/// array of strings (which only the schema default `'[]'` and
+/// [`labels_to_json`] ever write, so this surfaces external corruption).
+fn labels_from_json(raw: &str) -> Result<Vec<String>, sqlx::Error> {
+    serde_json::from_str(raw).map_err(|e| decode_err("labels", &e.to_string()))
 }

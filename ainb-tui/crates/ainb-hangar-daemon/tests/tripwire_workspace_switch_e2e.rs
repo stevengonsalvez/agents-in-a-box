@@ -92,6 +92,9 @@ fn seed_second_workspace(home: &std::path::Path) {
                 assignee: None,
                 creator,
                 created_at: 1_700_000_000_000,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
             },
         )
         .await

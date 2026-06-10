@@ -416,6 +416,9 @@ impl<'a> ReconcileService<'a> {
             )
             .expect("adopted creator actor is non-empty"),
             created_at: now.timestamp_millis(),
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
         };
         IssueRepo::insert(self.pool, &new).await?;
         self.mapping

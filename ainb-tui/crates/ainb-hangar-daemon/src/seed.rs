@@ -124,6 +124,9 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 assignee: (i == 0).then(|| agent_ref.clone()),
                 creator: creator.clone(),
                 created_at: now + i64::try_from(i).unwrap_or(0),
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
             },
         )
         .await?;
