@@ -716,9 +716,10 @@ impl HangarPlugin {
     ///
     /// Maps the [`IssueCommentAction::Add`] to `hangar/comment_add`, posting the
     /// typed body on the issue authored by the current member, framed over the
-    /// socket cap. After firing, re-pull the issue list so the daemon's
-    /// `CommentAdded` push (or the next snapshot) re-renders the new comment. A
-    /// send failure is logged but non-fatal — the comment simply isn't posted.
+    /// socket cap. The daemon's `CommentAdded` push re-renders the new comment
+    /// (mirroring `apply_assign_action` — this fires the RPC only, no separate
+    /// re-pull). A send failure is logged but non-fatal — the comment simply
+    /// isn't posted.
     async fn apply_comment_action(
         &mut self,
         host: &HostClient,

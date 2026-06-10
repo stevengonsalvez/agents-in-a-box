@@ -3,15 +3,15 @@
 //!
 //! The seed fixture lays down the `claude-agent` agent (id `agent-1`) and three
 //! open issues in `WS_ID`. Here a connection authenticates, subscribes, and posts
-//! a comment `@claude-agent please do X` on `issue-1` through the real dispatcher.
+//! a comment `@claude-agent please do X` on `issue-3` through the real dispatcher.
 //! After the comment commits, the `comment_add` path parses the mention, resolves
 //! `claude-agent` to the workspace's agent, and enqueues a task bound to
-//! `issue-1`.
+//! `issue-3`.
 //!
 //! This is the framed-socket daemon proof leg for the bead. Two assertions carry
 //! it:
 //!  - POSITIVE: `@claude-agent` enqueues exactly one task for `agent-1` on
-//!    `issue-1` (resolved by agent name, workspace-scoped, reusing `TaskRepo`).
+//!    `issue-3` (resolved by agent name, workspace-scoped, reusing `TaskRepo`).
 //!  - NEGATIVE: an unknown `@nobody` handle AND a plain comment each enqueue
 //!    NOTHING (no agent resolves, so no task spawns — an unknown handle is
 //!    ignored, never an error).
@@ -185,7 +185,7 @@ async fn task_count(store: &Store, agent_id: &str, issue_id: &str) -> i64 {
 }
 
 /// POSITIVE leg: `@claude-agent` in a comment spawns exactly one task for that
-/// agent (id `agent-1`), bound to the comment's issue (`issue-1`).
+/// agent (id `agent-1`), bound to the comment's issue (`issue-3`).
 #[tokio::test]
 async fn mentioning_a_real_agent_spawns_its_task_on_the_issue() {
     let dir = tempfile::tempdir().unwrap();

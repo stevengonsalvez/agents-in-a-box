@@ -644,10 +644,13 @@ pub async fn comment_add(
 /// to no agent and is silently ignored — never an error. Each matched agent is
 /// enqueued through the ordinary [`TaskRepo::insert`] path (no claim/dispatch
 /// logic is duplicated), bound to the comment's `issue_id` with the agent's
-/// resolved `runtime_id`. A handle matching no live runtime is skipped (the agent
-/// has nowhere to run); a duplicate enqueue (the agent already has a pending task
-/// on this issue — the per-`(issue, agent)` unique index) is coalesced, not an
-/// error, so the trigger is idempotent.
+/// `runtime_id` (`NOT NULL` + FK-enforced, so a resolved agent always has one).
+/// A duplicate enqueue while the agent still holds a *pending* (`queued` /
+/// `dispatched`) task on this issue — the per-`(issue, agent)` unique index — is
+/// coalesced, not an error, so re-mentioning is idempotent. Once that task has
+/// advanced to `running` the index no longer guards it, so a fresh mention
+/// enqueues a new task (intended: a follow-up mention after work started is a
+/// new request).
 ///
 /// Returns the agent ids that actually got a task enqueued (for the caller's
 /// logging / future event push), empty when no mention resolved.
@@ -655,9 +658,8 @@ pub async fn comment_add(
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] only on an unexpected store fault — the expected
-/// "agent has no runtime" and "duplicate pending task" cases are handled inline
-/// (skip / coalesce) rather than surfaced, so a single bad mention never poisons
-/// the whole comment.
+/// duplicate-pending-task case is coalesced inline by the unique index, not
+/// surfaced, so a single repeated mention never poisons the whole comment.
 pub async fn spawn_mention_tasks(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
