@@ -9,8 +9,8 @@
 
 use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, SdkError, WireBuffer, topics,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
+    RenderParams, Result, SdkError, WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
     RefreshRequest, ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
@@ -137,7 +137,7 @@ impl Plugin for BurndownPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // Subscribe up front so chunked publishes from session-reader
         // arrive via `handle_event`. The snapshot store only retains
         // the most recent publish, so for >1-chunk snapshots a passive

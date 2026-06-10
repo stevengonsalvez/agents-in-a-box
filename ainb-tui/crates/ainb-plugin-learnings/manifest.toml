@@ -1,0 +1,73 @@
+# ainb plugin manifest — learnings (subprocess plugin, ABI v2).
+#
+# Loaded by ainb-plugin-runtime at host startup (discovery) and again at
+# plugin/init for validation. Schema lives in
+# `ainb-plugin-protocol::manifest::Manifest` — keep field names in sync
+# with that type.
+#
+# learnings is a read-only browser over the reflect knowledge base:
+# the `~/.learnings` notes (direct fs read), the QMD vector index
+# (shelled `qmd`), and the nano_graphrag graph (direct fs read of the
+# graphml + community json). The `read_paths` capability (Part B of the
+# design) is the outer fs envelope; the `[config]` paths below are the
+# user's choice within it.
+
+[plugin]
+name = "learnings"
+version = "0.1.0"
+abi_version = 2
+description = "Browse, search & graph your learnings knowledge base"
+
+[capabilities]
+# Path-scoped fs read envelope. List form: the plugin may read under
+# these prefixes only (the configured KB paths are a choice within it).
+read_paths        = ["~/.learnings", "~/.cache/qmd"]
+# Semantic search shells `qmd`; graph-expanded search may shell `learnings`.
+spawn_subprocess  = ["qmd", "learnings"]
+# Persist plugin-local UI state / cache under the plugin data dir.
+write_plugin_data = true
+# Required so the runtime exposes the snapshot/event reverse channel
+# (refresh snapshots).
+event_bus         = true
+
+[provides]
+screens  = ["learnings"]
+commands = ["/recall", "/memory"]
+# NO cli_namespaces — TUI-only (v1 verification is tmux-ui-tripwire, not
+# a CLI parity leg). See design spec §C4.
+snapshots = []
+
+[subscribes]
+snapshots = []
+
+[lifecycle]
+# Lazy — learnings is on-demand. Don't spawn until the user opens the
+# screen or types `/recall` / `/memory`.
+spawn          = "lazy"
+idle_reap_secs = 600
+
+# User-configurable variables (flat scalars). Resolved values persist to
+# config.toml `[plugins.learnings]` and are injected at plugin/init.
+[[config]]
+key     = "learnings_dir"
+kind    = "path"
+label   = "Learnings notes directory"
+default = "~/.learnings/documents/learnings"
+
+[[config]]
+key     = "qmd_index"
+kind    = "path"
+label   = "QMD index (sqlite)"
+default = "~/.cache/qmd/index.sqlite"
+
+[[config]]
+key     = "qmd_collection"
+kind    = "string"
+label   = "QMD collection"
+default = "learnings"
+
+[[config]]
+key     = "graph_cache"
+kind    = "path"
+label   = "nano_graphrag cache dir"
+default = "~/.learnings/nano_graphrag_cache"

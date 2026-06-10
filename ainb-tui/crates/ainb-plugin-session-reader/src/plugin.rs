@@ -14,7 +14,7 @@
 //! [`UsageData`]: ainb_plugin_types_sessions::UsageData
 
 use ainb_plugin_sdk::{
-    HandleEventParams, HostClient, Plugin, RenderParams, Result, SdkError, WireBuffer,
+    HandleEventParams, HostClient, InitContext, Plugin, RenderParams, Result, SdkError, WireBuffer,
 };
 use ainb_plugin_types_sessions::{
     RefreshRequest, ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION,
@@ -772,7 +772,7 @@ impl Plugin for SessionReader {
         manifest_text::TOML
     }
 
-    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // Subscribe to refresh-requests so any consumer (burndown,
         // tests) can force a rescan. We deliberately *do not* publish
         // on startup — consumers ask via the refresh topic so they're

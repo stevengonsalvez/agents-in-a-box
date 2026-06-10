@@ -30,6 +30,32 @@ impl SlashCommand for QuitCommand {
     }
 }
 
+/// `/recall` — opens the learnings knowledge-base browser.
+///
+/// Aliased by `/memory`; both dispatch `AppEvent::GoToLearnings` (see
+/// `EventHandler::slash_command_event`). Mirrors the learnings plugin's
+/// manifest `provides.commands = ["/recall", "/memory"]`.
+pub struct RecallCommand;
+impl SlashCommand for RecallCommand {
+    fn name(&self) -> &'static str {
+        "recall"
+    }
+    fn description(&self) -> &'static str {
+        "Open the learnings knowledge-base browser"
+    }
+}
+
+/// `/memory` — alias of `/recall`; opens the learnings browser.
+pub struct MemoryCommand;
+impl SlashCommand for MemoryCommand {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+    fn description(&self) -> &'static str {
+        "Open the learnings knowledge-base browser"
+    }
+}
+
 /// Registry of built-in + plugin-contributed slash commands.
 #[derive(Default)]
 pub struct SlashCommandRegistry {
@@ -43,11 +69,15 @@ impl SlashCommandRegistry {
         }
     }
 
-    /// Built-ins: `/help`, `/quit`. Plugins extend via `register()` in Phase 4.
+    /// Built-ins: `/help`, `/quit`, plus the learnings plugin's `/recall`
+    /// + `/memory` (host-mapped in `EventHandler::slash_command_event`).
+    /// Plugins extend further via `register()` in Phase 4.
     pub fn built_ins() -> Self {
         let mut r = Self::new();
         r.register(Box::new(HelpCommand));
         r.register(Box::new(QuitCommand));
+        r.register(Box::new(RecallCommand));
+        r.register(Box::new(MemoryCommand));
         r
     }
 
@@ -213,6 +243,35 @@ mod tests {
         let hits = r.filter("/he");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "help");
+    }
+
+    #[test]
+    fn registry_built_ins_contain_recall_and_memory() {
+        // P9: the learnings plugin's `/recall` + `/memory` are discoverable
+        // in the palette suggestion list.
+        let r = SlashCommandRegistry::built_ins();
+        let names = r.names();
+        assert!(
+            names.contains(&"recall"),
+            "expected /recall in built-ins, got {names:?}"
+        );
+        assert!(
+            names.contains(&"memory"),
+            "expected /memory in built-ins, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn palette_enter_emits_execute_recall() {
+        // Typing `/recall` + Enter yields Execute("recall") — the bare name
+        // the main loop hands to `EventHandler::slash_command_event`.
+        let mut p = SlashPalette::new(SlashCommandRegistry::built_ins());
+        p.handle_key(press(KeyCode::Char(':')));
+        for c in "/recall".chars() {
+            p.handle_key(press(KeyCode::Char(c)));
+        }
+        let action = p.handle_key(press(KeyCode::Enter));
+        assert_eq!(action, SlashAction::Execute("recall".into()));
     }
 
     #[test]

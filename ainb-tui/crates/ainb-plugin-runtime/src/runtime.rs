@@ -13,7 +13,7 @@ use crate::error::RuntimeError;
 use crate::event_stream::EventStreamRegistry;
 use crate::handle::{HandleInner, RuntimeHandle};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
-use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, KeyInbox, RenderCache};
+use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, KeyInbox, MouseInbox, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
 use crate::types::{LifecycleState, LogTap, PluginId, RuntimeConfig};
@@ -26,6 +26,10 @@ pub(crate) struct PluginHandle {
     /// notifications. See [`crate::plugin_task::KeyInbox`] for the
     /// rationale (Esc-during-chunked-publish starvation fix).
     pub(crate) key_inbox: KeyInbox,
+    /// Priority side-channel reserved for `plugin/handle_mouse`
+    /// notifications. Mirrors [`Self::key_inbox`]; see
+    /// [`crate::plugin_task::MouseInbox`].
+    pub(crate) mouse_inbox: MouseInbox,
     pub(crate) cache: RenderCache,
     pub(crate) state: Arc<RwLock<LifecycleState>>,
     pub(crate) plugin: Arc<RegisteredPlugin>,
@@ -165,6 +169,7 @@ impl Runtime {
             workspace_store: workspace_store.clone(),
             config,
             key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mouse_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         Ok((
             Self {
@@ -267,7 +272,7 @@ impl Runtime {
             arc.manifest.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Eager
         );
-        let (inbox, key_inbox, cache, state) = plugin_task::spawn(
+        let (inbox, key_inbox, mouse_inbox, cache, state) = plugin_task::spawn(
             arc.clone(),
             self.snapshots.clone(),
             self.inboxes.clone(),
@@ -294,6 +299,7 @@ impl Runtime {
         let handle = Arc::new(PluginHandle {
             inbox,
             key_inbox,
+            mouse_inbox,
             cache,
             state,
             plugin: arc.clone(),

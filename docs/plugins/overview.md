@@ -34,11 +34,12 @@ The host (`ainb-core`) spawns each plugin as a child process and drives it over 
 
 ## Reference plugins
 
-Three plugins ship in-tree as the canonical examples:
+Four plugins ship in-tree as the canonical examples:
 
 - **[`burndown`](./burndown.md)** — screen-owner reference. Owns the Analytics screen (renders a ratatui dashboard into a `WireBuffer` each frame) and the `ainb usage` CLI tree; subscribes to `sessions.usage_data` from `session-reader`.
 - **[`session-reader`](./session-reader.md)** — pure-publisher reference. No screen. Scans `~/.claude/projects/**`, `~/.codex/sessions/**` (and more) and chunk-publishes usage snapshots on `sessions.usage_data` for `burndown` to render.
 - **[`witr`](./witr.md)** — subprocess-wrapper reference. The `ainb witr <target>` CLI + `/witr` slash run `witr --json <target>` and parse the ancestry JSON; its **screen** is a host-embedded foreign TTY (`w` hands the terminal to `witr -i` — see [the two render paths](#two-ways-a-plugin-screen-renders)). Declares `spawn_subprocess` + `event_bus`.
+- **[`learnings`](./learnings.md)** — read-only-browser reference. A path-scoped fs reader + `qmd` subprocess: it browses, searches and **graphs** the [`reflect`](../toolkit/plugins/reflect.md) knowledge base under `~/.learnings` (Markdown notes + `.entities.yaml` sidecars + the nano-graphrag cache + the qmd index). Opens with `m` / `/recall` / `/memory`; its Graph tab renders an entity neighbourhood, community clusters, and a deterministic radial ego local-graph. Declares `read_paths` + `spawn_subprocess` + `event_bus`.
 - **[`abtop`](./abtop.md)** — subprocess-wrapper plugin for `abtop` (top-for-agents). The `ainb abtop` CLI execs `abtop --once`; pressing `t` attaches the terminal full-screen to `abtop --exit-on-jump` (same foreign-TTY hand-off pattern as witr). First launch shows a one-time rate-limit `--setup` consent dialog. Declares `spawn_subprocess` only.
 
 Each links to its own page with a `/fireworks-tech-graph` diagram of how it works.

@@ -10,8 +10,8 @@
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
+    RenderParams, Result, WireBuffer,
 };
 
 use crate::cli::{self};
@@ -52,11 +52,7 @@ impl Plugin for AbtopPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(
-        &mut self,
-        _host: &HostClient,
-        _granted_capabilities: &[String],
-    ) -> Result<()> {
+    async fn on_init(&mut self, _host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         let result = detect_abtop().await;
         match &result {
             crate::detect::DetectResult::Ready { path } => {

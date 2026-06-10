@@ -96,6 +96,7 @@ build_plugin() {
 build_plugin ainb-plugin-burndown burndown
 build_plugin ainb-plugin-session-reader session-reader
 build_plugin ainb-plugin-witr witr
+build_plugin ainb-plugin-learnings learnings
 build_plugin ainb-plugin-abtop abtop
 # The Hangar control-plane plugin (P4.10). The crate is `ainb-plugin-hangar`
 # but its manifest `[plugin].name` — and therefore the discovered plugin id and

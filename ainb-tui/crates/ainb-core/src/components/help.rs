@@ -62,6 +62,7 @@ impl HelpComponent {
             ListItem::new("  i          Stats / usage analytics (Esc closes)"),
             ListItem::new("  w          Witr process browser (quit witr to return)"),
             ListItem::new("  k          Skills browser (Esc closes)"),
+            ListItem::new("  m          Memory / learnings browser (Esc closes)"),
             ListItem::new("  t          Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),
             ListItem::new("Views:")

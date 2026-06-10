@@ -396,10 +396,20 @@ async fn run_tui_loop(
                     if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
-                                tracing::info!(
-                                    "slash command requested (stub, no dispatch yet): /{}",
-                                    cmd
-                                );
+                                // Route host-mapped slash commands (e.g. the
+                                // learnings plugin's `/recall` + `/memory`,
+                                // wired in P9) to the same AppEvent path the
+                                // global keyboard shortcuts use. Commands with
+                                // no host mapping fall through to the log-only
+                                // stub (plugin-owned dispatch lands later).
+                                if let Some(app_event) = EventHandler::slash_command_event(&cmd) {
+                                    EventHandler::process_event(app_event, &mut app.state);
+                                } else {
+                                    tracing::info!(
+                                        "slash command requested (no host mapping): /{}",
+                                        cmd
+                                    );
+                                }
                             }
                             SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
                         }
@@ -514,6 +524,19 @@ async fn run_tui_loop(
                 Event::Mouse(mouse_event) => {
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
+
+                    // A focused plugin screen owns the pointer (mirrors the
+                    // key-forwarding contract). Forward + consume before the
+                    // host's own mouse handling so the two never double-act.
+                    if matches!(
+                        crate::app::screens::builtin::forward_mouse_to_focused_plugin(
+                            &mut app.state,
+                            &mouse_event,
+                        ),
+                        crate::app::screens::EventOutcome::Handled
+                    ) {
+                        continue;
+                    }
 
                     match mouse_event.kind {
                         MouseEventKind::Down(MouseButton::Left) => {

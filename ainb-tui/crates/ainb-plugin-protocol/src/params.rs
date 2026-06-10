@@ -37,6 +37,11 @@ pub struct PluginInitParams {
     /// Wire ABI version the host speaks. Plugin MUST refuse to init
     /// if it can't speak this revision.
     pub abi_version: u32,
+    /// Resolved per-plugin config (the `[plugins.<name>]` table) the host
+    /// injects at init. Defaults to JSON `null` so ABI-2 peers that omit it
+    /// keep decoding. The plugin parses this into its typed config struct.
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 /// `plugin/init` result: plugin echoes its name + version so the host
@@ -100,6 +105,17 @@ pub struct RenderParams {
 pub struct RenderResult {
     /// Cell grid to paint.
     pub buffer: WireBuffer,
+    /// Self-animation hint: when `true`, the plugin is mid-transition and
+    /// wants to be rendered again on the next host tick without any further
+    /// input. The runtime re-marks the plugin's render-dirty flag so the
+    /// host's render loop calls `plugin/render` again, frame-by-frame, until
+    /// the plugin returns `false`. A requestAnimationFrame analogue.
+    ///
+    /// `#[serde(default)]` (defaults to `false`) so ABI-2 peers that omit it
+    /// keep decoding — a plugin that never animates is byte-compatible with
+    /// the pre-`redraw` wire shape.
+    #[serde(default)]
+    pub redraw: bool,
 }
 
 // =====================================================================
@@ -223,6 +239,92 @@ pub struct HandleKeyParams {
     /// is expected to echo the value back via [`RenderParams::generation`]
     /// on the next render, giving the host a freshness witness that the
     /// key has been observed.
+    pub generation: u64,
+}
+
+// =====================================================================
+// plugin/handle_mouse
+// =====================================================================
+
+/// Mouse button identity for the press/release/drag variants of
+/// [`MouseKind`]. Wire tag is `type`, variants `snake_case` —
+/// `Left` is `{"type":"left"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseButton {
+    /// Left / primary button.
+    Left,
+    /// Right / secondary button.
+    Right,
+    /// Middle / wheel button.
+    Middle,
+}
+
+/// Logical mouse action. Wire tag is `type`, variants `snake_case` —
+/// `Down { button }` is `{"type":"down","button":{"type":"left"}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseKind {
+    /// Button pressed.
+    Down {
+        /// Which button went down.
+        button: MouseButton,
+    },
+    /// Button released.
+    Up {
+        /// Which button came up.
+        button: MouseButton,
+    },
+    /// Pointer moved with a button held.
+    Drag {
+        /// Which button is held during the drag.
+        button: MouseButton,
+    },
+    /// Pointer moved with no button held.
+    Moved,
+    /// Wheel scrolled up.
+    ScrollUp,
+    /// Wheel scrolled down.
+    ScrollDown,
+    /// Wheel scrolled left.
+    ScrollLeft,
+    /// Wheel scrolled right.
+    ScrollRight,
+}
+
+/// Normalized mouse event delivered from host → plugin.
+///
+/// Coordinates are **plugin-viewport-relative**: the host subtracts the
+/// plugin screen's origin before forwarding, so `(0, 0)` is the top-left
+/// cell of the plugin's own buffer. This lets a plugin hit-test against
+/// the same coordinate space it painted into, without knowing where on
+/// the terminal its screen was placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseEvent {
+    /// What the pointer did.
+    pub kind: MouseKind,
+    /// Column within the plugin viewport (0-based).
+    pub col: u16,
+    /// Row within the plugin viewport (0-based).
+    pub row: u16,
+    /// Bitmask of active modifiers — same bits as [`KeyEvent::mods`]
+    /// ([`KEY_MOD_SHIFT`], [`KEY_MOD_CTRL`], [`KEY_MOD_ALT`], [`KEY_MOD_SUPER`]).
+    #[serde(default)]
+    pub mods: u8,
+}
+
+/// `plugin/handle_mouse` params (notification). Host forwards mouse
+/// events to the plugin owning the currently focused screen, mirroring
+/// [`HandleKeyParams`]. The [`MouseEvent`] carries coordinates already
+/// translated into the plugin's viewport space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleMouseParams {
+    /// Plugin-defined screen identifier (mirrors [`HandleKeyParams::screen_id`]).
+    pub screen_id: String,
+    /// The mouse event, in plugin-viewport coordinates.
+    pub mouse: MouseEvent,
+    /// Monotonic counter the host increments per forwarded mouse event,
+    /// mirroring [`HandleKeyParams::generation`].
     pub generation: u64,
 }
 
@@ -760,7 +862,8 @@ pub struct WorkspaceSetDefaultParams {
 pub struct WorkspaceSetDefaultResult {}
 
 // =====================================================================
-// (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
+// (de)serialise bytes::Bytes as a base64 string (with a legacy
+// byte-array fallback on decode).
 // =====================================================================
 
 /// Binary payloads ride the JSON-RPC envelope as **base64 strings**.
@@ -854,6 +957,7 @@ mod tests {
             manifest_path: "/x/manifest.toml".into(),
             granted_capabilities: vec!["read_sessions".into()],
             abi_version: 2,
+            config: serde_json::Value::Null,
         });
         rt(&PluginInitResult {
             name: "burndown".into(),
@@ -868,11 +972,31 @@ mod tests {
             viewport: Viewport::new(80, 24),
             generation: 7,
         });
-        rt(&RenderResult { buffer: buf });
+        rt(&RenderResult {
+            buffer: buf.clone(),
+            redraw: false,
+        });
+        rt(&RenderResult {
+            buffer: buf,
+            redraw: true,
+        });
 
         rt(&HandleEventParams {
             topic: "sessions.usage_data".into(),
             payload: bytes::Bytes::from_static(b"hello"),
+        });
+
+        rt(&HandleMouseParams {
+            screen_id: "learnings".into(),
+            mouse: MouseEvent {
+                kind: MouseKind::Down {
+                    button: MouseButton::Left,
+                },
+                col: 12,
+                row: 3,
+                mods: KEY_MOD_CTRL,
+            },
+            generation: 9,
         });
 
         rt(&CliDispatchParams {
@@ -1186,6 +1310,54 @@ mod tests {
     }
 
     #[test]
+    fn mouse_event_wire_shape_and_viewport_coords() {
+        // Coordinates are plugin-viewport-relative; kind carries the button.
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 7,
+            row: 2,
+            mods: 0,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"col\":7"), "col missing: {json}");
+        assert!(json.contains("\"row\":2"), "row missing: {json}");
+        assert!(json.contains("\"kind\""), "kind missing: {json}");
+        // Snake-case tagged union for the action + button.
+        assert!(
+            json.contains("\"type\":\"down\""),
+            "down tag missing: {json}"
+        );
+        assert!(
+            json.contains("\"type\":\"left\""),
+            "left tag missing: {json}"
+        );
+        let back: MouseEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn mouse_event_mods_default_to_zero_when_absent() {
+        let json = r#"{"kind":{"type":"moved"},"col":1,"row":1}"#;
+        let ev: MouseEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.mods, 0);
+        assert_eq!(ev.kind, MouseKind::Moved);
+    }
+
+    #[test]
+    fn render_result_redraw_defaults_to_false_when_absent() {
+        // Pre-`redraw` wire shape (buffer only) must still decode, with
+        // redraw defaulting to false — ABI back-compat for non-animating
+        // plugins.
+        let mut buf = WireBuffer::new(1, 1);
+        buf.push(Coord::new(0, 0), Cell::new("x"));
+        let legacy = serde_json::json!({ "buffer": buf });
+        let back: RenderResult = serde_json::from_value(legacy).unwrap();
+        assert!(!back.redraw, "absent redraw must default to false");
+    }
+
+    #[test]
     fn handle_key_params_round_trip_ctrl_shift_press() {
         // Plan §Phase 1 gate: HandleKeyParams { Char('1'), SHIFT|CTRL, Press }
         // round-trips byte-stable.
@@ -1236,6 +1408,31 @@ mod tests {
         assert_eq!(all, 0b1111);
         assert_eq!(KEY_MOD_SHIFT & KEY_MOD_CTRL, 0);
         assert_eq!(KEY_MOD_ALT & KEY_MOD_SUPER, 0);
+    }
+
+    #[test]
+    fn test_init_params_config_defaults_empty() {
+        // ABI-2 back-compat: an init payload WITHOUT `config` still decodes,
+        // and `config` defaults to JSON null.
+        let legacy = r#"{
+            "manifest_path": "/x/manifest.toml",
+            "granted_capabilities": ["read_sessions"],
+            "abi_version": 2
+        }"#;
+        let p: PluginInitParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.config, serde_json::Value::Null);
+
+        // With `config` present it round-trips byte-stably.
+        let with_config = PluginInitParams {
+            manifest_path: "/x/manifest.toml".into(),
+            granted_capabilities: vec!["read_paths".into()],
+            abi_version: 2,
+            config: serde_json::json!({ "learnings_dir": "~/.learnings" }),
+        };
+        let json = serde_json::to_string(&with_config).unwrap();
+        let back: PluginInitParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_config, back);
+        assert_eq!(back.config["learnings_dir"], "~/.learnings");
     }
 
     #[test]

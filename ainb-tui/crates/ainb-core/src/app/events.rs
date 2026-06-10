@@ -208,6 +208,7 @@ pub enum AppEvent {
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
     GoToWitr,                // Navigate to the witr (process causality) plugin screen
+    GoToLearnings,           // Navigate to the learnings (knowledge-base) plugin screen
     GoToAbtop,               // Launch the abtop (top-for-agents) monitor full-screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
@@ -519,6 +520,23 @@ impl EventHandler {
             Some(state.sessions_pane_state.collapsed);
         if let Err(e) = state.app_config.save() {
             tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
+        }
+    }
+
+    /// Map a slash-command name (leading `/` already stripped by the
+    /// palette) to the host `AppEvent` it dispatches, or `None` if no host
+    /// mapping exists (e.g. a plugin-owned or unknown command — the caller
+    /// falls back to its log-only stub).
+    ///
+    /// P9: the `learnings` plugin advertises `/recall` + `/memory` in its
+    /// manifest `provides.commands`. Both open the learnings screen via the
+    /// SAME path the global `m` shortcut uses — `AppEvent::GoToLearnings`
+    /// (handler at the `GoToLearnings` arm of `process_event`). No open
+    /// logic is duplicated here; this is purely the name→event lookup.
+    pub fn slash_command_event(cmd: &str) -> Option<AppEvent> {
+        match cmd {
+            "recall" | "memory" => Some(AppEvent::GoToLearnings),
+            _ => None,
         }
     }
 
@@ -1296,14 +1314,16 @@ impl EventHandler {
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
-            // k skills, t abtop — same set `handle_home_screen_keys` binds).
-            // GoToStats/GoToSkills save `previous_screen`, so closing the
-            // panel lands back on the session list, not home. GoToWitr /
+            // k skills, m memory, t abtop — same set
+            // `handle_home_screen_keys` binds). GoToStats/GoToSkills/
+            // GoToLearnings save `previous_screen`, so closing the panel
+            // lands back on the session list, not home. GoToWitr /
             // GoToAbtop are tmux suspend/attach that never change
             // `current_screen`, so quitting them resumes here automatically.
             KeyCode::Char('i') => Some(AppEvent::GoToStats),
             KeyCode::Char('w') => Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => Some(AppEvent::GoToSkills),
+            KeyCode::Char('m') => Some(AppEvent::GoToLearnings),
             KeyCode::Char('t') => Some(AppEvent::GoToAbtop),
 
             // Tmux preview scroll mode (Shift + Up/Down)
@@ -2053,6 +2073,11 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
+            // `m` for "memory" — opens the learnings KB browser. The
+            // plugin also advertises `/recall` + `/memory` slash commands
+            // (wired in P9); this global shortcut is the host's sidebar/
+            // keybinding open path the P3 tripwire drives.
+            KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
             KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
@@ -3696,6 +3721,19 @@ impl EventHandler {
                 // slash; only the screen is the embedded binary.
                 state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
+            AppEvent::GoToLearnings => {
+                tracing::info!("Navigating to Learnings (knowledge-base browser)");
+                // Generic plugin-rendered screen (same plumbing as
+                // analytics). The learnings plugin owns its own data load
+                // + render; the host only routes the screen. Save the
+                // origin like every other panel so Esc/PanelBack (and the
+                // plugin's `ui.close_request`) pops back to where the
+                // panel was opened from instead of falling back to home.
+                if state.current_screen != screen_ids::LEARNINGS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
+                state.current_screen = screen_ids::LEARNINGS.to_string();
+            }
             AppEvent::GoToAbtop => {
                 tracing::info!("Launching abtop (top-for-agents)");
                 // abtop is a full-screen interactive monitor of running AI
@@ -5134,6 +5172,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
+            | ids::LEARNINGS
             | ids::ABTOP
             | ids::SESSION_LIST
             | ids::LOGS
@@ -5308,6 +5347,53 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Learnings (memory) is a plugin screen — Esc on it resolves to
+    /// `PanelBack` (and to the plugin's `ui.close_request` at its root
+    /// view), so it must save its origin on entry like stats/skills/
+    /// hangar, or closing it would fall back to home instead of the
+    /// screen it was opened from.
+    #[test]
+    fn go_to_learnings_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.current_screen, ids::LEARNINGS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Same self-loop guard as stats: re-firing GoToLearnings while
+    /// already on the learnings screen must not clobber the saved
+    /// origin with the panel's own id.
+    #[test]
+    fn reopening_learnings_does_not_overwrite_origin_with_itself() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+    }
+
+    /// The session list advertises `m memory` on its menu legend — the
+    /// key must actually dispatch there, not only on the home screen.
+    #[test]
+    fn session_list_m_key_dispatches_go_to_learnings() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(key, &mut state)
+            .expect("`m` on the session list must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must map to GoToLearnings, got {evt:?}"
+        );
     }
 
     /// Re-firing the open event while already on the panel must not
@@ -5722,6 +5808,75 @@ mod text_input_guard_tests {
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Creating is render-only, not a text input"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slash_command_dispatch_tests {
+    //! P9: the learnings plugin advertises `/recall` + `/memory` slash
+    //! commands (manifest `provides.commands`). Both must route to the SAME
+    //! screen-open path the global `m` shortcut uses — i.e. emit
+    //! `AppEvent::GoToLearnings`, whose handler sets
+    //! `current_screen = "learnings"`.
+    //!
+    //! `slash_command_event` is the pure name→event mapping the main loop
+    //! calls when the slash palette emits `SlashAction::Execute(cmd)`. The
+    //! palette already strips the leading `/`, so the input here is the bare
+    //! command name (`"recall"`, not `"/recall"`).
+
+    use super::*;
+    use crate::app::screens::ids as screen_ids;
+
+    #[test]
+    fn slash_recall_opens_learnings_screen() {
+        // `/recall` → GoToLearnings.
+        let evt = EventHandler::slash_command_event("recall")
+            .expect("/recall must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/recall must emit GoToLearnings, got {evt:?}"
+        );
+
+        // …and processing that event actually opens the learnings screen
+        // (same end-state the `m` shortcut produces).
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /recall must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn slash_memory_opens_learnings_screen() {
+        // `/memory` → GoToLearnings (the second manifest alias).
+        let evt = EventHandler::slash_command_event("memory")
+            .expect("/memory must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/memory must emit GoToLearnings, got {evt:?}"
+        );
+
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /memory must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn unknown_slash_command_is_not_routed() {
+        // A command name with no host mapping returns None — the main loop
+        // leaves it to the existing log-only fallback (no panic, no nav).
+        assert!(
+            EventHandler::slash_command_event("definitely-not-a-command").is_none(),
+            "unknown slash commands must not map to an event"
         );
     }
 }

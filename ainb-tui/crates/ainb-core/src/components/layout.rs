@@ -323,6 +323,8 @@ impl LayoutComponent {
             desc(" witr "),
             key("k", GOLD),
             desc(" skills "),
+            key("m", GOLD),
+            desc(" memory "),
             key("t", GOLD),
             desc(" abtop"),
             sep(),
@@ -1119,6 +1121,7 @@ mod menu_bar_tests {
             "stats",    // i — analytics panel
             "witr",     // w — process-causality browser
             "skills",   // k — skills browser
+            "memory",   // m — learnings KB browser
             "abtop",    // t — top-for-agents monitor
         ] {
             assert!(

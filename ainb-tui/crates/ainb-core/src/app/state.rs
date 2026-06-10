@@ -1277,6 +1277,82 @@ impl ConfigValue {
     }
 }
 
+/// Render a TOML scalar from a `[plugins.<name>]` value table as the plain
+/// string the Settings widgets edit. Non-scalar values (tables/arrays) can't
+/// appear under the flat-scalars-only plugin config schema, so they fall back
+/// to their TOML debug form rather than panicking.
+fn toml_scalar_to_string(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Map a plugin's [`ConfigField`](ainb_plugin_protocol::manifest::ConfigField)
+/// to the [`ConfigValue`] widget the Settings screen renders, seeding it from
+/// `saved` (the persisted `[plugins.<name>].<key>` value) when present, else
+/// the schema `default`. The kind drives the widget:
+/// `path`/`string` → [`ConfigValue::Text`], `bool` → [`ConfigValue::Bool`],
+/// `enum` → [`ConfigValue::Choice`], `int` → [`ConfigValue::Number`].
+fn config_value_for_field(
+    field: &ainb_plugin_protocol::manifest::ConfigField,
+    saved: Option<&str>,
+) -> ConfigValue {
+    use ainb_plugin_protocol::manifest::ConfigKind;
+
+    let raw = saved.unwrap_or(field.default.as_str());
+    match field.kind {
+        ConfigKind::Path | ConfigKind::String => ConfigValue::Text(raw.to_string()),
+        ConfigKind::Bool => ConfigValue::Bool(raw.eq_ignore_ascii_case("true")),
+        ConfigKind::Int => {
+            // A non-numeric stored value (corrupt config.toml) would otherwise be
+            // silently coerced to 0; warn so the bad value surfaces in the logs
+            // rather than vanishing on reset.
+            let n = raw.trim().parse().unwrap_or_else(|_| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "non-integer value for int config field; falling back to 0"
+                );
+                0
+            });
+            ConfigValue::Number(n)
+        }
+        ConfigKind::Enum => {
+            // An unknown stored choice (corrupt config.toml or a renamed enum
+            // variant) would otherwise be silently coerced to the first choice;
+            // warn so the bad value surfaces in the logs.
+            let idx = field.choices.iter().position(|c| c == raw).unwrap_or_else(|| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "unknown choice for enum config field; falling back to first option"
+                );
+                0
+            });
+            ConfigValue::Choice(field.choices.clone(), idx)
+        }
+    }
+}
+
+/// Convert an edited [`ConfigValue`] back into the TOML scalar persisted under
+/// `[plugins.<name>].<key>`. Bool/enum/int keep their native TOML type;
+/// `Text`/`Secret` serialize as strings. (`Secret` never appears in a plugin
+/// `[[config]]` schema today, but is handled for totality.)
+fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
+    match value {
+        ConfigValue::Text(s) | ConfigValue::Secret(s) => toml::Value::String(s.clone()),
+        ConfigValue::Bool(b) => toml::Value::Boolean(*b),
+        ConfigValue::Number(n) => toml::Value::Integer(*n),
+        ConfigValue::Choice(options, idx) => {
+            toml::Value::String(options.get(*idx).cloned().unwrap_or_default())
+        }
+    }
+}
+
 /// Tracks which pane has focus in the config screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigPane {
@@ -1785,64 +1861,77 @@ impl ConfigScreenState {
         state
     }
 
-    /// Convert ConfigScreenState back to AppConfig for saving
-    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
-        // Apply Workspace settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Workspace) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "default_workspace" => {
-                        if let ConfigValue::Text(path) = &setting.value {
-                            let expanded = if path.starts_with("~/") {
-                                dirs::home_dir()
-                                    .map(|h| h.join(&path[2..]))
-                                    .unwrap_or_else(|| std::path::PathBuf::from(path))
-                            } else {
-                                std::path::PathBuf::from(path)
-                            };
-                            // "Default Workspace" is surfaced as
-                            // `workspace_scan_paths.first()` in `from_app_config`,
-                            // so it must be written back as the *primary* entry.
-                            // The old code pushed to the end, leaving `first()`
-                            // pointing at the stale path — editing the field then
-                            // appeared to do nothing on reopen.
-                            //
-                            // Rebuild as: edited path first, then every other
-                            // distinct scan dir. This replaces the old primary
-                            // (index 0), de-dups the edited path, and — crucially
-                            // — preserves the remaining scan dirs even on a no-op
-                            // confirm (drop the old primary, never the tail).
-                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
-                            let tail: Vec<std::path::PathBuf> =
-                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
-                            paths.clear();
-                            paths.push(expanded);
-                            paths.extend(tail);
-                        }
-                    }
-                    "branch_prefix" => {
-                        if let ConfigValue::Text(prefix) = &setting.value {
-                            config.workspace_defaults.branch_prefix = prefix.clone();
-                        }
-                    }
-                    "exclude_paths" => {
-                        if let ConfigValue::Text(paths) = &setting.value {
-                            config.workspace_defaults.exclude_paths = paths
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                    }
-                    "max_repositories" => {
-                        if let ConfigValue::Number(max) = &setting.value {
-                            config.workspace_defaults.max_repositories = *max as usize;
-                        }
-                    }
-                    _ => {}
-                }
+    /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin
+    /// `[[config]]` field (vs. the static enable/disable placeholder rows).
+    /// The row key is `plugin:<plugin_name>:<field_key>` — unique across
+    /// plugins that share a field name, and reversible in
+    /// [`apply_to_app_config`](Self::apply_to_app_config) so the edit lands
+    /// under `plugins.values[plugin_name][field_key]`.
+    const PLUGIN_ROW_PREFIX: &'static str = "plugin:";
+
+    /// Compose the Plugins-category row key for a plugin's config field.
+    fn plugin_row_key(plugin: &str, field_key: &str) -> String {
+        format!("{}{plugin}:{field_key}", Self::PLUGIN_ROW_PREFIX)
+    }
+
+    /// Split a Plugins-category row key back into `(plugin_name, field_key)`,
+    /// or `None` for the static placeholder rows. The plugin name and the
+    /// field key are joined by the *first* `:` after the prefix, so plugin
+    /// names never contain `:` but field keys may.
+    fn parse_plugin_row_key(key: &str) -> Option<(&str, &str)> {
+        let rest = key.strip_prefix(Self::PLUGIN_ROW_PREFIX)?;
+        rest.split_once(':')
+    }
+
+    /// Append per-plugin `[[config]]` rows to the Plugins category from the
+    /// loaded plugin manifests, keeping the existing enable/disable rows.
+    ///
+    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the
+    /// field `kind` to the matching [`ConfigValue`] widget
+    /// (`path`/`string` → `Text`, `bool` → `Bool`, `enum` → `Choice`,
+    /// `int` → `Number`). The displayed value defaults from
+    /// `plugins.values[plugin][key]` when present, else the schema `default`.
+    ///
+    /// Idempotent: re-invoking it (e.g. after the plugin runtime finishes
+    /// discovery) rebuilds the per-plugin rows from scratch rather than
+    /// duplicating them — only the static placeholder rows are retained.
+    pub fn apply_plugin_manifests(
+        &mut self,
+        manifests: &[ainb_plugin_protocol::manifest::Manifest],
+        plugins_cfg: &crate::config::PluginsConfig,
+    ) {
+        let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
+        // Drop any previously-appended plugin rows so repeated calls are
+        // idempotent; keep the static enable/disable placeholders.
+        rows.retain(|s| Self::parse_plugin_row_key(&s.key).is_none());
+
+        for manifest in manifests {
+            let plugin = manifest.plugin.name.as_str();
+            // The resolved [plugins.<name>] value table, if the user has set
+            // any keys — drives the displayed default ahead of the schema's.
+            let saved = plugins_cfg.values.get(plugin).and_then(toml::Value::as_table);
+
+            for field in &manifest.config {
+                // Saved string value (config.toml only stores TOML scalars; we
+                // render every kind from its string form for the widget).
+                let saved_str = saved.and_then(|t| t.get(&field.key)).map(toml_scalar_to_string);
+                let value = config_value_for_field(field, saved_str.as_deref());
+
+                rows.push(ConfigSetting {
+                    key: Self::plugin_row_key(plugin, &field.key),
+                    label: field.label.clone(),
+                    value,
+                    description: format!("{} · plugin: {}", field.label, plugin),
+                });
             }
         }
+    }
+
+    /// Convert ConfigScreenState back to AppConfig for saving
+    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
+        // Apply Workspace settings (extracted to keep this method under the
+        // clippy `too_many_lines` threshold).
+        self.apply_workspace_rows(config);
 
         // Apply Docker settings
         if let Some(settings) = self.settings.get(&ConfigCategory::Docker) {
@@ -1918,6 +2007,102 @@ impl ConfigScreenState {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Apply per-plugin [[config]] edits (extracted to keep this method under
+        // the clippy `too_many_lines` threshold).
+        self.apply_plugin_rows(config);
+    }
+
+    /// Route the Workspace-category rows (`default_workspace`, `branch_prefix`,
+    /// `exclude_paths`, `max_repositories`) back into `config.workspace_defaults`.
+    fn apply_workspace_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Workspace) else {
+            return;
+        };
+        for setting in settings {
+            match setting.key.as_str() {
+                "default_workspace" => {
+                    if let ConfigValue::Text(path) = &setting.value {
+                        let expanded = if path.starts_with("~/") {
+                            dirs::home_dir()
+                                .map(|h| h.join(&path[2..]))
+                                .unwrap_or_else(|| std::path::PathBuf::from(path))
+                        } else {
+                            std::path::PathBuf::from(path)
+                        };
+                        // "Default Workspace" is surfaced as
+                        // `workspace_scan_paths.first()` in `from_app_config`, so
+                        // it must be written back as the *primary* entry. The old
+                        // code pushed to the end, leaving `first()` pointing at the
+                        // stale path — editing the field then appeared to do
+                        // nothing on reopen.
+                        //
+                        // Rebuild as: edited path first, then every other distinct
+                        // scan dir. This replaces the old primary (index 0),
+                        // de-dups the edited path, and — crucially — preserves the
+                        // remaining scan dirs even on a no-op confirm (drop the old
+                        // primary, never the tail).
+                        let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                        let tail: Vec<std::path::PathBuf> =
+                            paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                        paths.clear();
+                        paths.push(expanded);
+                        paths.extend(tail);
+                    }
+                }
+                "branch_prefix" => {
+                    if let ConfigValue::Text(prefix) = &setting.value {
+                        config.workspace_defaults.branch_prefix = prefix.clone();
+                    }
+                }
+                "exclude_paths" => {
+                    if let ConfigValue::Text(paths) = &setting.value {
+                        config.workspace_defaults.exclude_paths = paths
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                "max_repositories" => {
+                    if let ConfigValue::Number(max) = &setting.value {
+                        config.workspace_defaults.max_repositories = *max as usize;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Route every Plugins-category row whose key is `plugin:<name>:<field_key>`
+    /// (see [`Self::plugin_row_key`]) into `config.plugins.values[<name>]
+    /// [<field_key>]` — NOT a top-level field. The static enable/disable
+    /// placeholder rows have no such prefix and are skipped. The serialized
+    /// `[plugins.<name>]` table round-trips through the existing
+    /// `AppConfig::save()` pipeline.
+    fn apply_plugin_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
+            return;
+        };
+        for setting in settings {
+            let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
+                continue;
+            };
+            let toml_value = config_value_to_toml(&setting.value);
+            let entry = config
+                .plugins
+                .values
+                .entry(plugin.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+            // Coerce a non-table entry (shouldn't happen for a well-formed
+            // config) into a table so the write always lands somewhere sane.
+            if !entry.is_table() {
+                *entry = toml::Value::Table(toml::value::Table::new());
+            }
+            if let Some(table) = entry.as_table_mut() {
+                table.insert(field_key.to_string(), toml_value);
             }
         }
     }
@@ -2395,6 +2580,15 @@ pub struct AppState {
     /// stale is fine — the first frame still uses the plugin's fallback,
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
+    /// Top-left `(x, y)` origin `PluginScreen::render` painted each screen
+    /// id at, stashed alongside `plugin_render_areas`. The mouse forwarder
+    /// (`forward_mouse_to_focused_plugin`) subtracts this from the absolute
+    /// terminal click coordinates so the plugin receives a click in its own
+    /// viewport space (`(0, 0)` = top-left of its buffer). Separate from
+    /// `plugin_render_areas` to keep that tuple's `(width, height)` meaning
+    /// unchanged for the render-tick loop.
+    pub plugin_render_origins: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
     /// Viewport `(width, height)` the last `plugin/render` kick used for
     /// each screen id. `tick_plugin_renders` forces a fresh render kick
@@ -2875,6 +3069,7 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 
@@ -9340,6 +9535,7 @@ impl App {
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
+            (crate::app::screens::ids::LEARNINGS, "learnings"),
             (crate::app::screens::ids::ABTOP, "abtop"),
             (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
@@ -9356,9 +9552,36 @@ impl App {
             // Drain the cached frame (if any) into the screen map. The
             // plugin task pushes a fresh frame each time it returns from
             // `plugin/render`; `try_recv_render` is the non-blocking
-            // hand-off the render thread relies on.
+            // hand-off the render thread relies on. Unconditional (no
+            // visibility gate): a frame that completed just before the
+            // user navigated away must still land in the cache so the
+            // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+            }
+
+            // Visibility gate: only the plugin owning the focused screen
+            // gets render kicks. `LayoutComponent::render` dispatches
+            // exactly `state.current_screen` through the screen registry,
+            // so a hidden screen's buffer is never painted — kicking its
+            // renders only burns CPU. Concretely this stops (a) a
+            // self-animating plugin (search spinner returning
+            // `redraw=true`, which re-marks the dirty flag each frame)
+            // from re-rendering an invisible screen at tick cadence, and
+            // (b) the startup storm where the registration-seeded dirty
+            // flag kicked all five screen plugins on the first tick —
+            // `Command::Render` lazy-spawns the subprocess via
+            // `ensure_running`, so that defeated `spawn = "lazy"`. Eager
+            // plugins are unaffected: registration pokes them with
+            // `EnsureSpawned` (see `register_kept` in the runtime), not
+            // this loop.
+            //
+            // MUST stay above `take_render_dirty`: the gate skips the
+            // consume, so a hidden plugin's dirty flag survives until the
+            // user opens the screen and the first tick after the switch
+            // kicks the deferred paint.
+            if self.state.current_screen != *screen_id {
+                continue;
             }
 
             // Viewport comes from the previous frame's allocated area
@@ -9425,6 +9648,21 @@ impl App {
                 }
                 self.plugin_runtime_owner = Some(runtime);
                 self.state.plugin_runtime = Some(handle.clone());
+
+                // Surface each loaded plugin's `[[config]]` schema in the
+                // Settings ▸ Plugins category. `from_app_config` built the
+                // config screen before discovery ran (the handle is `None` at
+                // `AppState` construction), so we backfill the per-plugin rows
+                // here now that the manifests are known. Defaults resolve from
+                // the persisted `[plugins.<name>]` table first, else the
+                // schema default. Idempotent — only the plugin rows are
+                // rebuilt; the static enable/disable rows are kept.
+                let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
+                    handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
+                self.state
+                    .config_screen_state
+                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+
                 // A fresh runtime means a fresh snapshot store whose
                 // version counter restarts at 0 — drop any version
                 // watermark from a previous runtime so an equal-valued
@@ -9813,6 +10051,139 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod plugin_render_gate_tests {
+    //! Visibility gate on the render-tick loop: only the plugin owning
+    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
+    //! only after the screen check) so the deferred first paint happens
+    //! on the first tick after the user opens the screen.
+
+    use std::path::PathBuf;
+
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    };
+    use ainb_plugin_runtime::{PluginId, RegisteredPlugin, Runtime};
+
+    use super::App;
+    use crate::app::screens::ids;
+
+    fn lazy_manifest(name: &str) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities::default(),
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: Vec::new(),
+        }
+    }
+
+    /// Real runtime + an `App` wired to it, with the named lazy plugins
+    /// registered. The binary path is deliberately nonexistent — these
+    /// tests assert host-side kick bookkeeping only; an actual spawn
+    /// attempt would fail harmlessly on the runtime's executor.
+    fn app_with_plugins(names: &[&str]) -> (Runtime, App) {
+        let (runtime, handle) = Runtime::new().expect("runtime constructs without plugins");
+        for name in names {
+            runtime.register(RegisteredPlugin::new(
+                lazy_manifest(name),
+                PathBuf::from("/nonexistent/plugin-binary"),
+                PathBuf::from("/nonexistent/manifest.toml"),
+            ));
+        }
+        let mut app = App::new();
+        app.state.plugin_runtime = Some(handle);
+        (runtime, app)
+    }
+
+    #[test]
+    fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+        app.tick_plugin_renders();
+
+        // No kick: `plugin_last_render_viewport` is only written when a
+        // render is dispatched.
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "hidden screen must not receive a render kick"
+        );
+        // The registration-seeded dirty flag survived both ticks, so the
+        // deferred first paint still happens when the screen opens.
+        assert!(
+            handle.take_render_dirty(&pid),
+            "hidden plugin's dirty flag must survive the gated ticks"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn dirty_plugin_kicks_on_first_tick_after_screen_switch() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        // Ticks while hidden: gated, dirty preserved (proved above).
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+
+        // User opens the learnings screen → first tick kicks the render.
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert_eq!(
+            app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
+            Some(&(0, 0)),
+            "first tick after the switch must kick a render at the seed viewport"
+        );
+        assert!(
+            !handle.take_render_dirty(&pid),
+            "the kick must consume the dirty flag"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn only_the_focused_plugin_screen_is_kicked() {
+        let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert!(
+            app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "focused plugin screen must be kicked"
+        );
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            "unfocused plugin screen must not be kicked"
+        );
+        assert!(
+            handle.take_render_dirty(&PluginId::from("burndown")),
+            "unfocused plugin must stay dirty for its deferred first paint"
+        );
+
+        runtime.shutdown();
+    }
+}
 
 #[cfg(test)]
 mod panel_close_tests {

@@ -22,8 +22,8 @@
 
 use ainb_hangar_proto::{methods as daemon_methods, RpcId, RpcResponse};
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
+    RenderParams, Result, RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
 
@@ -841,7 +841,7 @@ impl Plugin for HangarPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // P5.6: decide whether to show the first-run danger-full-access modal
         // from the recorded acks in `~/.ainb/hangar/state.toml`. A missing file
         // (fresh machine) → no acks → the modal shows once.

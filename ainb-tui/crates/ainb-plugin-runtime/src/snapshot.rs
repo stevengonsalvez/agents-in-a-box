@@ -37,10 +37,11 @@ pub struct SnapshotEntry {
     pub publisher: PluginId,
 }
 
-/// Publisher id stamped on host-side `RuntimeHandle::publish_snapshot`
-/// calls. Reserved — both plugin discovery and `Runtime::register`
-/// reject a plugin whose manifest name is `host`, so no plugin can
-/// claim this id on any registration path.
+/// Publisher id stamped on host-side `RuntimeHandle::publish_snapshot` calls.
+///
+/// Reserved — both plugin discovery and `Runtime::register` reject a plugin
+/// whose manifest name is `host`, so no plugin can claim this id on any
+/// registration path.
 pub const HOST_PUBLISHER: &str = "host";
 
 /// Concurrent snapshot store.

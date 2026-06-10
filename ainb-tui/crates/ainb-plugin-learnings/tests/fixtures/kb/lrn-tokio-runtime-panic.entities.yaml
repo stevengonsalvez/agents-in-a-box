@@ -1,0 +1,15 @@
+document_id: lrn-tokio-runtime-panic
+extracted_at: "2026-05-12T09:10:00.000000+00:00"
+entities:
+  - name: "tokio Runtime"
+    type: tool
+    description: "Async runtime whose Drop panics inside an existing async context"
+  - name: "runtime drop panic"
+    type: error
+    description: "Panic raised when dropping a Runtime from inside #[tokio::main]"
+relationships:
+  - source: "tokio Runtime"
+    target: "runtime drop panic"
+    type: causes
+    description: "Dropping the owned runtime from inside the async context panics"
+    strength: 7
