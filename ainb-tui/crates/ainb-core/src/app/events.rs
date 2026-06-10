@@ -1294,9 +1294,11 @@ impl EventHandler {
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
-            // k skills — same set `handle_home_screen_keys` binds). Each
-            // GoTo* saves `previous_screen`, so closing the panel lands
-            // back on the session list, not home.
+            // k skills — same set `handle_home_screen_keys` binds).
+            // GoToStats/GoToSkills save `previous_screen`, so closing the
+            // panel lands back on the session list, not home. GoToWitr is
+            // a tmux suspend/attach that never changes `current_screen`,
+            // so quitting witr resumes here automatically.
             KeyCode::Char('i') => Some(AppEvent::GoToStats),
             KeyCode::Char('w') => Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => Some(AppEvent::GoToSkills),
@@ -3445,9 +3447,10 @@ impl EventHandler {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Inbox => {
-                        state.previous_screen = Some(state.current_screen.clone());
-                        state.current_screen = screen_ids::INBOX.to_string();
-                        state.inbox_state.refresh();
+                        // Route through the canonical event so the
+                        // origin-save (and its self-clobber guard) has
+                        // exactly one code path.
+                        Self::process_event(AppEvent::GoToInbox, state);
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
@@ -3463,10 +3466,10 @@ impl EventHandler {
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
-                        state.current_screen = screen_ids::ANALYTICS.to_string();
-                        // Data load lives inside the burndown plugin
-                        // now (Phase 3 cutover); host no longer
-                        // pre-populates state for the analytics screen.
+                        // Canonical event saves `previous_screen` so the
+                        // panel's Esc-close returns here, not to a stale
+                        // origin from an earlier flow.
+                        Self::process_event(AppEvent::GoToStats, state);
                     }
                     SidebarItem::Witr => {
                         tracing::info!(
@@ -3479,8 +3482,7 @@ impl EventHandler {
                     }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
-                        state.current_screen = screen_ids::SKILLS.to_string();
-                        state.start_background_skills_load(false);
+                        Self::process_event(AppEvent::GoToSkills, state);
                     }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();

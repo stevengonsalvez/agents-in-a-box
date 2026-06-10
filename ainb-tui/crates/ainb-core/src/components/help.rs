@@ -56,12 +56,12 @@ impl HelpComponent {
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  c          Toggle Claude chat"),
             ListItem::new(""),
-            ListItem::new("Panels (Esc returns here):")
+            ListItem::new("Panels (closing returns here):")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  b          Inbox"),
-            ListItem::new("  i          Stats (usage analytics)"),
-            ListItem::new("  w          Witr (process browser)"),
-            ListItem::new("  k          Skills browser"),
+            ListItem::new("  b          Inbox (Esc closes)"),
+            ListItem::new("  i          Stats / usage analytics (Esc closes)"),
+            ListItem::new("  w          Witr process browser (quit witr to return)"),
+            ListItem::new("  k          Skills browser (Esc closes)"),
             ListItem::new(""),
             ListItem::new("Views:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
