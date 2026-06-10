@@ -47,6 +47,7 @@ explicit, higher-limit path.
 | `/reflect:recall <query> --mode global` | Community-based (broad patterns) |
 | `/reflect:recall <query> --format json` | Structured output for programmatic use |
 | `/reflect:recall <query> --no-cache` | Skip cache, force fresh query |
+| `/reflect:recall <query> --field rule` | S1: just one structured field per hit (rule/fix/root_cause/problem) — cheapest injection |
 
 ## Staged recall (3-layer workflow — preferred for deep digs)
 

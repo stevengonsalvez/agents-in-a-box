@@ -20,6 +20,7 @@ Usage:
                       [--no-cache]
                       [--cache-ttl 3600]
                       [--no-mmr] [--mmr-lambda 0.7]
+                      [--field rule]
 
 Exit codes:
     0 = success (including empty results when KB absent — see D9)
@@ -244,6 +245,48 @@ QMD_PATH_RE = re.compile(r"qmd://" + re.escape(QMD_COLLECTION) + r"/(\S+?\.md)")
 RRF_K = 60  # standard reciprocal-rank-fusion constant
 
 
+# S1: structured field projection. New learnings carry typed frontmatter
+# fields (problem / root_cause / fix / rule / category / entities /
+# causal_relations — the Hindsight fact_extraction schema, written by the
+# drain per assets/learning_template.md). `--field rule` returns JUST that
+# field per hit instead of the whole note — a large context-efficiency win
+# on injection. Legacy free-form notes degrade gracefully: a missing field
+# falls back to the matching prose body section (## Problem → `problem`,
+# ## Solution → `fix`), then key_insight/title in the markdown rendering.
+FIELD_BODY_SECTIONS = {
+    "problem": "Problem",
+    "fix": "Solution",
+    "root_cause": "Root Cause",
+}
+FIELD_VALUE_MAX_CHARS = 500
+
+
+def _stringify_field(raw: Any) -> str:
+    """S1: render one frontmatter value as a compact single string.
+
+    Scalars stringify; lists of scalars comma-join; anything nested (the
+    causal_relations list-of-dicts) JSON-dumps — always bounded so a bloated
+    field can't undo the projection's context savings. Returns "" for
+    missing/empty values so callers can fall back.
+    """
+    if raw is None or isinstance(raw, bool):
+        return ""
+    if isinstance(raw, str):
+        text = raw.strip().strip('"')
+    elif isinstance(raw, (int, float)):
+        text = str(raw)
+    elif isinstance(raw, list):
+        if any(isinstance(i, (dict, list)) for i in raw):
+            text = json.dumps(raw, default=str)
+        else:
+            text = ", ".join(str(i).strip() for i in raw if str(i).strip())
+    elif isinstance(raw, dict):
+        text = json.dumps(raw, default=str)
+    else:
+        text = str(raw)
+    return text.strip()[:FIELD_VALUE_MAX_CHARS]
+
+
 # --- Data models ---------------------------------------------------------
 
 @dataclass
@@ -338,6 +381,37 @@ class Learning:
             # Cap at one sentence / 280 chars for SessionStart brevity
             text = text.split("\n")[0]
             return text[:280]
+        return ""
+
+    def _body_section(self, heading: str) -> str:
+        """S1: extract one `## <heading>` section's first paragraph from the
+        chunk body — the graceful-degradation path for legacy free-form notes
+        that predate structured frontmatter fields."""
+        m = re.search(
+            rf"^##\s+{re.escape(heading)}\s*\n+(.*?)(?=\n##\s|\Z)",
+            self.chunk_text,
+            re.DOTALL | re.MULTILINE,
+        )
+        if not m:
+            return ""
+        text = " ".join(m.group(1).split())
+        return text[:FIELD_VALUE_MAX_CHARS]
+
+    def field_value(self, name: str) -> str:
+        """S1: one structured frontmatter field as a compact string.
+
+        Lookup order: frontmatter[name] → the matching prose body section
+        (FIELD_BODY_SECTIONS — so pre-S1 notes still answer `--field problem`
+        / `--field fix` from their Problem/Solution prose) → "". Callers
+        decide the final fallback ("" lets render_markdown substitute
+        key_insight/title while render_json reports null honestly).
+        """
+        text = _stringify_field(self.frontmatter.get(name))
+        if text:
+            return text
+        heading = FIELD_BODY_SECTIONS.get(name)
+        if heading:
+            return self._body_section(heading)
         return ""
 
 
@@ -1373,17 +1447,33 @@ def filter_by_token_budget(
 
 
 def render_markdown(
-    learnings: list[Learning], query: str, max_chars: int = DEFAULT_MAX_CHARS
+    learnings: list[Learning],
+    query: str,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    field: str | None = None,
 ) -> str:
-    """D5: compact markdown block for agent context."""
+    """D5: compact markdown block for agent context.
+
+    S1: ``field`` projects each hit to ONE structured frontmatter field
+    ("just the rule" instead of a paragraph). Legacy notes without the field
+    fall back to the matching body section, then key_insight/title — never
+    dropped, never crash.
+    """
     if not learnings:
         return ""
-    lines = [f"## Prior learnings relevant to `{query[:80]}`\n"]
+    title = f"## Prior learnings relevant to `{query[:80]}`"
+    if field:
+        title += f" (field: {field})"
+    lines = [title + "\n"]
     used = len(lines[0])
     for lrn in learnings:
-        header = f"- **[{lrn.id}]** {lrn.key_insight or lrn.title}"
-        how = lrn.how_to_apply
-        entry = header + (f"\n  How to apply: {how}" if how else "") + "\n"
+        if field:
+            value = lrn.field_value(field) or lrn.key_insight or lrn.title
+            entry = f"- **[{lrn.id}]** {value}\n"
+        else:
+            header = f"- **[{lrn.id}]** {lrn.key_insight or lrn.title}"
+            how = lrn.how_to_apply
+            entry = header + (f"\n  How to apply: {how}" if how else "") + "\n"
         if used + len(entry) > max_chars:
             lines.append(f"- _(…{len(learnings) - (len(lines) - 1)} more truncated)_\n")
             break
@@ -1398,7 +1488,27 @@ def render_json(
     mode: str,
     ood_gated: bool = False,
     temporal: TemporalRange | None = None,
+    field: str | None = None,
 ) -> str:
+    """S1: when ``field`` is set, each result additionally carries
+    ``field_value`` — the projected frontmatter field (body-section fallback
+    for legacy notes), or null when the note genuinely has nothing. JSON is
+    programmatic, so unlike the markdown rendering it never substitutes
+    key_insight/title — callers can tell "has the field" from "doesn't"."""
+    def _result(lrn: Learning) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "id": lrn.id,
+            "title": lrn.title,
+            "key_insight": lrn.key_insight,
+            "confidence": lrn.confidence,
+            "tags": lrn.tags,
+            "how_to_apply": lrn.how_to_apply,
+            "archived_at": lrn.archived_at,
+        }
+        if field:
+            row["field_value"] = lrn.field_value(field) or None
+        return row
+
     return json.dumps(
         {
             "query": query,
@@ -1407,18 +1517,9 @@ def render_json(
             "ood_gated": ood_gated,
             # R6: the date range parsed out of the query, or null.
             "temporal": temporal.to_dict() if temporal else None,
-            "results": [
-                {
-                    "id": lrn.id,
-                    "title": lrn.title,
-                    "key_insight": lrn.key_insight,
-                    "confidence": lrn.confidence,
-                    "tags": lrn.tags,
-                    "how_to_apply": lrn.how_to_apply,
-                    "archived_at": lrn.archived_at,
-                }
-                for lrn in learnings
-            ],
+            # S1: the projected field name, or null when no projection.
+            "field": field or None,
+            "results": [_result(lrn) for lrn in learnings],
         },
         indent=2,
     )
@@ -1753,6 +1854,11 @@ def main() -> int:
     ap.add_argument("--no-gap-log", action="store_true",
                     help="SG6: don't record a 0-result run as a knowledge gap "
                          "(synthetic-query callers like the SessionStart hook)")
+    ap.add_argument("--field", default=None, metavar="NAME",
+                    help="S1: project each hit to ONE structured frontmatter "
+                         "field (e.g. rule, fix, root_cause, problem) instead "
+                         "of the full note. Legacy notes fall back to the "
+                         "matching body section, then key_insight/title.")
     args = ap.parse_args()
 
     query = " ".join(args.query).strip()
@@ -1786,13 +1892,16 @@ def main() -> int:
         # Empty output, exit 0
         return 0
 
+    field = (args.field or "").strip() or None  # S1
     if args.format == "json":
         print(render_json(
             result.learnings, query, args.mode, result.ood_gated,
-            temporal=result.temporal,
+            temporal=result.temporal, field=field,
         ))
     else:
-        out = render_markdown(result.learnings, query, max_chars=args.max_chars)
+        out = render_markdown(
+            result.learnings, query, max_chars=args.max_chars, field=field,
+        )
         if out:
             print(out)
 

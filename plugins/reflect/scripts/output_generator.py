@@ -116,6 +116,25 @@ def ensure_directories(*dirs: Path):
 # ---------------------------------------------------------------------------
 
 
+def _one_liner(text: str, cap: int = 200) -> str:
+    """S1: distil prose to a single-line summary for structured frontmatter.
+
+    First non-empty line, then first sentence of it, capped. The full prose
+    stays in the body — this is the context-cheap projection recall returns
+    when asked for `--field problem`.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # First sentence boundary (". " keeps versions like "v1.2" intact).
+        idx = line.find(". ")
+        if idx != -1:
+            line = line[: idx + 1]
+        return line[:cap].strip()
+    return ""
+
+
 def create_knowledge_note(
     title: str,
     category: str,
@@ -133,9 +152,21 @@ def create_knowledge_note(
     source_path: str = "",
     session_id: str = "",
     content_hash: str = "",
+    fix: str = "",
+    rule: str = "",
+    entities: Optional[list] = None,
+    causal_relations: Optional[list] = None,
 ) -> tuple[Path, str]:
     """
     Create a knowledge note in docs/solutions/{category}/.
+
+    S1 (Hindsight fact_extraction shape): typed fields — ``problem`` (one-liner
+    derived from the prose), ``root_cause``, ``fix``, ``rule``, ``category``,
+    ``entities``, ``causal_relations`` — land in structured frontmatter so
+    recall can return just one field instead of the whole note. The prose body
+    remains the human-readable rationale. ``problem`` is auto-derived from the
+    prose; the other new fields are optional and omitted from frontmatter when
+    empty, so notes from legacy callers gain only the derived ``problem`` line.
 
     Returns:
         Tuple of (file_path, filename_stem) for sidecar generation
@@ -162,6 +193,19 @@ def create_knowledge_note(
         'created': datetime.now().strftime('%Y-%m-%d'),
         'confidence': confidence,
     }
+    # S1: structured extraction fields — only written when populated so legacy
+    # callers keep producing the exact same frontmatter as before.
+    problem_line = _one_liner(problem)
+    if problem_line:
+        frontmatter['problem'] = problem_line
+    if fix:
+        frontmatter['fix'] = fix
+    if rule:
+        frontmatter['rule'] = rule
+    if entities:
+        frontmatter['entities'] = entities
+    if causal_relations:
+        frontmatter['causal_relations'] = causal_relations
     if language:
         frontmatter['language'] = language
     if framework:
@@ -182,7 +226,12 @@ def create_knowledge_note(
         fm_lines = []
         for k, v in frontmatter.items():
             if isinstance(v, list):
-                fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
+                if any(isinstance(i, (dict, list)) for i in v):
+                    # S1: causal_relations is a list of dicts — JSON is valid
+                    # YAML, unlike str() of a python dict.
+                    fm_lines.append(f"{k}: {json.dumps(v)}")
+                else:
+                    fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
             elif isinstance(v, dict):
                 fm_lines.append(f"{k}:")
                 for dk, dv in v.items():
@@ -203,7 +252,12 @@ def create_knowledge_note(
         from commit_verifier import verify_refs
         # Verify against the PROJECT repo (CLAUDE_PROJECT_DIR / nearest .git),
         # not Path.cwd() — the drain runs with a neutral $HOME cwd.
-        report = verify_refs(f"{problem}\n{solution}\n{context}", repo_dir=get_project_dir())
+        # S1: rule/fix are LLM-authored too — a fabricated SHA there must not
+        # bypass the hallucination check.
+        report = verify_refs(
+            f"{problem}\n{solution}\n{context}\n{fix}\n{rule}",
+            repo_dir=get_project_dir(),
+        )
         if report.all_unverified:
             raise ValueError(
                 "all_refs_hallucinated: every commit ref in this note "

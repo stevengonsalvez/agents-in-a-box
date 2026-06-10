@@ -217,6 +217,42 @@ individual `.md` file (fields: `id`, `scope`, `confidence`, `learning_type`,
 `source_episodes`, `superseded_by`, `provenance`, plus Problem/Solution/
 Anti-Pattern/Context sections).
 
+#### Structured field extraction (MANDATORY for every knowledge note)
+
+Every learning's frontmatter MUST carry typed, single-purpose fields in
+addition to the prose body — recall returns just one of them
+(`recall.py --field rule`) instead of injecting a paragraph. Schema
+(strict — every key present; use `""` / `[]` when genuinely absent):
+
+```yaml
+problem: ""           # string — what went wrong, ONE sentence
+root_cause: ""        # string — the underlying cause, ONE sentence
+fix: ""               # string — what resolved it, ONE sentence
+rule: ""              # string — imperative do/don't to apply next time
+category: ""          # string — one of the knowledge categories above
+entities: []          # list[string] — specific named tech/tools/errors
+causal_relations: []  # list[{source, target, type: caused_by}]
+```
+
+Field rules:
+- **Be selective**: keep a signal only when a session 6 months from now
+  would still act on it; anything below that bar should not become a
+  note at all.
+- **Be concise**: prefer a single strong sentence over several weak ones.
+  The prose body is the place for the full rationale; the fields are
+  distillations.
+- **`rule` is the highest-value field**: phrase it as an imperative the
+  next session can follow verbatim ("Always X", "Never Y when Z").
+- **`entities`**: specific named identifiers only (proper nouns, error
+  strings, tool names) — the same entities the Step 5 sidecar expands on.
+- **`causal_relations`**: cause→effect chains between entities
+  (`type: caused_by`, mirroring sidecar relationship types). `[]` when
+  the learning has no causal structure.
+
+The prose body (Problem/Solution/Anti-Pattern/Context) stays mandatory —
+fields complement it, never replace it. Older free-form notes without
+these fields remain valid; recall degrades gracefully for them.
+
 The output must include:
 
 1. **Signals table** -- all detected signals with confidence and category

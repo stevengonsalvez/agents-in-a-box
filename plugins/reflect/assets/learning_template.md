@@ -11,6 +11,20 @@ tags: [{{TAGS}}]
 symptoms:
   - "{{SYMPTOM_1}}"
 key_insight: "{{KEY_INSIGHT}}"
+# S1: structured extraction fields (Hindsight fact_extraction shape).
+# Typed distillations of the prose body — recall can return just one field
+# (`recall.py --field rule`) instead of the whole note. Be SELECTIVE and
+# CONCISE: one strong sentence each; only what stays useful 6 months out.
+problem: "{{PROBLEM_ONE_LINER}}"        # what went wrong, 1 sentence
+root_cause: "{{ROOT_CAUSE}}"            # the underlying cause, 1 sentence
+fix: "{{FIX_ONE_LINER}}"                # what resolved it, 1 sentence
+rule: "{{RULE}}"                        # imperative do/don't to follow next time
+category: "{{CATEGORY}}"                # e.g. build-errors | debugging-sessions
+entities: [{{ENTITIES}}]                # specific named tech/tools/errors involved
+causal_relations:                       # cause -> effect chains ([] when none)
+  - source: "{{CAUSE_ENTITY}}"
+    target: "{{EFFECT_ENTITY}}"
+    type: caused_by
 links: []
 source_episodes: [{{EPISODE_ID}}]
 superseded_by: null
