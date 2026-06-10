@@ -15,6 +15,12 @@ index (R20, curated) is consulted FIRST, and a strong skill hit injects
 just the skill name + one-line summary, skipping the raw-learnings recall
 entirely. Lower tiers run only when the skills tier is empty or stale.
 
+A1 (opt-in via REFLECT_SLOTS): memory slots are Tier-0 — the agent-curated
+scratchpads (persona, pending_items, project_context, ...) inject BEFORE
+any skill hit or recall result, and unlike the skills tier they never
+suppress the lower tiers: the slots block is PREPENDED to whatever the
+rest of the hierarchy produces.
+
 Usage in settings.json:
 {
   "hooks": {
@@ -85,6 +91,10 @@ SKILL_TIER_LIMIT = 2
 # match_skills scores name/tag token hits at 2.0 and summary hits at 1.0;
 # default threshold = at least one strong (name/tag) hit.
 SKILL_TIER_DEFAULT_MIN_SCORE = 2.0
+# A1: memory slots are Tier-0 of the inject hierarchy. Opt-in rollout flag
+# (mirrors agentmemory's SLOTS=on gate); char budget for the slots block.
+SLOTS_FLAG = "REFLECT_SLOTS"
+SLOT_TIER_MAX_CHARS = 4000
 
 
 # --- Context extraction --------------------------------------------------
@@ -170,6 +180,49 @@ def build_query(cwd: Path) -> tuple[str, list[str]]:
                 seen.add(w)
                 dedup.append(word)
     return " ".join(dedup), tags
+
+
+# --- A1: slots tier (Tier-0 — the agent's working memory) ----------------
+
+def slots_enabled() -> bool:
+    """Opt-in rollout flag for the slots tier (read at call time so
+    settings.json env stanzas and tests can flip it)."""
+    return os.environ.get(SLOTS_FLAG, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def slot_tier_context(cwd: Path) -> str:
+    """Tier 0 of the inject hierarchy: pinned editable memory slots.
+
+    Seeds the 8 default slots for this project (idempotent), then renders
+    every non-empty slot as a compact markdown block. Unlike the skills
+    tier this block never wins outright — it is PREPENDED to whatever the
+    lower tiers produce, because slots are working memory, not retrieval.
+
+    Silent-fail: any error (missing module, locked DB, broken config)
+    returns "" so SessionStart degrades to the slot-less behaviour.
+    """
+    if not slots_enabled():
+        return ""
+    try:
+        # Lazy import: only pay the sqlite cost when the flag is on.
+        # scripts/ is already on sys.path (silent_fail import above).
+        import reflect_db
+
+        conn = reflect_db.get_conn()
+        project_id = reflect_db.derive_slot_project_id(cwd)
+        reflect_db.ensure_default_slots(project_id, conn=conn)
+        return reflect_db.render_slots_context(
+            project_id=project_id, max_chars=SLOT_TIER_MAX_CHARS, conn=conn,
+        )
+    except Exception:
+        return ""
+
+
+def join_blocks(*blocks: str) -> str:
+    """Join non-empty context blocks with a blank line."""
+    return "\n\n".join(b for b in blocks if b)
 
 
 # --- R10: skills tier (curated beats raw) --------------------------------
@@ -291,20 +344,24 @@ def _main_body() -> NoReturn:
     if cwd == Path.home():
         emit("")
 
+    # A1: slots are Tier-0 — agent-curated working memory injects BEFORE
+    # any recall result, and is prepended to every emit path below.
+    slots_block = slot_tier_context(cwd)
+
     query, tags = build_query(cwd)
     if not query:
-        emit("")
+        emit(slots_block)
 
-    # R10: tiered inject — skills (curated) are the top tier. A strong
-    # skill hit wins outright; the learnings recall below only runs when
-    # the skills tier is empty/stale (or the flag is off).
+    # R10: tiered inject — skills (curated) are the top retrieval tier. A
+    # strong skill hit wins outright; the learnings recall below only runs
+    # when the skills tier is empty/stale (or the flag is off).
     skill_block = skill_tier_context(query)
     if skill_block:
-        emit(skill_block)
+        emit(join_blocks(slots_block, skill_block))
 
     recall = find_recall_script()
     if not recall or not UV_BIN:
-        emit("")
+        emit(slots_block)
 
     # D9: SessionStart must feel instant. 10s cap — if recall is slower
     # than that, prefer empty context over a stalled session boot. The
@@ -334,12 +391,12 @@ def _main_body() -> NoReturn:
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
-        emit("")
+        emit(slots_block)
 
     if r.returncode != 0:
-        emit("")
+        emit(slots_block)
 
-    emit((r.stdout or "").strip())
+    emit(join_blocks(slots_block, (r.stdout or "").strip()))
 
 
 def main() -> NoReturn:

@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -310,6 +312,22 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 """
 
+_SLOTS_DDL = """
+CREATE TABLE IF NOT EXISTS slots (
+    project_id      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    content         TEXT NOT NULL DEFAULT '',
+    scope           TEXT NOT NULL DEFAULT 'project'
+                    CHECK (scope IN ('project', 'global')),
+    size_limit      INTEGER NOT NULL DEFAULT 2000,
+    read_only       INTEGER NOT NULL DEFAULT 0,
+    description     TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    last_edited_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -327,6 +345,7 @@ CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
 CREATE INDEX IF NOT EXISTS idx_concept_index_learning_id
     ON concept_index(learning_id);
 CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+CREATE INDEX IF NOT EXISTS idx_slots_name ON slots(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
@@ -344,6 +363,7 @@ _SCHEMA_DDL = (
     + _LEARNING_HISTORY_DDL
     + _CONCEPT_INDEX_DDL
     + _SKILLS_DDL
+    + _SLOTS_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -664,6 +684,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_LEARNING_HISTORY_DDL)
         conn.execute(_CONCEPT_INDEX_DDL)
         conn.execute(_SKILLS_DDL)
+        conn.execute(_SLOTS_DDL)
 
     _backfill_concept_index(conn)
 
@@ -1922,25 +1943,464 @@ def remove_skills(
 
 
 # ---------------------------------------------------------------------------
+# Memory slots (A1: pinned editable agent scratchpads, agentmemory shape)
+# ---------------------------------------------------------------------------
+
+# A small fixed vocabulary of named, size-capped, agent-editable scratchpads.
+# Slots sit between skills (workflow-shaped, slow to refresh) and learnings
+# (aggregated from corrections): they are the agent's FAST working memory.
+# Global-scope slots live under project_id='' and apply everywhere; project
+# slots are keyed by project_id and shadow a same-named global slot on read.
+
+SLOT_SCOPE_PROJECT = "project"
+SLOT_SCOPE_GLOBAL = "global"
+SLOT_EVENT_TYPE = "slot_edited"
+DEFAULT_SLOT_SIZE_LIMIT = 2000
+_SLOT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+# The 8 default slots seeded on init. Descriptions are the inject-time hint
+# telling the agent what belongs in each slot.
+DEFAULT_SLOTS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "persona",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 1000,
+        "description": "Self-image: the role, voice, and operating principles the agent works under.",
+    },
+    {
+        "name": "user_preferences",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 2000,
+        "description": "Durable user habits: style, naming, tooling picks to carry across sessions.",
+    },
+    {
+        "name": "tool_guidelines",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 1500,
+        "description": "Tool selection and sequencing rules the agent must respect.",
+    },
+    {
+        "name": "project_context",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 3000,
+        "description": "This project's architecture notes, conventions, and build/test commands.",
+    },
+    {
+        "name": "guidance",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "Live steering for the next session: focus areas, hazards, open risks.",
+    },
+    {
+        "name": "pending_items",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 2000,
+        "description": "Unfinished work and TODOs that must survive the session boundary.",
+    },
+    {
+        "name": "session_patterns",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "Recurring behaviours observed over recent sessions (auto-counted).",
+    },
+    {
+        "name": "self_notes",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "The agent's own scratch notes: hypotheses, dead ends, follow-ups.",
+    },
+)
+
+
+def validate_slot_name(name: Any) -> Optional[str]:
+    """Normalize a slot name: lowercase snake_case, <= 64 chars, or None."""
+    if not isinstance(name, str):
+        return None
+    trimmed = name.strip()
+    if not _SLOT_NAME_RE.match(trimmed):
+        return None
+    return trimmed
+
+
+def derive_slot_project_id(cwd: Optional[Path] = None) -> str:
+    """Project identity for slot scoping: git remote basename, else dir name.
+
+    Mirrors the derivation in memory_discovery's ``project-id`` and the
+    SessionStart hook's ``project_name`` so the same checkout always maps
+    to the same slot bucket. Never raises — a broken git falls back to
+    the directory basename.
+    """
+    cwd = Path(cwd) if cwd is not None else Path.cwd()
+    try:
+        r = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            base = r.stdout.strip().rstrip("/").rsplit("/", 1)[-1]
+            return re.sub(r"\.git$", "", base)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return cwd.name
+
+
+def _slot_bucket(scope: str, project_id: str) -> str:
+    """The project_id key a slot of *scope* is stored under."""
+    return "" if scope == SLOT_SCOPE_GLOBAL else project_id
+
+
+def ensure_default_slots(
+    project_id: str = "",
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Seed any missing default slot rows. Returns the number created.
+
+    Idempotent: existing rows (including agent-edited content) are never
+    touched. Global defaults seed under project_id=''; project defaults
+    seed under *project_id*. A fresh DB gains exactly 8 rows.
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    created = 0
+    with conn:
+        for tmpl in DEFAULT_SLOTS:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO slots
+                   (project_id, name, content, scope, size_limit, read_only,
+                    description, created_at, last_edited_at)
+                   VALUES (?, ?, '', ?, ?, 0, ?, ?, ?)""",
+                (
+                    _slot_bucket(tmpl["scope"], project_id),
+                    tmpl["name"],
+                    tmpl["scope"],
+                    tmpl["size_limit"],
+                    tmpl["description"],
+                    now,
+                    now,
+                ),
+            )
+            created += cur.rowcount
+    return created
+
+
+def get_slot(
+    name: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch one slot: the project row wins, else the global ('') row."""
+    label = validate_slot_name(name)
+    if label is None:
+        return None
+    conn = conn or get_conn()
+    for bucket in (project_id, ""):
+        row = conn.execute(
+            "SELECT * FROM slots WHERE project_id = ? AND name = ?",
+            (bucket, label),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    return None
+
+
+def list_slots(
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """All slots visible from *project_id* (project shadows global), by name."""
+    conn = conn or get_conn()
+    merged: dict[str, dict[str, Any]] = {}
+    for bucket in ("", project_id):
+        rows = conn.execute(
+            "SELECT * FROM slots WHERE project_id = ? ORDER BY name",
+            (bucket,),
+        ).fetchall()
+        for r in rows:
+            merged[r["name"]] = dict(r)
+    return [merged[k] for k in sorted(merged)]
+
+
+def _slot_result(ok: bool, *, error: str = "", slot: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    out: dict[str, Any] = {"ok": ok}
+    if error:
+        out["error"] = error
+    if slot is not None:
+        out["slot"] = slot
+        out["size"] = len(slot.get("content", ""))
+    return out
+
+
+def _write_slot_content(
+    conn: sqlite3.Connection,
+    slot: dict[str, Any],
+    content: str,
+    action: str,
+) -> dict[str, Any]:
+    """Persist *content* into *slot* and audit the edit (shared UPDATE path)."""
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            "UPDATE slots SET content = ?, last_edited_at = ? "
+            "WHERE project_id = ? AND name = ?",
+            (content, now, slot["project_id"], slot["name"]),
+        )
+        add_event(
+            SLOT_EVENT_TYPE,
+            None,
+            {
+                "name": slot["name"],
+                "project_id": slot["project_id"],
+                "action": action,
+                "size": len(content),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    updated = dict(slot)
+    updated["content"] = content
+    updated["last_edited_at"] = now
+    return _slot_result(True, slot=updated)
+
+
+def slot_append(
+    name: str,
+    text: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: append *text* as a new line. Size cap is a hard error —
+    the agent must compact via :func:`slot_replace` rather than silently
+    losing content."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    if not text:
+        return _slot_result(False, error="text required")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    sep = "\n" if slot["content"] and not slot["content"].endswith("\n") else ""
+    merged = f"{slot['content']}{sep}{text}"
+    if len(merged) > slot["size_limit"]:
+        return _slot_result(
+            False,
+            error=(
+                f"append would exceed size_limit ({len(merged)} > "
+                f"{slot['size_limit']}); use replace to compact first"
+            ),
+        )
+    return _write_slot_content(conn, slot, merged, "append")
+
+
+def slot_replace(
+    name: str,
+    content: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: replace the slot body wholesale (size cap enforced)."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    if not isinstance(content, str):
+        return _slot_result(False, error="content required (string)")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    if len(content) > slot["size_limit"]:
+        return _slot_result(
+            False,
+            error=f"content exceeds size_limit ({len(content)} > {slot['size_limit']})",
+        )
+    return _write_slot_content(conn, slot, content, "replace")
+
+
+def slot_delete(
+    name: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: clear a slot's content (the named slot row survives so
+    the vocabulary stays fixed — delete means 'empty it', not 'unname it')."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    return _write_slot_content(conn, slot, "", "delete")
+
+
+def slot_auto_append(
+    name: str,
+    lines: list[str],
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Deterministic (hook) writer: append *lines* not already present.
+
+    Unlike :func:`slot_append`, overflow is tolerated by keeping the TAIL
+    of the merged content within size_limit — a background hook can't ask
+    the agent to compact, and newest entries matter most. Skips read-only
+    slots. Returns True when the slot changed.
+    """
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None or not lines:
+        return False
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None or slot["read_only"]:
+        return False
+    existing = set(slot["content"].split("\n"))
+    fresh = [ln for ln in lines if ln and ln not in existing]
+    if not fresh:
+        return False
+    sep = "\n" if slot["content"] and not slot["content"].endswith("\n") else ""
+    merged = f"{slot['content']}{sep}" + "\n".join(fresh)
+    if len(merged) > slot["size_limit"]:
+        merged = merged[len(merged) - slot["size_limit"]:]
+    _write_slot_content(conn, slot, merged, "auto_append")
+    return True
+
+
+def slot_auto_replace(
+    name: str,
+    content: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Deterministic (hook) writer: replace content, head-truncated to fit.
+    Skips read-only slots. Returns True when the slot changed."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return False
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None or slot["read_only"]:
+        return False
+    capped = content[: slot["size_limit"]]
+    if capped == slot["content"]:
+        return False
+    _write_slot_content(conn, slot, capped, "auto_replace")
+    return True
+
+
+def render_slots_context(
+    *,
+    project_id: str = "",
+    max_chars: int = 4000,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Markdown block of every non-empty slot visible from *project_id*.
+
+    This is the Tier-0 SessionStart inject: slots come BEFORE skills and
+    raw learnings. Empty slots render nothing; no slots → "".
+    """
+    conn = conn or get_conn()
+    filled = [s for s in list_slots(project_id=project_id, conn=conn) if s["content"].strip()]
+    if not filled:
+        return ""
+    lines = ["## Memory slots (agent-curated — edit via /reflect:slots)"]
+    for slot in filled:
+        lines.append(f"### {slot['name']}")
+        lines.append(slot["content"].strip())
+    return "\n".join(lines)[:max_chars]
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Reflect SQLite manager")
     parser.add_argument(
         "command",
-        choices=["init", "stats", "events", "history", "contradictions", "doctor"],
+        choices=[
+            "init", "stats", "events", "history", "contradictions", "doctor",
+            "slot-list", "slot-get", "slot-append", "slot-replace", "slot-delete",
+        ],
         help="Action to perform",
     )
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--name", default="", help="Slot name (slot-* commands)")
+    parser.add_argument("--text", default="", help="Text to append (slot-append)")
+    parser.add_argument("--content", default="", help="New body (slot-replace)")
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Slot project id (default: derived from cwd git remote/basename)",
+    )
     args = parser.parse_args()
 
     conn = init_db()
 
+    if args.command.startswith("slot-"):
+        project_id = (
+            args.project if args.project is not None else derive_slot_project_id()
+        )
+        ensure_default_slots(project_id, conn=conn)
+        if args.command == "slot-list":
+            for slot in list_slots(project_id=project_id, conn=conn):
+                size = len(slot["content"])
+                print(
+                    f"  {slot['name']:<18} [{slot['scope']}] "
+                    f"{size}/{slot['size_limit']} chars"
+                    + ("  (read-only)" if slot["read_only"] else "")
+                    + f"  — {slot['description']}"
+                )
+        elif args.command == "slot-get":
+            slot = get_slot(args.name, project_id=project_id, conn=conn)
+            if slot is None:
+                print(f"slot not found: {args.name!r}", file=sys.stderr)
+                raise SystemExit(1)
+            print(json.dumps(slot, indent=2))
+        else:
+            if args.command == "slot-append":
+                result = slot_append(
+                    args.name, args.text, project_id=project_id, conn=conn,
+                )
+            elif args.command == "slot-replace":
+                result = slot_replace(
+                    args.name, args.content, project_id=project_id, conn=conn,
+                )
+            else:  # slot-delete
+                result = slot_delete(args.name, project_id=project_id, conn=conn)
+            if not result["ok"]:
+                print(f"error: {result['error']}", file=sys.stderr)
+                raise SystemExit(1)
+            print(
+                f"ok: {args.command} {args.name} "
+                f"({result['size']}/{result['slot']['size_limit']} chars)"
+            )
+        return
+
     if args.command == "init":
+        ensure_default_slots(derive_slot_project_id(), conn=conn)
         print(f"Database initialized at {_db_path()}")
 
     elif args.command == "stats":
@@ -1956,6 +2416,7 @@ def main() -> None:
             "learning_history",
             "concept_index",
             "skills",
+            "slots",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
