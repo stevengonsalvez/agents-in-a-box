@@ -107,6 +107,7 @@ impl CommandRegistry {
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
+        r.register(McpCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r
     }
@@ -1253,6 +1254,42 @@ impl CliCommand for FleetCommand {
     }
 }
 
+pub struct McpCommand;
+impl CliCommand for McpCommand {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+    fn build(&self, app: Command) -> Command {
+        let daemon = Command::new("daemon")
+            .about("Run the shared MCP pool daemon (foreground)")
+            .arg(
+                clap::Arg::new("idle-grace")
+                    .long("idle-grace")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("Override [mcp_pool].idle_grace_secs (seconds)"),
+            );
+        let proxy = Command::new("proxy")
+            .about("Stdio shim: bridge this process's stdio onto a pool socket")
+            .arg(clap::Arg::new("socket").required(true).help("Unix socket path"));
+        let status = Command::new("status").about("Query the pool daemon (JSON)");
+        let stop = Command::new("stop").about("Stop the pool daemon and its MCP children");
+        app.subcommand(
+            Command::new(self.name())
+                .about("Shared MCP server pool: daemon / proxy / status / stop")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(daemon)
+                .subcommand(proxy)
+                .subcommand(status)
+                .subcommand(stop),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::mcp::execute(&matches).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1262,14 +1299,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_three_commands() {
+    fn built_ins_registers_twenty_four_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + plugin stub + fleet + hidden notifyd = 23. The
-        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
-        // inline.
-        assert_eq!(names.len(), 23, "expected 23 entries, got {names:?}");
+        // + tmux namespace + plugin stub + fleet + mcp namespace + hidden
+        // notifyd = 24. The TUI is NOT in the registry — main.rs handles
+        // `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 24, "expected 24 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1293,6 +1330,7 @@ mod tests {
             "completion",
             "plugin",
             "fleet",
+            "mcp",
             "notifyd",
         ] {
             assert!(

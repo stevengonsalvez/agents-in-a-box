@@ -18,6 +18,7 @@ pub mod git_cmd;
 pub mod init;
 pub mod list;
 pub mod logs;
+pub mod mcp;
 pub mod plugin;
 pub mod presets;
 pub mod recover;
