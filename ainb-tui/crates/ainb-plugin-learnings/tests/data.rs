@@ -239,6 +239,7 @@ fn test_qmd_search_trait_uses_runner_output() {
         "audit after rebase",
         "learnings",
         "~/.cache/qmd/index.sqlite",
+        data::SearchMode::Semantic,
     )
     .expect("search via trait");
     assert_eq!(hits.len(), 3);
@@ -256,6 +257,7 @@ fn test_qmd_live_smoke() {
         "audit after rebase",
         "learnings",
         "~/.cache/qmd/index.sqlite",
+        data::SearchMode::Semantic,
     )
     .expect("live qmd query");
     assert!(!hits.is_empty(), "live qmd returned no hits");

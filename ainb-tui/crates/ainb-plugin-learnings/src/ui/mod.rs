@@ -26,14 +26,36 @@ use ratatui::widgets::{Block, BorderType, Borders, Tabs, Widget};
 
 use ainb_plugin_sdk::KeyCode;
 
-use crate::data::{Community, LearningRecord};
+use crate::data::{Community, DataError, LearningRecord, SearchHit};
 
 use browse::BrowseState;
 use detail::DetailState;
 use graph::GraphState;
 use picker::{PickerItem, PickerState};
-pub use search::SearchContext;
 use search::SearchState;
+pub use search::{SearchContext, SearchRequest};
+
+/// Outcome of routing one key into the shell: did state change, and did a fresh
+/// Search submit ask the plugin to run a `qmd` worker?
+#[derive(Debug, Default)]
+pub struct KeyOutcome {
+    /// `true` when the key mutated shell state (so the plugin bumps its render
+    /// generation).
+    pub changed: bool,
+    /// `Some(request)` when a Search submit must be serviced on a worker thread
+    /// (the non-blocking search path). The plugin spawns the worker.
+    pub start_search: Option<SearchRequest>,
+}
+
+impl From<bool> for KeyOutcome {
+    /// The common case: a key that only flips the `changed` bit (no search).
+    fn from(changed: bool) -> Self {
+        Self {
+            changed,
+            start_search: None,
+        }
+    }
+}
 
 /// TUI palette — see `../.claude/skills/tui-screen/SKILL.md`.
 pub(crate) const GOLD: RColor = RColor::Rgb(255, 215, 0);
@@ -150,13 +172,17 @@ impl LearningsUi {
         self.browse.filter().apply(&self.records).len()
     }
 
-    /// Route one key. Returns `true` when state changed (so the plugin bumps
-    /// its render generation). Host-reserved keys (Esc, etc.) are NOT forwarded
-    /// by the host, so a return of `false` for an unhandled key is correct.
+    /// Route one key. Returns a [`KeyOutcome`]: `changed` is `true` when state
+    /// changed (so the plugin bumps its render generation), and `start_search`
+    /// carries a [`SearchRequest`] when a Search submit must be run on a worker
+    /// thread (the non-blocking search path). Host-reserved keys (Esc, etc.) are
+    /// NOT forwarded by the host, so an unchanged outcome for an unhandled key is
+    /// correct.
     ///
-    /// `ctx` carries the injected `qmd` runner + the resolved collection/index
-    /// the Search tab needs to actually run a query (the plugin builds it fresh
-    /// from its config each call so the UI stays pure view state).
+    /// `ctx` carries the resolved collection/index the Search tab threads into
+    /// its query (the plugin builds it fresh from its config each call so the UI
+    /// stays pure view state; the `qmd` runner itself lives on the plugin and
+    /// runs OFF this dispatch thread).
     ///
     /// Routing precedence:
     /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
@@ -188,10 +214,10 @@ impl LearningsUi {
     ///      otherwise Browse handles its own keys.
     ///    - **Graph** — when not focused, navigation keys are inert (press `g`
     ///      to focus first).
-    pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> bool {
+    pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> KeyOutcome {
         // 1. Modal Detail pane takes precedence over everything.
         if self.detail.is_open() {
-            return self.detail.handle_key(code);
+            return KeyOutcome::from(self.detail.handle_key(code));
         }
 
         // 1b. Learnings picker popup (opened by `o` in the map) is modal next.
@@ -203,7 +229,7 @@ impl LearningsUi {
                 }
                 self.picker.close();
             }
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 2. Graph focus: the graph claims its navigation keys. In the radial
@@ -213,19 +239,19 @@ impl LearningsUi {
         // the user can always leave a focused graph.
         if self.tab.0 == Tab::Graph && self.graph.is_focused() {
             if self.graph.in_map() && matches!(code, KeyCode::Char { ch: 'o' }) {
-                return self.open_detail_for_map_entity();
+                return KeyOutcome::from(self.open_detail_for_map_entity());
             }
             if matches!(code, KeyCode::Backspace) {
                 if self.graph.in_map() {
-                    return self.graph.handle_key(code); // exits the map
+                    return KeyOutcome::from(self.graph.handle_key(code)); // exits the map
                 }
                 self.graph.blur();
-                return true;
+                return KeyOutcome::from(true);
             }
             if !matches!(code, KeyCode::Tab | KeyCode::Char { ch: '/' | 'g' })
                 && self.graph.handle_key(code)
             {
-                return true;
+                return KeyOutcome::from(true);
             }
         }
 
@@ -235,7 +261,7 @@ impl LearningsUi {
         if matches!(code, KeyCode::Char { ch: '/' }) {
             self.tab.0 = Tab::Search;
             self.search.focus();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 4. `g` is a global shortcut to the Graph tab + entity focus, from any
@@ -246,13 +272,13 @@ impl LearningsUi {
         if matches!(code, KeyCode::Char { ch: 'g' }) && !search_box_focused {
             self.tab.0 = Tab::Graph;
             self.graph.focus();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 5. `Tab` switches the top-level tab.
         if matches!(code, KeyCode::Tab) {
             self.tab.0 = self.tab.0.next();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 6. Per-tab routing.
@@ -262,18 +288,47 @@ impl LearningsUi {
                 if let Some(record) = outcome.open_record {
                     self.detail.open(&record);
                 }
-                outcome.changed
+                KeyOutcome {
+                    changed: outcome.changed,
+                    start_search: outcome.start_search,
+                }
             }
             Tab::Browse => {
                 if matches!(code, KeyCode::Enter) {
-                    return self.open_detail_for_selection();
+                    return KeyOutcome::from(self.open_detail_for_selection());
                 }
-                self.browse.handle_key(code, &self.records)
+                KeyOutcome::from(self.browse.handle_key(code, &self.records))
             }
             // Graph navigation only fires while focused (handled in step 2);
             // an unfocused Graph press is a clean no-op (press `g` to focus).
-            Tab::Graph => false,
+            Tab::Graph => KeyOutcome::default(),
         }
+    }
+
+    /// Apply a completed `qmd` worker result into the Search tab. The plugin
+    /// calls this each render with whatever the worker channel yielded. A result
+    /// whose token is stale (superseded query) is dropped inside [`SearchState`].
+    /// Returns `true` if the result was applied (so the plugin bumps generation).
+    pub fn apply_search_result(
+        &mut self,
+        token: u64,
+        result: Result<Vec<SearchHit>, DataError>,
+    ) -> bool {
+        self.search.apply_result(token, result)
+    }
+
+    /// Enforce the in-flight search ceiling. The plugin calls this each render;
+    /// returns `true` if the search just timed out (so the plugin bumps
+    /// generation + drops the worker channel).
+    pub fn check_search_timeout(&mut self) -> bool {
+        self.search.check_timeout()
+    }
+
+    /// `true` while a `qmd` search is in flight (so the plugin keeps ticking
+    /// redraws to animate the spinner).
+    #[must_use]
+    pub const fn search_in_flight(&self) -> bool {
+        self.search.is_searching()
     }
 
     /// Open the Detail pane on the Browse tab's currently-selected record.
@@ -342,11 +397,13 @@ impl LearningsUi {
         self.graph.map_tick()
     }
 
-    /// Whether the map wants another animation frame without input — surfaced to
-    /// the host via `Plugin::wants_redraw`.
+    /// Whether the screen wants another frame without input — surfaced to the
+    /// host via `Plugin::wants_redraw`. Two animations request redraws: the map's
+    /// recentre grow, and an in-flight `qmd` search (so its spinner animates and
+    /// the plugin keeps polling the worker channel for the result).
     #[must_use]
     pub fn wants_redraw(&self) -> bool {
-        self.graph.map_wants_redraw()
+        self.graph.map_wants_redraw() || self.search.is_searching()
     }
 
     /// `true` while the Detail pane is open (exposed for tests).

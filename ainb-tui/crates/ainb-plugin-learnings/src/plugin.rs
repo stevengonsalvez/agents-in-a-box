@@ -12,6 +12,9 @@
 //! convert to a sparse [`WireBuffer`] cell stream for the host
 //! ([`buffer_to_wire`]). The host re-paints each cell at its `(x, y)`.
 
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
@@ -24,9 +27,14 @@ use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
 use crate::data::{
-    QmdCli, QmdSearch, parse_community_reports, resolve_config_path, scan_learnings_dir_report,
+    DataError, QmdCli, QmdSearch, SearchHit, SearchMode, parse_community_reports,
+    resolve_config_path, scan_learnings_dir_report, search as run_search,
 };
-use crate::ui::{LearningsUi, SearchContext, render as render_ui};
+use crate::ui::{LearningsUi, SearchContext, SearchRequest, render as render_ui};
+
+/// A worker result handed back over the channel: the submit `token` it answers
+/// plus the parsed hits (or a typed error the UI degrades to empty).
+type SearchOutcome = (u64, std::result::Result<Vec<SearchHit>, DataError>);
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
@@ -63,8 +71,15 @@ pub struct LearningsPlugin {
     config: LearningsConfig,
     /// Tabbed UI view (records + per-tab state).
     ui: LearningsUi,
-    /// Injected `qmd` runner — `QmdCli` in production, a fake in tests.
-    search_runner: Box<dyn QmdSearch + Send + Sync>,
+    /// Injected `qmd` runner — `QmdCli` in production, a fake in tests. Held
+    /// behind an `Arc` so the search worker thread can clone a handle and run the
+    /// (slow) subprocess OFF the dispatch thread without borrowing `self`.
+    search_runner: Arc<dyn QmdSearch + Send + Sync>,
+    /// Receiver for the in-flight search worker's result, `Some` only while a
+    /// search is running. The plugin polls it (non-blocking) each render and
+    /// drops it once the result is applied / the search times out / is
+    /// superseded.
+    search_rx: Option<Receiver<SearchOutcome>>,
     /// `true` once the Graph tab's community clusters have been lazily loaded
     /// from `graph_cache` (memoized so re-entry doesn't re-read).
     communities_loaded: bool,
@@ -77,7 +92,8 @@ impl Default for LearningsPlugin {
         Self {
             config: LearningsConfig::default(),
             ui: LearningsUi::default(),
-            search_runner: Box::new(QmdCli::default()),
+            search_runner: Arc::new(QmdCli::default()),
+            search_rx: None,
             communities_loaded: false,
             generation: 0,
         }
@@ -100,12 +116,80 @@ impl LearningsPlugin {
     /// Construct with an injected [`QmdSearch`] runner. Production builds use
     /// [`Self::default`] (the real [`QmdCli`]); tests pass a fake so the Search
     /// tab renders ranked results deterministically without a live `qmd` index.
+    ///
+    /// The runner is wrapped in an [`Arc`] so the search worker thread can share
+    /// it (run the subprocess off the dispatch thread).
     #[must_use]
-    pub fn with_search_runner(runner: Box<dyn QmdSearch + Send + Sync>) -> Self {
+    pub fn with_search_runner(runner: Arc<dyn QmdSearch + Send + Sync>) -> Self {
         Self {
             search_runner: runner,
             ..Self::default()
         }
+    }
+
+    /// Spawn the `qmd` search for `request` on a dedicated worker thread and arm
+    /// the result channel. Runtime-agnostic: uses `std::thread` + `mpsc` (the
+    /// in-module + integration tests call into the plugin without guaranteeing a
+    /// tokio runtime on the calling thread, so `spawn_blocking` is unsafe here).
+    /// The worker runs the (slow) subprocess and sends `(token, result)` back;
+    /// the plugin polls the receiver each render. Dropping the previous receiver
+    /// here orphans any prior worker — its result is ignored by token mismatch.
+    fn start_search_worker(&mut self, request: SearchRequest) {
+        let (tx, rx) = mpsc::channel::<SearchOutcome>();
+        let runner = Arc::clone(&self.search_runner);
+        let collection = self.config.qmd_collection.clone();
+        let index = self.config.qmd_index.clone();
+        let SearchRequest { token, query } = request;
+        // TODO(perf): two-stage BM25 fast-paint — the `QmdCli::run_bm25`
+        // (`qmd search`, no LLM) path is wired and ready; fire it first for an
+        // instant paint, then run the semantic `query` and swap in the reranked
+        // hits. Single-stage semantic is shipped here; the BM25 seam exists so a
+        // follow-up can layer the fast paint on without touching the worker
+        // plumbing or the `SearchMode` enum.
+        std::thread::spawn(move || {
+            let result = run_search(
+                runner.as_ref(),
+                &query,
+                &collection,
+                &index,
+                SearchMode::Semantic,
+            );
+            // The receiver may already be gone (superseded/timed-out search);
+            // a failed send is the expected "nobody's listening" case.
+            let _ = tx.send((token, result));
+        });
+        self.search_rx = Some(rx);
+    }
+
+    /// Poll the in-flight search worker (non-blocking) and enforce the timeout.
+    /// Called at the top of every render so a settled result paints on the next
+    /// frame and a hung search is abandoned at the ceiling. Returns `true` if
+    /// either applied a state change (so the caller bumps generation).
+    fn poll_search(&mut self) -> bool {
+        let mut changed = false;
+        // 1. Drain any worker result that landed.
+        if let Some(rx) = self.search_rx.as_ref() {
+            match rx.try_recv() {
+                Ok((token, result)) => {
+                    changed |= self.ui.apply_search_result(token, result);
+                    // The worker is done; drop the channel.
+                    self.search_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker thread ended without sending (shouldn't happen, but
+                    // be defensive) — drop the dead channel.
+                    self.search_rx = None;
+                }
+            }
+        }
+        // 2. Enforce the ceiling on whatever's still in flight.
+        if self.ui.check_search_timeout() {
+            changed = true;
+            // Abandon the worker channel; the orphan thread finishes on its own.
+            self.search_rx = None;
+        }
+        changed
     }
 
     /// Borrow the resolved config. Used by tests to assert the parse landed.
@@ -202,6 +286,14 @@ impl Plugin for LearningsPlugin {
     }
 
     async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // Poll the search worker + enforce its timeout BEFORE painting so a
+        // settled (or timed-out) search shows on THIS frame, not the next. The
+        // generation bump keeps the host's freshness witness honest when a
+        // result lands between key presses (driven by `wants_redraw` ticks).
+        if self.poll_search() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+
         let (w, h) = match (params.viewport.width, params.viewport.height) {
             (0, _) | (_, 0) => FALLBACK_VIEWPORT,
             (w, h) => (w, h),
@@ -226,15 +318,23 @@ impl Plugin for LearningsPlugin {
     /// etc.) and only forwards keys it hasn't consumed, so a no-op here for an
     /// unhandled key is correct.
     async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        // Build the Search context fresh from the resolved config: the injected
-        // `qmd` runner + the collection/index the Search tab queries against.
+        // Build the Search context fresh from the resolved config: the
+        // collection/index the Search tab threads into its query. The `qmd`
+        // runner is NOT in the context — a search submit returns a request and
+        // the plugin runs the runner on a worker thread (so this dispatch thread
+        // never blocks on the slow subprocess).
         let ctx = SearchContext {
-            runner: self.search_runner.as_ref(),
             collection: &self.config.qmd_collection,
             index: &self.config.qmd_index,
         };
-        if self.ui.handle_key(&params.key.code, &ctx) {
+        let outcome = self.ui.handle_key(&params.key.code, &ctx);
+        if outcome.changed {
             self.generation = self.generation.wrapping_add(1);
+        }
+        // A fresh Search submit: kick the `qmd` worker OFF this thread. The
+        // result is polled back in on the next render.
+        if let Some(request) = outcome.start_search {
+            self.start_search_worker(request);
         }
         // Lazily load the Graph tab's community clusters the first time the user
         // reaches the Graph tab (keeps the `graph_cache` read off init + off any

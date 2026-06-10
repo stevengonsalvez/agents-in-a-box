@@ -17,11 +17,20 @@
 //! - `/` (or `Tab` to the Search tab) opens a query input box bearing a unique
 //!   prompt token; typed characters echo into the box.
 //! - Submitting a non-empty query (`Enter`) renders ranked result rows (`id` /
-//!   `title` / `score`) from the fake runner, in rank order.
+//!   `title` / `score`) from the fake runner, in rank order — but ONLY after the
+//!   non-blocking worker settles (submit shows a spinner first; the worker runs
+//!   OFF the dispatch thread).
 //! - `↑↓` move the result selection; `Enter` on a selected result opens the
 //!   Detail pane for the resolved `LearningRecord`.
 //! - An empty query / a query the runner returns no hits for renders an honest
 //!   empty state.
+//!
+//! **Settling the async search.** Submit kicks a worker thread and returns
+//! immediately; the result is polled back in on a later render. Tests drive the
+//! settle with [`render_until`] — a bounded poll loop that re-renders until the
+//! awaited token appears (or a deadline trips). This is deterministic for a fast
+//! fake (the worker finishes in microseconds) and exercises the real
+//! spinner → results transition, not a mocked-out one.
 //!
 //! Asserted EXACT unique tokens (never substring-OR):
 //! - prompt        → `search:` (the query-box prompt)
@@ -30,12 +39,16 @@
 //! - result score  → `0.93`
 //! - detail body   → `## Solution` (proves Enter opened the resolved record)
 //! - empty state   → `no results`
+//! - searching     → `Searching…` (the in-flight spinner line)
+//! - timeout       → `search timed out` (the abandoned-search empty state)
 
 use ainb_plugin_learnings::data::{DataError, QmdSearch};
 use ainb_plugin_learnings::plugin::LearningsPlugin;
 use ainb_plugin_protocol::params::{HandleKeyParams, KeyCode, KeyEvent};
 use ainb_plugin_testkit::{Viewport, WireBuffer, methods, run_plugin};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Absolute path to the committed fixture KB directory.
 fn kb_dir() -> PathBuf {
@@ -84,6 +97,62 @@ impl QmdSearch for EmptyRunner {
     }
 }
 
+/// A runner that sleeps `delay` before returning `payload` — used to observe the
+/// spinner BEFORE results land (the worker runs off the dispatch thread, so the
+/// pane stays responsive while this sleeps).
+struct SlowRunner {
+    payload: String,
+    delay: Duration,
+}
+
+impl QmdSearch for SlowRunner {
+    fn run_query(
+        &self,
+        _query: &str,
+        _collection: &str,
+        _index: &str,
+    ) -> Result<String, DataError> {
+        std::thread::sleep(self.delay);
+        Ok(self.payload.clone())
+    }
+}
+
+/// A runner that sleeps WELL past the search ceiling (8 s) before returning, so
+/// the timeout fires first. The eventual result is dropped by token mismatch.
+struct HangRunner;
+
+impl QmdSearch for HangRunner {
+    fn run_query(
+        &self,
+        _query: &str,
+        _collection: &str,
+        _index: &str,
+    ) -> Result<String, DataError> {
+        // Longer than SEARCH_CEILING; the timeout abandons the search first.
+        std::thread::sleep(Duration::from_secs(30));
+        Ok("[]".to_string())
+    }
+}
+
+/// A runner that sleeps `delay`, then returns a single hit whose `title`
+/// ECHOES the query verbatim. Used by the coalescing test: each submit's
+/// result is identifiable by the query it was built from, so the test can
+/// prove the SUPERSEDED query's result never renders. The slow stage also
+/// guarantees both submits are in flight before either settles.
+struct EchoRunner {
+    delay: Duration,
+}
+
+impl QmdSearch for EchoRunner {
+    fn run_query(&self, query: &str, _collection: &str, _index: &str) -> Result<String, DataError> {
+        std::thread::sleep(self.delay);
+        Ok(serde_json::json!([
+            { "docid": "#echo", "score": 0.99, "title": format!("echo:{query}") }
+        ])
+        .to_string())
+    }
+}
+
 /// Fake `qmd query --json` payload. Row 0's `docid` is a real fixture record id
 /// (`lrn-audit-after-rebase`) so selecting it resolves to a fixture record and
 /// opens its Detail pane. The remaining rows carry distinct ids/titles/scores
@@ -128,6 +197,30 @@ fn buffer_text(buf: &WireBuffer) -> String {
     rows.join("\n")
 }
 
+/// Re-render in a bounded poll loop until `token` appears in the rendered text,
+/// returning that text. This is how a test settles the async search: submit
+/// kicks a worker thread, the result is polled back in on a later render, so the
+/// test renders until the awaited token lands (or a deadline trips and the test
+/// fails with the last frame). A tiny sleep between polls lets the worker thread
+/// make progress without busy-spinning.
+async fn render_until(
+    h: &mut ainb_plugin_testkit::Harness,
+    token: &str,
+    deadline: Duration,
+) -> String {
+    let start = std::time::Instant::now();
+    loop {
+        let text = buffer_text(&h.render(VIEWPORT).await.expect("render poll"));
+        if text.contains(token) {
+            return text;
+        }
+        if start.elapsed() >= deadline {
+            panic!("token {token:?} did not appear within {deadline:?}; last frame:\n{text}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Build a `plugin/handle_key` notification for a single key with no mods.
 fn key_params(code: KeyCode) -> HandleKeyParams {
     HandleKeyParams {
@@ -162,11 +255,17 @@ const RESULT_SCORE_TOKEN: &str = "0.93";
 const DETAIL_BODY_TOKEN: &str = "## Solution";
 /// The honest empty-state token (no query / no hits).
 const EMPTY_TOKEN: &str = "no results";
+/// The in-flight spinner token (rendered while the worker is running).
+const SEARCHING_TOKEN: &str = "Searching…";
+/// The abandoned-search empty-state token (search overran the ceiling).
+const TIMEOUT_TOKEN: &str = "search timed out";
+/// Generous deadline for settling a fast fake worker (microseconds in practice).
+const SETTLE: Duration = Duration::from_secs(5);
 
 /// Init a plugin (with the fake runner) over the fixture KB and return the
 /// harness ready to drive.
 async fn init_with_fake() -> ainb_plugin_testkit::Harness {
-    let plugin = LearningsPlugin::with_search_runner(Box::new(FakeRunner {
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(FakeRunner {
         payload: fake_payload(),
     }));
     let mut h = run_plugin(plugin);
@@ -250,12 +349,13 @@ async fn submitting_query_renders_ranked_result_rows() {
     open_search(&mut h).await;
     type_query(&mut h, "audit rebase").await;
 
-    // Submit (Enter) → ranked results from the fake runner render.
+    // Submit (Enter) → the non-blocking worker runs off-thread; ranked results
+    // land on a later render. Poll until the top hit appears.
     h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
         .await
         .expect("send Enter submit");
 
-    let results = buffer_text(&h.render(VIEWPORT).await.expect("render results"));
+    let results = render_until(&mut h, RESULT_ID_TOKEN, SETTLE).await;
 
     // id / title / score of the top hit all render.
     assert!(
@@ -299,12 +399,8 @@ async fn down_then_enter_opens_detail_for_selected_result() {
         .await
         .expect("submit query");
 
-    // Results render; the Detail body token must NOT be present yet.
-    let results = buffer_text(&h.render(VIEWPORT).await.expect("render results"));
-    assert!(
-        results.contains(RESULT_ID_TOKEN),
-        "precondition: results rendered:\n{results}"
-    );
+    // Results land on a later render (worker off-thread); poll until they do.
+    let results = render_until(&mut h, RESULT_ID_TOKEN, SETTLE).await;
     assert!(
         !results.contains(DETAIL_BODY_TOKEN),
         "the result list must not render the Detail body before opening:\n{results}"
@@ -351,8 +447,9 @@ async fn down_moves_result_selection_before_open() {
         .await
         .expect("submit query");
 
-    // Initially the first result (#114073) is selected (▶ precedes it).
-    let first = buffer_text(&h.render(VIEWPORT).await.expect("render results"));
+    // Initially the first result (#114073) is selected (▶ precedes it). Poll the
+    // off-thread worker to completion first.
+    let first = render_until(&mut h, RESULT_ID_TOKEN, SETTLE).await;
     let top_line = first
         .lines()
         .find(|l| l.contains(RESULT_ID_TOKEN))
@@ -412,7 +509,7 @@ async fn empty_query_renders_honest_empty_state() {
 #[tokio::test]
 async fn no_hit_query_renders_honest_empty_state() {
     // A runner that returns zero hits → the no-results empty state.
-    let plugin = LearningsPlugin::with_search_runner(Box::new(EmptyRunner));
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(EmptyRunner));
     let mut h = run_plugin(plugin);
     h.init_with_config(fixture_config()).await.expect("init");
 
@@ -422,7 +519,9 @@ async fn no_hit_query_renders_honest_empty_state() {
         .await
         .expect("submit query");
 
-    let empty = buffer_text(&h.render(VIEWPORT).await.expect("render empty"));
+    // The worker settles to zero hits off-thread; poll until the empty state
+    // shows (it replaces the spinner once the result lands).
+    let empty = render_until(&mut h, EMPTY_TOKEN, SETTLE).await;
     assert!(
         empty.contains(EMPTY_TOKEN),
         "a query with no hits must render the honest empty state \
@@ -449,6 +548,130 @@ async fn backspace_edits_query_then_no_op_when_empty() {
     assert!(
         edited.contains("ab") && !edited.lines().any(|l| l.contains("abc")),
         "Backspace must delete the last query char (`abc` → `ab`):\n{edited}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn submit_shows_spinner_first_then_results_when_worker_settles() {
+    // The load-bearing non-blocking proof: a slow runner means the FIRST render
+    // after Enter shows the spinner (the dispatch thread did NOT block on qmd),
+    // and a LATER render — once the off-thread worker settles — shows the
+    // results. If submit blocked, the pane would freeze for the 200 ms instead
+    // of painting a spinner.
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(SlowRunner {
+        payload: fake_payload(),
+        delay: Duration::from_millis(200),
+    }));
+    let mut h = run_plugin(plugin);
+    h.init_with_config(fixture_config()).await.expect("init slow");
+
+    open_search(&mut h).await;
+    type_query(&mut h, "audit").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit slow query");
+
+    // First render right after submit: the spinner is up, results are NOT yet
+    // present (the worker is still sleeping).
+    let searching = buffer_text(&h.render(VIEWPORT).await.expect("render searching"));
+    assert!(
+        searching.contains(SEARCHING_TOKEN),
+        "the first render after submit must show the spinner (non-blocking):\n{searching}"
+    );
+    assert!(
+        !searching.contains(RESULT_ID_TOKEN),
+        "results must NOT be present while the worker is still running:\n{searching}"
+    );
+
+    // Poll until the worker settles and the results replace the spinner.
+    let results = render_until(&mut h, RESULT_ID_TOKEN, SETTLE).await;
+    assert!(
+        !results.contains(SEARCHING_TOKEN),
+        "the spinner must be gone once results land:\n{results}"
+    );
+    assert!(
+        results.contains(RESULT_TITLE_TOKEN),
+        "the settled results must render the top hit title:\n{results}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn two_submits_coalesce_only_latest_results_render() {
+    // Coalescing / cancellation: a slow first submit is superseded by a second
+    // submit before the first settles. Only the SECOND query's results may
+    // render — the first query's (stale-token) result is dropped on arrival.
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(EchoRunner {
+        delay: Duration::from_millis(150),
+    }));
+    let mut h = run_plugin(plugin);
+    h.init_with_config(fixture_config()).await.expect("init echo");
+
+    open_search(&mut h).await;
+    // Submit #1 (query "first") — kicks a slow worker.
+    type_query(&mut h, "first").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit first");
+    // Confirm we're searching (spinner up), then edit + submit #2 before #1
+    // settles. Editing invalidates + supersedes the in-flight query.
+    let mid = buffer_text(&h.render(VIEWPORT).await.expect("render mid"));
+    assert!(
+        mid.contains(SEARCHING_TOKEN),
+        "submit #1 must be in flight (spinner up):\n{mid}"
+    );
+    // Append to make query "firstSECOND", a distinct query/token.
+    type_query(&mut h, "SECOND").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit second");
+
+    // Settle: poll until the SECOND query's echoed title renders.
+    let results = render_until(&mut h, "echo:firstSECOND", SETTLE).await;
+    assert!(
+        !results.contains("echo:first\n") && !results.lines().any(|l| l.contains("echo:first ")),
+        "the superseded first query's result must NOT render:\n{results}"
+    );
+    // Belt-and-braces: the only echoed title present is the second query's.
+    let echo_titles: Vec<&str> = results.lines().filter(|l| l.contains("echo:")).collect();
+    assert!(
+        echo_titles.iter().all(|l| l.contains("echo:firstSECOND")),
+        "only the latest query's results may render:\n{results}"
+    );
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
+async fn hung_search_times_out_to_honest_state() {
+    // A runner that hangs well past the 8 s ceiling. The search must abandon to
+    // the honest "search timed out" state — NOT spin forever. The orphaned
+    // worker finishes on its own; its result is dropped by token mismatch.
+    let plugin = LearningsPlugin::with_search_runner(Arc::new(HangRunner));
+    let mut h = run_plugin(plugin);
+    h.init_with_config(fixture_config()).await.expect("init hang");
+
+    open_search(&mut h).await;
+    type_query(&mut h, "this will hang").await;
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Enter))
+        .await
+        .expect("submit hanging query");
+
+    // While in flight, the spinner is up.
+    let searching = buffer_text(&h.render(VIEWPORT).await.expect("render searching"));
+    assert!(
+        searching.contains(SEARCHING_TOKEN),
+        "the hanging search must show the spinner while in flight:\n{searching}"
+    );
+
+    // Poll past the 8 s ceiling until the timeout state shows (generous margin).
+    let timed_out = render_until(&mut h, TIMEOUT_TOKEN, Duration::from_secs(12)).await;
+    assert!(
+        !timed_out.contains(SEARCHING_TOKEN),
+        "the spinner must clear once the search times out:\n{timed_out}"
     );
 
     h.close().await.expect("clean close");

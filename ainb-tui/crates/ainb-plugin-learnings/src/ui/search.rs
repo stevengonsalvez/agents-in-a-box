@@ -5,18 +5,28 @@
 //! - **Query input** (`/` focuses it): a single-line box bearing the `search:`
 //!   prompt. Printable chars append to the query; `Backspace` edits it; `Enter`
 //!   submits.
-//! - **Results**: the ranked [`SearchHit`]s the [`QmdSearch`] runner returned,
-//!   rendered as `id · title · score` rows (rank order = the order the runner
-//!   returned, which `qmd` sorts by score). `↑↓` move a `▶` selection; `Enter`
-//!   on a result resolves the hit back to a [`LearningRecord`] and hands it to
-//!   the shell to open the SAME Detail pane (P6). Selection uses the arrow keys
+//! - **Results**: the ranked [`SearchHit`]s the `qmd` runner returned, rendered
+//!   as `id · title · score` rows (rank order = the order the runner returned,
+//!   which `qmd` sorts by score). `↑↓` move a `▶` selection; `Enter` on a
+//!   result resolves the hit back to a [`LearningRecord`] and hands it to the
+//!   shell to open the SAME Detail pane (P6). Selection uses the arrow keys
 //!   only — `j`/`k` are reserved for typing into the query box (a user must be
 //!   able to search for `jwt`, `kafka`, etc.).
 //!
-//! The qmd shell sits behind the [`QmdSearch`] trait so this module never
-//! spawns a subprocess directly — it's handed a runner (real [`QmdCli`] at
-//! runtime, a fake in tests) via a [`SearchContext`]. That keeps ranked-result
-//! rendering deterministic under test without a live qmd index.
+//! **Non-blocking submit (the load-bearing invariant).** `qmd` is slow — the
+//! semantic `query` path runs LLM query-expansion (cold ~14 s) and can hang
+//! indefinitely. The plugin's SDK dispatches `handle_key` INLINE on its single
+//! reader-loop task, so it must never block: a synchronous subprocess in submit
+//! would freeze the whole Learnings pane until `qmd` returns. So submit does NOT
+//! run the subprocess — it transitions to [`SearchPhase::Searching`] with a
+//! fresh monotonic token and returns a [`SearchRequest`] telling the plugin to
+//! spawn the query on a worker thread. The plugin polls the worker each render
+//! and feeds the result back via [`SearchState::apply_result`]; a result whose
+//! token doesn't match the current [`query_seq`](SearchState) is dropped (that's
+//! how a superseded query is coalesced / cancelled). An 8 s ceiling
+//! ([`SEARCH_CEILING`]) bounds a hung `qmd` — past it the tab shows an honest
+//! "search timed out" state. While searching, an animated spinner renders and
+//! the plugin keeps ticking redraws so the spinner animates.
 //!
 //! Result→record resolution maps a qmd hit (a `#docid` + a `qmd://…` file +
 //! a title) back to a parsed fixture/real record via [`resolve_hit`], matching
@@ -29,6 +39,8 @@
 //!
 //! [`QmdCli`]: crate::data::QmdCli
 
+use std::time::{Duration, Instant};
+
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as RRect};
 use ratatui::style::{Modifier as RModifier, Style};
@@ -38,21 +50,64 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Row, Table, Widget
 use ainb_plugin_sdk::KeyCode;
 
 use super::{CORNFLOWER_BLUE, GOLD, LIST_HIGHLIGHT_BG, MUTED_GRAY, SELECTION_GREEN, SOFT_WHITE};
-use crate::data::{LearningRecord, QmdSearch, SearchHit, search as run_search};
+use crate::data::{DataError, LearningRecord, SearchHit};
 
 /// The query-box prompt token. Unique to the Search input box so the tripwire
 /// can lock an exact match (never a substring-OR).
 pub(crate) const PROMPT: &str = "search:";
 
-/// Everything the Search tab needs to actually run a query: the injected qmd
-/// runner plus the resolved collection / index from [`LearningsConfig`]. Built
-/// fresh by the plugin per `handle_key` so the runner is borrowed, not owned by
-/// the UI (the runner lives on the plugin; the UI is pure view state).
+/// Upper bound on how long an in-flight `qmd` search may run before the tab
+/// gives up and shows the honest timeout state. A hung `qmd` (or a cold
+/// LLM-expansion that overruns) must not leave the user staring at a spinner
+/// forever. The orphaned worker thread is left to finish on its own; its result
+/// is ignored by token mismatch.
+pub(crate) const SEARCH_CEILING: Duration = Duration::from_secs(8);
+
+/// The braille spinner frames cycled while a search is in flight. Indexed by
+/// `started.elapsed()` so the glyph advances every render tick.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How often the spinner glyph advances.
+const SPINNER_TICK: Duration = Duration::from_millis(80);
+
+/// Lifecycle of a single submitted query. The worker runs OFF the dispatch
+/// thread; the plugin drives the transitions [`Idle`](SearchPhase::Idle) →
+/// [`Searching`](SearchPhase::Searching) → [`Done`](SearchPhase::Done).
+#[derive(Debug, Clone, Copy, Default)]
+enum SearchPhase {
+    /// No query has been submitted (or the query was edited, invalidating the
+    /// last one). The pre-submit hint renders. The default phase.
+    #[default]
+    Idle,
+    /// A query is in flight on the worker thread. `token` ties the eventual
+    /// result back to THIS submit (a superseded query's stale result is
+    /// dropped); `started` bounds it against [`SEARCH_CEILING`] and animates the
+    /// spinner.
+    Searching { token: u64, started: Instant },
+    /// The in-flight query settled — results applied (possibly empty), or the
+    /// search timed out. The results table / empty state renders.
+    Done,
+}
+
+/// A request the plugin must service by spawning the `qmd` worker: run `query`
+/// for `token`, and send `(token, result)` back on the plugin's channel. The
+/// plugin feeds the result to [`SearchState::apply_result`] on the next render.
+#[derive(Debug, Clone)]
+pub struct SearchRequest {
+    /// The monotonic token identifying this submit. The worker echoes it back so
+    /// a superseded query's result can be dropped.
+    pub token: u64,
+    /// The (trimmed-non-empty) query string to run.
+    pub query: String,
+}
+
+/// Everything the Search tab needs for query metadata: the resolved collection
+/// / index from [`LearningsConfig`]. The runner is NOT here any more — the
+/// plugin owns it and runs the worker, so the UI stays pure view state with no
+/// blocking subprocess.
 ///
 /// [`LearningsConfig`]: crate::config::LearningsConfig
 pub struct SearchContext<'a> {
-    /// The qmd runner (real [`QmdCli`](crate::data::QmdCli) or a test fake).
-    pub runner: &'a dyn QmdSearch,
     /// QMD collection to query (`config.qmd_collection`).
     pub collection: &'a str,
     /// QMD sqlite index path (`config.qmd_index`) — threaded for display/future
@@ -62,8 +117,9 @@ pub struct SearchContext<'a> {
     pub index: &'a str,
 }
 
-/// The outcome of routing a key into the Search tab: did state change, and
-/// should the shell open the Detail pane for a resolved record?
+/// The outcome of routing a key into the Search tab: did state change, should
+/// the shell open the Detail pane for a resolved record, and should it kick off
+/// a `qmd` worker for a freshly-submitted query?
 pub struct SearchKeyOutcome {
     /// `true` when the key mutated Search state (so the shell bumps its render
     /// generation).
@@ -72,27 +128,33 @@ pub struct SearchKeyOutcome {
     /// shell should open in the Detail pane. Cloned so the pane outlives the
     /// result list.
     pub open_record: Option<LearningRecord>,
+    /// `Some(request)` when `Enter` submitted a fresh query the plugin must run
+    /// on a worker thread (the non-blocking submit path).
+    pub start_search: Option<SearchRequest>,
 }
 
 impl SearchKeyOutcome {
-    /// A no-op outcome: nothing changed, nothing to open.
+    /// A no-op outcome: nothing changed, nothing to open, nothing to run.
     fn unchanged() -> Self {
         Self {
             changed: false,
             open_record: None,
+            start_search: None,
         }
     }
 
-    /// State changed; nothing to open.
+    /// State changed; nothing to open or run.
     fn changed() -> Self {
         Self {
             changed: true,
             open_record: None,
+            start_search: None,
         }
     }
 }
 
-/// Search-tab view state: the query input + the ranked results + selection.
+/// Search-tab view state: the query input + the ranked results + selection +
+/// the in-flight search lifecycle.
 #[derive(Debug, Default)]
 pub struct SearchState {
     /// The query being composed in the input box.
@@ -100,13 +162,21 @@ pub struct SearchState {
     /// `true` once `/` has focused the query box (so the box + prompt render).
     /// Stays `true` after submit so editing the query re-runs a fresh search.
     focused: bool,
-    /// The last submitted query's ranked hits (empty until the first submit).
+    /// The last completed query's ranked hits (empty until the first result).
     results: Vec<SearchHit>,
     /// `true` once a query has been submitted at least once — distinguishes the
-    /// pre-submit hint state from a submitted-but-empty (no-results) state.
+    /// pre-submit hint state from a settled-but-empty (no-results) state.
     submitted: bool,
     /// Selected row index into [`results`](Self::results).
     selected: usize,
+    /// Lifecycle of the current/last submitted query.
+    phase: SearchPhase,
+    /// Monotonic submit token. Bumped on every submit so a stale worker result
+    /// (from a superseded query) can be recognised and dropped.
+    query_seq: u64,
+    /// `true` once the in-flight search overran [`SEARCH_CEILING`] — drives the
+    /// honest "search timed out" empty state.
+    timed_out: bool,
 }
 
 impl SearchState {
@@ -129,12 +199,20 @@ impl SearchState {
         self.results.get(self.selected)
     }
 
+    /// `true` while a `qmd` search is in flight (so the shell keeps ticking
+    /// redraws to animate the spinner — see `LearningsUi::wants_redraw`).
+    #[must_use]
+    pub const fn is_searching(&self) -> bool {
+        matches!(self.phase, SearchPhase::Searching { .. })
+    }
+
     /// Route a Search-tab key. `records` is the parsed KB used to resolve a
     /// selected hit back to a record on `Enter`.
     ///
     /// Routing while focused:
-    /// - `Enter` — submit the query (run the search) when results aren't yet
-    ///   the focus; if a result is selected, `Enter` resolves + opens it.
+    /// - `Enter` — submit the query (kick off the non-blocking worker via
+    ///   [`SearchKeyOutcome::start_search`]) when results aren't yet the focus;
+    ///   if a result is selected, `Enter` resolves + opens it.
     /// - printable char — append to the query (including `j`/`k`, so a user can
     ///   search for `jwt`, `kafka`, …; selection is arrow-keys-only).
     /// - `Backspace` — delete the last query char (no-op when empty).
@@ -173,59 +251,139 @@ impl SearchState {
     /// Invalidate any previously-submitted results because the query was
     /// edited. Without this a user who submits `foo`, then edits the query
     /// to `bar`, and hits `Enter` would OPEN `foo`'s stale top hit instead
-    /// of re-querying. Clearing `results` + resetting `submitted` forces
-    /// the next `Enter` back onto the submit path so it runs a fresh search
-    /// for the edited query.
+    /// of re-querying. Clearing `results` + resetting the phase to `Idle`
+    /// forces the next `Enter` back onto the submit path so it runs a fresh
+    /// search for the edited query. Bumping `query_seq` also makes any
+    /// still-in-flight worker's result a stale token (dropped on arrival).
     fn invalidate_results(&mut self) {
         self.results.clear();
         self.submitted = false;
         self.selected = 0;
+        self.phase = SearchPhase::Idle;
+        self.timed_out = false;
+        // Supersede any in-flight query so its eventual result is ignored.
+        self.query_seq = self.query_seq.wrapping_add(1);
     }
 
-    /// `Enter` handler: if a result is selected, resolve + open it; otherwise
-    /// submit the current query (run the search).
+    /// `Enter` handler: if a settled result is selected, resolve + open it;
+    /// otherwise submit the current query (kick off the worker).
     fn on_enter(
         &mut self,
-        ctx: &SearchContext<'_>,
+        _ctx: &SearchContext<'_>,
         records: &[LearningRecord],
     ) -> SearchKeyOutcome {
-        // After a submit with results, a second Enter opens the selected hit.
+        // After a settled submit with results, a second Enter opens the
+        // selected hit. While a search is still in flight, Enter is a no-op
+        // (there's nothing to open yet) — it must NOT re-submit.
+        if self.is_searching() {
+            return SearchKeyOutcome::unchanged();
+        }
         if self.submitted && !self.results.is_empty() {
             if let Some(record) = self.selected_hit().and_then(|h| resolve_hit(h, records).cloned())
             {
                 return SearchKeyOutcome {
                     changed: true,
                     open_record: Some(record),
+                    start_search: None,
                 };
             }
             // Selected hit didn't resolve to a local record — clean no-op.
             return SearchKeyOutcome::unchanged();
         }
 
-        // Otherwise: submit the query.
-        self.submit(ctx);
-        SearchKeyOutcome::changed()
+        // Otherwise: submit the query (non-blocking).
+        self.submit()
     }
 
-    /// Run the current query through the injected runner, replacing the results
-    /// and resetting the selection. An empty query short-circuits to no results
-    /// (no subprocess). A runner error degrades to an empty result set rather
-    /// than failing the render — the empty state is the honest user-visible
-    /// outcome.
-    fn submit(&mut self, ctx: &SearchContext<'_>) {
+    /// Begin a fresh search: transition to [`SearchPhase::Searching`] with a new
+    /// token and ask the plugin (via [`SearchKeyOutcome::start_search`]) to run
+    /// the `qmd` worker. Does NOT spawn the subprocess — that would block the
+    /// dispatch thread. An empty query short-circuits to the settled no-results
+    /// state without a worker.
+    fn submit(&mut self) -> SearchKeyOutcome {
         self.submitted = true;
         self.selected = 0;
-        if self.query.trim().is_empty() {
-            self.results.clear();
-            return;
+        self.results.clear();
+        self.timed_out = false;
+        self.query_seq = self.query_seq.wrapping_add(1);
+
+        let query = self.query.trim().to_string();
+        if query.is_empty() {
+            // Empty query → no worker, settle immediately on the empty state.
+            self.phase = SearchPhase::Done;
+            return SearchKeyOutcome::changed();
         }
-        self.results = match run_search(ctx.runner, &self.query, ctx.collection, ctx.index) {
+
+        let token = self.query_seq;
+        self.phase = SearchPhase::Searching {
+            token,
+            started: Instant::now(),
+        };
+        SearchKeyOutcome {
+            changed: true,
+            open_record: None,
+            start_search: Some(SearchRequest { token, query }),
+        }
+    }
+
+    /// Apply a worker result back into the view. The plugin calls this each
+    /// render with whatever the worker channel yielded. A result whose `token`
+    /// doesn't match the current in-flight token is DROPPED — that's how a
+    /// superseded (coalesced) query's stale result is discarded. A runner error
+    /// degrades to an empty result set rather than failing the render — the
+    /// empty state is the honest user-visible outcome. Returns `true` if the
+    /// result was applied (so the plugin bumps its render generation).
+    pub fn apply_result(&mut self, token: u64, result: Result<Vec<SearchHit>, DataError>) -> bool {
+        // Only the current in-flight token's result counts.
+        match self.phase {
+            SearchPhase::Searching { token: cur, .. } if cur == token => {}
+            _ => return false,
+        }
+        self.results = match result {
             Ok(hits) => hits,
             Err(err) => {
-                tracing::warn!(query = %self.query, %err, "qmd search failed — empty results");
+                tracing::warn!(%err, "qmd search failed — empty results");
                 Vec::new()
             }
         };
+        self.selected = 0;
+        self.timed_out = false;
+        self.phase = SearchPhase::Done;
+        true
+    }
+
+    /// Check the in-flight search against [`SEARCH_CEILING`]. The plugin calls
+    /// this each render. If the deadline has passed, the tab gives up: it shows
+    /// the honest "search timed out" empty state and supersedes the query (so
+    /// the orphaned worker's eventual result is dropped). Returns `true` if a
+    /// timeout fired (so the plugin bumps its render generation + stops the
+    /// worker). A no-op when not searching or still within the ceiling.
+    pub fn check_timeout(&mut self) -> bool {
+        let SearchPhase::Searching { started, .. } = self.phase else {
+            return false;
+        };
+        if started.elapsed() <= SEARCH_CEILING {
+            return false;
+        }
+        self.results.clear();
+        self.selected = 0;
+        self.timed_out = true;
+        self.phase = SearchPhase::Done;
+        // Supersede so a late worker result for this query is dropped.
+        self.query_seq = self.query_seq.wrapping_add(1);
+        true
+    }
+
+    /// The braille spinner glyph for the current in-flight search, advanced by
+    /// `started.elapsed()` so it animates across render ticks. `None` when not
+    /// searching.
+    fn spinner_glyph(&self) -> Option<&'static str> {
+        let SearchPhase::Searching { started, .. } = self.phase else {
+            return None;
+        };
+        let frame = (started.elapsed().as_millis() / SPINNER_TICK.as_millis()) as usize
+            % SPINNER_FRAMES.len();
+        Some(SPINNER_FRAMES[frame])
     }
 
     /// Move the result selection by `delta` (clamped to the result bounds).
@@ -330,9 +488,14 @@ fn render_query_box(buf: &mut RBuffer, area: RRect, state: &SearchState) {
     Paragraph::new(line).render(inner, buf);
 }
 
-/// Render the ranked results as an `id · title · score` table, or the honest
-/// empty state when there are none.
+/// Render the ranked results as an `id · title · score` table, the animated
+/// "Searching…" line while a query is in flight, or the honest empty state when
+/// there are none.
 fn render_results(buf: &mut RBuffer, area: RRect, state: &SearchState) {
+    if let Some(glyph) = state.spinner_glyph() {
+        render_searching(buf, area, glyph);
+        return;
+    }
     if state.results.is_empty() {
         render_empty(buf, area, state);
         return;
@@ -374,13 +537,34 @@ fn render_results(buf: &mut RBuffer, area: RRect, state: &SearchState) {
     Widget::render(table, area, buf);
 }
 
-/// The honest empty state. Distinguishes the pre-submit hint ("type a query…")
-/// from a submitted-but-empty result ("no results"). Both render the `no
-/// results` token only in the no-hit case so the tests/tripwire can assert it
-/// precisely.
+/// The animated in-flight state: a cycling braille spinner + the `Searching…`
+/// token (which the tests lock). The glyph advances with `started.elapsed()`,
+/// so the host's redraw ticks animate it.
+fn render_searching(buf: &mut RBuffer, area: RRect, glyph: &str) {
+    Paragraph::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            glyph.to_string(),
+            Style::default().fg(GOLD).add_modifier(RModifier::BOLD),
+        ),
+        Span::styled(
+            " Searching…",
+            Style::default().fg(MUTED_GRAY).add_modifier(RModifier::ITALIC),
+        ),
+    ]))
+    .render(area, buf);
+}
+
+/// The honest empty state. Distinguishes the pre-submit hint ("type a query…"),
+/// a timed-out search ("search timed out"), and a submitted-but-empty result
+/// ("no results"). Each renders a distinct exact token so the tests/tripwire can
+/// assert them precisely.
 fn render_empty(buf: &mut RBuffer, area: RRect, state: &SearchState) {
-    let text = if state.submitted {
-        // Submitted (empty query OR a query the runner had no hits for).
+    let text = if state.timed_out {
+        // The search overran SEARCH_CEILING and was abandoned.
+        "  search timed out"
+    } else if state.submitted {
+        // Settled (empty query OR a query the runner had no hits for).
         "  no results"
     } else {
         "  type a query and press ⏎ to search"
@@ -393,10 +577,14 @@ fn render_empty(buf: &mut RBuffer, area: RRect, state: &SearchState) {
 }
 
 /// Bottom help bar for the Search tab. `⏎ search`/`⏎ open` reflect the live
-/// two-stage Enter; `↑↓ select` is live once there are results.
+/// two-stage Enter; `↑↓ select` is live once there are results; while a search
+/// is in flight the bar reads `searching…`.
 fn render_help_bar(buf: &mut RBuffer, area: RRect, state: &SearchState) {
     let mut spans = vec![Span::raw(" ")];
-    if state.results.is_empty() {
+    if state.is_searching() {
+        spans.extend(help_key("⏎", "searching…"));
+        spans.extend(help_key("Bksp", "edit"));
+    } else if state.results.is_empty() {
         spans.extend(help_key("⏎", "search"));
         spans.extend(help_key("Bksp", "edit"));
     } else {
@@ -423,9 +611,11 @@ fn help_key(key: &str, desc: &str) -> [Span<'static>; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::DataError;
+    use crate::data::QmdSearch;
 
-    /// A fake runner returning a fixed payload — the in-module unit seam.
+    /// A fake runner returning a fixed payload — the in-module unit seam. Used
+    /// only to PARSE a payload into hits the way the worker would, so the unit
+    /// tests can settle a submit synchronously without a thread.
     struct Fake(String);
     impl QmdSearch for Fake {
         fn run_query(&self, _q: &str, _c: &str, _i: &str) -> Result<String, DataError> {
@@ -451,18 +641,40 @@ mod tests {
         }
     }
 
-    fn ctx<'a>(runner: &'a dyn QmdSearch) -> SearchContext<'a> {
+    fn ctx() -> SearchContext<'static> {
         SearchContext {
-            runner,
             collection: "learnings",
             index: "~/.cache/qmd/index.sqlite",
         }
     }
 
+    /// Drive a submit to completion synchronously: route the key, run the fake
+    /// runner for the returned request, and apply the parsed result — the
+    /// in-module stand-in for the plugin's worker + render poll. Returns the
+    /// original outcome so callers can inspect `open_record`.
+    fn submit_and_settle(
+        st: &mut SearchState,
+        fake: &Fake,
+        c: &SearchContext<'_>,
+        recs: &[LearningRecord],
+    ) -> SearchKeyOutcome {
+        let out = st.handle_key(&KeyCode::Enter, c, recs);
+        if let Some(req) = &out.start_search {
+            let hits = crate::data::search(
+                fake,
+                &req.query,
+                c.collection,
+                c.index,
+                crate::data::SearchMode::Semantic,
+            );
+            st.apply_result(req.token, hits);
+        }
+        out
+    }
+
     #[test]
     fn typing_appends_and_backspace_edits_query() {
-        let fake = Fake("[]".into());
-        let c = ctx(&fake);
+        let c = ctx();
         let mut st = SearchState::default();
         st.focus();
         for ch in "abc".chars() {
@@ -479,20 +691,37 @@ mod tests {
     }
 
     #[test]
-    fn submit_populates_ranked_results() {
+    fn submit_transitions_to_searching_then_applies_ranked_results() {
         let payload = serde_json::json!([
             {"docid": "#1", "score": 0.9, "title": "Top"},
             {"docid": "#2", "score": 0.4, "title": "Low"}
         ])
         .to_string();
         let fake = Fake(payload);
-        let c = ctx(&fake);
+        let c = ctx();
         let mut st = SearchState::default();
         st.focus();
         for ch in "query".chars() {
             st.handle_key(&KeyCode::Char { ch }, &c, &[]);
         }
-        st.handle_key(&KeyCode::Enter, &c, &[]);
+        // Submit does NOT block / apply results — it transitions to Searching
+        // and hands back a request for the plugin to run on a worker.
+        let out = st.handle_key(&KeyCode::Enter, &c, &[]);
+        assert!(st.is_searching(), "submit transitions to Searching");
+        assert!(st.results.is_empty(), "no results yet while searching");
+        let req = out.start_search.expect("submit yields a worker request");
+        assert_eq!(req.query, "query");
+
+        // Apply the worker result for the matching token → results land.
+        let hits = crate::data::search(
+            &fake,
+            &req.query,
+            c.collection,
+            c.index,
+            crate::data::SearchMode::Semantic,
+        );
+        assert!(st.apply_result(req.token, hits));
+        assert!(!st.is_searching(), "applying the result settles the search");
         assert_eq!(st.results.len(), 2);
         assert_eq!(st.results[0].id, "#1");
         assert_eq!(st.results[1].id, "#2");
@@ -500,14 +729,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_submit_clears_results() {
-        let payload = serde_json::json!([{"docid": "#1", "score": 0.9, "title": "x"}]).to_string();
-        let fake = Fake(payload);
-        let c = ctx(&fake);
+    fn empty_query_submit_settles_without_worker() {
+        let c = ctx();
         let mut st = SearchState::default();
         st.focus();
-        // Submit with empty query → no subprocess, no results, but submitted.
-        st.handle_key(&KeyCode::Enter, &c, &[]);
+        // Submit with empty query → no worker request, settles immediately,
+        // submitted=true, not searching.
+        let out = st.handle_key(&KeyCode::Enter, &c, &[]);
+        assert!(out.start_search.is_none(), "empty query spawns no worker");
+        assert!(!st.is_searching());
         assert!(st.results.is_empty());
         assert!(st.submitted);
     }
@@ -517,15 +747,15 @@ mod tests {
         let payload =
             serde_json::json!([{"docid": "lrn-x", "score": 0.9, "title": "T"}]).to_string();
         let fake = Fake(payload);
-        let c = ctx(&fake);
+        let c = ctx();
         let recs = vec![record("lrn-x", "T")];
         let mut st = SearchState::default();
         st.focus();
         for ch in "q".chars() {
             st.handle_key(&KeyCode::Char { ch }, &c, &recs);
         }
-        // First Enter submits.
-        st.handle_key(&KeyCode::Enter, &c, &recs);
+        // First Enter submits + settle the worker result.
+        submit_and_settle(&mut st, &fake, &c, &recs);
         assert_eq!(st.results.len(), 1);
         // Second Enter opens the resolved record.
         let out = st.handle_key(&KeyCode::Enter, &c, &recs);
@@ -557,7 +787,7 @@ mod tests {
         ])
         .to_string();
         let fake = Fake(payload);
-        let c = ctx(&fake);
+        let c = ctx();
         let mut st = SearchState::default();
         st.focus();
 
@@ -572,14 +802,14 @@ mod tests {
         );
 
         // With results present, `j`/`k` must STILL type — they must not move the
-        // selection. Seed results via a submit, then confirm `j` appends and the
-        // selection stays put.
+        // selection. Seed results via a settled submit, then confirm `j` appends
+        // and the selection stays put.
         let mut st = SearchState::default();
         st.focus();
         for ch in "query".chars() {
             st.handle_key(&KeyCode::Char { ch }, &c, &[]);
         }
-        st.handle_key(&KeyCode::Enter, &c, &[]);
+        submit_and_settle(&mut st, &fake, &c, &[]);
         assert_eq!(st.results.len(), 2, "precondition: results present");
         assert_eq!(st.selected, 0, "precondition: first result selected");
 
@@ -610,16 +840,16 @@ mod tests {
         let payload =
             serde_json::json!([{"docid": "lrn-stale", "score": 0.9, "title": "Stale"}]).to_string();
         let fake = Fake(payload);
-        let c = ctx(&fake);
+        let c = ctx();
         let recs = vec![record("lrn-stale", "Stale")];
         let mut st = SearchState::default();
         st.focus();
 
-        // Submit query #1 → results populate, submitted=true.
+        // Submit query #1 → settle results, submitted=true.
         for ch in "foo".chars() {
             st.handle_key(&KeyCode::Char { ch }, &c, &recs);
         }
-        st.handle_key(&KeyCode::Enter, &c, &recs);
+        submit_and_settle(&mut st, &fake, &c, &recs);
         assert_eq!(st.results.len(), 1, "precondition: query #1 has results");
         assert!(st.submitted, "precondition: query #1 submitted");
 
@@ -635,19 +865,29 @@ mod tests {
             "appending a char after submit must reset `submitted` so Enter re-queries"
         );
 
-        // Next Enter must RE-SUBMIT (run the search again), NOT open the stale
-        // record. After re-submit the fresh results are present and nothing
-        // opened.
+        // Next Enter must RE-SUBMIT (kick a fresh worker), NOT open the stale
+        // record. The submit transitions to Searching and yields a request;
+        // nothing opened.
         let out = st.handle_key(&KeyCode::Enter, &c, &recs);
         assert!(
             out.open_record.is_none(),
             "Enter after editing the query must re-query, not open the stale result"
         );
-        assert_eq!(
-            st.results.len(),
-            1,
-            "Enter after editing must re-run the search"
+        assert!(
+            out.start_search.is_some() && st.is_searching(),
+            "Enter after editing must re-run the search (new worker request)"
         );
+        // Settle it so the next Backspace edit starts from a clean settled state.
+        let req = out.start_search.unwrap();
+        let hits = crate::data::search(
+            &fake,
+            &req.query,
+            c.collection,
+            c.index,
+            crate::data::SearchMode::Semantic,
+        );
+        st.apply_result(req.token, hits);
+        assert_eq!(st.results.len(), 1, "re-submit applied fresh results");
 
         // Backspace must ALSO invalidate results (same staleness hazard).
         st.handle_key(&KeyCode::Backspace, &c, &recs);
@@ -674,13 +914,13 @@ mod tests {
         ])
         .to_string();
         let fake = Fake(payload);
-        let c = ctx(&fake);
+        let c = ctx();
         let mut st = SearchState::default();
         st.focus();
         for ch in "q".chars() {
             st.handle_key(&KeyCode::Char { ch }, &c, &[]);
         }
-        st.handle_key(&KeyCode::Enter, &c, &[]);
+        submit_and_settle(&mut st, &fake, &c, &[]);
         assert_eq!(st.selected, 0);
         st.handle_key(&KeyCode::Down, &c, &[]);
         assert_eq!(st.selected, 1);
@@ -689,5 +929,108 @@ mod tests {
         assert!(!out.changed);
         st.handle_key(&KeyCode::Up, &c, &[]);
         assert_eq!(st.selected, 0);
+    }
+
+    #[test]
+    fn stale_token_result_is_dropped_coalescing_superseded_query() {
+        // Two submits in flight: applying the FIRST token's result after the
+        // SECOND submit has bumped the token must be dropped (the coalescing /
+        // cancellation of a superseded query).
+        let c = ctx();
+        let mut st = SearchState::default();
+        st.focus();
+        for ch in "first".chars() {
+            st.handle_key(&KeyCode::Char { ch }, &c, &[]);
+        }
+        let first = st.handle_key(&KeyCode::Char { ch: '!' }, &c, &[]); // mutate then submit
+        let _ = first;
+        let out1 = st.handle_key(&KeyCode::Enter, &c, &[]);
+        let req1 = out1.start_search.expect("first submit yields a request");
+
+        // Edit + re-submit BEFORE applying req1 → req1 is now superseded.
+        st.handle_key(&KeyCode::Char { ch: '2' }, &c, &[]);
+        let out2 = st.handle_key(&KeyCode::Enter, &c, &[]);
+        let req2 = out2.start_search.expect("second submit yields a request");
+        assert_ne!(req1.token, req2.token, "tokens must be distinct");
+
+        // Apply the STALE first result → dropped (still searching, no results).
+        let stale = Ok(vec![SearchHit {
+            id: "#stale".into(),
+            score: 0.9,
+            title: "stale".into(),
+            file: None,
+        }]);
+        assert!(
+            !st.apply_result(req1.token, stale),
+            "a superseded token's result must be dropped"
+        );
+        assert!(st.is_searching(), "still searching for the live query");
+        assert!(st.results.is_empty(), "no stale results applied");
+
+        // Apply the LIVE second result → lands.
+        let live = Ok(vec![SearchHit {
+            id: "#live".into(),
+            score: 0.9,
+            title: "live".into(),
+            file: None,
+        }]);
+        assert!(st.apply_result(req2.token, live));
+        assert_eq!(st.results.len(), 1);
+        assert_eq!(st.results[0].id, "#live");
+    }
+
+    #[test]
+    fn check_timeout_abandons_a_hung_search_to_an_honest_state() {
+        // A Searching phase whose `started` is already past the ceiling settles
+        // to the timed-out state when checked.
+        let c = ctx();
+        let mut st = SearchState::default();
+        st.focus();
+        for ch in "slow".chars() {
+            st.handle_key(&KeyCode::Char { ch }, &c, &[]);
+        }
+        let out = st.handle_key(&KeyCode::Enter, &c, &[]);
+        let req = out.start_search.expect("submit yields a request");
+
+        // Within the ceiling: no timeout.
+        assert!(!st.check_timeout(), "fresh search must not time out");
+        assert!(st.is_searching());
+
+        // Force the started instant past the ceiling, then check.
+        if let SearchPhase::Searching { started, .. } = &mut st.phase {
+            *started = Instant::now() - (SEARCH_CEILING + Duration::from_secs(1));
+        }
+        assert!(st.check_timeout(), "an overrun search must time out");
+        assert!(!st.is_searching(), "timeout settles the phase");
+        assert!(st.timed_out, "timeout flag set for the honest empty state");
+
+        // A late worker result for the timed-out token is now dropped.
+        let late = Ok(vec![SearchHit {
+            id: "#late".into(),
+            score: 0.9,
+            title: "late".into(),
+            file: None,
+        }]);
+        assert!(
+            !st.apply_result(req.token, late),
+            "a result for a timed-out query must be dropped"
+        );
+        assert!(st.results.is_empty());
+    }
+
+    #[test]
+    fn spinner_glyph_present_only_while_searching() {
+        let c = ctx();
+        let mut st = SearchState::default();
+        st.focus();
+        assert!(st.spinner_glyph().is_none(), "idle has no spinner");
+        for ch in "q".chars() {
+            st.handle_key(&KeyCode::Char { ch }, &c, &[]);
+        }
+        st.handle_key(&KeyCode::Enter, &c, &[]);
+        assert!(
+            st.spinner_glyph().is_some(),
+            "searching renders a spinner glyph"
+        );
     }
 }
