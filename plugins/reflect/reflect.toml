@@ -62,6 +62,15 @@ timeout_s = 60
 # hooks that set it. Set to 0 to disable.
 project_affinity_alpha = 0.2
 
+[cascade]
+# C1: per-ingest semantic-dedup adjudication. A revise CREATE whose text is
+# >= this embedding cosine to an existing learning is held for a focused
+# 1-by-1 merge-or-keep verdict instead of landing as a near-duplicate row.
+# 0.97 matches Hindsight's consolidation dedup default. The
+# REFLECT_DEDUP_THRESHOLD env var overrides this key; >= 1.0 disables the
+# probe entirely.
+dedup_threshold = 0.97
+
 [telemetry]
 enabled = true
 log_level = "info"

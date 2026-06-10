@@ -33,12 +33,26 @@ The execution half is the ``revise`` subcommand: UPDATE merges as evidence
 (proof_count++ + history snapshot, S4/S6), DELETE retires stale learnings
 non-destructively (status -> reverted + reason).
 
+C1 per-ingest semantic dedup: before a CREATE lands, its text is probed
+against existing learnings by embedding cosine (via `reflect embed`, the same
+all-mpnet-base-v2 space nano-graphrag indexes with). If the nearest learning
+is >= the dedup threshold (default 0.97; env REFLECT_DEDUP_THRESHOLD or
+[cascade].dedup_threshold in reflect.toml; >= 1.0 disables), the CREATE is
+held and the revise output carries a focused 1-by-1 'merge?' adjudication —
+both texts plus the action contract. The drain (the LLM) answers as a final
+step: UPDATE the listed id to merge (the new evidence folds into the existing
+row), or re-issue the CREATE with "dedup_adjudicated": true to keep both.
+The weekly consolidation pass catches dupes after they have been served for
+days; this catches them at write. S5's title-overlap recall is lexical and
+misses paraphrases — the cosine probe is the semantic backstop.
+
 CLI:
     reflect_cascade.py prepare <transcript.jsonl> [--out SLICE] [--context N]
         -> JSON {action, reason, signal_count, slice_path, orig_tokens,
                  slice_tokens, signal_hash, related_count}
     reflect_cascade.py revise [--actions JSON|FILE|-] [--source ID]
-        -> JSON {executed, created, updated, deleted, skipped, errors}
+        -> JSON {executed, created, updated, deleted, skipped,
+                 needs_adjudication, adjudications, errors}
 """
 
 from __future__ import annotations
@@ -79,6 +93,16 @@ _STOPWORDS = frozenset({
 
 # Statuses a revision must never target again — retired/replaced beliefs.
 _RETIRED_STATUSES = ("reverted", "superseded", "rejected")
+
+# C1: per-ingest semantic-dedup adjudication (Hindsight consolidator shape).
+# A CREATE whose text is >= this cosine to an existing learning is held for a
+# focused 1-by-1 merge-or-keep verdict instead of landing as a near-duplicate
+# row. 0.97 matches Hindsight's consolidation_dedup_threshold default; a
+# threshold >= 1.0 disables the probe entirely (same semantics as upstream).
+_DEDUP_THRESHOLD_DEFAULT = 0.97
+_DEDUP_SCAN_CAP = 200      # newest learnings embedded per probe (bounded)
+_DEDUP_TEXT_CAP = 2000     # chars of each text handed to the embedder
+_DEDUP_EMBED_TIMEOUT = 60  # seconds — first call may pay the model load
 
 
 @dataclass
@@ -211,6 +235,186 @@ def recall_related_learnings(signals, *, limit: int = _RELATED_LIMIT,
     return [entry for _, entry in scored[:limit]]
 
 
+def dedup_threshold() -> float:
+    """C1: resolve the semantic-dedup cosine floor (config-tunable).
+
+    Precedence: REFLECT_DEDUP_THRESHOLD env var > [cascade].dedup_threshold
+    in the layered reflect.toml > 0.97 default. A value >= 1.0 disables the
+    probe (Hindsight's _dedup_active semantics); unparseable values fall back
+    to the default rather than failing the write path.
+    """
+    import os
+    raw: object = os.environ.get("REFLECT_DEDUP_THRESHOLD")
+    if raw is None:
+        try:
+            import reflect_config
+            raw = reflect_config.get_config().get("cascade", {}).get(
+                "dedup_threshold")
+        except Exception:
+            raw = None
+    if raw is None:
+        return _DEDUP_THRESHOLD_DEFAULT
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEDUP_THRESHOLD_DEFAULT
+
+
+def _find_reflect_cli() -> Optional[str]:
+    """C1: locate the reflect-kb CLI on $PATH (canonical `uv tool install`).
+    None when absent — the probe fail-opens and the CREATE proceeds."""
+    import shutil
+    return shutil.which("reflect")
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Engine vectors are unit-normalized, but guard the
+    norms instead of trusting subprocess output."""
+    import math
+    dot = norm_a = norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / math.sqrt(norm_a * norm_b)
+
+
+def _fetch_dedup_embeddings(
+    cli: str, anchor_text: str, candidates: list[dict],
+    timeout: int = _DEDUP_EMBED_TIMEOUT,
+) -> Optional[tuple[list[float], dict[str, list[float]]]]:
+    """C1: embed the CREATE text + candidate learning titles via `reflect embed`.
+
+    Same subprocess contract as recall's MMR step — the engine embeds with the
+    model nano-graphrag indexes with, so the dedup cosine lives in the index's
+    embedding space. Returns (anchor_vector, {learning_id: vector}) or None on
+    ANY failure (slim build, legacy CLI, timeout, junk output) — the dedup
+    probe is a guard, never a blocker for the write path.
+    """
+    import subprocess
+    payload = json.dumps({
+        "candidates": [
+            {"id": c["id"], "text": (c["text"] or "")[:_DEDUP_TEXT_CAP]}
+            for c in candidates
+        ]
+    })
+    try:
+        proc = subprocess.run(
+            [cli, "embed", anchor_text[:_DEDUP_TEXT_CAP]],
+            input=payload,
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    qvec_raw = data.get("query_embedding")
+    docs_raw = data.get("embeddings")
+    if not isinstance(qvec_raw, list) or not qvec_raw or not isinstance(docs_raw, dict):
+        return None
+    try:
+        qvec = [float(x) for x in qvec_raw]
+        docs = {
+            str(key): [float(x) for x in vec]
+            for key, vec in docs_raw.items()
+            if isinstance(vec, list) and len(vec) == len(qvec_raw)
+        }
+    except (TypeError, ValueError):
+        return None
+    return (qvec, docs) if docs else None
+
+
+def find_semantic_twin(content: str, *,
+                       threshold: Optional[float] = None) -> Optional[dict]:
+    """C1: probe a CREATE's text against existing learnings by embedding cosine.
+
+    Returns {"id", "title", "similarity"} for the nearest non-retired learning
+    at/above the threshold, or None — no near twin, threshold >= 1.0
+    (disabled), empty corpus, or any probe failure (fail-open: a missing CLI
+    or slim engine must never block the write path).
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+    thresh = dedup_threshold() if threshold is None else float(threshold)
+    if thresh >= 1.0:
+        return None  # disabled — matches Hindsight's _dedup_active contract
+    try:
+        from reflect_db import get_conn
+        rows = get_conn().execute(
+            f"""SELECT id, title FROM learnings
+                WHERE status NOT IN ({", ".join("?" for _ in _RETIRED_STATUSES)})
+                ORDER BY created_at DESC LIMIT ?""",
+            (*_RETIRED_STATUSES, _DEDUP_SCAN_CAP),
+        ).fetchall()
+    except Exception:
+        return None
+    candidates = [
+        {"id": row["id"], "text": row["title"]}
+        for row in rows if (row["title"] or "").strip()
+    ]
+    if not candidates:
+        return None
+    cli = _find_reflect_cli()
+    if not cli:
+        return None
+    embedded = _fetch_dedup_embeddings(cli, text, candidates)
+    if embedded is None:
+        return None
+    qvec, docs = embedded
+    best_id: Optional[str] = None
+    best_sim = thresh  # only candidates at/above the threshold qualify
+    for cand in candidates:
+        vec = docs.get(cand["id"])
+        if vec is None:
+            continue
+        sim = _cosine(qvec, vec)
+        if sim >= best_sim:
+            best_id, best_sim = cand["id"], sim
+    if best_id is None:
+        return None
+    title = next(c["text"] for c in candidates if c["id"] == best_id)
+    return {"id": best_id, "title": title, "similarity": round(best_sim, 4)}
+
+
+def _merge_adjudication(content: str, twin: dict, threshold: float) -> dict:
+    """C1: the focused 1-by-1 'merge?' question handed back to the drain.
+
+    Mirrors Hindsight's adjudication contract — the LLM reads BOTH texts so a
+    word-level difference (a number, named entity, negation, or condition) is
+    respected — but the adjudicator here is the drain agent itself: it answers
+    by re-running revise with either an UPDATE (merge: the new evidence folds
+    into the existing learning instead of a duplicate row landing) or the
+    original CREATE flagged "dedup_adjudicated": true (keep both).
+    """
+    return {
+        "new_text": content,
+        "existing_id": twin["id"],
+        "existing_title": twin["title"],
+        "similarity": twin["similarity"],
+        "threshold": threshold,
+        "question": (
+            "merge? NEW (new_text) and EXISTING (existing_title) are "
+            f">= {threshold:.2f} cosine-similar. If they state the same "
+            "rule/fact (wording aside), re-run revise with "
+            f'{{"action": "UPDATE", "target_id": "{twin["id"]}", '
+            '"reason": "<one sentence>"}} — the new evidence merges into the '
+            "existing learning instead of creating a duplicate. If ANY "
+            "important detail differs (a number, named entity, negation, or "
+            "condition), keep both: re-run the CREATE with "
+            '"dedup_adjudicated": true.'
+        ),
+    }
+
+
 def _build_revision_block(related: list[dict], transcript_path: str) -> str:
     """S5: the belief-revision section embedded in the slice handed to /reflect.
 
@@ -238,7 +442,14 @@ def _build_revision_block(related: list[dict], transcript_path: str) -> str:
         "- DELETE only when new evidence directly contradicts or supersedes a\n"
         "  listed learning (retires it as stale, non-destructively). Be very\n"
         "  conservative with deletes.\n"
-        "- Every action carries a one-sentence reason.\n\n"
+        "- Every action carries a one-sentence reason.\n"
+        "- CREATEs are semantically dedup-checked at write time: when the new\n"
+        "  text is near-identical (embedding cosine) to an existing learning,\n"
+        "  the revise output holds it under 'adjudications' with a 'merge?'\n"
+        "  question instead of creating. Answer it as a final step — emit the\n"
+        "  UPDATE it names to merge, or re-run the CREATE with\n"
+        '  "dedup_adjudicated": true if an important detail genuinely\n'
+        "  differs.\n\n"
         "Execute UPDATE/DELETE actions with:\n"
         f"    python3 {script} revise --source {transcript_path} "
         "--actions '<json-array>'\n\n"
@@ -257,11 +468,20 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                  transition). Hindsight hard-deletes; our ledger keeps the
                  row so 'why was this retired?' stays answerable.
 
+    C1: every CREATE is first probed against existing learnings by embedding
+    cosine. At/above the dedup threshold the row does NOT land — the CREATE
+    is held in ``adjudications`` with both texts and a focused 'merge?'
+    question, and ``needs_adjudication`` counts the holds. The caller (the
+    drain LLM) answers as a final step: UPDATE the twin to merge, or re-run
+    the CREATE with ``"dedup_adjudicated": true`` to keep both. The probe
+    fail-opens (no CLI / slim engine / timeout -> plain CREATE).
+
     Per-action failures are collected in ``errors`` — one malformed action
     never blocks the rest of the batch.
     """
     summary = {"executed": 0, "created": 0, "updated": 0, "deleted": 0,
-               "skipped": 0, "errors": []}
+               "skipped": 0, "needs_adjudication": 0, "adjudications": [],
+               "errors": []}
     try:
         import reflect_db
         from domain.enums import LearningStatus
@@ -318,6 +538,18 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                     summary["skipped"] += 1
                     summary["errors"].append("CREATE missing content")
                     continue
+                # C1: per-ingest semantic dedup — hold near-duplicate CREATEs
+                # for a focused merge-or-keep verdict instead of letting both
+                # rows land. "dedup_adjudicated" is the keep verdict (the
+                # adjudicator already read both texts and ruled them distinct).
+                if not raw.get("dedup_adjudicated"):
+                    twin = find_semantic_twin(content)
+                    if twin is not None:
+                        summary["needs_adjudication"] += 1
+                        summary["adjudications"].append(
+                            _merge_adjudication(content, twin, dedup_threshold())
+                        )
+                        continue
                 reflect_db.add_learning(
                     title=content[:200],
                     category=str(raw.get("category", "") or "Unknown"),
@@ -474,6 +706,7 @@ def main() -> None:
         except (json.JSONDecodeError, TypeError) as exc:
             print(json.dumps({"executed": 0, "created": 0, "updated": 0,
                               "deleted": 0, "skipped": 0,
+                              "needs_adjudication": 0, "adjudications": [],
                               "errors": [f"invalid actions JSON: {exc}"]}))
             sys.exit(1)
         if isinstance(parsed, dict):
