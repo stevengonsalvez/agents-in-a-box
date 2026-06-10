@@ -128,6 +128,15 @@ def _main_body() -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # SG7: same sweep for TodoWrite todo-completion state.
+    try:
+        from todo_state import cleanup_stale as todo_cleanup_stale  # noqa: E402
+        n = todo_cleanup_stale()
+        if n:
+            forensics_log(_HOOK_NAME, f"todo-state sweep removed {n} stale file(s)")
+    except Exception:  # noqa: BLE001
+        pass
+
     if not transcript_path:
         # Nothing useful to queue without a transcript path.
         return

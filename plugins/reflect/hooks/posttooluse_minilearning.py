@@ -154,6 +154,28 @@ def _main_body() -> None:
             pass
     regression = bool(test_hit and test_hit.get("kind") == "regression")
 
+    # SG7: TodoWrite completion capture. An item transitioning to
+    # status='completed' is an explicit "done" moment — observe_todowrite
+    # diffs prior vs new todo state and writes a MEDIUM-confidence Process
+    # learning per completion (with in_progress duration + files touched).
+    # Every OTHER file-modifying tool feeds the per-session file-event log
+    # that those completions attribute their work to.
+    try:
+        if tool_name and tool_name.lower() == "todowrite":
+            from todo_state import observe_todowrite
+            hit = observe_todowrite(session_id, tool_input)
+            if hit:
+                forensics_log(
+                    _HOOK_NAME,
+                    f"todo completion(s) captured for session={session_id[:8]}: "
+                    f"{len(hit['completed'])}",
+                )
+        else:
+            from todo_state import record_file_event
+            record_file_event(session_id, tool_name, tool_input)
+    except ImportError:  # pragma: no cover
+        pass
+
     if not loop_hit and not regression and not tool_failed(tool_response, tool_name):
         return  # Successful, non-looping tool calls don't arm.
 
