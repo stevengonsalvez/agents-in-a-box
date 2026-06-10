@@ -375,6 +375,28 @@ fn sigkill_triggers_respawn_then_quarantine() {
     );
 }
 
+// `host` is the reserved publisher id stamped on host-side snapshot
+// publishes; a plugin must not be able to register under it on ANY path
+// (discovery filters it; `Runtime::register` rejects it too). Build a
+// manifest named `host` and register it directly — it must be a no-op,
+// so the runtime never knows a `host` plugin (lifecycle_state == None).
+#[test]
+fn register_rejects_reserved_host_name() {
+    let (rt, handle) = build_runtime();
+    let mut manifest = fixture_manifest();
+    manifest.plugin.name = "host".into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    rt.register(plugin);
+    assert!(
+        handle.lifecycle_state(&PluginId::from("host")).is_none(),
+        "a plugin named `host` must be refused by Runtime::register"
+    );
+}
+
 // Sanity: lifecycle_state for unknown plugin must not panic.
 #[test]
 fn unknown_plugin_lifecycle_returns_none() {
