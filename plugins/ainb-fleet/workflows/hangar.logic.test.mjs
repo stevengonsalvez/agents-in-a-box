@@ -2,7 +2,7 @@
 //   node --test hangar.logic.test.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildPanel, PRIORITY } from './hangar.logic.mjs'
+import { buildPanel, PRIORITY, enrichMapFromItems } from './hangar.logic.mjs'
 
 const ask = {
   row: {
@@ -134,4 +134,32 @@ test('unknown kind sorts last, session falls back to workspace_name', () => {
   const { cards } = buildPanel([weird, ask])
   assert.equal(cards[0].kind, 'ASK')
   assert.equal(cards[1].session, 'ws-only')
+})
+
+// --- batched enrich: map assembly + partial-fail tolerance ---
+
+test('enrichMapFromItems keys suggestions by enrich_key', () => {
+  const map = enrichMapFromItems([
+    { enrich_key: 'k1', suggestion: 'Approve as-is' },
+    { enrich_key: 'k2', suggestion: 'retry' },
+  ])
+  assert.deepEqual(map, { k1: 'Approve as-is', k2: 'retry' })
+})
+
+test('one bad item never drops the rest of the batch', () => {
+  const map = enrichMapFromItems([
+    { enrich_key: 'k1', suggestion: 'resume' },
+    { suggestion: 'orphan with no key' }, // malformed → skipped
+    null, // garbage → skipped
+    { enrich_key: 'k3' }, // missing suggestion → mapped as ''
+  ])
+  assert.equal(map.k1, 'resume')
+  assert.equal(map.k3, '')
+  assert.equal(Object.keys(map).length, 2)
+})
+
+test('empty / non-array input yields an empty map', () => {
+  assert.deepEqual(enrichMapFromItems([]), {})
+  assert.deepEqual(enrichMapFromItems(undefined), {})
+  assert.deepEqual(enrichMapFromItems(null), {})
 })
