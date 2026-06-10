@@ -14,6 +14,8 @@
 
 pub mod client;
 pub mod daemon;
+pub mod import;
+pub mod install;
 pub mod mcp_json;
 pub mod mux;
 pub mod paths;
@@ -23,12 +25,30 @@ pub mod shim;
 use crate::config::{AppConfig, McpServerConfig, McpServerDefinition};
 
 /// A server eligible for pooling, with its resolved spawn parameters.
-#[derive(Debug, Clone)]
+/// Serializable — sessions register servers with a running daemon over the
+/// control socket, so the daemon isn't limited to config visible at ITS cwd.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PooledServer {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+}
+
+impl PooledServer {
+    /// Host-resolvability check shared by config eligibility and .mcp.json
+    /// import: command on PATH (or an existing absolute path) and no
+    /// container-only arg paths.
+    pub fn resolvable_on_host(&self) -> bool {
+        let cmd_path = std::path::Path::new(&self.command);
+        let ok = if cmd_path.is_absolute() {
+            cmd_path.exists()
+        } else {
+            which::which(&self.command).is_ok()
+        };
+        ok && !self.args.iter().any(|a| a.starts_with("/home/claude-user"))
+    }
 }
 
 /// Decide which configured MCP servers the pool will share on this host.
@@ -57,30 +77,17 @@ fn eligible(server: &McpServerConfig) -> Option<PooledServer> {
         return None;
     };
 
-    let cmd_path = std::path::Path::new(command);
-    let resolvable = if cmd_path.is_absolute() {
-        cmd_path.exists()
-    } else {
-        which::which(command).is_ok()
-    };
-    if !resolvable {
-        tracing::debug!("mcp_pool: skipping '{}' — command '{}' not found on host", server.name, command);
-        return None;
-    }
-
-    // Container-only marker paths (built-in defaults target the Docker image).
-    let container_only = args.iter().any(|a| a.starts_with("/home/claude-user"));
-    if container_only {
-        tracing::debug!("mcp_pool: skipping '{}' — definition targets container paths", server.name);
-        return None;
-    }
-
-    Some(PooledServer {
+    let candidate = PooledServer {
         name: server.name.clone(),
         command: command.clone(),
         args: args.clone(),
         env: env.clone(),
-    })
+    };
+    if !candidate.resolvable_on_host() {
+        tracing::debug!("mcp_pool: skipping '{}' — not resolvable on host", server.name);
+        return None;
+    }
+    Some(candidate)
 }
 
 #[cfg(test)]

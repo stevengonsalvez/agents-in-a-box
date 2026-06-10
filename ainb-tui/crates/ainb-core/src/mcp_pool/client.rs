@@ -28,6 +28,15 @@ pub fn daemon_stop() -> Result<String> {
     query(&path, "shutdown")
 }
 
+/// Push server definitions to a RUNNING daemon so it can pool them even
+/// though its own cwd-scoped config never mentioned them. Unknown names get
+/// proxies spawned; already-running names are ignored.
+pub fn register_servers(servers: &[super::PooledServer]) -> Result<String> {
+    let path = paths::control_socket()?;
+    let msg = serde_json::json!({"cmd": "register", "servers": servers});
+    query(&path, &msg.to_string())
+}
+
 fn query(path: &std::path::Path, cmd: &str) -> Result<String> {
     let mut stream = std::os::unix::net::UnixStream::connect(path)
         .with_context(|| format!("connect {}", path.display()))?;
