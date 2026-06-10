@@ -24,8 +24,6 @@ path = "src/main.rs"
 ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
 
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = "0.1"
@@ -39,5 +37,7 @@ clap = { workspace = true }
 [dev-dependencies]
 toml = { workspace = true }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# JSON-RPC frame bodies hand-built in the stdio round-trip smoke test.
+serde_json = { workspace = true }
 # Stub-abtop binaries staged in tempdirs by detect_subprocess + cli_dispatch.
 tempfile = { workspace = true }
