@@ -726,6 +726,17 @@ impl HangarPlugin {
     ///
     /// A cap error (e.g. `-32001` if the grant were withdrawn) is logged but
     /// non-fatal: the pane simply stays on the prior active workspace.
+    ///
+    /// # Data-plane re-scope (e38.26)
+    ///
+    /// A `SetActive` switch must re-scope the DATA plane, not just the active
+    /// `▶` marker / top-bar slug. `refresh_workspaces` advances
+    /// `app_state().ws_id` to the newly-active workspace, but the cached
+    /// snapshots (issues / agents / skills / tasks / autopilots) still hold the
+    /// PRIOR workspace's rows until they are re-pulled. Without the re-fetch the
+    /// issue list would keep showing the old tenant's issues after the switch —
+    /// a cross-tenant data leak. So after a `SetActive`, re-issue the
+    /// workspace-scoped snapshot requests (now scoped to the new `ws_id`).
     async fn apply_workspace_action(&mut self, host: &HostClient, action: WorkspaceAction) {
         let result = match &action {
             // A bare refresh just pulls the list (no mutating cap call).
@@ -744,6 +755,14 @@ impl HangarPlugin {
             return;
         }
         self.refresh_workspaces(host).await;
+        // After an active-workspace switch, re-pull every workspace-scoped
+        // snapshot so the screens reflect the NEW tenant's data (not the prior
+        // one's stale cache). `refresh_workspaces` already moved `ws_id`, and
+        // `fetch_snapshots` reads it, so the re-fetch is scoped to the switch
+        // target.
+        if matches!(action, WorkspaceAction::SetActive(_)) {
+            self.fetch_snapshots(host).await;
+        }
     }
 
     /// Pull the host workspace list and fold it into the Settings pane + the
