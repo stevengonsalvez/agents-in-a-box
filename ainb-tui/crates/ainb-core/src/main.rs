@@ -525,6 +525,19 @@ async fn run_tui_loop(
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
 
+                    // A focused plugin screen owns the pointer (mirrors the
+                    // key-forwarding contract). Forward + consume before the
+                    // host's own mouse handling so the two never double-act.
+                    if matches!(
+                        crate::app::screens::builtin::forward_mouse_to_focused_plugin(
+                            &mut app.state,
+                            &mouse_event,
+                        ),
+                        crate::app::screens::EventOutcome::Handled
+                    ) {
+                        continue;
+                    }
+
                     match mouse_event.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             // Convert coordinates to pane focus

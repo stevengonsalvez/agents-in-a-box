@@ -14,6 +14,8 @@
 mod browse;
 mod detail;
 mod graph;
+mod map;
+mod picker;
 mod search;
 
 use ratatui::buffer::Buffer as RBuffer;
@@ -24,13 +26,36 @@ use ratatui::widgets::{Block, BorderType, Borders, Tabs, Widget};
 
 use ainb_plugin_sdk::KeyCode;
 
-use crate::data::{Community, LearningRecord};
+use crate::data::{Community, DataError, LearningRecord, SearchHit};
 
 use browse::BrowseState;
 use detail::DetailState;
 use graph::GraphState;
-pub use search::SearchContext;
+use picker::{PickerItem, PickerState};
 use search::SearchState;
+pub use search::{SearchContext, SearchRequest, SearchStage};
+
+/// Outcome of routing one key into the shell: did state change, and did a fresh
+/// Search submit ask the plugin to run a `qmd` worker?
+#[derive(Debug, Default)]
+pub struct KeyOutcome {
+    /// `true` when the key mutated shell state (so the plugin bumps its render
+    /// generation).
+    pub changed: bool,
+    /// `Some(request)` when a Search submit must be serviced on a worker thread
+    /// (the non-blocking search path). The plugin spawns the worker.
+    pub start_search: Option<SearchRequest>,
+}
+
+impl From<bool> for KeyOutcome {
+    /// The common case: a key that only flips the `changed` bit (no search).
+    fn from(changed: bool) -> Self {
+        Self {
+            changed,
+            start_search: None,
+        }
+    }
+}
 
 /// TUI palette — see `../.claude/skills/tui-screen/SKILL.md`.
 pub(crate) const GOLD: RColor = RColor::Rgb(255, 215, 0);
@@ -98,6 +123,9 @@ pub struct LearningsUi {
     /// tab's body and consumes keys until closed (`Backspace`). Tab-agnostic —
     /// any tab opens it the same way via [`Self::open_detail_for_selection`].
     detail: DetailState,
+    /// Learnings picker popup — opened by `o` in the radial map when the
+    /// selected entity is cited by more than one learning.
+    picker: PickerState,
 }
 
 /// Wrapper so [`Tab`] can derive a sensible [`Default`] (Browse) without
@@ -144,23 +172,33 @@ impl LearningsUi {
         self.browse.filter().apply(&self.records).len()
     }
 
-    /// Route one key. Returns `true` when state changed (so the plugin bumps
-    /// its render generation). Host-reserved keys (Esc, etc.) are NOT forwarded
-    /// by the host, so a return of `false` for an unhandled key is correct.
+    /// Route one key. Returns a [`KeyOutcome`]: `changed` is `true` when state
+    /// changed (so the plugin bumps its render generation), and `start_search`
+    /// carries a [`SearchRequest`] when a Search submit must be run on a worker
+    /// thread (the non-blocking search path). Host-reserved keys (Esc, etc.) are
+    /// NOT forwarded by the host, so an unchanged outcome for an unhandled key is
+    /// correct.
     ///
-    /// `ctx` carries the injected `qmd` runner + the resolved collection/index
-    /// the Search tab needs to actually run a query (the plugin builds it fresh
-    /// from its config each call so the UI stays pure view state).
+    /// `ctx` carries the resolved collection/index the Search tab threads into
+    /// its query (the plugin builds it fresh from its config each call so the UI
+    /// stays pure view state; the `qmd` runner itself lives on the plugin and
+    /// runs OFF this dispatch thread).
     ///
     /// Routing precedence:
     /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
     ///    everything else is swallowed so the list behind can't move). The pane
     ///    is modal over the whole shell, so this short-circuits `Tab` too.
-    /// 2. **Graph focused** — when `g` has focused the Graph tab, `Backspace`
-    ///    releases focus (the in-plugin "back"; Esc is host-reserved) and the
-    ///    graph claims `↑↓`/`jk`/`c` for navigation + the entity⇄community
-    ///    toggle. `Tab` and `/` still fall through (they switch tab / view), so
-    ///    a focused graph never traps the user on the screen.
+    ///    - **Picker popup** (opened by `o` in the map) is the next modal:
+    ///      `↑↓` move, `⏎` opens the chosen learning's Detail, `Backspace`
+    ///      closes. It always claims the key.
+    /// 2. **Graph focused** — when `g` has focused the Graph tab, the graph
+    ///    claims `↑↓`/`jk`/`c` for navigation + the entity⇄community toggle, and
+    ///    `v` cycles the radial map. In the **map** sub-mode the map additionally
+    ///    owns `←→`/`⏎`/`h`/`e` (map-only keys), `o` opens the learnings behind
+    ///    the selected entity (→ picker or Detail), and `Backspace` exits the
+    ///    map; in the text views `Backspace` releases focus (Esc is
+    ///    host-reserved). `Tab` and `/` always fall through (they switch tab /
+    ///    view), so a focused graph never traps the user on the screen.
     /// 3. **`/`** — switch to the Search tab and focus its query box (a global
     ///    shortcut, available from any tab, mirroring the design mock footer).
     /// 4. **`g`** — switch to the Graph tab and focus it (a global shortcut,
@@ -176,24 +214,44 @@ impl LearningsUi {
     ///      otherwise Browse handles its own keys.
     ///    - **Graph** — when not focused, navigation keys are inert (press `g`
     ///      to focus first).
-    pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> bool {
+    pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> KeyOutcome {
         // 1. Modal Detail pane takes precedence over everything.
         if self.detail.is_open() {
-            return self.detail.handle_key(code);
+            return KeyOutcome::from(self.detail.handle_key(code));
         }
 
-        // 2. Graph focus: `Backspace` releases focus; the graph claims its own
-        // navigation keys. `Tab`/`/`/`g` fall through to the global shortcuts
-        // below so the user can always leave a focused graph.
+        // 1b. Learnings picker popup (opened by `o` in the map) is modal next.
+        // `⏎` on a row opens its Detail; `Backspace` closes the picker.
+        if self.picker.is_open() {
+            if let Some(record_idx) = self.picker.handle_key(code) {
+                if let Some(record) = self.records.get(record_idx) {
+                    self.detail.open(record);
+                }
+                self.picker.close();
+            }
+            return KeyOutcome::from(true);
+        }
+
+        // 2. Graph focus: the graph claims its navigation keys. In the radial
+        // Map sub-mode `o` opens the learnings-behind-the-entity (→ picker or
+        // Detail) and `Backspace` exits the map; in the text views `Backspace`
+        // releases focus. `Tab`/`/`/`g` fall through to the global shortcuts so
+        // the user can always leave a focused graph.
         if self.tab.0 == Tab::Graph && self.graph.is_focused() {
+            if self.graph.in_map() && matches!(code, KeyCode::Char { ch: 'o' }) {
+                return KeyOutcome::from(self.open_detail_for_map_entity());
+            }
             if matches!(code, KeyCode::Backspace) {
+                if self.graph.in_map() {
+                    return KeyOutcome::from(self.graph.handle_key(code)); // exits the map
+                }
                 self.graph.blur();
-                return true;
+                return KeyOutcome::from(true);
             }
             if !matches!(code, KeyCode::Tab | KeyCode::Char { ch: '/' | 'g' })
                 && self.graph.handle_key(code)
             {
-                return true;
+                return KeyOutcome::from(true);
             }
         }
 
@@ -203,7 +261,7 @@ impl LearningsUi {
         if matches!(code, KeyCode::Char { ch: '/' }) {
             self.tab.0 = Tab::Search;
             self.search.focus();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 4. `g` is a global shortcut to the Graph tab + entity focus, from any
@@ -214,13 +272,13 @@ impl LearningsUi {
         if matches!(code, KeyCode::Char { ch: 'g' }) && !search_box_focused {
             self.tab.0 = Tab::Graph;
             self.graph.focus();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 5. `Tab` switches the top-level tab.
         if matches!(code, KeyCode::Tab) {
             self.tab.0 = self.tab.0.next();
-            return true;
+            return KeyOutcome::from(true);
         }
 
         // 6. Per-tab routing.
@@ -230,18 +288,58 @@ impl LearningsUi {
                 if let Some(record) = outcome.open_record {
                     self.detail.open(&record);
                 }
-                outcome.changed
+                KeyOutcome {
+                    changed: outcome.changed,
+                    start_search: outcome.start_search,
+                }
             }
             Tab::Browse => {
                 if matches!(code, KeyCode::Enter) {
-                    return self.open_detail_for_selection();
+                    return KeyOutcome::from(self.open_detail_for_selection());
                 }
-                self.browse.handle_key(code, &self.records)
+                KeyOutcome::from(self.browse.handle_key(code, &self.records))
             }
             // Graph navigation only fires while focused (handled in step 2);
             // an unfocused Graph press is a clean no-op (press `g` to focus).
-            Tab::Graph => false,
+            Tab::Graph => KeyOutcome::default(),
         }
+    }
+
+    /// Apply one STAGE of a two-stage `qmd` worker result into the Search tab.
+    /// The plugin calls this each render with whatever the worker channel yielded
+    /// (BM25 then semantic). A result whose token is stale (superseded query) is
+    /// dropped inside [`SearchState`]. Returns `true` if it was applied (so the
+    /// plugin bumps generation).
+    pub fn apply_search_result(
+        &mut self,
+        token: u64,
+        stage: SearchStage,
+        result: Result<Vec<SearchHit>, DataError>,
+    ) -> bool {
+        self.search.apply_stage_result(token, stage, result)
+    }
+
+    /// `true` while the subtle "refining…" indicator is up (BM25 painted, the
+    /// semantic rerank still upgrading). Exposed for the plugin/tests.
+    #[must_use]
+    pub const fn search_refining(&self) -> bool {
+        self.search.is_refining()
+    }
+
+    /// Enforce the in-flight search ceiling. The plugin calls this each render;
+    /// returns `true` if the search just timed out (so the plugin bumps
+    /// generation + drops the worker channel).
+    pub fn check_search_timeout(&mut self) -> bool {
+        self.search.check_timeout()
+    }
+
+    /// `true` while EITHER stage of a two-stage `qmd` search is in flight — the
+    /// pre-paint spinner stage OR the refining stage (so the plugin keeps ticking
+    /// redraws to animate the spinner AND to keep polling the worker channel for
+    /// the semantic stage).
+    #[must_use]
+    pub const fn search_in_flight(&self) -> bool {
+        self.search.is_in_flight()
     }
 
     /// Open the Detail pane on the Browse tab's currently-selected record.
@@ -258,11 +356,86 @@ impl LearningsUi {
         }
     }
 
+    /// `o` in the radial map: open the learnings behind the selected entity.
+    /// Zero citations is a clean no-op; exactly one opens Detail directly; more
+    /// than one opens the picker popup so the user chooses. Always returns `true`
+    /// (the key is claimed by the focused map either way).
+    fn open_detail_for_map_entity(&mut self) -> bool {
+        let Some(entity) = self.graph.map_selected_entity() else {
+            return true;
+        };
+        let matches: Vec<(usize, &LearningRecord)> = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| record_cites_entity(r, &entity))
+            .collect();
+        match matches.as_slice() {
+            [] => true,
+            [(_, record)] => {
+                self.detail.open(record);
+                true
+            }
+            _ => {
+                let items = matches
+                    .iter()
+                    .map(|(idx, r)| PickerItem {
+                        record_idx: *idx,
+                        title: r.title.clone(),
+                    })
+                    .collect();
+                self.picker.open(entity, items);
+                true
+            }
+        }
+    }
+
+    /// Forward a mouse click (plugin-viewport coordinates) to the radial map.
+    /// Returns `true` when the click changed the map (so the plugin bumps its
+    /// render generation). A click outside the map / when not in the map is a
+    /// no-op.
+    pub fn handle_mouse(&mut self, col: u16, row: u16) -> bool {
+        if self.tab.0 == Tab::Graph && self.graph.in_map() {
+            return self.graph.handle_map_click(col, row);
+        }
+        false
+    }
+
+    /// Advance the radial map's recentre animation one frame; `true` while it's
+    /// still animating (so the plugin keeps requesting redraws). Called by the
+    /// plugin's `&mut self` render after painting.
+    pub fn tick_map_animation(&mut self) -> bool {
+        self.graph.map_tick()
+    }
+
+    /// Whether the screen wants another frame without input — surfaced to the
+    /// host via `Plugin::wants_redraw`. Two animations request redraws: the map's
+    /// recentre grow, and an in-flight `qmd` search — across BOTH stages (the
+    /// pre-paint spinner AND the refining stage) so the spinner animates and the
+    /// plugin keeps polling the worker channel for the second (semantic) stage.
+    #[must_use]
+    pub fn wants_redraw(&self) -> bool {
+        self.graph.map_wants_redraw() || self.search.is_in_flight()
+    }
+
     /// `true` while the Detail pane is open (exposed for tests).
     #[must_use]
     pub fn detail_open(&self) -> bool {
         self.detail.is_open()
     }
+
+    /// `true` while the learnings picker popup is open (exposed for tests).
+    #[must_use]
+    pub fn picker_open(&self) -> bool {
+        self.picker.is_open()
+    }
+}
+
+/// `true` if `record` names `entity` among its entities or relationship
+/// endpoints — the "learnings behind this entity" relation the map's `o` uses.
+fn record_cites_entity(record: &LearningRecord, entity: &str) -> bool {
+    record.entities.iter().any(|e| e.name == entity)
+        || record.relationships.iter().any(|r| r.source == entity || r.target == entity)
 }
 
 /// Render the tabbed shell into `area`. Outer rounded panel titled
@@ -310,6 +483,11 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
         }
         Tab::Search => search::render(buf, rows[1], &ui.search),
         Tab::Graph => graph::render(buf, rows[1], &ui.graph),
+    }
+
+    // The learnings picker floats over the active body (the map shows behind it).
+    if ui.picker.is_open() {
+        ui.picker.render(buf, rows[1]);
     }
 }
 

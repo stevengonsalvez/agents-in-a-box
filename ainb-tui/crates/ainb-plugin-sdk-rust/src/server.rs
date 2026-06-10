@@ -34,8 +34,9 @@ use tokio::task::JoinHandle;
 use ainb_plugin_protocol::{
     Manifest, RpcError, framing, methods,
     params::{
-        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams, PluginInitParams,
-        PluginInitResult, PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
+        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams,
+        HandleMouseParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
+        PluginShutdownResult, RenderParams, RenderResult,
     },
 };
 
@@ -158,16 +159,19 @@ where
         if let Some(method) = value.get("method").and_then(Value::as_str) {
             // host -> plugin request or notification.
             //
-            // `plugin/handle_event` and `plugin/handle_key` MUST run in
-            // receive order — chunked publishes (e.g.
-            // `sessions.usage_data`) rely on the consumer seeing
-            // `chunk_index = 0` before any follow-on chunk, and key
-            // sequences (`1`, `2`, `Tab`, `Esc`) would lose their
-            // semantics if dispatched out of order. Spawning each
-            // notification onto its own task lets tokio re-order them
-            // through the per-plugin mutex, so we serve these inline
-            // and only spawn for other methods.
-            if method == methods::PLUGIN_HANDLE_EVENT || method == methods::PLUGIN_HANDLE_KEY {
+            // `plugin/handle_event`, `plugin/handle_key`, and
+            // `plugin/handle_mouse` MUST run in receive order — chunked
+            // publishes (e.g. `sessions.usage_data`) rely on the consumer
+            // seeing `chunk_index = 0` before any follow-on chunk, key
+            // sequences (`1`, `2`, `Tab`, `Esc`) would lose their semantics
+            // if reordered, and pointer sequences (Down → Drag → Up) must
+            // likewise stay ordered. Spawning each notification onto its own
+            // task lets tokio re-order them through the per-plugin mutex, so
+            // we serve these inline and only spawn for other methods.
+            if method == methods::PLUGIN_HANDLE_EVENT
+                || method == methods::PLUGIN_HANDLE_KEY
+                || method == methods::PLUGIN_HANDLE_MOUSE
+            {
                 dispatch_incoming(
                     plugin.clone(),
                     host_client.clone(),
@@ -406,8 +410,21 @@ async fn handle_method<P: Plugin>(
         }
         methods::PLUGIN_RENDER => {
             let p: RenderParams = decode_params(params)?;
-            let buf = plugin.lock().await.render(host, p).await?;
-            Ok(serde_json::to_value(RenderResult { buffer: buf })?)
+            // Hold the lock across render + the redraw query so the hint
+            // reflects the exact frame just painted (render advances the
+            // animation; wants_redraw reports whether frames remain).
+            let mut guard = plugin.lock().await;
+            let buf = guard.render(host, p).await?;
+            let redraw = guard.wants_redraw();
+            // Release the lock before serialising the reply — the JSON
+            // encode doesn't touch plugin state, so the mutex must not
+            // span it. This keeps the critical section to exactly
+            // render + the redraw read.
+            drop(guard);
+            Ok(serde_json::to_value(RenderResult {
+                buffer: buf,
+                redraw,
+            })?)
         }
         methods::PLUGIN_HANDLE_EVENT => {
             let p: HandleEventParams = decode_params(params)?;
@@ -417,6 +434,11 @@ async fn handle_method<P: Plugin>(
         methods::PLUGIN_HANDLE_KEY => {
             let p: HandleKeyParams = decode_params(params)?;
             plugin.lock().await.handle_key(host, p).await?;
+            Ok(Value::Null)
+        }
+        methods::PLUGIN_HANDLE_MOUSE => {
+            let p: HandleMouseParams = decode_params(params)?;
+            plugin.lock().await.handle_mouse(host, p).await?;
             Ok(Value::Null)
         }
         methods::PLUGIN_CLI_DISPATCH => {

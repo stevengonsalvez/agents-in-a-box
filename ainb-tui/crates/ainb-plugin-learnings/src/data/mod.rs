@@ -35,7 +35,7 @@ pub use record::{
     Entity, LearningRecord, Provenance, Relationship, ScanReport, parse_learning_record,
     scan_learnings_dir, scan_learnings_dir_report,
 };
-pub use search::{QmdCli, QmdSearch, SearchHit, parse_qmd_json, search};
+pub use search::{QmdCli, QmdSearch, SearchHit, SearchMode, parse_qmd_json, search};
 
 /// Expand a leading `~` (alone or as the first path segment) to the user's
 /// home directory.

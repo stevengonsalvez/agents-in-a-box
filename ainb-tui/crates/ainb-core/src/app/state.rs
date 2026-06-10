@@ -2571,6 +2571,15 @@ pub struct AppState {
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Top-left `(x, y)` origin `PluginScreen::render` painted each screen
+    /// id at, stashed alongside `plugin_render_areas`. The mouse forwarder
+    /// (`forward_mouse_to_focused_plugin`) subtracts this from the absolute
+    /// terminal click coordinates so the plugin receives a click in its own
+    /// viewport space (`(0, 0)` = top-left of its buffer). Separate from
+    /// `plugin_render_areas` to keep that tuple's `(width, height)` meaning
+    /// unchanged for the render-tick loop.
+    pub plugin_render_origins: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
     /// Viewport `(width, height)` the last `plugin/render` kick used for
     /// each screen id. `tick_plugin_renders` forces a fresh render kick
     /// whenever the live area (from `plugin_render_areas`) differs from
@@ -3044,6 +3053,7 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 

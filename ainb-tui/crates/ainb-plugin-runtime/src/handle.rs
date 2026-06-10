@@ -38,7 +38,7 @@ pub(crate) struct HandleInner {
     pub(crate) snapshots: SnapshotStore,
     pub(crate) channels: ChannelRegistry,
     pub(crate) plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>>,
-    /// Lightweight fan-out map (plugin_id → Inbox). Mirrors `plugins`
+    /// Lightweight fan-out map (`plugin_id` → Inbox). Mirrors `plugins`
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
     /// Parallel `plugin_id → render-dirty` map. See `runtime::PluginHandle`.
@@ -56,6 +56,11 @@ pub(crate) struct HandleInner {
     /// sequence works regardless of which `RuntimeHandle` queued the
     /// keystroke.
     pub(crate) key_generation: Arc<AtomicU64>,
+    /// Monotonic counter the host bumps once per `send_mouse` call.
+    /// Parallel to [`Self::key_generation`]; stamped into
+    /// `HandleMouseParams.generation` as the same kind of freshness
+    /// witness for forwarded mouse events.
+    pub(crate) mouse_generation: Arc<AtomicU64>,
 }
 
 /// Send + Clone runtime façade. The TUI thread should hold one of
@@ -269,6 +274,38 @@ impl RuntimeHandle {
         handle.key_inbox.send(params).is_ok()
     }
 
+    /// Forward a single normalized mouse event to the plugin owning the
+    /// focused screen. Non-blocking — mirrors [`Self::send_key`]: the
+    /// per-plugin tokio task picks it off the priority mouse inbox and
+    /// writes the `plugin/handle_mouse` notification frame.
+    ///
+    /// `mouse.col`/`mouse.row` MUST already be translated into the
+    /// plugin's viewport coordinate space by the caller (the host's
+    /// mouse forwarder subtracts the screen origin).
+    ///
+    /// Returns `false` if the plugin is unknown or the task is gone; the
+    /// event is dropped in either case (mouse events, like keys, tolerate
+    /// loss).
+    pub fn send_mouse(
+        &self,
+        plugin_id: &PluginId,
+        screen_id: impl Into<String>,
+        mouse: ainb_plugin_protocol::params::MouseEvent,
+    ) -> bool {
+        let Some(handle) = self.lookup(plugin_id) else {
+            return false;
+        };
+        let generation = self.inner.mouse_generation.fetch_add(1, Ordering::Relaxed);
+        let params = ainb_plugin_protocol::params::HandleMouseParams {
+            screen_id: screen_id.into(),
+            mouse,
+            generation,
+        };
+        // Mark dirty BEFORE enqueue (same race-avoidance as `send_key`).
+        handle.render_dirty.store(true, Ordering::Release);
+        handle.mouse_inbox.send(params).is_ok()
+    }
+
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
     /// fan-out happens on the tokio runtime.
     pub fn publish_snapshot(&self, topic: &str, payload: Bytes) -> u64 {
@@ -380,7 +417,7 @@ impl RuntimeHandle {
             arc.manifest.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Eager
         );
-        let (inbox, key_inbox, cache, state) = crate::plugin_task::spawn(
+        let (inbox, key_inbox, mouse_inbox, cache, state) = crate::plugin_task::spawn(
             arc.clone(),
             self.inner.snapshots.clone(),
             self.inner.inboxes.clone(),
@@ -400,6 +437,7 @@ impl RuntimeHandle {
             Arc::new(PluginHandle {
                 inbox,
                 key_inbox,
+                mouse_inbox,
                 cache,
                 state,
                 plugin: arc,

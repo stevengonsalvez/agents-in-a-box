@@ -202,6 +202,149 @@ pub fn forward_key_to_focused_plugin(
     EventOutcome::Handled
 }
 
+/// Convert a `crossterm::event::MouseEvent` into the portable wire shape
+/// consumed by `plugin/handle_mouse`. Coordinates are left as the
+/// absolute terminal column/row the caller received — translation into
+/// the plugin's viewport space happens in
+/// [`forward_mouse_to_focused_plugin`], which knows the screen origin.
+#[must_use]
+pub fn crossterm_to_protocol_mouse(
+    event: &crossterm::event::MouseEvent,
+) -> ainb_plugin_runtime::MouseEvent {
+    use ainb_plugin_runtime::{
+        KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, MouseButton as PButton,
+        MouseEvent as PEvent, MouseKind as PKind,
+    };
+    use crossterm::event::{
+        KeyModifiers as CtMods, MouseButton as CtButton, MouseEventKind as CtKind,
+    };
+
+    fn button(b: CtButton) -> PButton {
+        match b {
+            CtButton::Left => PButton::Left,
+            CtButton::Right => PButton::Right,
+            CtButton::Middle => PButton::Middle,
+        }
+    }
+
+    let kind = match event.kind {
+        CtKind::Down(b) => PKind::Down { button: button(b) },
+        CtKind::Up(b) => PKind::Up { button: button(b) },
+        CtKind::Drag(b) => PKind::Drag { button: button(b) },
+        CtKind::Moved => PKind::Moved,
+        CtKind::ScrollDown => PKind::ScrollDown,
+        CtKind::ScrollUp => PKind::ScrollUp,
+        CtKind::ScrollLeft => PKind::ScrollLeft,
+        CtKind::ScrollRight => PKind::ScrollRight,
+    };
+
+    let mut mods: u8 = 0;
+    if event.modifiers.contains(CtMods::SHIFT) {
+        mods |= KEY_MOD_SHIFT;
+    }
+    if event.modifiers.contains(CtMods::CONTROL) {
+        mods |= KEY_MOD_CTRL;
+    }
+    if event.modifiers.contains(CtMods::ALT) {
+        mods |= KEY_MOD_ALT;
+    }
+    if event.modifiers.contains(CtMods::SUPER) {
+        mods |= KEY_MOD_SUPER;
+    }
+
+    PEvent {
+        kind,
+        col: event.column,
+        row: event.row,
+        mods,
+    }
+}
+
+/// Try to forward `event` to the plugin owning `current_screen`.
+///
+/// Mirrors [`forward_key_to_focused_plugin`] for the pointer. Returns
+/// `Handled` whenever a plugin owns the focused screen — even if the
+/// event is dropped (outside the plugin's rect, or a high-frequency
+/// `Moved`) — so the host's own mouse handling never double-acts on a
+/// plugin screen. Returns `NotHandled` when no plugin owns the screen or
+/// the runtime isn't up yet, letting the caller's host-side mouse
+/// dispatch run.
+///
+/// Coordinates are translated from absolute terminal space into the
+/// plugin's viewport (origin subtracted) before forwarding, so the
+/// plugin hit-tests against the same `(0, 0)`-based grid it painted.
+pub fn forward_mouse_to_focused_plugin(
+    state: &mut AppState,
+    event: &crossterm::event::MouseEvent,
+) -> EventOutcome {
+    use ainb_plugin_runtime::MouseKind;
+
+    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+        return EventOutcome::NotHandled;
+    };
+    let Some(runtime) = state.plugin_runtime.as_ref() else {
+        return EventOutcome::NotHandled;
+    };
+
+    let mut mouse = crossterm_to_protocol_mouse(event);
+
+    // Drop pointer-move spam: forwarding every `Moved` would flood the
+    // priority mouse channel for an event the map doesn't need (no hover
+    // semantics in v1). Still report Handled so host move-handling stays
+    // off the plugin screen.
+    if matches!(mouse.kind, MouseKind::Moved) {
+        return EventOutcome::Handled;
+    }
+
+    // Translate absolute terminal coords → plugin-viewport coords. Drop
+    // (still Handled) when the point falls outside the plugin's painted
+    // rect rather than forwarding a click the plugin would mis-hit-test.
+    let origin = state
+        .plugin_render_origins
+        .get(&state.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
+    let area = state.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
+        return EventOutcome::Handled;
+    };
+    mouse.col = col;
+    mouse.row = row;
+
+    let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
+    let _ = runtime.send_mouse(&pid, state.current_screen.clone(), mouse);
+    EventOutcome::Handled
+}
+
+/// Translate an absolute terminal `(col, row)` into a plugin-viewport
+/// coordinate, given the plugin screen's painted `origin` (top-left
+/// `(x, y)`) and `area` size `(width, height)`.
+///
+/// Returns `None` — i.e. the click is outside the plugin and should be
+/// dropped — when the point is left/above the origin (would underflow),
+/// at/beyond the right/bottom edge (a `width`-wide rect owns cols
+/// `0..width`), or the area is zero-sized (the screen has never painted,
+/// so both origin and area default to `(0, 0)`). Kept as a pure free
+/// function so the underflow guard + bounds math are unit-testable
+/// without a live `AppState`/runtime.
+#[must_use]
+fn click_to_viewport(
+    col: u16,
+    row: u16,
+    (origin_x, origin_y): (u16, u16),
+    (width, height): (u16, u16),
+) -> Option<(u16, u16)> {
+    if col < origin_x || row < origin_y {
+        return None;
+    }
+    let vcol = col - origin_x;
+    let vrow = row - origin_y;
+    if width == 0 || height == 0 || vcol >= width || vrow >= height {
+        return None;
+    }
+    Some((vcol, vrow))
+}
+
 /// Build the placeholder paragraph shown when a plugin screen renders
 /// but no frame has arrived yet. Two cases:
 ///
@@ -334,6 +477,9 @@ impl Screen for PluginScreen {
         state
             .plugin_render_areas
             .insert(self.screen_id.to_string(), (area.width, area.height));
+        // Stash the origin too, so the mouse forwarder can translate an
+        // absolute terminal click into this plugin's viewport space.
+        state.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state);
@@ -753,6 +899,40 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn click_to_viewport_translates_in_bounds_click() {
+        // Plugin painted at origin (3, 1), size 20x10. A click at absolute
+        // (10, 4) maps to viewport (7, 3).
+        assert_eq!(click_to_viewport(10, 4, (3, 1), (20, 10)), Some((7, 3)));
+        // Top-left corner of the plugin rect maps to (0, 0).
+        assert_eq!(click_to_viewport(3, 1, (3, 1), (20, 10)), Some((0, 0)));
+        // Bottom-right-most owned cell (origin + size - 1).
+        assert_eq!(click_to_viewport(22, 10, (3, 1), (20, 10)), Some((19, 9)));
+    }
+
+    #[test]
+    fn click_to_viewport_drops_clicks_left_or_above_origin() {
+        // Left of origin (would underflow the u16 subtraction).
+        assert_eq!(click_to_viewport(2, 4, (3, 1), (20, 10)), None);
+        // Above origin.
+        assert_eq!(click_to_viewport(10, 0, (3, 1), (20, 10)), None);
+    }
+
+    #[test]
+    fn click_to_viewport_drops_clicks_at_or_beyond_far_edge() {
+        // Column at the exclusive right edge (origin_x + width).
+        assert_eq!(click_to_viewport(23, 4, (3, 1), (20, 10)), None);
+        // Row at the exclusive bottom edge (origin_y + height).
+        assert_eq!(click_to_viewport(10, 11, (3, 1), (20, 10)), None);
+    }
+
+    #[test]
+    fn click_to_viewport_drops_when_area_never_painted() {
+        // Zero-sized area (screen never rendered) → no destination.
+        assert_eq!(click_to_viewport(0, 0, (0, 0), (0, 0)), None);
+        assert_eq!(click_to_viewport(5, 5, (0, 0), (0, 0)), None);
+    }
 
     #[test]
     fn register_builtins_populates_registry() {

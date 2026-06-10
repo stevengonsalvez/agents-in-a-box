@@ -12,11 +12,14 @@
 //! convert to a sparse [`WireBuffer`] cell stream for the host
 //! ([`buffer_to_wire`]). The host re-paints each cell at its `(x, y)`.
 
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    Cell, Color, Coord, HandleKeyParams, HostClient, InitContext, Plugin, RenderParams, Result,
-    WireBuffer,
+    Cell, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext, MouseButton,
+    MouseKind, Plugin, RenderParams, Result, WireBuffer,
 };
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -24,9 +27,19 @@ use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
 use crate::data::{
-    QmdCli, QmdSearch, parse_community_reports, resolve_config_path, scan_learnings_dir_report,
+    DataError, QmdCli, QmdSearch, SearchHit, SearchMode, parse_community_reports,
+    resolve_config_path, scan_learnings_dir_report, search as run_search,
 };
-use crate::ui::{LearningsUi, SearchContext, render as render_ui};
+use crate::ui::{LearningsUi, SearchContext, SearchRequest, SearchStage, render as render_ui};
+
+/// One STAGE of a two-stage worker result handed back over the channel: the
+/// submit `token` it answers, which `stage` (BM25 fast paint vs semantic rerank)
+/// produced it, and the parsed hits (or a typed error the UI degrades to empty).
+type SearchOutcome = (
+    u64,
+    SearchStage,
+    std::result::Result<Vec<SearchHit>, DataError>,
+);
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
@@ -63,8 +76,15 @@ pub struct LearningsPlugin {
     config: LearningsConfig,
     /// Tabbed UI view (records + per-tab state).
     ui: LearningsUi,
-    /// Injected `qmd` runner — `QmdCli` in production, a fake in tests.
-    search_runner: Box<dyn QmdSearch + Send + Sync>,
+    /// Injected `qmd` runner — `QmdCli` in production, a fake in tests. Held
+    /// behind an `Arc` so the search worker thread can clone a handle and run the
+    /// (slow) subprocess OFF the dispatch thread without borrowing `self`.
+    search_runner: Arc<dyn QmdSearch + Send + Sync>,
+    /// Receiver for the in-flight search worker's result, `Some` only while a
+    /// search is running. The plugin polls it (non-blocking) each render and
+    /// drops it once the result is applied / the search times out / is
+    /// superseded.
+    search_rx: Option<Receiver<SearchOutcome>>,
     /// `true` once the Graph tab's community clusters have been lazily loaded
     /// from `graph_cache` (memoized so re-entry doesn't re-read).
     communities_loaded: bool,
@@ -77,7 +97,8 @@ impl Default for LearningsPlugin {
         Self {
             config: LearningsConfig::default(),
             ui: LearningsUi::default(),
-            search_runner: Box::new(QmdCli::default()),
+            search_runner: Arc::new(QmdCli::default()),
+            search_rx: None,
             communities_loaded: false,
             generation: 0,
         }
@@ -100,12 +121,104 @@ impl LearningsPlugin {
     /// Construct with an injected [`QmdSearch`] runner. Production builds use
     /// [`Self::default`] (the real [`QmdCli`]); tests pass a fake so the Search
     /// tab renders ranked results deterministically without a live `qmd` index.
+    ///
+    /// The runner is wrapped in an [`Arc`] so the search worker thread can share
+    /// it (run the subprocess off the dispatch thread).
     #[must_use]
-    pub fn with_search_runner(runner: Box<dyn QmdSearch + Send + Sync>) -> Self {
+    pub fn with_search_runner(runner: Arc<dyn QmdSearch + Send + Sync>) -> Self {
         Self {
             search_runner: runner,
             ..Self::default()
         }
+    }
+
+    /// Spawn the TWO-STAGE `qmd` search for `request` on a dedicated worker
+    /// thread and arm the result channel. Runtime-agnostic: uses `std::thread` +
+    /// `mpsc` (the in-module + integration tests call into the plugin without
+    /// guaranteeing a tokio runtime on the calling thread, so `spawn_blocking` is
+    /// unsafe here). Dropping the previous receiver here orphans any prior worker
+    /// — its results are ignored by token mismatch.
+    ///
+    /// The single worker runs `qmd` twice, both tagged with the SAME `token`:
+    ///
+    /// 1. **BM25** (`run_bm25` / `qmd search --json`, no LLM — effectively
+    ///    instant): sent first for the fast first paint.
+    /// 2. **Semantic** (`run_query` / `qmd query --json -C 20`, the LLM rerank):
+    ///    sent second to swap in the reranked results.
+    ///
+    /// The plugin polls the receiver each render and applies each stage in turn
+    /// ([`Self::poll_search`]); the channel is kept until the SEMANTIC stage
+    /// lands (or the ceiling fires), so both stages reach the UI.
+    fn start_search_worker(&mut self, request: SearchRequest) {
+        let (tx, rx) = mpsc::channel::<SearchOutcome>();
+        let runner = Arc::clone(&self.search_runner);
+        let collection = self.config.qmd_collection.clone();
+        let index = self.config.qmd_index.clone();
+        let SearchRequest { token, query } = request;
+        std::thread::spawn(move || {
+            // Stage 1 — BM25 fast paint (no LLM, returns ~instantly).
+            let bm25 = run_search(
+                runner.as_ref(),
+                &query,
+                &collection,
+                &index,
+                SearchMode::Bm25,
+            );
+            // A failed send means the receiver is already gone (superseded /
+            // timed-out search) — bail without running the slow semantic pass.
+            if tx.send((token, SearchStage::Bm25, bm25)).is_err() {
+                return;
+            }
+            // Stage 2 — semantic rerank (the slow LLM path).
+            let semantic = run_search(
+                runner.as_ref(),
+                &query,
+                &collection,
+                &index,
+                SearchMode::Semantic,
+            );
+            let _ = tx.send((token, SearchStage::Semantic, semantic));
+        });
+        self.search_rx = Some(rx);
+    }
+
+    /// Poll the in-flight two-stage search worker (non-blocking) and enforce the
+    /// timeout. Called at the top of every render so a settled stage paints on
+    /// the next frame and a hung search is abandoned at the ceiling. Returns
+    /// `true` if any stage / the timeout applied a state change (so the caller
+    /// bumps generation).
+    fn poll_search(&mut self) -> bool {
+        let mut changed = false;
+        // 1. Drain every stage result that landed this frame (BM25 then
+        // semantic) — both may arrive between two renders. The channel is
+        // retained until the SEMANTIC stage is applied, so the BM25 fast paint
+        // doesn't prematurely close it.
+        while let Some(rx) = self.search_rx.as_ref() {
+            match rx.try_recv() {
+                Ok((token, stage, result)) => {
+                    changed |= self.ui.apply_search_result(token, stage, result);
+                    // The semantic stage is the worker's last message — drop the
+                    // channel once it's been delivered.
+                    if stage == SearchStage::Semantic {
+                        self.search_rx = None;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker ended without sending the remaining stage(s) — drop
+                    // the dead channel (the UI keeps whatever already painted).
+                    self.search_rx = None;
+                }
+            }
+        }
+        // 2. Enforce the ceiling on whatever's still in flight (covers the WHOLE
+        // two-stage; if BM25 painted, the UI keeps those results on timeout).
+        if self.ui.check_search_timeout() {
+            changed = true;
+            // Abandon the worker channel; the orphan thread finishes on its own.
+            self.search_rx = None;
+        }
+        changed
     }
 
     /// Borrow the resolved config. Used by tests to assert the parse landed.
@@ -202,6 +315,14 @@ impl Plugin for LearningsPlugin {
     }
 
     async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // Poll the search worker + enforce its timeout BEFORE painting so a
+        // settled (or timed-out) search shows on THIS frame, not the next. The
+        // generation bump keeps the host's freshness witness honest when a
+        // result lands between key presses (driven by `wants_redraw` ticks).
+        if self.poll_search() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+
         let (w, h) = match (params.viewport.width, params.viewport.height) {
             (0, _) | (_, 0) => FALLBACK_VIEWPORT,
             (w, h) => (w, h),
@@ -214,22 +335,35 @@ impl Plugin for LearningsPlugin {
         };
         let mut rbuf = RBuffer::empty(area);
         render_ui(&mut rbuf, area, &self.ui);
-        Ok(buffer_to_wire(&rbuf, area))
+        let wire = buffer_to_wire(&rbuf, area);
+        // Advance the map's recentre animation for the NEXT frame. This frame
+        // was painted at the current scale; ticking here (post-paint, under the
+        // plugin's &mut self) drives the self-animation via `wants_redraw`.
+        self.ui.tick_map_animation();
+        Ok(wire)
     }
 
     /// Route a forwarded key into the UI. The host reserves global nav (Esc,
     /// etc.) and only forwards keys it hasn't consumed, so a no-op here for an
     /// unhandled key is correct.
     async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        // Build the Search context fresh from the resolved config: the injected
-        // `qmd` runner + the collection/index the Search tab queries against.
+        // Build the Search context fresh from the resolved config: the
+        // collection/index the Search tab threads into its query. The `qmd`
+        // runner is NOT in the context — a search submit returns a request and
+        // the plugin runs the runner on a worker thread (so this dispatch thread
+        // never blocks on the slow subprocess).
         let ctx = SearchContext {
-            runner: self.search_runner.as_ref(),
             collection: &self.config.qmd_collection,
             index: &self.config.qmd_index,
         };
-        if self.ui.handle_key(&params.key.code, &ctx) {
+        let outcome = self.ui.handle_key(&params.key.code, &ctx);
+        if outcome.changed {
             self.generation = self.generation.wrapping_add(1);
+        }
+        // A fresh Search submit: kick the `qmd` worker OFF this thread. The
+        // result is polled back in on the next render.
+        if let Some(request) = outcome.start_search {
+            self.start_search_worker(request);
         }
         // Lazily load the Graph tab's community clusters the first time the user
         // reaches the Graph tab (keeps the `graph_cache` read off init + off any
@@ -238,6 +372,28 @@ impl Plugin for LearningsPlugin {
             self.ensure_communities_loaded();
         }
         Ok(())
+    }
+
+    /// Route a forwarded mouse click into the radial map. Only a left-button
+    /// press acts (select / recentre the clicked node); other events are
+    /// ignored. Coordinates arrive in the plugin's own viewport space.
+    async fn handle_mouse(&mut self, _host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        if matches!(
+            params.mouse.kind,
+            MouseKind::Down {
+                button: MouseButton::Left
+            }
+        ) && self.ui.handle_mouse(params.mouse.col, params.mouse.row)
+        {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    /// Surface the map's recentre animation to the host: while the transition is
+    /// running, ask to be rendered again next tick without further input.
+    fn wants_redraw(&self) -> bool {
+        self.ui.wants_redraw()
     }
 }
 

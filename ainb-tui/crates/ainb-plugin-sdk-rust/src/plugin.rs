@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
-    params::{HandleEventParams, HandleKeyParams, RenderParams},
+    params::{HandleEventParams, HandleKeyParams, HandleMouseParams, RenderParams},
     wire_buffer::WireBuffer,
 };
 
@@ -126,6 +126,37 @@ pub trait Plugin: Send + 'static {
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
         let _ = (host, params);
         Ok(())
+    }
+
+    /// Receive a single normalized mouse event the host has forwarded.
+    ///
+    /// Notification — the host does not wait on a response and ignores
+    /// errors. Default is a no-op, mirroring [`Self::handle_key`], so
+    /// plugins that don't react to the pointer get nothing on the wire
+    /// by virtue of the host only forwarding mouse events to the focused
+    /// plugin. `params.mouse.col`/`.row` are already in the plugin's own
+    /// viewport coordinate space.
+    ///
+    /// Ordering: dispatched inline on the reader-loop task, same as
+    /// `handle_key`. Plugins MUST NOT spawn the handler body.
+    async fn handle_mouse(&mut self, host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        let _ = (host, params);
+        Ok(())
+    }
+
+    /// Whether the plugin wants the host to render it again on the next
+    /// tick without any further input. Queried by the [`Server`] right
+    /// after each [`render`](Self::render) call and reported to the host
+    /// via `RenderResult.redraw`; the runtime re-marks the plugin dirty
+    /// when it's `true`, so the host's render loop keeps calling `render`
+    /// frame-by-frame.
+    ///
+    /// This is the self-animation hook (a requestAnimationFrame analogue):
+    /// a plugin running a transition returns `true` while frames remain and
+    /// `false` once it settles. Default is `false` — static plugins repaint
+    /// only on input/snapshot, exactly as before.
+    fn wants_redraw(&self) -> bool {
+        false
     }
 
     /// Dispatch a CLI subcommand the plugin advertised in its manifest's
