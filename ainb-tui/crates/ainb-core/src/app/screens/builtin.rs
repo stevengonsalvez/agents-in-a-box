@@ -137,21 +137,19 @@ pub fn crossterm_to_protocol_key(
 /// - `?` / `H` → help toggle (already short-circuited above
 ///   `handle_key_event`'s plugin branch, but listed here for parity in
 ///   the `PluginScreen` trait impl path).
-/// - `Esc` → pop screen / return to home. The plugin/handle_key wire
-///   method is a one-way notification (no `consumed` reply), so once
-///   the host forwards a keystroke it has no way to know whether the
-///   plugin had any state to consume it. The user-visible failure is
-///   Esc-from-burndown silently disappearing into the plugin even when
-///   there's no filter chip or zoom to pop. Until the wire protocol is
-///   extended with a `consumed: bool` result for `plugin/handle_key`,
-///   Esc belongs to the host. Plugins re-bind internal pop semantics
-///   to `Backspace` (see burndown's `KeyCode::Backspace` handler).
 ///
-///   UX note: a side-effect of routing Esc straight to the host is
-///   that Esc on a *zoomed* plugin view does NOT first un-zoom — it
-///   navigates straight to home, discarding zoom state. Users who
-///   want a one-level pop press `Backspace` (closes zoom, stays on
-///   the screen). The burndown help bar advertises both keys.
+/// `Esc` is plugin-owned (it used to be host-reserved): it pops one
+/// internal level (detail drawer, search overlay, zoom, filter chip)
+/// and, once the plugin is already at its root view, the plugin
+/// publishes `ui.close_request` on the snapshot bus to ask the host to
+/// close the screen. The host's event loop polls that topic by version
+/// (`AppState::tick_panel_close_requests`) and pops back to the screen
+/// the panel was opened from. This replaces the old behaviour where
+/// Esc on a zoomed plugin view discarded zoom state and jumped
+/// straight home. `Backspace` remains a plugin-internal alias for the
+/// same one-level pop. When the plugin is missing or its runtime is
+/// down, the forwarder returns `NotHandled` and Esc falls through to
+/// the central dispatch, which still closes the placeholder screen.
 ///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
@@ -163,7 +161,6 @@ pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
     match key.code {
         CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
         CtKey::Char('?' | 'H') => true,
-        CtKey::Esc => true,
         _ => false,
     }
 }

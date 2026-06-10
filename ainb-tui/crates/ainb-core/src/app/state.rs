@@ -2303,6 +2303,13 @@ pub struct AppState {
     pub git_view_state: Option<crate::components::GitViewState>,
     // Previous view for navigation (e.g., to return from GitView)
     pub previous_screen: Option<ScreenId>,
+    /// Last `ui.close_request` snapshot version consumed by
+    /// `tick_panel_close_requests`. The poll acts at most once per
+    /// plugin publish: a version is consumed (recorded here) on first
+    /// sight whether or not it triggered a navigation, so a close
+    /// request that arrives while the user is on a different screen is
+    /// absorbed instead of firing later.
+    pub last_panel_close_version: Option<u64>,
     // Notification system
     pub notifications: Vec<Notification>,
     // Pending event to be processed in next loop iteration
@@ -2804,6 +2811,7 @@ impl Default for AppState {
             log_sender: None,
             git_view_state: None,
             previous_screen: None,
+            last_panel_close_version: None,
             notifications: Vec::new(),
             pending_event: None,
 
@@ -9121,6 +9129,66 @@ impl AppState {
         }
         None
     }
+
+    /// Consume pending `ui.close_request` publishes from plugins.
+    ///
+    /// A plugin publishes this topic when it receives an `Esc` with no
+    /// internal state left to pop (its root view — see the burndown
+    /// plugin's Esc handler). The snapshot store stamps every publish
+    /// with a monotonic version, so polling by version honours each
+    /// request at most once; the version is consumed on sight whether
+    /// or not it triggers navigation, so a request observed while the
+    /// user is on a different screen is absorbed instead of firing
+    /// later. A matching request navigates back to the screen the
+    /// panel was opened from (same pop as `AppEvent::PanelBack`).
+    ///
+    /// Called from `App::tick_plugin_renders` so the poll shares the
+    /// event loop's render-tick cadence.
+    pub fn tick_panel_close_requests(&mut self) {
+        let Some(handle) = self.plugin_runtime.clone() else {
+            return;
+        };
+        let Some((payload, version)) =
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
+        else {
+            return;
+        };
+        if self.last_panel_close_version == Some(version) {
+            return;
+        }
+        self.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.current_screen, &payload) {
+            return;
+        }
+        let target = self
+            .previous_screen
+            .take()
+            .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
+        tracing::info!(
+            from = %self.current_screen,
+            to = %target,
+            "ui.close_request: closing plugin panel"
+        );
+        self.current_screen = target;
+        self.ui_needs_refresh = true;
+    }
+}
+
+/// `true` when a `ui.close_request` payload names the currently-focused
+/// plugin screen. Requests for non-plugin screens (a plugin can't close
+/// the session list out from under the user) and malformed payloads are
+/// rejected.
+fn panel_close_matches(current_screen: &str, payload: &[u8]) -> bool {
+    if crate::app::screens::builtin::plugin_id_for_screen(current_screen).is_none() {
+        return false;
+    }
+    match serde_json::from_slice::<ainb_plugin_runtime::topics::UiCloseRequest>(payload) {
+        Ok(req) => req.screen_id == current_screen,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui.close_request: malformed payload — ignoring");
+            false
+        }
+    }
 }
 
 pub struct App {
@@ -9179,6 +9247,10 @@ impl App {
         let Some(handle) = self.state.plugin_runtime.clone() else {
             return;
         };
+
+        // Honour any pending plugin close request (root-view Esc) before
+        // kicking renders — a closed screen shouldn't get another paint.
+        self.state.tick_panel_close_requests();
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -9651,3 +9723,46 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod panel_close_tests {
+    use super::panel_close_matches;
+    use crate::app::screens::ids;
+
+    fn payload(screen: &str) -> Vec<u8> {
+        serde_json::to_vec(&ainb_plugin_runtime::topics::UiCloseRequest {
+            screen_id: screen.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn matches_when_request_names_focused_plugin_screen() {
+        assert!(panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS)
+        ));
+    }
+
+    #[test]
+    fn rejects_request_for_a_different_screen() {
+        // A stale close request for analytics must not close the witr
+        // screen the user has since navigated to.
+        assert!(!panel_close_matches(ids::WITR, &payload(ids::ANALYTICS)));
+    }
+
+    #[test]
+    fn rejects_when_focused_screen_is_not_plugin_owned() {
+        // A plugin can't close the session list (or any host screen)
+        // out from under the user, even if it names it.
+        assert!(!panel_close_matches(
+            ids::SESSION_LIST,
+            &payload(ids::SESSION_LIST)
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_payload() {
+        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json"));
+    }
+}
