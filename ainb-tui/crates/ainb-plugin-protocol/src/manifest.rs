@@ -128,6 +128,54 @@ pub struct Capabilities {
     /// Read the Codex session log directory specifically.
     #[serde(default)]
     pub read_codex_logs: CapabilityGrant,
+    /// Open cancellable streaming subscriptions via `host/event_stream_subscribe`.
+    /// List form is a topic-prefix allow-list (e.g. `["workspace:*"]`);
+    /// bool-true grants wildcard subscribe across all topics.
+    #[serde(default)]
+    pub event_stream_subscribe: CapabilityGrant,
+    /// Ask the host to spawn host-supervised child processes via
+    /// `host/spawn_managed_subprocess`. List form is a mandatory allow-list
+    /// of binary names/paths (e.g. `["ainb-hangar-daemon"]`); a bool-true
+    /// grant is rejected at manifest validation (`-32003`) so there is no
+    /// way to request an unrestricted "spawn anything" grant.
+    #[serde(default)]
+    pub spawn_managed_subprocess: CapabilityGrant,
+    /// Dial whitelisted `AF_UNIX` sockets via `host/unix_socket_dial`. List
+    /// form is a mandatory allow-list of socket paths (e.g.
+    /// `["~/.ainb/hangar.sock"]`); a bool-true grant is rejected at
+    /// manifest validation (`-32003`) so there is no way to request an
+    /// unrestricted "dial any socket" grant. The host canonicalizes the
+    /// requested path (symlink resolution) before comparing it against the
+    /// list, defending shared dev boxes against arbitrary `AF_UNIX` abuse.
+    #[serde(default)]
+    pub unix_socket_dial: CapabilityGrant,
+    /// Read secrets from the platform secret store via
+    /// `host/secret_store_get`. List form is an allow-list of secret `key`
+    /// names (e.g. `["anthropic_api_key", "openai_api_key"]`). A bool-true
+    /// grant is an unconditional read of *any* key — permitted, but a
+    /// danger surface (document the negative impact when a plugin requests
+    /// it). On macOS the host reads the login Keychain; on linux it returns
+    /// `-32005 NOT_IMPLEMENTED` so the plugin degrades to dotenv.
+    ///
+    /// The TOML/wire key is `secrets:read` (the colon-namespaced capability
+    /// name); the Rust field is `secrets_read`.
+    #[serde(rename = "secrets:read", default)]
+    pub secrets_read: CapabilityGrant,
+    /// Mutate the host's workspace switching state (`active_workspace`,
+    /// `default_workspace` in `~/.ainb/hangar/state.toml`) via
+    /// `host/workspace_set_active` and `host/workspace_set_default`.
+    ///
+    /// This gates the *write* path only: `host/workspace_list` and
+    /// `host/workspace_get_active` are ungated reads. A bool-true grant
+    /// permits switching/defaulting any workspace; list form is reserved
+    /// for a future per-workspace-id allow-list (today any non-empty list
+    /// grants the write, no per-id filtering). Without the grant a write
+    /// returns `-32001 CAPABILITY_DENIED`.
+    ///
+    /// The TOML/wire key is `workspace:write` (the colon-namespaced
+    /// capability name); the Rust field is `workspace_write`.
+    #[serde(rename = "workspace:write", default)]
+    pub workspace_write: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -211,6 +259,11 @@ mod tests {
                 spawn_subprocess: CapabilityGrant::Bool(false),
                 read_claude_logs: CapabilityGrant::Bool(false),
                 read_codex_logs: CapabilityGrant::Bool(false),
+                event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
+                spawn_managed_subprocess: CapabilityGrant::List(vec!["ainb-hangar-daemon".into()]),
+                unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
+                secrets_read: CapabilityGrant::List(vec!["anthropic_api_key".into()]),
+                workspace_write: CapabilityGrant::Bool(true),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -257,6 +310,281 @@ network = ["api.example.com", "raw.githubusercontent.com"]
             m.capabilities.network.allow_list().unwrap(),
             ["api.example.com", "raw.githubusercontent.com"]
         );
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_round_trips_list_form() {
+        // List form whitelists topic prefixes (e.g. `["workspace:*"]`).
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+event_stream_subscribe = ["workspace:*", "stream:*"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.event_stream_subscribe.allow_list().unwrap(),
+            ["workspace:*", "stream:*"]
+        );
+        // Round-trips byte-stable.
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_round_trips_bool_form() {
+        // Bool-true grant = wildcard subscribe.
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+event_stream_subscribe = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.event_stream_subscribe,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.event_stream_subscribe.is_granted());
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_round_trips_list_form() {
+        // List form whitelists binary names/paths.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+spawn_managed_subprocess = ["ainb-hangar-daemon"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.spawn_managed_subprocess.allow_list().unwrap(),
+            ["ainb-hangar-daemon"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_round_trips_bool_form() {
+        // Bool-true grant survives the manifest round-trip at the SCHEMA
+        // level (semantic rejection happens at validation / handler time,
+        // returning -32003 — not here).
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+spawn_managed_subprocess = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.spawn_managed_subprocess,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.spawn_managed_subprocess.is_granted());
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_round_trips_list_form() {
+        // List form whitelists socket paths.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.unix_socket_dial.allow_list().unwrap(),
+            ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_round_trips_bool_form() {
+        // Bool-true grant survives the manifest round-trip at the SCHEMA
+        // level (semantic rejection — `-32003` — happens at validation /
+        // handler time, not here).
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+unix_socket_dial = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.unix_socket_dial,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.unix_socket_dial.is_granted());
+    }
+
+    #[test]
+    fn secrets_read_cap_round_trips_list_form() {
+        // List form whitelists secret `key` names. The TOML key is the
+        // colon-namespaced `secrets:read`.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+"secrets:read" = ["anthropic_api_key", "openai_api_key"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.secrets_read.allow_list().unwrap(),
+            ["anthropic_api_key", "openai_api_key"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        // The re-encoded TOML must carry the colon-namespaced key.
+        assert!(
+            s.contains("\"secrets:read\""),
+            "re-encoded manifest must use the `secrets:read` key: {s}"
+        );
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn secrets_read_cap_round_trips_bool_form() {
+        // Bool-true grant = unconditional secret read (allowed, but flagged
+        // as a danger surface in the PR body). Survives the round-trip.
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+"secrets:read" = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.secrets_read,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn secrets_read_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.secrets_read.is_granted());
+    }
+
+    #[test]
+    fn workspace_write_cap_round_trips_bool_form() {
+        // Bool-true grant = switch/default any workspace. The TOML key is the
+        // colon-namespaced `workspace:write`.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+"workspace:write" = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.workspace_write,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        assert!(
+            s.contains("\"workspace:write\""),
+            "re-encoded manifest must use the `workspace:write` key: {s}"
+        );
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn workspace_write_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.workspace_write.is_granted());
     }
 
     #[test]

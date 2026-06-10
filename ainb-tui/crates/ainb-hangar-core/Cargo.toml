@@ -1,0 +1,80 @@
+[package]
+name = "ainb-hangar-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar domain core: pure, IO-free types (polymorphic actors, IDs, task status, clock/idgen traits) shared across the ainb managed-agents control plane"
+categories = ["data-structures"]
+keywords = ["ainb", "hangar", "domain", "types"]
+
+[lib]
+name = "ainb_hangar_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+# P6.3: the embedded curated `agent_template` registry parses its 10
+# `include_str!`'d JSON files at first access. Pure parse — no IO — so the
+# crate's no-IO contract is preserved.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+# P7.1: cron-expression parsing + next-tick math. Parser only (no scheduler);
+# the daemon (P7.3) drives the tick loop. `chrono` (workspace) supplies the
+# `DateTime<Utc>` the parser computes against — the public API is chrono-typed
+# because `cron` requires it, but the storage layer stays epoch-millis i64
+# (see `autopilot::cron::{millis_to_utc, utc_to_millis}` for the boundary).
+cron = "0.12"
+ulid = "1"
+# Token minting + hashing (P5.4). `sha2` for the SHA-256 digest, `subtle` for
+# constant-time digest comparison, `rand` for the injectable CSPRNG seam. All
+# IO-free, keeping this crate's no-IO contract intact.
+sha2 = "0.10"
+subtle = "2.5"
+rand = "0.8"
+# P8.6: the structured-log reader (`logs` module) is the one deliberate IO
+# exception to this crate's no-IO charter — it globs + reads the daemon's
+# `daemon.<date>` log files so the `ainb hangar logs tail` CLI and the TUI
+# `LogsScreen` share one parser. `dirs` resolves the default `~/.ainb` home the
+# same way `ainb-hangar-daemon::hangar_dir` does (without a dep on the daemon,
+# which the plugin can't take).
+dirs = { workspace = true }
+# P9.1: line-anchored match for the canonical `gh pr create` PR-URL line so the
+# daemon can stamp `agent_task_queue.result.pr_url`. Pure string match — no IO —
+# so the crate's no-IO charter is preserved. Compiled once via `std::sync::LazyLock`.
+regex = { workspace = true }
+
+[features]
+# Exposes the deterministic test doubles (`FixedClock`, `FixedIdGen`) to
+# downstream crates' test builds. Within this crate they are also available
+# under `#[cfg(test)]` without enabling the feature.
+test-support = []
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# P8.6: the `logs` reader tests seed temp `daemon.<date>` files to exercise the
+# glob + bounded-tail + level-filter paths.
+tempfile = { workspace = true }
+
+# Local lint config rather than `workspace = true`: this matches the sibling
+# ainb-hangar-store crate. The workspace-level lints would declare lint groups
+# at the same priority as specific lints, which rustc rejects; mirroring the
+# intent locally keeps `cargo clippy -p ainb-hangar-core -- -D warnings` clean.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

@@ -108,6 +108,7 @@ impl CommandRegistry {
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
+        r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r
     }
 
@@ -1253,6 +1254,38 @@ impl CliCommand for FleetCommand {
     }
 }
 
+/// The `hangar` namespace — Hangar managed-agents control plane.
+///
+/// Augments the derive-side [`HangarCommand`](crate::cli::hangar::HangarCommand)
+/// subtree (noun groups: `issue` / `task` / `beads` / `daemon`) onto a `hangar`
+/// builder command, mirroring the hybrid derive+builder pattern used elsewhere
+/// in this registry. The dispatch lives in the `cli::hangar` lib module
+/// (`reference_rust_bin_lib_split`); `run` only extracts the parsed enum and
+/// hands it off. Verbs whose backing impl does not yet exist (`skill`,
+/// `autopilot`, `config`, `init`, `tui`, `daemon start|stop`) are intentionally
+/// absent — a later phase adds a variant rather than un-stubbing one here.
+pub struct HangarCommand;
+impl CliCommand for HangarCommand {
+    fn name(&self) -> &'static str {
+        "hangar"
+    }
+    fn build(&self, app: Command) -> Command {
+        let hangar = <crate::cli::hangar::HangarCommand as Subcommand>::augment_subcommands(
+            Command::new(self.name())
+                .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
+                .subcommand_required(true)
+                .arg_required_else_help(true),
+        );
+        app.subcommand(hangar)
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::hangar::HangarCommand::from_arg_matches(matches) {
+            Ok(cmd) => Box::pin(async move { crate::cli::hangar::dispatch(cmd, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1262,14 +1295,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_three_commands() {
+    fn built_ins_registers_twenty_four_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + plugin stub + fleet + hidden notifyd = 23. The
-        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
-        // inline.
-        assert_eq!(names.len(), 23, "expected 23 entries, got {names:?}");
+        // + tmux namespace + plugin stub + fleet + hidden notifyd + hangar
+        // = 24. The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 24, "expected 24 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1294,6 +1327,7 @@ mod tests {
             "plugin",
             "fleet",
             "notifyd",
+            "hangar",
         ] {
             assert!(
                 names.contains(&required),

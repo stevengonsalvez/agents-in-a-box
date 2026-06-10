@@ -60,10 +60,25 @@ build_plugin() {
     cp "target/$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
     resign_macos "$out_dir/$plugin_id"
 
-    if [[ -f "crates/$crate/manifest.toml" ]]; then
-        cp "crates/$crate/manifest.toml" "$out_dir/manifest.toml"
-    elif [[ -f "crates/$crate/plugin.toml" ]]; then
-        cp "crates/$crate/plugin.toml" "$out_dir/manifest.toml"
+    # The manifest lives next to the crate. Most plugin crates are under
+    # `crates/<crate>/`, but the Hangar plugin lives outside the workspace root
+    # at `../plugins/<plugin_id>/` (its crate dir is named by plugin id, not
+    # crate name). Search every known layout for a `manifest.toml`/`plugin.toml`.
+    local manifest_src=""
+    for cand in \
+        "crates/$crate/manifest.toml" \
+        "crates/$crate/plugin.toml" \
+        "../plugins/$plugin_id/manifest.toml" \
+        "../plugins/$plugin_id/plugin.toml"; do
+        if [[ -f "$cand" ]]; then
+            manifest_src="$cand"
+            break
+        fi
+    done
+    if [[ -n "$manifest_src" ]]; then
+        cp "$manifest_src" "$out_dir/manifest.toml"
+    else
+        printf 'WARN: no manifest found for %s (plugin id %s)\n' "$crate" "$plugin_id" >&2
     fi
 
     local size
@@ -74,3 +89,8 @@ build_plugin() {
 build_plugin ainb-plugin-burndown burndown
 build_plugin ainb-plugin-session-reader session-reader
 build_plugin ainb-plugin-witr witr
+# The Hangar control-plane plugin (P4.10). The crate is `ainb-plugin-hangar`
+# but its manifest `[plugin].name` — and therefore the discovered plugin id and
+# the host `PLUGIN_SCREENS` routing entry — is `hangar-tui`, so it stages under
+# `dist/plugins/hangar-tui/`.
+build_plugin ainb-plugin-hangar hangar-tui

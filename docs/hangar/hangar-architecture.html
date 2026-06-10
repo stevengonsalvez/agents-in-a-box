@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hangar — Architecture &amp; Feature Explainer</title>
+<style>
+  :root{
+    --bg:#0a1628; --panel:#0f2942; --panel2:#13243f; --line:#1e3a5f;
+    --teal:#2dd4bf; --blue:#38bdf8; --gold:#fbbf24; --orange:#fb923c;
+    --green:#34d399; --red:#f87171; --gray:#94a3b8; --text:#e2e8f0; --dim:#7c93b0;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.65;font-size:16px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.88em}
+  code{background:#0c1f38;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--teal)}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 28px}
+  header.hero{background:linear-gradient(160deg,#0c1f38,#0a1628 60%);border-bottom:1px solid var(--line);padding:60px 0 44px}
+  .hero h1{font-size:42px;margin:0 0 8px;letter-spacing:-.5px}
+  .hero .tag{color:var(--teal);font-weight:600;letter-spacing:.5px;text-transform:uppercase;font-size:13px}
+  .hero p.lead{font-size:19px;color:var(--gray);max-width:760px;margin:14px 0 0}
+  .pills{margin-top:22px;display:flex;flex-wrap:wrap;gap:8px}
+  .pill{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:5px 13px;font-size:13px;color:var(--text)}
+  .pill b{color:var(--gold)}
+  nav.toc{position:sticky;top:0;z-index:5;background:rgba(10,22,40,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);padding:12px 0;font-size:14px}
+  nav.toc .wrap{display:flex;flex-wrap:wrap;gap:6px 18px}
+  nav.toc a{color:var(--gray)}
+  nav.toc a:hover{color:var(--teal)}
+  section{padding:46px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:28px;margin:0 0 6px;color:#fff;letter-spacing:-.3px}
+  h2 .num{color:var(--teal);font-size:18px;margin-right:10px;font-weight:600}
+  h3{font-size:19px;margin:28px 0 8px;color:var(--gold)}
+  h4{font-size:15px;margin:18px 0 6px;color:var(--teal);text-transform:uppercase;letter-spacing:.5px}
+  p{margin:10px 0}
+  .muted{color:var(--gray)}
+  figure{margin:24px 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;text-align:center}
+  figure img{max-width:100%;height:auto;border-radius:6px}
+  figcaption{color:var(--gray);font-size:13px;margin-top:10px;text-align:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:18px 0}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .card h4{margin-top:0;color:var(--blue)}
+  .card .crate{color:var(--teal);font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:13.5px;background:var(--panel2);border-radius:10px;overflow:hidden}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#0c1f38;color:var(--teal);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  tr:last-child td{border-bottom:none}
+  td .mono{color:var(--dim);font-size:12px}
+  .ok{color:var(--green);font-weight:700}
+  .warn{color:var(--gold);font-weight:700}
+  .no{color:var(--red);font-weight:700}
+  .area{background:#0c1f38;color:var(--gold);font-weight:700}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0;font-size:13px;color:var(--gray)}
+  .kbd{background:#0c1f38;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 7px;font-family:monospace;font-size:12px;color:var(--gold)}
+  ul.tight{margin:8px 0;padding-left:22px}
+  ul.tight li{margin:4px 0}
+  .callout{background:#0c1f38;border-left:3px solid var(--teal);border-radius:0 8px 8px 0;padding:12px 16px;margin:16px 0;color:var(--gray)}
+  .callout.warnbox{border-left-color:var(--gold)}
+  .phasebar{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0}
+  .phase{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;min-width:88px}
+  .phase b{display:block;color:var(--green)}
+  footer{padding:36px 0;color:var(--dim);font-size:13px;text-align:center}
+  .flow{font-family:monospace;font-size:12.5px;white-space:pre;overflow-x:auto;background:#0c1f38;border:1px solid var(--line);border-radius:8px;padding:14px;color:var(--gray)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="tag">agents-in-a-box · feat/multica</div>
+    <h1>Hangar</h1>
+    <p class="lead">A TUI-first managed-agents control plane — a feature replica of Multica built natively inside <code>ainb</code>. No web UI: the terminal <em>is</em> the control plane. Issues, autopilots, skills, a kanban board, and a managed-agent fleet, driven by a loosely-coupled daemon + plugin over a unix-socket JSON-RPC contract.</p>
+    <div class="pills">
+      <span class="pill"><b>4</b> Rust crates + <b>1</b> plugin</span>
+      <span class="pill"><b>9</b> TUI screens</span>
+      <span class="pill"><b>10</b> CLI noun-groups</span>
+      <span class="pill"><b>17</b> JSON-RPC methods</span>
+      <span class="pill"><b>10</b> migrations</span>
+      <span class="pill"><b>35</b> features · <b>22</b> e2e-tripwired</span>
+      <span class="pill">Phases <b>P0–P9</b></span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#deps">Dependencies</a>
+  <a href="#flow">Data &amp; Control Flow</a>
+  <a href="#fsm">Task FSM</a>
+  <a href="#schema">Data Model</a>
+  <a href="#caps">Capabilities &amp; Security</a>
+  <a href="#autopilot">Autopilots</a>
+  <a href="#features">Feature Catalogue</a>
+  <a href="#coverage">Test Coverage</a>
+  <a href="#phases">Build Phases</a>
+</div></nav>
+
+<!-- ───────────────────────── OVERVIEW ───────────────────────── -->
+<section id="overview"><div class="wrap">
+  <h2><span class="num">01</span>What Hangar is</h2>
+  <p>Hangar gives <code>ainb</code> a <strong>managed-agent control plane</strong>: a place to file work as <em>issues</em>, assign them to <em>agents</em> (Claude / Codex / Gemini), watch tasks march through a lifecycle on a <em>kanban board</em>, schedule recurring work with <em>autopilots</em>, curate reusable <em>skills</em> &amp; <em>agent templates</em>, and observe the whole fleet's health — all from the terminal.</p>
+  <p>It is deliberately <strong>loosely coupled</strong>. A standalone <span class="crate">ainb-hangar-daemon</span> owns the data plane (SQLite, the task FSM, the cron scheduler, the agent runner). The TUI is a <strong>plugin</strong> (<span class="crate">hangar-tui</span>) that the host <code>ainb</code> binary loads and that talks to the daemon over a unix-socket JSON-RPC contract. The plugin holds <em>zero</em> domain logic — it subscribes, pulls snapshots, renders, and forwards key intents. This means the control plane runs (autopilots fire, tasks dispatch) whether or not a TUI is attached.</p>
+
+  <div class="grid">
+    <div class="card"><h4>Issues → Tasks → Agents</h4><p class="muted">File an issue, assign an agent, and the daemon dispatches a task that runs the provider in an isolated git worktree, streaming its transcript back.</p></div>
+    <div class="card"><h4>Autopilots</h4><p class="muted">Cron-scheduled autopilots fire tasks on a schedule, with a concurrency guard that skips a tick if the prior run is still in flight.</p></div>
+    <div class="card"><h4>Skills &amp; Templates</h4><p class="muted">Import skills from the toolkit, bundle them into 10 curated agent templates, and materialise them into each task's provider-native skill directory at dispatch.</p></div>
+    <div class="card"><h4>Observability</h4><p class="muted">Structured JSONL tracing (+ optional OTLP), instrumented service spans, a live daemon-health sparkline, and a logs tail on both CLI and TUI.</p></div>
+  </div>
+</div></section>
+
+<!-- ───────────────────────── ARCHITECTURE ───────────────────────── -->
+<section id="architecture"><div class="wrap">
+  <h2><span class="num">02</span>System architecture</h2>
+  <p>Five Rust components in three planes: the <strong>host + plugin</strong> (presentation), the <strong>daemon</strong> (control), and the <strong>store + SQLite</strong> (data). Two cross-cutting crates — <span class="crate">ainb-hangar-core</span> (IO-free domain types) and <span class="crate">ainb-hangar-proto</span> (wire types) — are shared by everything.</p>
+
+  <figure><img src="diagrams/arch-system.png" alt="Hangar layered system architecture" />
+    <figcaption>Fig 1 — Layered architecture: host <code>ainb</code> + plugin-runtime v2 → <code>hangar-tui</code> plugin → unix-socket JSON-RPC → <code>ainb-hangar-daemon</code> → <code>ainb-hangar-store</code> (sqlx) → SQLite.</figcaption></figure>
+
+  <h3>The components</h3>
+  <div class="grid">
+    <div class="card"><h4 class="crate">ainb (host)</h4><p class="muted">The ratatui TUI binary (folder <code>crates/ainb-core</code>, package <code>ainb</code>). Embeds <strong>plugin-runtime v2</strong>, which discovers, spawns, and supervises plugin subprocesses and brokers their host-capability calls. Reaches Hangar from the home screen via <span class="kbd">g</span>.</p></div>
+    <div class="card"><h4 class="crate">hangar-tui (plugin)</h4><p class="muted">Package <code>ainb-plugin-hangar</code>. A native subprocess speaking JSON-RPC 2.0 over stdio (Content-Length framing). Renders 9 screens, dials the daemon socket, subscribes to a workspace, pulls snapshots, folds events. No DB, no domain logic.</p></div>
+    <div class="card"><h4 class="crate">ainb-hangar-daemon</h4><p class="muted">Standalone binary. Hosts the unix-socket JSON-RPC server, the task <strong>claim loop</strong>, the autopilot <strong>scheduler</strong>, the provider <strong>runner</strong>, the beads sync, and the observability subscriber. The control plane proper.</p></div>
+    <div class="card"><h4 class="crate">ainb-hangar-store</h4><p class="muted">sqlx repositories + the task-FSM services (claim / start / complete / fail / cancel / retry / sweep). Owns the schema (migrations 0001–0010) over a single SQLite file at <code>~/.ainb/hangar/hangar.db</code>.</p></div>
+    <div class="card"><h4 class="crate">ainb-hangar-core</h4><p class="muted">IO-free domain layer: typed ids, the <code>HangarClock</code>/<code>IdGen</code> traits, the task-status FSM table, the cron parser, env-allowlist policy, skill + autopilot service traits, PR-URL parser, token mint/verify, <code>TaskResult</code>.</p></div>
+    <div class="card"><h4 class="crate">ainb-hangar-proto</h4><p class="muted">The JSON-RPC wire types + method-name constants shared by daemon and plugin. Plus the plugin SDK (<code>ainb-plugin-protocol</code> / <code>ainb-plugin-sdk-rust</code>) that defines the host-call contract and the stdio server loop.</p></div>
+  </div>
+
+  <h3>The transport</h3>
+  <p>The plugin dials <code>~/.ainb/hangar/hangar.sock</code> via the host <code>unix_socket_dial</code> capability and speaks the same JSON-RPC framing the host uses over stdio. The daemon resolves a workspace identifier (slug <em>or</em> id) to the real row before scoping any query — the guard that closed the cross-tenant IDOR. Plugin subprocesses are spawned with <code>kill_on_drop(true)</code> plus an OS leak-guard (<code>PR_SET_PDEATHSIG</code> on Linux, <code>setpgid</code> + <code>kill(-pgid)</code> on macOS).</p>
+</div></section>
+
+<!-- ───────────────────────── DEPENDENCIES ───────────────────────── -->
+<section id="deps"><div class="wrap">
+  <h2><span class="num">03</span>Dependency graph</h2>
+  <h3>Internal crate dependencies</h3>
+  <div class="flow">ainb-hangar-core   (foundation — IO-free; no internal deps)
+      ▲          ▲              ▲
+      │          │              │
+ainb-hangar-store │       ainb-hangar-proto
+   (sqlx + FSM)   │        (wire types)
+      ▲           │              ▲
+      └───────────┴──────────────┘
+                  │
+         ainb-hangar-daemon  (deps: core + store + proto)
+                  │  unix-socket JSON-RPC
+                  ▼
+        hangar-tui plugin  (deps: proto + plugin-sdk)  ◀── loaded by ──  ainb (host + plugin-runtime v2)</div>
+  <p class="muted"><code>core</code> is the root and depends on nothing internal (so it stays IO-free + trivially testable). <code>store</code> and <code>proto</code> both build on <code>core</code>; the <code>daemon</code> ties all three together. The plugin depends only on <code>proto</code> + the SDK — never on the daemon or store crates — so it cannot smuggle in domain logic.</p>
+
+  <h3>Key external dependencies</h3>
+  <table>
+    <tr><th>Crate</th><th>Purpose</th></tr>
+    <tr><td><code>tokio</code></td><td>Async runtime — daemon server, claim loop, scheduler, runner, plugin stdio.</td></tr>
+    <tr><td><code>sqlx</code> (SQLite)</td><td>Async, runtime-checked queries; migrations 0001–0010. Postgres-compatible schema for a future backend.</td></tr>
+    <tr><td><code>ratatui</code> + <code>crossterm</code></td><td>TUI rendering (host + plugin screens).</td></tr>
+    <tr><td><code>cron</code> v0.12</td><td>Cron expression parsing (6-field; 5-field POSIX normalised by prepending <code>0 </code>).</td></tr>
+    <tr><td><code>chrono</code></td><td>Time math for next-tick calc (bridged to epoch-millis storage via <code>millis_to_utc</code>/<code>utc_to_millis</code>).</td></tr>
+    <tr><td><code>security-framework</code> (macOS)</td><td>OS keychain backend for the secret store (<code>ainb-hangar-secrets</code>).</td></tr>
+    <tr><td><code>sha2</code> + <code>subtle</code></td><td>PAT/daemon-token hashing (sha256, stored hash-only) + constant-time verify.</td></tr>
+    <tr><td><code>tracing-subscriber</code> + <code>tracing-appender</code></td><td>Structured JSONL sink with daily rotation (<code>daemon.&lt;date&gt;</code>).</td></tr>
+    <tr><td><code>opentelemetry</code> / <code>opentelemetry-otlp</code> <span class="mono">(optional <code>otlp</code> feature)</span></td><td>OTLP span export; zero crates linked in the default build.</td></tr>
+    <tr><td><code>zeroize</code></td><td><code>SecretBytes</code> wiped on drop.</td></tr>
+  </table>
+</div></section>
+
+<!-- ───────────────────────── FLOW ───────────────────────── -->
+<section id="flow"><div class="wrap">
+  <h2><span class="num">04</span>Data &amp; control flow</h2>
+  <p>Two loops run continuously and independently: the <strong>dispatch loop</strong> (control plane — turns issues into running agent tasks) and the <strong>render loop</strong> (data plane — turns daemon state into TUI pixels).</p>
+
+  <figure><img src="diagrams/arch-dataflow.png" alt="Hangar control and data flow" />
+    <figcaption>Fig 2 — Dispatch (orange/control) vs render (blue/data + dashed events). The daemon is the single source of truth; the plugin self-heals on the next snapshot.</figcaption></figure>
+
+  <h3>Dispatch loop (control)</h3>
+  <ol class="tight">
+    <li><code>ainb hangar issue create --assign &lt;agent&gt;</code> (or an autopilot tick) enqueues an <code>agent_task_queue</code> row.</li>
+    <li>The daemon <strong>claim loop</strong> atomically claims the oldest queued task for an idle runtime (<code>queued → dispatched</code>), respecting per-agent <code>max_concurrent_tasks</code>.</li>
+    <li>It <strong>materialises skills</strong> into the task's per-task directory at the provider-native path (<code>.claude/skills/</code>, <code>.codex/skills/</code>, <code>.agent_context/skills/</code> …) — copied, scripts <code>chmod 0755</code>, kept outside the worktree git root so <code>git status</code> stays clean.</li>
+    <li>It spawns the provider in an isolated git worktree (<code>dispatched → running</code>), streaming the transcript.</li>
+    <li>On a terminal transition the <strong>FSM finalize</strong> path runs idempotently: it stamps <code>done/failed/cancelled</code>, cascades <code>autopilot_run.completed_at</code> when the task belongs to an autopilot run, and captures any <code>gh pr create</code> URL into <code>result.pr_url</code>.</li>
+  </ol>
+
+  <h3>Render loop (data)</h3>
+  <ol class="tight">
+    <li>The plugin sends <code>workspace/subscribe</code> for the active workspace.</li>
+    <li>On the ack it fires snapshot RPCs — <code>hangar/issues_list</code>, <code>tasks_list</code>, <code>agents_list</code>, <code>skills_list</code>, <code>autopilots_list</code>, <code>daemon_health</code> — which the daemon answers from the store (resolving slug→id, scoping by workspace).</li>
+    <li>The plugin folds the wire rows into screen state and renders.</li>
+    <li>Async events (<code>TaskStarted</code>/<code>TaskFinished</code>, <code>autopilot.tick_skipped</code>, skill updates) stream back over the subscription for instant feedback; the next snapshot reconciles authoritatively, so a dropped event self-heals.</li>
+  </ol>
+</div></section>
+
+<!-- ───────────────────────── FSM ───────────────────────── -->
+<section id="fsm"><div class="wrap">
+  <h2><span class="num">05</span>Task lifecycle (FSM)</h2>
+  <p>Every unit of agent work is an <code>agent_task_queue</code> row walking a strict finite-state machine. The transition table is exhaustively defined in <code>ainb-hangar-core</code> and enforced by the store's finalize services.</p>
+  <figure><img src="diagrams/arch-task-fsm.png" alt="Task FSM state machine" />
+    <figcaption>Fig 3 — <code>queued → dispatched → running → done | failed | cancelled</code>, with idempotent finalize, retry via <code>parent_task_id</code>, and TTL sweepers.</figcaption></figure>
+  <ul class="tight">
+    <li><strong>Idempotent finalize</strong> — concurrent complete-vs-cancel resolves deterministically (first wins, loser no-ops); a terminal row never re-transitions.</li>
+    <li><strong>Retry</strong> — a failure with a <em>retryable</em> reason (e.g. runtime offline) spawns a child task linked by <code>parent_task_id</code>, capped by <code>max_attempts</code>; <code>agent_error</code> does not retry.</li>
+    <li><strong>TTL sweepers</strong> — stale <code>queued</code> (2h) / <code>dispatched</code> (5min) / <code>running</code> (2.5h) rows are swept to <code>failed</code> in idempotent batches (cap 500).</li>
+    <li><strong>Autopilot cascade</strong> — finalising a task carrying an <code>autopilot_run_id</code> stamps the run's <code>completed_at</code> in the same path.</li>
+  </ul>
+</div></section>
+
+<!-- ───────────────────────── SCHEMA ───────────────────────── -->
+<section id="schema"><div class="wrap">
+  <h2><span class="num">06</span>Data model</h2>
+  <p>A single SQLite database, workspace-tenant from migration 0001. Every row is scoped to a <code>workspace</code>; every by-id query carries the workspace guard (the IDOR fix). The schema is kept Postgres-compatible for a future server backend.</p>
+  <figure><img src="diagrams/arch-schema-er.png" alt="Hangar SQLite schema ER diagram" />
+    <figcaption>Fig 4 — Entities &amp; foreign keys across migrations 0001–0010 (16 tables): tenancy, actors, work queue, skills, auth, autopilots.</figcaption></figure>
+  <div class="grid">
+    <div class="card"><h4>Tenancy</h4><p class="muted"><code>workspace</code> (slug unique), <code>user</code> (email unique), <code>member</code> (role).</p></div>
+    <div class="card"><h4>Actors</h4><p class="muted"><code>agent_runtime</code> (status), <code>agent</code> (runtime, visibility, owner).</p></div>
+    <div class="card"><h4>Work</h4><p class="muted"><code>issue</code> + <code>comment</code>; <code>agent_task_queue</code> (status, attempt, <code>parent_task_id</code>, <code>result</code> JSON, <code>autopilot_run_id</code>) with a partial unique index = one pending task per issue.</p></div>
+    <div class="card"><h4>Skills</h4><p class="muted"><code>skill</code> (unique per workspace/name), <code>skill_file</code>, <code>agent_skill</code> M:N junction.</p></div>
+    <div class="card"><h4>Auth</h4><p class="muted"><code>pat</code> + <code>daemon_token</code> (sha256 only), <code>beads_mapping</code> (hangar↔bd).</p></div>
+    <div class="card"><h4>Autopilots</h4><p class="muted"><code>autopilot</code> (cron_expr, max_concurrent_runs, next_tick_at, enabled), <code>autopilot_run</code> (status, completed_at).</p></div>
+  </div>
+</div></section>
+
+<!-- ───────────────────────── CAPS ───────────────────────── -->
+<section id="caps"><div class="wrap">
+  <h2><span class="num">07</span>Plugin host capabilities &amp; security</h2>
+  <p>The plugin runs as a separate process and can only reach the host through declared, gated capabilities in its <code>manifest.toml</code>. Each capability is a <code>Bool</code> or an allow-<code>List</code>; the runtime enforces the grant before any privileged action.</p>
+  <figure><img src="diagrams/arch-capabilities.png" alt="Plugin host capability and security model" />
+    <figcaption>Fig 5 — Capability gating: ungranted → <code>-32001</code>; ambiguous form → <code>-32003</code>; daemon-side workspace scoping closes IDOR.</figcaption></figure>
+  <table>
+    <tr><th>Capability</th><th>Host call</th><th>Enforcement</th></tr>
+    <tr><td><code>event_stream_subscribe</code></td><td>subscribe to event topics</td><td>topic-prefix allow-list</td></tr>
+    <tr><td><code>spawn_managed_subprocess</code></td><td>spawn a tracked child (e.g. the daemon)</td><td>list-form mandatory; bool-true rejected <code>-32003</code>; reaped on teardown</td></tr>
+    <tr><td><code>unix_socket_dial</code></td><td>dial the daemon socket</td><td>path allow-list, canonicalised; bool-true rejected <code>-32003</code></td></tr>
+    <tr><td><code>secrets:read</code></td><td><code>host/secret_store_get</code> → OS keychain</td><td>key allow-list; <code>{scope, key}</code>; read-only (no write path)</td></tr>
+    <tr><td><code>workspace:write</code></td><td>set active / default workspace</td><td>bool-only; list-form rejected <code>-32003</code></td></tr>
+  </table>
+  <div class="callout">An ungranted capability returns <code>-32001 CAPABILITY_DENIED</code>; an ambiguous/unsupported grant form returns <code>-32003 MANIFEST_VALIDATION</code>. Separately, every daemon-side by-id query is workspace-scoped (the <code>resolve_workspace_id</code> guard) so a leaked id from one workspace cannot read or mutate another's data.</div>
+</div></section>
+
+<!-- ───────────────────────── AUTOPILOT ───────────────────────── -->
+<section id="autopilot"><div class="wrap">
+  <h2><span class="num">08</span>Autopilots &amp; the cron scheduler</h2>
+  <p>An autopilot is a cron expression + an agent + instructions. A single daemon task drives all of them.</p>
+  <figure><img src="diagrams/arch-autopilot-scheduler.png" alt="Autopilot cron scheduler loop" />
+    <figcaption>Fig 6 — The scheduler loop: pick earliest tick → sleep/​wake/​shutdown select → concurrency check → fire (single-tx) → reschedule.</figcaption></figure>
+  <ul class="tight">
+    <li>The loop sleeps until the earliest <code>next_tick_at</code> across enabled autopilots, via a <code>tokio::select!</code> over <em>sleep</em>, <em>shutdown</em>, and a <em>wake</em> signal (used by tests' clock-advance).</li>
+    <li>At fire time it re-checks concurrency: if <code>count(autopilot_run WHERE completed_at IS NULL) ≥ max_concurrent_runs</code> it <strong>skips</strong> and emits <code>autopilot.tick_skipped</code>; otherwise <code>fire_autopilot_tick</code> inserts the run + enqueues the task in one transaction.</li>
+    <li>It recomputes the next tick anchored on <em>now</em> (not the stale tick) to avoid replay storms; no enabled autopilots → 60s re-poll.</li>
+  </ul>
+</div></section>
+
+<!-- ───────────────────────── FEATURES ───────────────────────── -->
+<section id="features"><div class="wrap">
+  <h2><span class="num">09</span>Feature catalogue — what a user does</h2>
+  <p class="muted">Every Hangar feature is reachable two ways: a <strong>TUI screen</strong> (open Hangar with <span class="kbd">g</span>, then a hotkey) and/or the <code>ainb hangar &lt;noun&gt;</code> <strong>CLI</strong>.</p>
+
+  <h3>TUI screens &amp; hotkeys</h3>
+  <table>
+    <tr><th>Hotkey</th><th>Screen</th><th>What you do</th></tr>
+    <tr><td><span class="kbd">1</span></td><td>Issues</td><td>Browse/filter issues (All/Members/Agents/Mine chips), <span class="kbd">c</span> create, <span class="kbd">a</span> assign agent, <span class="kbd">Enter</span> open task detail.</td></tr>
+    <tr><td><span class="kbd">2</span></td><td>Task detail</td><td>Live transcript (5-colour stream), PR badge + <span class="kbd">o</span> open-in-browser, <span class="kbd">r</span> retry / <span class="kbd">x</span> cancel.</td></tr>
+    <tr><td><span class="kbd">K</span></td><td>Kanban</td><td>4 columns (queued/running/done/failed); <span class="kbd">Shift+←/→</span> moves a card → fires a task transition.</td></tr>
+    <tr><td><span class="kbd">4</span></td><td>Skills</td><td><span class="kbd">s</span> sync from toolkit, <span class="kbd">i</span>/<span class="kbd">d</span> attach/detach to selected agent, <span class="kbd">Enter</span> view body.</td></tr>
+    <tr><td><span class="kbd">,</span></td><td>Settings</td><td>Provider keys (keychain write), workspace switching (<span class="kbd">s</span> active/<span class="kbd">d</span> default/<span class="kbd">n</span> new/<span class="kbd">r</span> rename).</td></tr>
+    <tr><td><span class="kbd">5</span></td><td>Autopilots</td><td>List + recent runs; <span class="kbd">a</span>/<span class="kbd">e</span> create/edit, <span class="kbd">r</span> run-now, <span class="kbd">d</span> enable/disable.</td></tr>
+    <tr><td><span class="kbd">D</span></td><td>Daemon health</td><td>Runtimes, claim-cache, concurrent tasks, dual-dim throughput sparkline (green success / red failure).</td></tr>
+    <tr><td><span class="kbd">L</span></td><td>Logs</td><td>Tail the daemon's structured JSONL, level-filter chips, colour-by-level.</td></tr>
+    <tr><td>(modal)</td><td>Agent picker</td><td>Pick a human or agent to assign (presence dots, <span class="kbd">/</span> filter, recents pinned).</td></tr>
+  </table>
+
+  <h3>CLI</h3>
+  <div class="flow">ainb hangar issue      create | list | show
+ainb hangar task       list | cancel | retry
+ainb hangar autopilot  create | list | disable | enable | run
+ainb hangar skills     sync | list
+ainb hangar templates  list | show | use
+ainb hangar logs       tail [-f] [--lines N] [--level L]
+ainb hangar auth       token create | list | revoke   (daemon-token create, hidden)
+ainb hangar config     env.allow list|add|remove · warnings reset
+ainb hangar beads      reconcile        ainb hangar daemon  status</div>
+</div></section>
+
+<!-- ───────────────────────── COVERAGE ───────────────────────── -->
+<section id="coverage"><div class="wrap">
+  <h2><span class="num">10</span>Feature × test coverage</h2>
+  <p>Built test-first: every feature carries an <strong>acceptance test</strong> (unit/integration), and most carry an <strong>e2e tripwire</strong> — a real test that drives <code>ainb tui</code> in a <code>tmux</code> pane (or the daemon over its real socket) and asserts the rendered/persisted result, per the <code>tmux-ui-tripwire</code> discipline.</p>
+  <div class="legend">
+    <span><span class="ok">✅</span> has acceptance + e2e tripwire</span>
+    <span><span class="ok">✅</span><span class="muted"> (acc.)</span> acceptance only</span>
+    <span><span class="warn">⚠</span> partial</span>
+  </div>
+
+  <table>
+    <tr><th>Feature (user action)</th><th>Layer</th><th>Acceptance</th><th>e2e tripwire</th><th></th></tr>
+
+    <tr><td colspan="5" class="area">Issues</td></tr>
+    <tr><td>Create / list / show issue</td><td>CLI</td><td class="mono">hangar_cli_integration.rs (4) + cli::hangar parse (3)</td><td class="mono">tripwire_hangar_issue_roundtrip.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Persist issue + assignee</td><td>store</td><td class="mono">repo_issue.rs (4)</td><td class="mono">— (via roundtrip)</td><td class="ok">✅</td></tr>
+    <tr><td>Issue list screen (nav/filter/create)</td><td>TUI</td><td class="mono">issue_list_reducer_test.rs (7)</td><td class="mono">tripwire_p4_issue_list_renders.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Kanban board (4 cols, card move)</td><td>TUI</td><td class="mono">kanban_reducer (10) + rpc_over_socket + snapshot (5)</td><td class="mono">tripwire_kanban_columns_render.rs</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Tasks</td></tr>
+    <tr><td>Task FSM (claim/start/complete/fail/cancel)</td><td>store+core</td><td class="mono">finalize_idempotency (22) + claim_task_integration + task_state_transitions</td><td class="mono">tripwire_task_happy_path_claude_provider.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Retry chain (parent/child, max-attempts)</td><td>store</td><td class="mono">retry_chain.rs (8)</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>TTL sweep (stale → fail)</td><td>daemon</td><td class="mono">sweeper_ttls.rs (10)</td><td class="mono">tripwire_ttl_sweeper_fails_stale_dispatched.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Task detail + transcript screen</td><td>TUI</td><td class="mono">transcript_reducer (10) + render_snapshot (2)</td><td class="mono">tripwire_p4_task_detail_streams.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Task CLI (list/cancel/retry)</td><td>CLI</td><td class="mono">hangar_cli_integration + cli::hangar parse</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>Task-started banner</td><td>TUI</td><td class="mono">banner_reducer_test.rs (6)</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+
+    <tr><td colspan="5" class="area">Agents</td></tr>
+    <tr><td>Agent picker (assign agent)</td><td>TUI</td><td class="mono">agent_picker_reducer_test.rs (8)</td><td class="mono">tripwire_p4_agent_picker_opens.rs</td><td class="ok">✅</td></tr>
+    <tr><td>agents_list snapshot</td><td>daemon/store</td><td class="mono">repo_agent.rs + rpc_server.rs</td><td class="mono">— (in picker tripwire)</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Skills</td></tr>
+    <tr><td>Skill repo CRUD (scoping, cascade)</td><td>store+core</td><td class="mono">skill_repo_tests (9) + skill_service inline</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>Skills sync importer (idempotent)</td><td>daemon/CLI</td><td class="mono">tripwire_skills_sync_idempotent.rs (5) + cli parse</td><td class="mono">screens_render_from_daemon (sync RPC)</td><td class="ok">✅</td></tr>
+    <tr><td>Skill manager screen (attach/detach/sync)</td><td>TUI</td><td class="mono">skill_manager_reducer (9) + snapshot (2)</td><td class="mono">tripwire_p4_skill_manager_lists.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Dispatch-time materialisation</td><td>daemon</td><td class="mono">materialise_skills_tests.rs (8)</td><td class="mono">tripwire_skill_import_and_dispatch.rs</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Templates</td></tr>
+    <tr><td>10 curated templates (embedded, resolve)</td><td>core</td><td class="mono">template_registry_tests.rs (5)</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>templates list / show / use</td><td>CLI+daemon</td><td class="mono">template_use_tests (6) + cli parse</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+
+    <tr><td colspan="5" class="area">Autopilots</td></tr>
+    <tr><td>Cron CRUD (reject invalid cron)</td><td>store+core</td><td class="mono">repo_autopilot (14) + cron.rs inline (12)</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>Scheduler fires on schedule</td><td>daemon</td><td class="mono">scheduler_loop + repo_autopilot_enqueue</td><td class="mono">tripwire_autopilot_fires_on_schedule.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Scheduler skips when in-flight</td><td>daemon</td><td class="mono">scheduler_loop::skip_when_prior_run_in_flight</td><td class="mono">tripwire_autopilot_skips_when_running.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Autopilots manager screen</td><td>TUI</td><td class="mono">autopilots_reducer (6) + snapshot (4) + rpc_over_socket</td><td class="mono">— (real-socket, no tmux)</td><td class="ok">✅</td></tr>
+    <tr><td>autopilot CLI (create/list/disable/run)</td><td>CLI</td><td class="mono">hangar_autopilot_cli.rs (2) + cli parse</td><td class="mono">—</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Auth / Secrets</td></tr>
+    <tr><td>OS keychain store/get/delete</td><td>secrets</td><td class="mono">backend.rs (7)</td><td class="mono">tripwire_keychain_roundtrip.rs <span class="muted">(#[ignore], dev-mac)</span></td><td class="ok">✅</td></tr>
+    <tr><td>secret_store_get cap gating</td><td>runtime</td><td class="mono">secret_store_cap.rs (5)</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>PAT / daemon tokens (hash-only)</td><td>store+core</td><td class="mono">repo_token (11) + token.rs inline (3) + cli</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>Env allowlist (block LD_PRELOAD)</td><td>core+daemon</td><td class="mono">env_policy (5) + env_allow_config (3) + runner</td><td class="mono">tripwire_env_allowlist_blocks_ld_preload / _passes_home</td><td class="ok">✅</td></tr>
+    <tr><td>danger-full-access first-run warning</td><td>core+daemon</td><td class="mono">warnings.rs inline (4)</td><td class="mono">tripwire_warning_shown_on_first_provider_use.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Workspace switching in Settings</td><td>TUI+runtime</td><td class="mono">settings_reducer + workspace_cap.rs (7)</td><td class="mono">tripwire_workspace_switch_e2e.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Settings screen (sections, key entry)</td><td>TUI</td><td class="mono">settings_reducer_test.rs</td><td class="mono">tripwire_p4_settings_renders.rs</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Observability</td></tr>
+    <tr><td>Tracing JSONL sink</td><td>daemon</td><td class="mono">it_subscriber_writes_jsonl.rs</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>OTLP exporter (otlp feature)</td><td>daemon</td><td class="mono">it_otlp_export_when_endpoint_set.rs <span class="muted">(--features otlp)</span></td><td class="mono">tripwire_otel_export_when_endpoint_set.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Instrumented service spans (8 methods)</td><td>store+daemon</td><td class="mono">service_spans_emit + beads_sync_spans_emit</td><td class="mono">—</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+    <tr><td>Daemon health pane + sparkline</td><td>TUI+daemon</td><td class="mono">snapshot_daemon_health.rs (5)</td><td class="mono">tripwire_daemon_health_sparkline.rs</td><td class="ok">✅</td></tr>
+    <tr><td>logs tail CLI + logs screen</td><td>CLI+TUI</td><td class="mono">logs.rs inline (8) + cli + snapshot_logs_screen (3)</td><td class="mono">— (no tmux for logs screen)</td><td class="ok">✅ <span class="muted">(acc.)</span></td></tr>
+
+    <tr><td colspan="5" class="area">gh integration</td></tr>
+    <tr><td>PR-URL capture into task result</td><td>core+daemon</td><td class="mono">pr_url_parse (10) + result inline + issues_list_pr_url (3)</td><td class="mono">tripwire_pr_capture.rs</td><td class="ok">✅</td></tr>
+    <tr><td>PR badge + o open-in-browser</td><td>TUI</td><td class="mono">pr_badge_snapshot (5) + pr_open_keybinding (3)</td><td class="mono">tripwire_pr_badge.rs</td><td class="ok">✅</td></tr>
+
+    <tr><td colspan="5" class="area">Daemon / Transport</td></tr>
+    <tr><td>Daemon boot + migrations apply</td><td>daemon+store</td><td class="mono">tripwire_migrations_apply.rs (16 tables)</td><td class="mono">tripwire_daemon_boots.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Unix-socket JSON-RPC + snapshots</td><td>daemon+proto</td><td class="mono">wire_types (6) + rpc inline + rpc_server.rs</td><td class="mono">tripwire_hangar_plugin_connects.rs</td><td class="ok">✅</td></tr>
+    <tr><td>workspace/subscribe + event stream</td><td>proto+plugin</td><td class="mono">event_roundtrip (6) + stream_decode (8) + daemon_dial</td><td class="mono">tripwire_detects_daemon_drop</td><td class="ok">✅</td></tr>
+    <tr><td>Cross-screen navigation</td><td>TUI</td><td class="mono">screen_router_test.rs (5)</td><td class="mono">tripwire_p4_cross_screen_navigation.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Beads bidirectional sync</td><td>daemon</td><td class="mono">beads_adapter/reconcile/inbound/outbound/cli (50+)</td><td class="mono">tripwire_beads_roundtrip.rs</td><td class="ok">✅</td></tr>
+    <tr><td>Claude runner exec (env/exit/stream/timeout)</td><td>daemon</td><td class="mono">runner_claude.rs (6)</td><td class="mono">— (in happy-path)</td><td class="ok">✅</td></tr>
+    <tr><td>Full-suite e2e guard (no shrink)</td><td>daemon</td><td class="mono">—</td><td class="mono">tripwire_full_e2e.rs</td><td class="ok">✅</td></tr>
+  </table>
+
+  <h3>Coverage summary</h3>
+  <div class="grid">
+    <div class="card"><h4 style="color:var(--green)">22 — full e2e tripwire</h4><p class="muted">Real <code>tmux</code> drive of <code>ainb tui</code> (11 screens/flows) or daemon-over-real-socket (11 control-plane flows).</p></div>
+    <div class="card"><h4 style="color:var(--gold)">12 — acceptance only</h4><p class="muted">Strong unit/integration coverage; no tmux tripwire — task retry, task/templates/token CLIs, skill CRUD, autopilot CRUD, JSONL sink, service spans, logs screen.</p></div>
+    <div class="card"><h4 style="color:var(--green)">0 — untested</h4><p class="muted">Every feature has at least an acceptance test.</p></div>
+  </div>
+
+  <div class="callout warnbox"><strong>Honest gaps (not regressions — coverage shape):</strong>
+    <ul class="tight">
+      <li>The <strong>logs screen</strong> and <strong>autopilots manager screen</strong> have reducer + snapshot + real-socket coverage but no <code>tmux capture-pane</code> proof of the rendered screen.</li>
+      <li>The <code>task</code> / <code>templates</code> / <code>token</code> CLIs are acceptance-only (parse + handler), versus the <code>issue</code> path which has a full tmux roundtrip.</li>
+      <li>The keychain roundtrip tripwire is <code>#[ignore]</code> by default (needs a real dev-mac keychain prompt); the in-memory + cfg-gated backend tests are the authoritative proof.</li>
+    </ul>
+  </div>
+</div></section>
+
+<!-- ───────────────────────── PHASES ───────────────────────── -->
+<section id="phases"><div class="wrap">
+  <h2><span class="num">11</span>How it was built — phases P0–P9</h2>
+  <p class="muted">Per-bead TDD (RED → GREEN → review → scoped gate → close), each phase capped by e2e tripwires.</p>
+  <div class="phasebar">
+    <div class="phase"><b>P0 ✅</b>Schema + store</div>
+    <div class="phase"><b>P1 ✅</b>Task FSM + dispatch</div>
+    <div class="phase"><b>P2 ✅</b>Daemon</div>
+    <div class="phase"><b>P3 ✅</b>Plugin host caps</div>
+    <div class="phase"><b>P4 ✅</b>5 core screens</div>
+    <div class="phase"><b>P5 ✅</b>Auth + workspace</div>
+    <div class="phase"><b>P6 ✅</b>Skills + templates</div>
+    <div class="phase"><b>P7 ✅</b>Autopilots + cron</div>
+    <div class="phase"><b>P8 ✅</b>Kanban + health + obs</div>
+    <div class="phase"><b>P9 ◐</b>gh + release</div>
+  </div>
+  <p class="muted">P0–P8 complete and verified; P9 (gh integration ✅, PR badge ✅, CI matrix ✅) in the release-prep stretch — draft PR <code>feat/multica → main</code> (#179) open, target tag <strong>v2.0.0</strong>.</p>
+</div></section>
+
+<footer><div class="wrap">
+  Hangar — agents-in-a-box · <code>feat/multica</code> · generated architecture explainer. Diagrams via fireworks-tech-graph.
+</div></footer>
+
+</body>
+</html>
