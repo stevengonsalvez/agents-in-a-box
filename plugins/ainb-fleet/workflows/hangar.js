@@ -60,6 +60,51 @@ async function withRetry(fn, label, attempts, baseDelayMs) {
 }
 
 // ===========================================================================
+// Batched enrich — ONE agent drafts a `suggestion` for every stale card and
+// persists each to the content cache via `ainb fleet enrich-cache put`, so the
+// next read is a free cache hit. Replaces the old one-subagent-per-session
+// fan-out. Returns a map of enrich_key -> suggestion (via the parity-guarded
+// `enrichMapFromItems` defined at the bottom of this file).
+// ===========================================================================
+async function batchedEnrich(stale, model) {
+  const BATCH_SCHEMA = {
+    type: 'object',
+    required: ['items'],
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['enrich_key', 'suggestion'],
+          properties: {
+            enrich_key: { type: 'string' },
+            suggestion: { type: 'string' },
+          },
+        },
+      },
+    },
+  }
+  const cards = stale.map((s) => ({
+    enrich_key: s.enrich_key,
+    kind: (s && s.kind) || 'WAIT',
+    context: JSON.stringify((s && s.context) || {}).slice(0, 600),
+  }))
+  const res = await withRetry(() => agent(
+    'Several claude sessions are blocked. For EACH card below, draft a `suggestion`:\n' +
+      '  ASK  → the single best option label, verbatim from the options\n' +
+      '  ERR  → one of: retry | skip | investigate\n' +
+      '  IDLE → one of: resume | close\n' +
+      '  WAIT/other → empty string\n\n' +
+      'Cards (JSON array of {enrich_key, kind, context}):\n' + JSON.stringify(cards) + '\n\n' +
+      'Then PERSIST each non-empty suggestion so the next read is free — run once per card:\n' +
+      '  ainb fleet enrich-cache put --key <enrich_key> --suggestion "<suggestion>"\n\n' +
+      'Return `items`: an array of {enrich_key, suggestion}, one entry per input card.',
+    { label: 'enrich:batch(' + cards.length + ')', phase: 'Enrich', model, schema: BATCH_SCHEMA },
+  ), 'enrich-batch', 2, 1000).catch(() => ({ items: [] }))
+  return enrichMapFromItems(res && res.items)
+}
+
+// ===========================================================================
 // VERB: needs — the Jarvis panel (former fleet-needs flow)
 // ===========================================================================
 async function runNeeds(opts) {
@@ -114,59 +159,20 @@ async function runNeeds(opts) {
   phase('Enrich')
   log('enrich model: ' + enrichModel)
 
-  const ENRICH_SCHEMA = {
-    type: 'object',
-    required: ['line', 'suggestion'],
-    properties: {
-      line: { type: 'string', description: 'one terse operator-facing summary, <= 12 words' },
-      suggestion: { type: 'string', description: 'ASK: best option label verbatim; ERR: retry|skip|investigate; IDLE: resume|close; else empty' },
-    },
-  }
+  // ONE batched enrich agent covers EVERY card that needs it (cache misses),
+  // regardless of fleet size — instead of one subagent per session. Cache hits
+  // already carry `enriched` from the Rust reader and cost nothing. A single
+  // bad item in the batch just leaves that card snippet-only; the rest survive.
+  const stale = sessions.filter((s) => s && s.need_enrich && s.enrich_key)
+  log('enrich: ' + stale.length + ' stale / ' + sessions.length + ' (cache hits free)')
+  const suggMap = stale.length > 0 ? await batchedEnrich(stale, enrichModel) : {}
 
-  // Label helpers: rich agent labels in the /workflows monitor.
-  const tagOf = (kind, ctx) => {
-    if (kind === 'IDLE' && ctx && typeof ctx.idle_minutes === 'number') return '[IDLE ' + ctx.idle_minutes + 'm]'
-    return '[' + (kind || 'WAIT') + ']'
-  }
-  const idOf = (sess, idx) => {
-    const tm = sess.tmux_session || sess.workspace_name
-    if (tm) return tm
-    const cwd = sess.cwd || ''
-    const segs = cwd.split('/').filter(Boolean)
-    const tail = (segs[segs.length - 1] || '').slice(0, 30)
-    const peer = sess.peer_id || ''
-    const skipTails = new Set(['tmp', 'private', 'home', 'Users'])
-    if (tail && !skipTails.has(tail)) return peer ? tail + ':' + peer : tail
-    return peer || ('session-' + idx)
-  }
-
-  let done = 0
-  const total = sessions.length
-  const enriched = await parallel(
-    sessions.map((s, i) => () => {
-      const kind = (s && s.kind) || 'WAIT'
-      const ctx = (s && s.context) || {}
-      const sess = (s && s.session) || {}
-      const sid = sess.id || idOf(sess, i)
-      const ctxStr = JSON.stringify(ctx).slice(0, 900)
-      const label = tagOf(kind, ctx) + ' enrich:' + idOf(sess, i) + '  route:' + (s.route_hint || 'tmux')
-      const onDone = () => {
-        done++
-        if (done % 5 === 0 || done === total) log('enriched ' + done + '/' + total)
-      }
-      return withRetry(() => agent(
-        'A claude session is blocked.\n' +
-          'session_id=' + sid + ' kind=' + kind + '\n' +
-          'context=' + ctxStr + '\n\n' +
-          'Return `line`: one terse operator-facing summary (<=12 words) of what this session needs.\n' +
-          'Return `suggestion`: for ASK, the single best option label verbatim from the options; ' +
-          'for ERR, one of retry|skip|investigate; for IDLE, one of resume|close; otherwise empty string.',
-        { label: label, phase: 'Enrich', model: enrichModel, schema: ENRICH_SCHEMA },
-      ), label, 2, 1000)
-        .then((e) => { onDone(); return { row: s, enriched: e } })
-        .catch(() => { onDone(); return { row: s, enriched: null } })
-    }),
-  )
+  const enriched = sessions.map((s) => {
+    const cached = s && typeof s.enriched === 'string' ? s.enriched : null
+    const fresh = s && s.enrich_key ? suggMap[s.enrich_key] : null
+    const suggestion = fresh && fresh.length > 0 ? fresh : cached
+    return { row: s, enriched: suggestion ? { suggestion } : null }
+  })
 
   phase('Prioritize')
 
@@ -242,39 +248,51 @@ async function runStandup(opts) {
   phase('Enrich')
   log('enrich model: ' + enrichModel)
 
-  const STANDUP_ENRICH_SCHEMA = {
+  // ONE batched agent briefs the whole fleet (instead of one per session); it
+  // may read each transcript tail itself. Items missing from the result just
+  // fall back to the raw summary in the Group step.
+  const STANDUP_BATCH_SCHEMA = {
     type: 'object',
-    required: ['activity', 'state', 'stale'],
+    required: ['items'],
     properties: {
-      activity: { type: 'string', description: '<=10 words: what this session is working on, or idle/done' },
-      state: { type: 'string', enum: ['active', 'idle', 'done', 'stuck'] },
-      stale: { type: 'string', description: 'human relative age from last_seen_ms vs now, e.g. "3h", "20m", "2d"' },
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['id', 'activity', 'state', 'stale'],
+          properties: {
+            id: { type: 'string', description: 'the session id, echoed verbatim from input' },
+            activity: { type: 'string', description: '<=10 words: what this session is working on, or idle/done' },
+            state: { type: 'string', enum: ['active', 'idle', 'done', 'stuck'] },
+            stale: { type: 'string', description: 'relative age from last_seen_ms vs now, e.g. "3h", "20m", "2d"' },
+          },
+        },
+      },
     },
   }
-
-  let done = 0
-  const total = sessions.length
-  const enriched = await parallel(
-    sessions.map((s, i) => () => {
-      const ws = s.workspace_name || 'unknown'
-      const tmux = s.tmux_session || s.bg_job_id || ('session-' + i)
-      const cwd = s.cwd || ''
-      const onDone = () => { done++; if (done % 10 === 0 || done === total) log('briefed ' + done + '/' + total) }
-      return withRetry(() => agent(
-        'A claude session. workspace=' + ws + ' tmux=' + tmux + ' cwd=' + cwd +
-          ' last_seen_ms=' + (s.last_seen_ms || 0) + ' raw_summary=' + JSON.stringify(s.summary || '') + '\n\n' +
-          'Determine what this session is actually doing. Read its recent transcript tail — try:\n' +
-          '  slug=$(echo "' + cwd + '" | sed "s#/#-#g"); f=$(ls -t ~/.claude/projects/$slug/*.jsonl 2>/dev/null | head -1); tail -n 40 "$f"\n' +
-          'If the tail is unreadable, fall back to the raw_summary.\n\n' +
-          'Return `activity`: <=10 words on what it is working on (or "idle"/"done" if nothing active — ignore noise like "No response requested").\n' +
-          'Return `state`: active | idle | done | stuck.\n' +
-          'Return `stale`: relative age computed from last_seen_ms vs the current time (run `date +%s%3N` if needed), e.g. "3h", "20m", "2d".',
-        { label: ws + ':' + tmux, phase: 'Enrich', model: enrichModel, schema: STANDUP_ENRICH_SCHEMA },
-      ), ws + ':' + tmux, 2, 1000)
-        .then((e) => { onDone(); return { s, e } })
-        .catch(() => { onDone(); return { s, e: null } })
-    }),
-  )
+  const idForStandup = (s, i) => s.tmux_session || s.bg_job_id || 'session-' + i
+  const cards = sessions.map((s, i) => ({
+    id: idForStandup(s, i),
+    workspace: s.workspace_name || 'unknown',
+    cwd: s.cwd || '',
+    last_seen_ms: s.last_seen_ms || 0,
+    summary: typeof s.summary === 'string' ? s.summary.slice(0, 80) : '',
+  }))
+  const res = await withRetry(() => agent(
+    'Brief a fleet of claude sessions. For EACH session below, decide what it is doing.\n' +
+      'You MAY read a session\'s recent transcript tail to decide:\n' +
+      '  slug=$(echo "<cwd>" | sed "s#/#-#g"); f=$(ls -t ~/.claude/projects/$slug/*.jsonl 2>/dev/null | head -1); tail -n 40 "$f"\n' +
+      'Compute `stale` as a relative age from last_seen_ms vs now (run `date +%s%3N`). Ignore noise like "No response requested".\n\n' +
+      'Sessions (JSON array): ' + JSON.stringify(cards) + '\n\n' +
+      'Return `items`: array of {id (echoed verbatim), activity (<=10 words), state (active|idle|done|stuck), stale}, one per session.',
+    { label: 'standup:batch(' + cards.length + ')', phase: 'Enrich', model: enrichModel, schema: STANDUP_BATCH_SCHEMA },
+  ), 'standup-batch', 2, 1000).catch(() => ({ items: [] }))
+  const byId = {}
+  for (const it of (res && res.items) || []) {
+    if (it && typeof it.id === 'string') byId[it.id] = it
+  }
+  const enriched = sessions.map((s, i) => ({ s, e: byId[idForStandup(s, i)] || null }))
+  log('briefed ' + sessions.length + ' session(s) in 1 batch')
 
   // ---- Group: pure JS, by workspace ----
   phase('Group')
@@ -457,5 +475,15 @@ function buildPanel(enriched) {
   })
 
   return { banner, cards, asks }
+}
+
+function enrichMapFromItems(items) {
+  const map = {}
+  for (const it of items || []) {
+    if (it && typeof it.enrich_key === 'string' && it.enrich_key.length > 0) {
+      map[it.enrich_key] = typeof it.suggestion === 'string' ? it.suggestion : ''
+    }
+  }
+  return map
 }
 // PARITY-END
