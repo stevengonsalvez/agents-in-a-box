@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The terminal set is `{Done, Failed, Cancelled}`; the pending (non-terminal,
 /// not-yet-running) set is `{Queued, Dispatched}` — the same partition the
-/// `idx_one_pending_task_per_issue` partial unique index enforces.
+/// `idx_one_pending_task_per_issue_agent` partial unique index enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {

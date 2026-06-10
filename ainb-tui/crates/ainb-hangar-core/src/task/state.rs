@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// The terminal set is `{Done, Failed, Cancelled}`; the pending (non-terminal,
 /// not-yet-running) set is `{Queued, Dispatched}` — the partition the
-/// `idx_one_pending_task_per_issue` partial unique index coalesces on
-/// (migration 022).
+/// `idx_one_pending_task_per_issue_agent` partial unique index coalesces on
+/// (migration 0012, per (issue, agent)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
@@ -138,7 +138,7 @@ impl TaskState {
     }
 
     /// Whether this state is pending (`Queued` / `Dispatched`) — the set the
-    /// `idx_one_pending_task_per_issue` partial unique index coalesces on.
+    /// `idx_one_pending_task_per_issue_agent` partial unique index coalesces on.
     #[must_use]
     pub const fn is_pending(self) -> bool {
         matches!(self, Self::Queued | Self::Dispatched)

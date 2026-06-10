@@ -8,13 +8,16 @@
 //! # Partial-unique invariant
 //!
 //! At most one *pending* (`queued` or `dispatched`) task may exist per
-//! `issue_id`, enforced by the partial unique index
-//! `idx_one_pending_task_per_issue` (migration 0004). An [`TaskRepo::insert`] of
-//! a second pending task for the same issue therefore returns a `sqlx::Error`
+//! `(issue_id, agent_id)` pair, enforced by the partial unique index
+//! `idx_one_pending_task_per_issue_agent` (migration 0012, replacing the 0004
+//! global-per-issue scope). An [`TaskRepo::insert`] of a second pending task
+//! for the same issue **and the same agent** therefore returns a `sqlx::Error`
 //! UNIQUE-constraint violation rather than silently double-queueing — this is
-//! how the enqueue path coalesces duplicate fires (mirrors Multica
-//! `022_task_lifecycle_guards.up.sql`). Tasks with a `NULL` `issue_id` (chat /
-//! autopilot placeholders) are excluded from the index and never collide.
+//! how the enqueue path coalesces duplicate fires, while *different* agents
+//! may each queue work on one issue in parallel (Multica's per-(issue, agent)
+//! model, `pkg/db/queries/agent.sql` `ClaimAgentTask`). Tasks with a `NULL`
+//! `issue_id` (chat / autopilot placeholders) are excluded from the index and
+//! never collide.
 //!
 //! # Scope
 //!
@@ -110,9 +113,9 @@ impl TaskRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the insert fails — notably a UNIQUE
-    /// constraint violation from `idx_one_pending_task_per_issue` when a pending
-    /// task already exists for the same `issue_id`, or an FK violation on
-    /// `workspace_id` / `runtime_id` / `agent_id` / `issue_id`.
+    /// constraint violation from `idx_one_pending_task_per_issue_agent` when a
+    /// pending task already exists for the same `(issue_id, agent_id)`, or an
+    /// FK violation on `workspace_id` / `runtime_id` / `agent_id` / `issue_id`.
     pub async fn insert(pool: &SqlitePool, task: &NewTask) -> Result<String, sqlx::Error> {
         let mut tx = pool.begin().await?;
         let id = Self::insert_in_tx(&mut tx, task).await?;
@@ -132,9 +135,9 @@ impl TaskRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the insert fails — notably a UNIQUE
-    /// constraint violation from `idx_one_pending_task_per_issue` when a pending
-    /// task already exists for the same `issue_id`, or an FK violation on
-    /// `workspace_id` / `runtime_id` / `agent_id` / `issue_id` /
+    /// constraint violation from `idx_one_pending_task_per_issue_agent` when a
+    /// pending task already exists for the same `(issue_id, agent_id)`, or an
+    /// FK violation on `workspace_id` / `runtime_id` / `agent_id` / `issue_id` /
     /// `autopilot_run_id`.
     pub async fn insert_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

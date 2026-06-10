@@ -396,18 +396,34 @@ async fn migration_0004_creates_agent_task_queue_with_partial_unique() {
         "agent_task_queue.finished_at: {tq}"
     );
 
-    let idx = index_sql(&pool, "idx_one_pending_task_per_issue").await;
+    // Migration 0012 replaces the 0004 global-per-issue index with the
+    // per-(issue, agent) scope (Multica ClaimAgentTask parity), so the final
+    // schema carries `idx_one_pending_task_per_issue_agent` and the old name
+    // must be gone.
+    let old_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='index' AND name='idx_one_pending_task_per_issue'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count old index");
+    assert_eq!(
+        old_count, 0,
+        "the 0004 global-per-issue index must be dropped by 0012"
+    );
+
+    let idx = index_sql(&pool, "idx_one_pending_task_per_issue_agent").await;
     assert!(
         idx.contains("UNIQUE"),
-        "idx_one_pending_task_per_issue is UNIQUE: {idx}"
+        "idx_one_pending_task_per_issue_agent is UNIQUE: {idx}"
     );
     assert!(
-        idx.contains("agent_task_queue") && idx.contains("(issue_id)"),
-        "idx_one_pending_task_per_issue on agent_task_queue(issue_id): {idx}"
+        idx.contains("agent_task_queue") && idx.contains("(issue_id, agent_id)"),
+        "idx_one_pending_task_per_issue_agent on agent_task_queue(issue_id, agent_id): {idx}"
     );
     assert!(
         idx.contains("WHERE") && idx.contains("status IN ('queued','dispatched')"),
-        "idx_one_pending_task_per_issue partial predicate: {idx}"
+        "idx_one_pending_task_per_issue_agent partial predicate: {idx}"
     );
 
     pool.close().await;

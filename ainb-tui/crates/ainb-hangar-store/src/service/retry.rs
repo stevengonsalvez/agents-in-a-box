@@ -24,10 +24,10 @@
 //! orphan exists with the schema defaults (`attempt=1`, `parent_task_id=NULL`),
 //! which would silently reset the chain cap and break parent-linkage if the
 //! process died mid-retry. That single insert is subject to the
-//! `idx_one_pending_task_per_issue` partial unique index: if another pending task
-//! already holds the per-issue slot, the insert raises a UNIQUE error which this
-//! service propagates (Multica raises + logs; we mirror that rather than silently
-//! swallowing the collision).
+//! `idx_one_pending_task_per_issue_agent` partial unique index (migration 0012):
+//! if another pending task already holds the per-(issue, agent) slot, the insert
+//! raises a UNIQUE error which this service propagates (Multica raises + logs;
+//! we mirror that rather than silently swallowing the collision).
 
 use ainb_hangar_core::clock::HangarClock;
 
@@ -90,8 +90,8 @@ impl RetryService {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the child insert fails — notably the
-    /// `idx_one_pending_task_per_issue` UNIQUE violation when another pending
-    /// task already holds the per-issue slot.
+    /// `idx_one_pending_task_per_issue_agent` UNIQUE violation when another
+    /// pending task already holds the per-(issue, agent) slot.
     pub async fn maybe_retry_failed(
         pool: &SqlitePool,
         failed_task: &Task,

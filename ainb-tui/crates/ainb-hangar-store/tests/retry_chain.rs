@@ -426,9 +426,9 @@ async fn retry_chain_walk_via_parent_task_id() {
 #[tokio::test]
 async fn partial_unique_index_blocks_retry_when_existing_pending() {
     // The failed task carries an issue_id; a *new* manually-enqueued queued task
-    // already exists for the same issue. The retry insert collides with
-    // idx_one_pending_task_per_issue and surfaces the UNIQUE error (Multica
-    // raises + logs; we mirror by propagating the DB error).
+    // already exists for the same issue AND the same agent. The retry insert
+    // collides with idx_one_pending_task_per_issue_agent and surfaces the UNIQUE
+    // error (Multica raises + logs; we mirror by propagating the DB error).
     let (_dir, store) = open_seeded().await;
     let issue = seed_issue(&store, "issue-1").await;
     let parent = seed_failed_task(

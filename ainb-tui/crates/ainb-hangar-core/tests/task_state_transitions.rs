@@ -177,7 +177,7 @@ fn serde_round_trip_lowercase() {
 
 #[test]
 fn is_pending_matches_partial_unique_index_predicate() {
-    // `idx_one_pending_task_per_issue` (migration 022) coalesces on
+    // `idx_one_pending_task_per_issue_agent` (migration 0012) coalesces on
     // `{queued, dispatched}`.
     assert!(TaskState::Queued.is_pending());
     assert!(TaskState::Dispatched.is_pending());

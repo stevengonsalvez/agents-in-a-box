@@ -327,8 +327,8 @@ fn seed_database(hangar_dir: &Path) {
 /// on the same workspace / runtime / agent the fixture seeded. Each gets a
 /// distinct `id` so the board's `#<short_id>` card identifier is greppable. The
 /// inserts carry **no** `issue_id` (`NULL`) so the partial-unique
-/// `idx_one_pending_task_per_issue` index never collides with the fixture's
-/// `issue-1` task.
+/// `idx_one_pending_task_per_issue_agent` index never collides with the
+/// fixture's `issue-1` task.
 ///
 /// Must run after [`prepare_pipeline`] (which seeds the fixture) and against the
 /// same isolated `$HOME`. Panics on any insert failure (the caller is already
