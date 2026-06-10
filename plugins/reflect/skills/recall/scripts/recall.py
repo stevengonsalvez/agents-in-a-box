@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +190,19 @@ GAP_LOG_ENABLED = os.environ.get("RECALL_GAP_LOG", "1") != "0"
 # only — the R5 temporal arm consumes the range for time-aware ranking.
 # Pure-regex stdlib pass, sub-millisecond; disable with RECALL_TEMPORAL=0.
 TEMPORAL_ENABLED = os.environ.get("RECALL_TEMPORAL", "1") != "0"
+
+# R5: temporal retrieval arm (Hindsight `retrieve_temporal_combined` shape).
+# When R6 extraction finds a date phrase, a 4th parallel arm scans the local
+# learnings corpus for notes whose timestamp falls INSIDE the parsed window
+# and feeds them into the RRF fusion alongside the vector/BM25/graph arms —
+# "what did we decide last week?" ranks recency explicitly instead of
+# relying on the bounded ±10% recency boost alone. Date-free queries skip
+# the arm entirely (zero hits, no false boost). Disable with
+# RECALL_TEMPORAL_ARM=0 (extraction itself stays on for the JSON surface).
+TEMPORAL_ARM_ENABLED = os.environ.get("RECALL_TEMPORAL_ARM", "1") != "0"
+# Corpus-scan bound: the arm reads frontmatter for every learning file, so
+# cap the walk — a runaway docs dir must never stall the recall path.
+TEMPORAL_ARM_MAX_FILES = 5000
 
 # R4: token-budget retrieval. Rough estimate — 1 token ≈ 4 chars — matching
 # Hindsight's budget-not-top-k contract (agents think in tokens).
@@ -349,7 +362,7 @@ def find_learnings_cli() -> Path | None:
     return None
 
 
-CACHE_VERSION = "v5-hybrid-mmr"  # bump when fusion semantics change
+CACHE_VERSION = "v6-temporal-arm"  # bump when fusion semantics change
 
 
 def cache_path(query: str, mode: str, limit: int) -> Path:
@@ -476,6 +489,120 @@ def parse_qmd_output(text: str) -> list[Learning]:
             archived = am.group(1)
         learnings.append(Learning(chunk_text=content, frontmatter=fm, archived_at=archived))
     return learnings
+
+
+def _coerce_datetime(raw: Any) -> datetime | None:
+    """R5: coerce one frontmatter/header value to a NAIVE datetime.
+
+    yaml.safe_load already turns ISO timestamps into datetime (tz-aware for
+    a trailing Z) and bare dates into date objects; raw strings come from
+    the ``<!-- archived: ... -->`` body header. tzinfo is dropped rather
+    than converted — the R6 window is day-granular and naive, and a few
+    hours of offset never flips a day-window verdict.
+    """
+    if isinstance(raw, datetime):
+        return raw.replace(tzinfo=None)
+    if isinstance(raw, date):
+        return datetime(raw.year, raw.month, raw.day)
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.strip().rstrip("Z")).replace(
+                tzinfo=None
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def learning_timestamp(learning: Learning) -> datetime | None:
+    """R5: coalesce a learning's effective timestamp for window matching.
+
+    Frontmatter ``archived`` → ``updated_at`` → ``created`` → ``date``,
+    then the ``<!-- archived: ... -->`` body header (what R8's recency
+    boost reads). Mirrors Hindsight's COALESCE(occurred_start,
+    mentioned_at, occurred_end) date coalescing — first known timestamp
+    wins. None when the learning carries no parsable date: undatable notes
+    are simply invisible to the temporal arm, never guessed into a window.
+    """
+    for key in ("archived", "updated_at", "created", "date"):
+        dt = _coerce_datetime(learning.frontmatter.get(key))
+        if dt is not None:
+            return dt
+    return _coerce_datetime(learning.archived_at)
+
+
+def fetch_temporal(
+    temporal: TemporalRange | None, limit: int, query: str = ""
+) -> list[Learning]:
+    """R5: temporal retrieval arm — date-window scan of the learnings corpus.
+
+    Hindsight's ``retrieve_temporal_combined`` runs a similarity-ranked,
+    window-filtered SQL arm next to semantic/BM25/graph and only when
+    extraction found a constraint. Port shape: walk the local corpus
+    (QMD_DOCS_ROOT, the same files qmd indexes), keep learnings whose
+    coalesced timestamp falls inside ``[temporal.start, temporal.end]``,
+    and rank them
+
+        1. by lexical overlap with the date-stripped query (the stdlib
+           analog of Hindsight's similarity-first pool selection), then
+        2. by temporal proximity to the window midpoint (Hindsight's
+           ``temporal_proximity = 1 − |d − mid| / (span/2)``).
+
+    Contract: returns [] when ``temporal`` is None (date-free queries get
+    ZERO hits from this arm — no false boost), when the arm is disabled,
+    when the corpus is absent, or on any IO error. Booster, never blocker.
+    """
+    if temporal is None or not TEMPORAL_ARM_ENABLED or limit <= 0:
+        return []
+    # Honour the engine's KB override (the eval harness and any isolated
+    # caller set GLOBAL_LEARNINGS_PATH to a sandbox KB whose documents live
+    # under <base>/documents) — scanning the user's live corpus from inside
+    # a sandboxed run would leak real learnings into the results.
+    override = os.environ.get("GLOBAL_LEARNINGS_PATH")
+    root = Path(override) / "documents" if override else QMD_DOCS_ROOT
+    try:
+        if not root.is_dir():
+            return []
+        paths = sorted(root.rglob("*.md"))[:TEMPORAL_ARM_MAX_FILES]
+    except OSError:
+        return []
+
+    # Overlap against the query MINUS the matched date phrase — "decisions
+    # last week" should rank on "decisions", not on notes mentioning "week".
+    topical_query = query.lower()
+    if temporal.matched_text:
+        topical_query = topical_query.replace(temporal.matched_text, " ")
+
+    span = (temporal.end - temporal.start).total_seconds()
+    mid = temporal.start + (temporal.end - temporal.start) / 2
+    scored: list[tuple[float, float, Learning]] = []
+    for path in paths:
+        try:
+            content = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue  # unreadable/binary stray — booster, never blocker
+        fm, body = parse_frontmatter(content)
+        archived = None
+        m = ARCHIVE_HEADER_RE.search(body)
+        if m:
+            archived = m.group(1)
+        lrn = Learning(chunk_text=content, frontmatter=fm, archived_at=archived)
+        ts = learning_timestamp(lrn)
+        if ts is None or not (temporal.start <= ts <= temporal.end):
+            continue
+        if span > 0:
+            proximity = 1.0 - min(
+                abs((ts - mid).total_seconds()) / (span / 2.0), 1.0
+            )
+        else:
+            proximity = 1.0
+        overlap = (
+            lexical_overlap(topical_query, lrn) if topical_query.strip() else 0.0
+        )
+        scored.append((overlap, proximity, lrn))
+    # Stable sort: ties keep the deterministic path order.
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [lrn for _, _, lrn in scored[:limit]]
 
 
 def _learning_key(learning: Learning) -> str:
@@ -1295,10 +1422,12 @@ def recall(
                 scores=rank_scores, temporal=temporal,
             )
 
-    # Fan out vector search (reflect CLI), QMD (BM25), and — R1 — the graph
-    # arm (reflect `--mode local`, entity-neighborhood expansion) in parallel.
-    # QMD and the graph arm are boosters, not blockers — each returns [] on
-    # any failure and fusion still works.
+    # Fan out vector search (reflect CLI), QMD (BM25), R1's graph arm
+    # (reflect `--mode local`, entity-neighborhood expansion), and — R5 —
+    # the temporal arm (date-window corpus scan, only when R6 extraction
+    # found a date phrase) in parallel. Every arm beyond the primary is a
+    # booster, not a blocker — each returns [] on any failure and fusion
+    # still works.
     def _fetch_mode(search_mode: str) -> tuple[list[Learning], str | None]:
         try:
             proc = subprocess.run(
@@ -1315,21 +1444,33 @@ def recall(
     # R1: only add the entity-graph arm when it differs from the primary mode
     # (an explicit `--mode local` call shouldn't fan out twice).
     graph_arm = GRAPH_ARM_ENABLED and mode != "local"
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    # R5: the temporal arm only runs when the query carried a date phrase —
+    # a date-free query contributes NOTHING from this arm (no false boost).
+    temporal_arm = TEMPORAL_ARM_ENABLED and temporal is not None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         learnings_future = pool.submit(_fetch_mode, mode)
         qmd_future = pool.submit(fetch_qmd, query, fetched_limit)
         graph_future = pool.submit(_fetch_mode, "local") if graph_arm else None
+        temporal_future = (
+            pool.submit(fetch_temporal, temporal, fetched_limit, query)
+            if temporal_arm else None
+        )
         graph_results, graph_err = learnings_future.result()
         qmd_results = qmd_future.result()
         entity_results: list[Learning] = []
         if graph_future is not None:
             entity_results, _entity_err = graph_future.result()  # booster — errors ignored
+        temporal_results: list[Learning] = []
+        if temporal_future is not None:
+            temporal_results = temporal_future.result()
 
     # If the primary path failed but a booster returned results, keep going.
-    if graph_err and not qmd_results and not entity_results:
+    if graph_err and not qmd_results and not entity_results and not temporal_results:
         return RecallResult([], query, mode, error=graph_err, temporal=temporal)
 
-    learnings = rrf_fuse([graph_results, qmd_results, entity_results])
+    learnings = rrf_fuse(
+        [graph_results, qmd_results, entity_results, temporal_results]
+    )
     # R2: cross-encoder scores for the fused top candidates. R3: mpnet
     # embeddings for the same window (MMR diversity). Both shell out to the
     # engine, so they run concurrently — added MMR latency is max(), not
