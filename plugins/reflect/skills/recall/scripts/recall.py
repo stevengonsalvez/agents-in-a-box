@@ -74,6 +74,22 @@ ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 # with RECALL_GRAPH_ARM=0.
 GRAPH_ARM_ENABLED = os.environ.get("RECALL_GRAPH_ARM", "1") != "0"
 
+# R2: cross-encoder rerank. After RRF fusion the top candidates are scored
+# jointly with the query by a local cross-encoder (`reflect rerank`; model
+# cross-encoder/ms-marco-MiniLM-L-6-v2, auto-downloaded on first use and
+# cached under ~/.reflect/models/). The CE score becomes the PRIMARY sort
+# key; the legacy confidence × recency × tags formula degrades to a
+# multiplicative modifier on top of it. Slim reflect builds (no
+# sentence-transformers) or legacy CLIs without the subcommand silently
+# degrade to formula-only ordering. Disable with RECALL_CROSS_ENCODER=0.
+CROSS_ENCODER_ENABLED = os.environ.get("RECALL_CROSS_ENCODER", "1") != "0"
+CE_CANDIDATES = 20  # only the top fused candidates are CE-scored (one batch)
+CE_TIMEOUT = int(os.environ.get("RECALL_CE_TIMEOUT", "60"))
+# Candidates beyond CE_CANDIDATES get this epsilon as their CE component:
+# they sort below every scored candidate, ordered by the legacy formula
+# among themselves (they were already tail-ranked by RRF).
+CE_UNSCORED = 1e-6
+
 # R7: OOD gate. Stopword-filtered query-term coverage of the top hit; below
 # the threshold the whole result set is treated as out-of-domain noise and
 # suppressed. 0.0 = gate off (library callers opt in; the SessionStart hook
@@ -225,7 +241,7 @@ def find_learnings_cli() -> Path | None:
     return None
 
 
-CACHE_VERSION = "v3-hybrid-graph"  # bump when fusion semantics change
+CACHE_VERSION = "v4-hybrid-ce"  # bump when fusion semantics change
 
 
 def cache_path(query: str, mode: str, limit: int) -> Path:
@@ -385,6 +401,83 @@ def rrf_fuse(result_lists: list[list[Learning]], k: int = RRF_K) -> list[Learnin
     return [first_seen[key] for key in ordered_keys]
 
 
+def _ce_sigmoid(raw: float) -> float:
+    """R2: map a cross-encoder logit to (0, 1).
+
+    ms-marco models emit unbounded logits (≈ -12 … +12); sigmoid keeps the
+    primary sort key positive and bounded so the legacy-formula modifier
+    can never flip its sign or explode it.
+    """
+    try:
+        return 1.0 / (1.0 + math.exp(-raw))
+    except OverflowError:
+        return 0.0 if raw < 0 else 1.0
+
+
+def fetch_ce_scores(
+    cli: Path,
+    query: str,
+    learnings: list[Learning],
+    timeout: int = CE_TIMEOUT,
+) -> dict[str, float] | None:
+    """R2: score the top fused candidates via `reflect rerank` (cross-encoder).
+
+    Sends one batch of up to CE_CANDIDATES (query, chunk) pairs to the
+    engine, which holds the heavy sentence-transformers dependency and the
+    model cache (~/.reflect/models/; auto-download on first use).
+
+    Returns {learning_key: raw_logit} or None on ANY failure — slim build
+    without sentence-transformers, legacy CLI without the subcommand,
+    timeout while the model downloads, junk output. The cross-encoder is a
+    booster, never a blocker.
+    """
+    if not learnings:
+        return None
+    payload = json.dumps({
+        "candidates": [
+            {"id": _learning_key(lrn), "text": lrn.chunk_text[:2000]}
+            for lrn in learnings[:CE_CANDIDATES]
+        ]
+    })
+    try:
+        proc = subprocess.run(
+            [str(cli), "rerank", query],
+            input=payload,
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    scores = data.get("scores")
+    if not isinstance(scores, dict):
+        return None
+    return _coerce_ce_scores(scores)
+
+
+def _coerce_ce_scores(raw: Any) -> dict[str, float] | None:
+    """R2: validate a {key: logit} mapping from subprocess output or cache.
+
+    Returns None on any shape problem so the caller degrades to the legacy
+    formula instead of crashing on a hand-edited cache file.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            out[str(key)] = float(value)
+        except (TypeError, ValueError):
+            return None
+    return out or None
+
+
 def parse_learnings_output(json_blob: str) -> list[Learning]:
     """Split a `reflect search --format json` response into Learning objects."""
     try:
@@ -415,15 +508,27 @@ def rerank(
     learnings: list[Learning],
     query_tags: list[str] | None = None,
     now: datetime | None = None,
+    ce_scores: dict[str, float] | None = None,
 ) -> list[Learning]:
     """
     D8 + S4: score = confidence × recency × (1 + tag_bonus) × proof_boost.
+
+    R2: when ``ce_scores`` (cross-encoder logits keyed by learning key) are
+    present, semantic relevance becomes the PRIMARY sort key and the legacy
+    formula degrades to a multiplicative modifier:
+
+        score = sigmoid(ce_logit) × legacy_formula
+
+    Candidates without a CE score (beyond the CE_CANDIDATES batch) take the
+    CE_UNSCORED epsilon — they sort below every scored candidate, ordered
+    by the legacy formula among themselves.
+
     Sorts in-place and returns the same list.
     """
     now = now or datetime.now(tz=None)
     qt = set(t.lower() for t in (query_tags or []))
 
-    def score(lrn: Learning) -> float:
+    def formula(lrn: Learning) -> float:
         c = CONFIDENCE_WEIGHTS.get(lrn.confidence, 0.5)
         # Recency: half-life 60d via exp(-age / 90)
         recency = 1.0
@@ -441,6 +546,13 @@ def rerank(
         lt = set(t.lower() for t in lrn.tags)
         bonus = 0.1 * len(qt & lt) if qt else 0.0
         return c * recency * (1 + bonus) * proof_count_boost(lrn.proof_count)
+
+    def score(lrn: Learning) -> float:
+        if ce_scores is None:
+            return formula(lrn)
+        raw = ce_scores.get(_learning_key(lrn))
+        ce = _ce_sigmoid(raw) if raw is not None else CE_UNSCORED
+        return ce * formula(lrn)
 
     learnings.sort(key=score, reverse=True)
     return learnings
@@ -641,7 +753,8 @@ def recall(
                 )
                 for r in cached.get("results", [])
             ]
-            learnings = rerank(learnings, query_tags)
+            ce_scores = _coerce_ce_scores(cached.get("ce_scores")) if CROSS_ENCODER_ENABLED else None  # R2
+            learnings = rerank(learnings, query_tags, ce_scores=ce_scores)
             learnings = filter_by_confidence(learnings, confidence.upper())
             learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
             learnings = learnings[:limit]
@@ -684,6 +797,10 @@ def recall(
         return RecallResult([], query, mode, error=graph_err)
 
     learnings = rrf_fuse([graph_results, qmd_results, entity_results])
+    # R2: cross-encoder scores for the fused top candidates. The cache is
+    # per-query, so the (query-dependent) CE scores are cached alongside the
+    # raw results — cache hits skip the model entirely.
+    ce_scores = fetch_ce_scores(cli, query, learnings) if CROSS_ENCODER_ENABLED else None
     # persist raw results to cache before filtering (so different confidence/limit
     # combinations can reuse the same fetch)
     if use_cache:
@@ -693,6 +810,7 @@ def recall(
                 "query": query,
                 "mode": mode,
                 "fetched_at": time.time(),
+                "ce_scores": ce_scores,
                 "results": [
                     {
                         "chunk_text": l.chunk_text,
@@ -703,7 +821,7 @@ def recall(
                 ],
             },
         )
-    learnings = rerank(learnings, query_tags)
+    learnings = rerank(learnings, query_tags, ce_scores=ce_scores)
     learnings = filter_by_confidence(learnings, confidence.upper())
     learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
     learnings = learnings[:limit]

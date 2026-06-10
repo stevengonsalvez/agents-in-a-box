@@ -74,6 +74,14 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         "REFLECT_LOG_LEVEL": (["telemetry", "log_level"], str),
         "REFLECT_RETENTION_DAYS": (["policies", "retention_days"], int),
         "REFLECT_AUTO_APPROVE": (["policies", "auto_approve_threshold"], float),
+        # R2: cross-encoder rerank knobs (recall.py reads the matching
+        # RECALL_CROSS_ENCODER / RECALL_CE_TIMEOUT env vars directly since
+        # it runs as a standalone uv script; these config keys are the
+        # declarative surface for hooks/tools that wire its environment).
+        "REFLECT_RECALL_CE_ENABLED": (["recall", "cross_encoder", "enabled"], bool),
+        "REFLECT_RECALL_CE_MODEL": (["recall", "cross_encoder", "model"], str),
+        "REFLECT_RECALL_CE_CANDIDATES": (["recall", "cross_encoder", "candidates"], int),
+        "REFLECT_RECALL_CE_TIMEOUT": (["recall", "cross_encoder", "timeout_s"], int),
     }
 
     for env_key, (path_keys, cast) in env_map.items():
@@ -84,6 +92,8 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         # Cast the raw string to the expected type
         if cast is list:
             value: Any = [s.strip() for s in raw.split(",") if s.strip()]
+        elif cast is bool:
+            value = raw.strip().lower() not in {"0", "false", "no", "off", ""}
         elif cast is int:
             value = int(raw)
         elif cast is float:
@@ -143,6 +153,16 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
         "auto_approve_threshold": 0.8,
         "retention_days": 90,
         "max_memory_lines": 200,
+    },
+    "recall": {
+        # R2: cross-encoder rerank (engine-side `reflect rerank`; model
+        # auto-downloads to ~/.reflect/models/ on first use).
+        "cross_encoder": {
+            "enabled": True,
+            "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "candidates": 20,
+            "timeout_s": 60,
+        },
     },
     "telemetry": {
         "enabled": True,

@@ -41,6 +41,18 @@ auto_approve_threshold = 0.8
 retention_days = 90
 max_memory_lines = 200
 
+[recall.cross_encoder]
+# R2: cross-encoder rerank. recall.py scores fused candidates jointly with
+# the query via `reflect rerank` (engine-side; model auto-downloads to
+# ~/.reflect/models/ on first use, cached thereafter). Slim builds without
+# sentence-transformers silently degrade to the legacy formula. recall.py
+# itself is controlled by the RECALL_CROSS_ENCODER / RECALL_CE_TIMEOUT env
+# vars; these keys are the declarative surface for hooks that set them.
+enabled = true
+model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+candidates = 20
+timeout_s = 60
+
 [telemetry]
 enabled = true
 log_level = "info"
