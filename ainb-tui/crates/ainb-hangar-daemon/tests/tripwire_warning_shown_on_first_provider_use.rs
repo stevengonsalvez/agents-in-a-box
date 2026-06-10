@@ -53,12 +53,16 @@ fn warning_shown_on_first_provider_use() {
     let bin = ainb_bin().expect("gated by can_run_tripwire");
 
     let sess = TuiSession::spawn(&bin, pipe.home());
-    // Reaching the Hangar screen is the precondition. If the render pipeline
-    // can't stand up on this machine (documented P4.9 tmux render blocker), SKIP
-    // per the HARD RULE — this tripwire asserts the warning, not the issue list.
+    // Reaching the Hangar screen is a hard precondition, and the environment is
+    // already gated by `can_run_tripwire()` — so a render timeout here is a
+    // real regression, not a missing prerequisite. This used to SKIP (citing
+    // the long-resolved P4.9 render blocker), which silently masked the notifyd
+    // first-run dialog swallowing the `g` nav on CI. Fail loud instead.
     if sess.open_hangar_and_wait_ready().is_none() {
-        skip("first_run_warning (hangar screen never rendered — P4.9 tmux render precondition)");
-        return;
+        panic!(
+            "hangar screen never rendered (precondition):\n{}",
+            sess.capture()
+        );
     }
 
     // POSITIVE: the danger-full-access warning modal appears within 10s.
@@ -66,10 +70,13 @@ fn warning_shown_on_first_provider_use() {
         c.contains(WARNING_MARKER)
     });
     let Some(shown) = shown else {
-        // The modal renders on the plugin's first paint after init. If it never
-        // appeared the pipeline is the P4.9 blocker again — SKIP, don't fail.
-        skip("first_run_warning (modal marker never painted — P4.9 render precondition)");
-        return;
+        // The modal renders on the plugin's first paint after init. The screen
+        // is already up (precondition above), so a missing modal is a real
+        // regression — fail loud, don't skip-mask it.
+        panic!(
+            "danger-full-access modal never painted:\n{}",
+            sess.capture()
+        );
     };
     assert!(
         shown.contains(WARNING_MARKER),

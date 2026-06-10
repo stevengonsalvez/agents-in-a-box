@@ -61,16 +61,17 @@ fn workspace_switch_e2e() {
     seed_second_workspace(pipe.home());
 
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
-    // Stand the TUI up to the seeded hangar issue list. If the render pipeline
-    // can't reach the landing screen on this machine (the documented P4.9 tmux
-    // render blocker — same failure as the baseline `tripwire_p4_*` tests), SKIP
-    // rather than fail: this tripwire asserts the *workspace switch*, not the
-    // issue-list render, and per the tmux-ui-tripwire HARD RULE an environment
-    // that can't support the precondition skips, never fails.
+    // Stand the TUI up to the seeded hangar issue list. The environment is
+    // already gated by `can_run_tripwire()`, so a render timeout here is a real
+    // regression, not a missing prerequisite. This used to SKIP (citing the
+    // long-resolved P4.9 render blocker), which silently masked the notifyd
+    // first-run dialog swallowing the `g` nav on CI. Fail loud instead.
     let sess = TuiSession::spawn(&bin, pipe.home());
     if sess.open_hangar_and_wait_ready().is_none() {
-        skip("workspace_switch (hangar issue list never rendered — P4.9 tmux render precondition)");
-        return;
+        panic!(
+            "hangar issue list never rendered (precondition):\n{}",
+            sess.capture()
+        );
     }
 
     // 1. Open Settings.
