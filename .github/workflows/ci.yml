@@ -138,6 +138,12 @@ jobs:
       - name: Run all hangar tripwires
         run: bash ../scripts/hangar/run_all_tripwires.sh
         working-directory: ${{ env.WORKING_DIR }}
+      # The framed-socket + CLI acceptance proofs (rpc_*, migration_*_upgrade,
+      # hangar_cli_integration, …) live in tests/ — neither the `--lib` test job
+      # nor the tripwire suite runs them, so they were CI-ungated. Gate them here.
+      - name: Run hangar acceptance tests (framed-socket + CLI)
+        run: bash ../scripts/hangar/run_acceptance_tests.sh
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
   # Unused dependency detection
