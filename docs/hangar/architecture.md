@@ -84,10 +84,10 @@ Two loops run continuously and independently: the **dispatch loop** (control pla
 
 **Render loop (data):**
 
-1. The plugin sends `workspace/subscribe` for the active workspace.
+1. The plugin sends `workspace/subscribe` for the active workspace; the daemon registers the (authenticated) connection as a workspace-scoped event subscriber.
 2. On the ack it fires snapshot RPCs — `hangar/issues_list`, `tasks_list`, `agents_list`, `skills_list`, `autopilots_list`, `daemon_health` — which the daemon answers from the store (resolving slug→id, scoping by workspace).
 3. The plugin folds the wire rows into screen state and renders.
-4. Async events (`TaskStarted`/`TaskFinished`, `autopilot.tick_skipped`, skill updates) stream back over the subscription for instant feedback; the next snapshot reconciles authoritatively, so a dropped event self-heals.
+4. The daemon **pushes** `hangar/event` notifications over the same subscription (this closed parity-review design gap 02 — the channel used to be decode-only with zero emission sites): the claim loop emits `TaskStarted` and the terminal `TaskFinished` as the FSM finalizes, the Kanban `task_transition` RPC emits the matching lifecycle event when a card actually moves, and the autopilot scheduler / fire-now path emits `AutopilotRunChanged` (fired and skipped ticks). Events are scoped to the subscribed workspace's resolved row id — a tenant never sees another tenant's frames — and only authenticated, subscribed connections receive them. Delivery is best-effort instant feedback; the next snapshot reconciles authoritatively, so a dropped event self-heals.
 
 ## Task lifecycle (FSM)
 
@@ -271,7 +271,7 @@ Legend: **✅** = acceptance + e2e tripwire · **✅ (acc.)** = acceptance only 
 |---|---|---|---|---|
 | Daemon boot + migrations apply | daemon+store | `tripwire_migrations_apply.rs` (16 tables) | `tripwire_daemon_boots.rs` | ✅ |
 | Unix-socket JSON-RPC + snapshots | daemon+proto | `wire_types` (6) + rpc inline + `rpc_server.rs` | `tripwire_hangar_plugin_connects.rs` | ✅ |
-| workspace/subscribe + event stream | proto+plugin | `event_roundtrip` (6) + `stream_decode` (8) + `daemon_dial` | `tripwire_detects_daemon_drop` | ✅ |
+| workspace/subscribe + event stream | proto+daemon+plugin | `event_roundtrip` (6) + `stream_decode` (8) + `daemon_dial` + `rpc_event_push.rs` (3: push, workspace isolation, no-op silence) | `tripwire_detects_daemon_drop` | ✅ |
 | Cross-screen navigation | TUI | `screen_router_test.rs` (5) | `tripwire_p4_cross_screen_navigation.rs` | ✅ |
 | Beads bidirectional sync | daemon | `beads_adapter`/`reconcile`/`inbound`/`outbound`/`cli` (50+) | `tripwire_beads_roundtrip.rs` | ✅ |
 | Claude runner exec (env/exit/stream/timeout) | daemon | `runner_claude.rs` (6) | — (in happy-path) | ✅ |
