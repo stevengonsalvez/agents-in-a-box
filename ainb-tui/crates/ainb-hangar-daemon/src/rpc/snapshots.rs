@@ -514,6 +514,60 @@ pub async fn task_transition(
     TaskRepo::transition_status(pool, workspace_id, task_id, to_status, clock.now_ms()).await
 }
 
+/// Edit one issue's mutable fields, scoped to `workspace_id`, then re-read the
+/// row as a wire [`IssueRow`] (`hangar/issue_update`, e38.8).
+///
+/// `update` is the already-validated partial edit (the daemon maps the wire
+/// params — including the assignee actor-ref parse — before this call). The
+/// write is workspace-scoped at the SQL boundary, so a foreign-tenant issue id
+/// touches no row. Returns `Some(row)` with the refreshed issue when exactly one
+/// row was edited, `None` when the `(id, workspace)` pair matched nothing (the
+/// not-found / cross-tenant case the caller surfaces as an error).
+///
+/// The re-read reuses the same `IssueRow` shape `issues_list` emits (including
+/// the P9 `pr_url` derivation) so the response row and the pushed
+/// `IssueUpdated` event are byte-identical to a list snapshot of the row.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault, or a malformed stored id on the
+/// re-read.
+pub async fn issue_update(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    update: &ainb_hangar_store::repo::issue::IssueFieldUpdate,
+) -> Result<Option<IssueRow>, sqlx::Error> {
+    let touched = IssueRepo::update_fields(pool, workspace_id, issue_id, update).await?;
+    if !touched {
+        return Ok(None);
+    }
+    // Re-read the edited row and map it exactly as issues_list does, so the
+    // response + event row match a list snapshot byte-for-byte.
+    let Some(issue) = IssueRepo::get_by_id(pool, issue_id).await? else {
+        return Ok(None);
+    };
+    let id = IssueId::from_str(&issue.id).map_err(|e| sqlx::Error::ColumnDecode {
+        index: "id".to_string(),
+        source: format!("malformed issue id {:?}: {e}", issue.id).into(),
+    })?;
+    let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    Ok(Some(IssueRow {
+        id,
+        workspace_id: issue.workspace_id,
+        title: issue.title,
+        description: issue.description,
+        state: issue.state,
+        assignee: issue.assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
+        creator: format!("{}:{}", issue.creator.kind().as_str(), issue.creator.id()),
+        created_at: issue.created_at,
+        priority: issue.priority,
+        due_date: issue.due_date,
+        labels: issue.labels,
+        pr_url,
+    }))
+}
+
 /// Snapshot the registered runtimes of `workspace` for the daemon-health pane.
 ///
 /// Maps each `agent_runtime` row to a wire [`RuntimeHealthRow`] for

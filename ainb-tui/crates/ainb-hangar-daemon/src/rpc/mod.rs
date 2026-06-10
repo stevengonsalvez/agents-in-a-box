@@ -449,6 +449,7 @@ async fn handle(
             to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
         }
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
+        methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -618,6 +619,89 @@ fn parse_task_status(raw: &str) -> Result<ainb_hangar_core::task_status::TaskSta
         invalid_params(&format!(
             "to_status must be one of queued/dispatched/running/done/failed/cancelled, got `{raw}`"
         ))
+    })
+}
+
+/// Dispatch `hangar/issue_update` (e38.8): edit one issue's fields, push the
+/// matching `IssueUpdated` event, and answer with the refreshed row.
+///
+/// Mirrors [`handle_task_transition`]'s contract: the mutating handler resolves
+/// the workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a
+/// silent no-op), parses the assignee actor-ref, then drives the
+/// workspace-scoped store edit. A `(id, workspace)` pair that matches no row
+/// (an unknown id, or an issue owned by another tenant) is rejected as a
+/// not-found error — never a cross-tenant edit. Only a committed edit pushes the
+/// event. Split out of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_issue_update(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let params: ainb_hangar_proto::snapshots::IssueUpdateParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, state?, assignee?, priority?, due_date? }",
+    )?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let update = issue_field_update_from_params(&params)?;
+    let row = snapshots::issue_update(pool, ws.as_str(), &params.issue_id, &update)
+        .await
+        .map_err(|e| store_err(&e))?;
+    // No row matched the (id, workspace) pair: an unknown id or a cross-tenant
+    // issue. Reject rather than ack a write that never happened.
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    };
+    // A committed edit announces the refreshed row to subscribers.
+    events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+    to_value(&row)
+}
+
+/// Map the wire [`IssueUpdateParams`] onto the store's [`IssueFieldUpdate`],
+/// parsing the optional assignee actor-ref (`"agent:<id>"` / `"member:<id>"`).
+///
+/// The three nullable-field states cross the boundary intact: the wire
+/// [`FieldUpdate`] (omitted / null / value) maps onto the store's nested
+/// `Option<Option<_>>` (leave / clear / set). A malformed assignee ref is an
+/// `INVALID_PARAMS` client error.
+///
+/// [`IssueUpdateParams`]: ainb_hangar_proto::snapshots::IssueUpdateParams
+/// [`IssueFieldUpdate`]: ainb_hangar_store::repo::issue::IssueFieldUpdate
+/// [`FieldUpdate`]: ainb_hangar_proto::snapshots::FieldUpdate
+fn issue_field_update_from_params(
+    params: &ainb_hangar_proto::snapshots::IssueUpdateParams,
+) -> Result<ainb_hangar_store::repo::issue::IssueFieldUpdate, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_proto::snapshots::FieldUpdate;
+    use std::str::FromStr as _;
+
+    let assignee = match &params.assignee {
+        FieldUpdate::Keep => None,
+        FieldUpdate::Clear => Some(None),
+        FieldUpdate::Set(raw) => {
+            let actor = ActorRef::from_str(raw).map_err(|e| {
+                invalid_params(&format!(
+                    "assignee must be `agent:<id>` or `member:<id>`: {e}"
+                ))
+            })?;
+            Some(Some(actor))
+        }
+    };
+    let due_date = match params.due_date {
+        FieldUpdate::Keep => None,
+        FieldUpdate::Clear => Some(None),
+        FieldUpdate::Set(ts) => Some(Some(ts)),
+    };
+    Ok(ainb_hangar_store::repo::issue::IssueFieldUpdate {
+        state: params.state.clone(),
+        assignee,
+        priority: params.priority,
+        due_date,
     })
 }
 
@@ -1021,6 +1105,83 @@ mod tests {
         let resp = dispatch(
             store.pool(),
             &req(methods::HANGAR_ISSUES_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/issue_update` edits a seeded issue's fields through the
+    /// dispatcher and answers with the refreshed row (e38.8).
+    #[tokio::test]
+    async fn issue_update_edits_seeded_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-1",
+                    "state": "done",
+                    "priority": 2,
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        assert_eq!(v["id"], "issue-1");
+        assert_eq!(v["state"], "done");
+        assert_eq!(v["priority"], 2);
+    }
+
+    /// A malformed assignee ref is an `INVALID_PARAMS` client error, not a store
+    /// fault — the mapper rejects it before any write.
+    #[tokio::test]
+    async fn issue_update_malformed_assignee_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-1",
+                    "assignee": "not-an-actor-ref",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// An unknown issue id is rejected (not a silent no-op), mirroring the
+    /// mutating workspace-reject contract.
+    #[tokio::test]
+    async fn issue_update_unknown_issue_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "no-such-issue",
+                    "state": "done",
+                }),
+            ),
             &health(),
             &sink(),
         )
