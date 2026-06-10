@@ -294,6 +294,57 @@ pub async fn sweep_stale_dispatched(
     Ok(DispatchSweepOutcome { reclaimed, failed })
 }
 
+/// Reclaim a crashed daemon's orphaned in-flight tasks back to `queued` at
+/// startup (e38.25 crash recovery).
+///
+/// When a daemon dies uncleanly (`kill -9`, OOM, panic) mid-task its claimed
+/// rows are left frozen in `dispatched` or `running` — the FSM step that would
+/// have finalised them never ran. The time-based sweepers eventually move them
+/// (a `running` row only past the 2.5h running TTL; a `dispatched` row past the
+/// 90s reclaim window), but on a fresh boot there is no need to wait: the
+/// process that *was* executing those tasks is, by definition, gone. So at
+/// startup the newly-booted daemon reclaims every non-terminal in-flight row it
+/// owns — scoped to **its own** `runtime_id` so a sibling daemon's live runs in
+/// a multi-runtime deployment are never disturbed — back to `queued`, clearing
+/// `started_at` / `dispatched_at` so a fresh claim re-dispatches the work. The
+/// `attempt` counter is left **unchanged** (a crash redelivery is not a retry,
+/// mirroring [`reclaim_stale_dispatched`]).
+///
+/// This is the redelivery the daemon-restart path needs: the orphan leaves its
+/// `running`/`dispatched` limbo immediately on restart rather than stranding the
+/// work for hours. Mirrors Multica's runtime-scoped reclaim-on-boot.
+///
+/// Returns the number of rows reclaimed.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the statement fails.
+pub async fn reclaim_orphaned_on_startup(
+    pool: &SqlitePool,
+    runtime_id: &str,
+) -> Result<u64, sqlx::Error> {
+    let reclaimed = sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'queued', started_at = NULL, dispatched_at = NULL \
+         WHERE runtime_id = ?1 \
+           AND status IN ('dispatched', 'running')",
+    )
+    .bind(runtime_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if reclaimed > 0 {
+        tracing::info!(
+            kind = "startup",
+            outcome = "reclaimed",
+            count = reclaimed,
+            runtime_id,
+            "sweeper_startup_reclaim"
+        );
+    }
+    Ok(reclaimed)
+}
+
 /// Fail up to `batch_size` rows in `from_status` whose `age_column` is older
 /// than `cutoff`, setting `failure_reason = 'timeout'` and `finished_at = now`.
 ///

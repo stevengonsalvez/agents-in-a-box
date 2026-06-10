@@ -48,7 +48,8 @@ use crate::execenv::prepare_env;
 use crate::health_stats::HealthStats;
 use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    SweeperConfig, sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
+    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
+    sweep_stale_running,
 };
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
@@ -151,6 +152,20 @@ pub async fn run(
     }
 
     let runtime_id = cfg.runtime_id.clone().expect("runtime_id present");
+
+    // e38.25 crash recovery: this daemon just booted, so any task still frozen
+    // `dispatched`/`running` for its runtime is an orphan from a previous
+    // (crashed/restarted) instance — the process that owned those runs is gone.
+    // Reclaim them to `queued` once, up front, so the work is re-dispatched
+    // immediately rather than stranded until the multi-hour running TTL. Scoped
+    // to this runtime so a sibling daemon's live runs are never touched. A
+    // reclaim fault is non-fatal — the time-based sweepers still backstop it.
+    match reclaim_orphaned_on_startup(&pool, &runtime_id).await {
+        Ok(n) if n > 0 => tracing::info!(reclaimed = n, "startup crash-recovery reclaim"),
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "startup crash-recovery reclaim failed"),
+    }
+
     let runner = Runner::new(RunnerConfig {
         claude_path: cfg.claude_path.clone(),
         max_runtime: PROVIDER_MAX_RUNTIME,
