@@ -9148,7 +9148,7 @@ impl AppState {
         let Some(handle) = self.plugin_runtime.clone() else {
             return;
         };
-        let Some((payload, version)) =
+        let Some((payload, version, publisher)) =
             handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
         else {
             return;
@@ -9157,7 +9157,7 @@ impl AppState {
             return;
         }
         self.last_panel_close_version = Some(version);
-        if !panel_close_matches(&self.current_screen, &payload) {
+        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
             return;
         }
         let target = self
@@ -9175,11 +9175,23 @@ impl AppState {
 }
 
 /// `true` when a `ui.close_request` payload names the currently-focused
-/// plugin screen. Requests for non-plugin screens (a plugin can't close
-/// the session list out from under the user) and malformed payloads are
-/// rejected.
-fn panel_close_matches(current_screen: &str, payload: &[u8]) -> bool {
-    if crate::app::screens::builtin::plugin_id_for_screen(current_screen).is_none() {
+/// plugin screen AND was published by the plugin that owns it. Rejects:
+/// requests while a non-plugin screen is focused (a plugin can't close
+/// the session list out from under the user), publishes from any plugin
+/// other than the focused screen's owner (the publisher stamp comes
+/// from the wire connection, not the payload, so it can't be forged),
+/// and malformed payloads.
+fn panel_close_matches(current_screen: &str, payload: &[u8], publisher: &str) -> bool {
+    let Some(owner) = crate::app::screens::builtin::plugin_id_for_screen(current_screen) else {
+        return false;
+    };
+    if publisher != owner {
+        tracing::warn!(
+            publisher,
+            owner,
+            screen = %current_screen,
+            "ui.close_request: publisher does not own the focused screen — ignoring"
+        );
         return false;
     }
     match serde_json::from_slice::<ainb_plugin_runtime::topics::UiCloseRequest>(payload) {
@@ -9341,6 +9353,12 @@ impl App {
                 }
                 self.plugin_runtime_owner = Some(runtime);
                 self.state.plugin_runtime = Some(handle.clone());
+                // A fresh runtime means a fresh snapshot store whose
+                // version counter restarts at 0 — drop any version
+                // watermark from a previous runtime so an equal-valued
+                // version can't mask a new close request. Init runs once
+                // today; this keeps any future runtime-restart path safe.
+                self.state.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -9729,6 +9747,9 @@ mod panel_close_tests {
     use super::panel_close_matches;
     use crate::app::screens::ids;
 
+    /// Plugin id owning the analytics screen (see `PLUGIN_SCREENS`).
+    const BURNDOWN: &str = "burndown";
+
     fn payload(screen: &str) -> Vec<u8> {
         serde_json::to_vec(&ainb_plugin_runtime::topics::UiCloseRequest {
             screen_id: screen.to_string(),
@@ -9737,10 +9758,11 @@ mod panel_close_tests {
     }
 
     #[test]
-    fn matches_when_request_names_focused_plugin_screen() {
+    fn matches_when_owning_plugin_names_focused_screen() {
         assert!(panel_close_matches(
             ids::ANALYTICS,
-            &payload(ids::ANALYTICS)
+            &payload(ids::ANALYTICS),
+            BURNDOWN
         ));
     }
 
@@ -9748,7 +9770,11 @@ mod panel_close_tests {
     fn rejects_request_for_a_different_screen() {
         // A stale close request for analytics must not close the witr
         // screen the user has since navigated to.
-        assert!(!panel_close_matches(ids::WITR, &payload(ids::ANALYTICS)));
+        assert!(!panel_close_matches(
+            ids::WITR,
+            &payload(ids::ANALYTICS),
+            "witr"
+        ));
     }
 
     #[test]
@@ -9757,12 +9783,32 @@ mod panel_close_tests {
         // out from under the user, even if it names it.
         assert!(!panel_close_matches(
             ids::SESSION_LIST,
-            &payload(ids::SESSION_LIST)
+            &payload(ids::SESSION_LIST),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_publish_from_plugin_that_does_not_own_screen() {
+        // The payload alone is forgeable — any plugin can serialize
+        // {"screen_id":"analytics"}. The publisher stamp (taken from
+        // the wire connection, not the payload) is not: a publish from
+        // session-reader naming burndown's screen must be ignored.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "session-reader"
+        ));
+        // The reserved host id doesn't own plugin screens either.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "host"
         ));
     }
 
     #[test]
     fn rejects_malformed_payload() {
-        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json"));
+        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
     }
 }

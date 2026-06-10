@@ -229,14 +229,18 @@ impl RuntimeHandle {
         self.inner.snapshots.payload(&Topic::from(topic))
     }
 
-    /// Read a snapshot payload plus its monotonic store version.
+    /// Read a snapshot payload plus its monotonic store version and the
+    /// publisher's plugin id.
     ///
     /// The version lets pollers act once per publish — track the last
-    /// version seen and only react when it advances. Used by the host's
-    /// event loop to consume `ui.close_request` publishes without a
-    /// subscriber channel.
+    /// version seen and only react when it advances. The publisher is
+    /// the id the per-plugin task stamped at publish time (never
+    /// payload-self-reported), so consumers of host-semantic topics can
+    /// reject publishes from plugins that don't own the resource named
+    /// in the payload. Used by the host's event loop to consume
+    /// `ui.close_request` publishes without a subscriber channel.
     #[must_use]
-    pub fn snapshot_get_versioned(&self, topic: &str) -> Option<(Bytes, u64)> {
+    pub fn snapshot_get_versioned(&self, topic: &str) -> Option<(Bytes, u64, PluginId)> {
         self.inner.snapshots.get(&Topic::from(topic))
     }
 
@@ -281,10 +285,16 @@ impl RuntimeHandle {
     }
 
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
-    /// fan-out happens on the tokio runtime.
+    /// fan-out happens on the tokio runtime. Stamped with the reserved
+    /// [`crate::snapshot::HOST_PUBLISHER`] id — discovery refuses to
+    /// register a plugin named `host`, so the stamp is unforgeable.
     pub fn publish_snapshot(&self, topic: &str, payload: Bytes) -> u64 {
         let topic_owned = Topic::from(topic);
-        let v = self.inner.snapshots.publish(topic_owned.clone(), payload.clone());
+        let v = self.inner.snapshots.publish(
+            topic_owned.clone(),
+            payload.clone(),
+            PluginId::from(crate::snapshot::HOST_PUBLISHER),
+        );
         let subs = self.inner.snapshots.subscribers(&topic_owned);
         if subs.is_empty() {
             return v;

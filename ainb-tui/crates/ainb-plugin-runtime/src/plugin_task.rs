@@ -644,7 +644,7 @@ impl PluginTask {
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let topic = Topic::from(p.topic);
         let (payload, version) = match self.snapshots.get(&topic) {
-            Some((p, v)) => (Some(p), v),
+            Some((p, v, _publisher)) => (Some(p), v),
             None => (None, 0),
         };
         let res = SnapshotGetResult { payload, version };
@@ -668,7 +668,10 @@ impl PluginTask {
                 };
                 let topic = Topic::from(p.topic);
                 let payload = p.payload;
-                let _ = self.snapshots.publish(topic.clone(), payload.clone());
+                // Stamp the publisher from the wire connection this task
+                // owns — the plugin can't self-report a different id.
+                let _ =
+                    self.snapshots.publish(topic.clone(), payload.clone(), self.plugin.id.clone());
                 // Fan out to every subscriber — the snapshot store
                 // only retains the *latest* publish, so chunked publishes
                 // (session-reader → burndown) would lose all but the
