@@ -9214,12 +9214,10 @@ impl AppState {
     /// later. A matching request navigates back to the screen the
     /// panel was opened from (same pop as `AppEvent::PanelBack`).
     ///
-    /// Called from `App::tick_plugin_renders` so the poll shares the
-    /// event loop's render-tick cadence.
-    pub fn tick_panel_close_requests(&mut self) {
-        let Some(handle) = self.plugin_runtime.clone() else {
-            return;
-        };
+    /// Called from `App::tick_plugin_renders`, which already holds a
+    /// cloned runtime `handle`, so it's passed in rather than re-cloned
+    /// per render tick.
+    pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
         let Some((payload, version, publisher)) =
             handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
         else {
@@ -9334,7 +9332,7 @@ impl App {
 
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
-        self.state.tick_panel_close_requests();
+        self.state.tick_panel_close_requests(&handle);
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
