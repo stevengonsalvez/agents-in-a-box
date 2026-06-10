@@ -22,7 +22,11 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::ui::{CORNFLOWER_BLUE, GOLD, MUTED_GRAY, SELECTION_GREEN, SOFT_WHITE};
 
 use super::ego::{Arrow, EgoSubgraph};
-use super::layout::{Placed, layout};
+use super::layout::Placed;
+// `layout` is only reached by the test-only single-shot `render` / `layout_in`;
+// production paints through the cached layout in `MapState`.
+#[cfg(test)]
+use super::layout::layout;
 
 /// Longest entity label rendered inside a `[…]` box (char count, pre-brackets).
 /// Wide enough for every fixture entity; longer names truncate with `…`.
@@ -47,6 +51,11 @@ pub fn split_area(area: RRect) -> [RRect; 3] {
 /// nodes in canvas-relative coordinates (add the canvas origin for absolute
 /// cells). Shared by [`render`] and the hit-test so a click resolves against the
 /// exact geometry that was painted.
+///
+/// Test-only: production paints + hit-tests through the CACHED layout
+/// ([`render_cached`] / [`hit_test_in`]); this single-shot lay-out only survives
+/// as a convenience the render/state unit tests + tripwire assertions use.
+#[cfg(test)]
 #[must_use]
 pub fn layout_in(area: RRect, ego: &EgoSubgraph) -> (RRect, Vec<Placed>) {
     let canvas = split_area(area)[1];
@@ -58,7 +67,35 @@ pub fn layout_in(area: RRect, ego: &EgoSubgraph) -> (RRect, Vec<Placed>) {
 /// name). `scale` (0.0..=1.0) drives the recentre animation: `1.0` is the
 /// settled layout; below that, ring nodes are lerped toward the centre so a
 /// recentre "grows" the new neighbourhood outward over a few frames.
+///
+/// Lays the subgraph out internally; production uses [`render_cached`] with the
+/// pre-built cached layout to avoid re-laying-out across animation frames, so
+/// this single-shot entry is now test-only (the render unit tests + tripwire
+/// token assertions still drive it).
+#[cfg(test)]
 pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str, scale: f64) {
+    let area = area.intersection(buf.area);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let canvas = split_area(area)[1];
+    let placed = layout(ego, canvas.width, canvas.height);
+    render_cached(buf, area, ego, &placed, selected, scale);
+}
+
+/// Render the radial map from a PRE-COMPUTED settled `placed` layout. The
+/// recentre animation feeds the same cached `placed` every frame and only
+/// varies `scale` — the per-frame cost drops to O(nodes) (just the lerp in
+/// [`scale_toward_centre`]), no re-layout, no ego rebuild. `placed` must be the
+/// settled (scale 1.0) layout for `ego` at `area`'s canvas dimensions.
+pub fn render_cached(
+    buf: &mut RBuffer,
+    area: RRect,
+    ego: &EgoSubgraph,
+    placed: &[Placed],
+    selected: &str,
+    scale: f64,
+) {
     // Clip to the buffer so every downstream write is in-bounds (ratatui's
     // get_mut panics otherwise). Sub-rect callers stay safe even if their area
     // overruns the buffer (resize race, etc.).
@@ -71,7 +108,8 @@ pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str,
     render_header(buf, header, ego);
 
     if canvas.width > 0 && canvas.height > 0 {
-        let placed = scale_toward_centre(layout(ego, canvas.width, canvas.height), scale);
+        // Lerp a COPY of the cached layout — the cache stays the settled layout.
+        let placed = scale_toward_centre(placed.to_vec(), scale);
         // 1 + 2: edges then their decorations.
         for edge in &ego.edges {
             if let (Some(from), Some(to)) = (find(&placed, &edge.from), find(&placed, &edge.to)) {
@@ -204,10 +242,21 @@ pub fn box_rect(canvas: RRect, node: &Placed) -> (u16, u16, u16) {
 
 /// Resolve an absolute `(col, row)` click to the node whose box contains it, if
 /// any. Lays the subgraph out exactly as [`render`] does, so the hit-test sees
-/// the same geometry the user clicked.
+/// the same geometry the user clicked. Production hit-tests through the CACHED
+/// layout via [`hit_test_in`]; this lay-it-out-fresh wrapper is test-only.
+#[cfg(test)]
 #[must_use]
 pub fn hit_test(area: RRect, ego: &EgoSubgraph, col: u16, row: u16) -> Option<String> {
     let (canvas, placed) = layout_in(area, ego);
+    hit_test_in(canvas, &placed, col, row)
+}
+
+/// Resolve an absolute `(col, row)` click against a PRE-COMPUTED `placed` layout
+/// within `canvas` (canvas = the radial sub-rect, NOT the full area). Used by
+/// the cached map path so a click re-uses the same layout the render painted —
+/// always the SETTLED geometry (the hit-test never sees the animation lerp).
+#[must_use]
+pub fn hit_test_in(canvas: RRect, placed: &[Placed], col: u16, row: u16) -> Option<String> {
     placed.iter().find_map(|node| {
         let (bx, by, len) = box_rect(canvas, node);
         (row == by && col >= bx && col < bx.saturating_add(len)).then(|| node.name.clone())
@@ -451,7 +500,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::data::Relationship;
-    use crate::ui::map::ego::DEFAULT_NODE_CAP;
+    use crate::ui::map::ego::{Adjacency, DEFAULT_NODE_CAP};
 
     fn rel(source: &str, target: &str, rel_type: &str) -> Relationship {
         Relationship {
@@ -495,7 +544,7 @@ mod tests {
             rel("audit-after-rebase", "stale plan execution", "solves"),
             rel("stale plan execution", "git pull --rebase", "caused_by"),
         ];
-        let ego = EgoSubgraph::build(&rels, center, 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(&Adjacency::build(&rels), center, 1, DEFAULT_NODE_CAP, false);
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
         render(&mut buf, area, &ego, center, 1.0);
@@ -549,7 +598,7 @@ mod tests {
     #[test]
     fn relates_to_edge_has_no_arrowhead() {
         let rels = vec![rel("c", "peer", "relates_to")];
-        let ego = EgoSubgraph::build(&rels, "c", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(&Adjacency::build(&rels), "c", 1, DEFAULT_NODE_CAP, false);
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
         render(&mut buf, area, &ego, "c", 1.0);
@@ -569,7 +618,13 @@ mod tests {
     #[test]
     fn isolated_centre_shows_no_connections_hint() {
         let rels = vec![rel("other-a", "other-b", "solves")];
-        let ego = EgoSubgraph::build(&rels, "lonely", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "lonely",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
         render(&mut buf, area, &ego, "lonely", 1.0);
@@ -584,7 +639,13 @@ mod tests {
         // offset sub-rect. Must not panic on out-of-buffer get_mut, and the
         // tokens must still land (inside the sub-rect).
         let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
-        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "audit-after-rebase",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let buf_area = RRect::new(0, 0, 200, 60);
         let mut buf = RBuffer::empty(buf_area);
         let sub = RRect::new(10, 5, 80, 24);
@@ -596,7 +657,13 @@ mod tests {
     fn render_with_area_overrunning_buffer_is_clipped_not_panicking() {
         // Area flush to / past the buffer's right + bottom edge.
         let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
-        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "audit-after-rebase",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let mut buf = RBuffer::empty(RRect::new(0, 0, 60, 18));
         // Deliberately larger than the buffer — must be clipped, not panic.
         render(
@@ -612,7 +679,13 @@ mod tests {
     #[test]
     fn hit_test_resolves_a_click_inside_a_node_box() {
         let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
-        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "audit-after-rebase",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let area = RRect::new(0, 0, 80, 24);
         // Resolve the centre box's own painted rect, then click its first cell.
         let (canvas, placed) = layout_in(area, &ego);
@@ -629,7 +702,13 @@ mod tests {
     #[test]
     fn hit_test_on_empty_space_returns_none() {
         let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
-        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "audit-after-rebase",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let area = RRect::new(0, 0, 80, 24);
         // (0,0) is the header row — never a node box.
         assert_eq!(hit_test(area, &ego, 0, 0), None);

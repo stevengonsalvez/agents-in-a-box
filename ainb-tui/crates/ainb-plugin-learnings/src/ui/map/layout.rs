@@ -134,7 +134,7 @@ fn clamp_round(v: f64, max: u16) -> u16 {
 mod tests {
     use super::*;
     use crate::data::Relationship;
-    use crate::ui::map::ego::DEFAULT_NODE_CAP;
+    use crate::ui::map::ego::{Adjacency, DEFAULT_NODE_CAP};
 
     fn rel(source: &str, target: &str, strength: u32) -> Relationship {
         Relationship {
@@ -158,7 +158,13 @@ mod tests {
 
     #[test]
     fn centre_sits_at_viewport_midpoint() {
-        let ego = EgoSubgraph::build(&[rel("c", "n", 5)], "c", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&[rel("c", "n", 5)]),
+            "c",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let placed = layout(&ego, 80, 24);
         let centre = find(&placed, "c");
         assert_eq!(centre.x, 40);
@@ -169,7 +175,7 @@ mod tests {
     #[test]
     fn all_nodes_stay_in_bounds() {
         let rels: Vec<Relationship> = (0..8).map(|i| rel("hub", &format!("n{i}"), 5)).collect();
-        let ego = EgoSubgraph::build(&rels, "hub", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(&Adjacency::build(&rels), "hub", 1, DEFAULT_NODE_CAP, false);
         let placed = layout(&ego, 60, 20);
         assert_eq!(placed.len(), ego.nodes.len());
         for p in &placed {
@@ -181,7 +187,7 @@ mod tests {
     #[test]
     fn ring_two_is_farther_from_centre_than_ring_one() {
         let rels = vec![rel("c", "mid", 5), rel("mid", "leaf", 5)];
-        let ego = EgoSubgraph::build(&rels, "c", 2, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(&Adjacency::build(&rels), "c", 2, DEFAULT_NODE_CAP, false);
         let placed = layout(&ego, 80, 24);
         let centre = find(&placed, "c");
         let mid = find(&placed, "mid");
@@ -197,7 +203,7 @@ mod tests {
     #[test]
     fn layout_is_deterministic() {
         let rels: Vec<Relationship> = (0..6).map(|i| rel("hub", &format!("n{i}"), 5)).collect();
-        let ego = EgoSubgraph::build(&rels, "hub", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(&Adjacency::build(&rels), "hub", 1, DEFAULT_NODE_CAP, false);
         let a = layout(&ego, 80, 24);
         let b = layout(&ego, 80, 24);
         assert_eq!(a, b, "same subgraph + viewport → identical placement");
@@ -206,7 +212,13 @@ mod tests {
     #[test]
     fn first_ring_node_sits_above_centre() {
         // Single neighbour starts at the top (−90°), directly above the centre.
-        let ego = EgoSubgraph::build(&[rel("c", "n", 5)], "c", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&[rel("c", "n", 5)]),
+            "c",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let placed = layout(&ego, 80, 24);
         let centre = find(&placed, "c");
         let n = find(&placed, "n");
@@ -216,7 +228,13 @@ mod tests {
 
     #[test]
     fn zero_viewport_yields_no_placement() {
-        let ego = EgoSubgraph::build(&[rel("c", "n", 5)], "c", 1, DEFAULT_NODE_CAP, false);
+        let ego = EgoSubgraph::build(
+            &Adjacency::build(&[rel("c", "n", 5)]),
+            "c",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert!(layout(&ego, 0, 24).is_empty());
         assert!(layout(&ego, 80, 0).is_empty());
     }

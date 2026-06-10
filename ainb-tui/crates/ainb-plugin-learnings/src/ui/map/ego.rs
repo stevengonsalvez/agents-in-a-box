@@ -92,6 +92,7 @@ pub struct EgoSubgraph {
 
 /// One adjacency entry: a neighbour reachable from a node via one relationship,
 /// remembering the original wire direction so the arrow can be resolved.
+#[derive(Debug, Clone)]
 struct AdjEntry {
     other: String,
     rel_type: String,
@@ -101,16 +102,47 @@ struct AdjEntry {
     src_is_self: bool,
 }
 
+/// Pre-built undirected adjacency over the WHOLE KB's typed relationships.
+///
+/// Building this is O(R) over every edge (two map inserts + two clones per
+/// edge), so it is built ONCE — in `GraphState::set_records`, on a data reload —
+/// and shared across every ego extraction. An [`EgoSubgraph::build`] then costs
+/// only O(degree(center)) per ring, not O(R): the recentre animation re-extracts
+/// the same ego ~6× per recentre, every keystroke re-extracts, and every mouse
+/// click re-extracts — all of which previously paid the full O(R) adjacency
+/// rebuild. Holding it here makes those rebuilds cheap.
+#[derive(Debug, Clone, Default)]
+pub struct Adjacency {
+    map: HashMap<String, Vec<AdjEntry>>,
+}
+
+impl Adjacency {
+    /// Build the undirected adjacency map from typed relationships, skipping
+    /// self-loops and normalizing empty types to `relates_to`. O(R) over the
+    /// whole edge set — call once per data reload, not per render frame.
+    #[must_use]
+    pub fn build(rels: &[Relationship]) -> Self {
+        Self {
+            map: build_adjacency(rels),
+        }
+    }
+}
+
 impl EgoSubgraph {
-    /// Extract the ego subgraph centred on `center` out to `hop` rings.
+    /// Extract the ego subgraph centred on `center` out to `hop` rings from a
+    /// pre-built [`Adjacency`].
     ///
     /// - `cap` bounds the ring-1 neighbours; overflow folds into one `[+N more]`
     ///   node unless `expanded` is set (the `e` action), which shows them all.
-    /// - Self-loops (`source == target`) are ignored.
+    /// - Self-loops (`source == target`) are ignored (already absent from `adj`).
     /// - An unknown or isolated `center` yields a lone centre node.
+    ///
+    /// Cost is O(degree(center)) per ring — the expensive O(R) adjacency build
+    /// is done once in [`Adjacency::build`], NOT here, so the recentre animation
+    /// and per-keystroke re-extracts are cheap.
     #[must_use]
-    pub fn build(rels: &[Relationship], center: &str, hop: u8, cap: usize, expanded: bool) -> Self {
-        let adj = build_adjacency(rels);
+    pub fn build(adj: &Adjacency, center: &str, hop: u8, cap: usize, expanded: bool) -> Self {
+        let adj = &adj.map;
 
         let mut subgraph = Self {
             center: center.to_string(),
@@ -129,7 +161,7 @@ impl EgoSubgraph {
         visited.insert(center.to_string());
 
         // ---- Ring 1: the centre's direct neighbours (capped) ----
-        let ring1 = ordered_neighbors(&adj, center, &visited);
+        let ring1 = ordered_neighbors(adj, center, &visited);
         subgraph.neighbor_count = ring1.len();
 
         let cap = cap.max(1);
@@ -167,7 +199,7 @@ impl EgoSubgraph {
             for ring in 2..=hop {
                 let mut next: Vec<String> = Vec::new();
                 for parent in &frontier {
-                    for nb in ordered_neighbors(&adj, parent, &visited) {
+                    for nb in ordered_neighbors(adj, parent, &visited) {
                         if visited.contains(&nb.name) {
                             continue;
                         }
@@ -330,7 +362,13 @@ mod tests {
             rel("centre", "out-target", "solves", Some(5)),
             rel("in-source", "centre", "caused_by", Some(5)),
         ];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert_eq!(g.nodes[0].name, "centre");
         assert_eq!(g.nodes[0].ring, 0);
         assert!(
@@ -351,7 +389,13 @@ mod tests {
             rel("in-source", "centre", "caused_by", Some(5)),
             rel("centre", "peer", "relates_to", Some(5)),
         ];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         // centre is the source → arrow points away from centre.
         assert_eq!(edge(&g, "out-target").unwrap().arrow, Arrow::Forward);
         // centre is the target → arrow points back toward centre.
@@ -365,7 +409,7 @@ mod tests {
         // 5 neighbours, cap 3 → keep 3 + one "+2 more".
         let rels: Vec<Relationship> =
             (0..5).map(|i| rel("hub", &format!("n{i}"), "solves", Some(1))).collect();
-        let g = EgoSubgraph::build(&rels, "hub", 1, 3, false);
+        let g = EgoSubgraph::build(&Adjacency::build(&rels), "hub", 1, 3, false);
         assert_eq!(g.neighbor_count, 5);
         let overflow = g.nodes.iter().find(|n| n.overflow).expect("overflow node");
         assert_eq!(overflow.name, "+2 more");
@@ -378,7 +422,7 @@ mod tests {
     fn expanded_shows_all_neighbors_no_overflow() {
         let rels: Vec<Relationship> =
             (0..5).map(|i| rel("hub", &format!("n{i}"), "solves", Some(1))).collect();
-        let g = EgoSubgraph::build(&rels, "hub", 1, 3, true);
+        let g = EgoSubgraph::build(&Adjacency::build(&rels), "hub", 1, 3, true);
         assert!(
             !g.nodes.iter().any(|n| n.overflow),
             "expanded → no overflow node"
@@ -397,7 +441,7 @@ mod tests {
         ];
         // cap 2 → strongest (`strong`, 9) then the alphabetically-first of the
         // strength-5 pair (`mid-a`). `mid-b` and `weak` fold into +2.
-        let g = EgoSubgraph::build(&rels, "hub", 1, 2, false);
+        let g = EgoSubgraph::build(&Adjacency::build(&rels), "hub", 1, 2, false);
         assert!(node(&g, "strong").is_some());
         assert!(node(&g, "mid-a").is_some());
         assert!(node(&g, "mid-b").is_none());
@@ -410,7 +454,13 @@ mod tests {
     #[test]
     fn isolated_center_is_lone_node() {
         let rels = vec![rel("other-a", "other-b", "solves", Some(5))];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.nodes[0].name, "centre");
         assert!(g.edges.is_empty());
@@ -420,7 +470,13 @@ mod tests {
     #[test]
     fn self_loops_are_ignored() {
         let rels = vec![rel("centre", "centre", "solves", Some(5))];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert_eq!(g.nodes.len(), 1);
         assert!(g.edges.is_empty());
     }
@@ -431,13 +487,25 @@ mod tests {
             rel("centre", "mid", "solves", Some(5)),
             rel("mid", "leaf", "requires", Some(5)),
         ];
-        let h1 = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let h1 = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert!(
             node(&h1, "leaf").is_none(),
             "hop 1 stops at the direct ring"
         );
 
-        let h2 = EgoSubgraph::build(&rels, "centre", 2, DEFAULT_NODE_CAP, false);
+        let h2 = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            2,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let leaf = node(&h2, "leaf").expect("hop 2 reaches the second ring");
         assert_eq!(leaf.ring, 2);
         // The ring-2 edge connects mid → leaf, not centre → leaf.
@@ -452,7 +520,13 @@ mod tests {
             rel("centre", "peer", "relates_to", Some(2)),
             rel("centre", "peer", "solves", Some(9)),
         ];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let e = edge(&g, "peer").unwrap();
         assert_eq!(
             e.rel_type, "solves",
@@ -475,8 +549,20 @@ mod tests {
             rel("peer", "centre", "causes", Some(5)),
             rel("centre", "peer", "causes", Some(5)),
         ];
-        let a = EgoSubgraph::build(&forward_first, "centre", 1, DEFAULT_NODE_CAP, false);
-        let b = EgoSubgraph::build(&backward_first, "centre", 1, DEFAULT_NODE_CAP, false);
+        let a = EgoSubgraph::build(
+            &Adjacency::build(&forward_first),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
+        let b = EgoSubgraph::build(
+            &Adjacency::build(&backward_first),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         assert_eq!(edge(&a, "peer").unwrap().arrow, Arrow::Forward);
         assert_eq!(
             edge(&a, "peer").unwrap().arrow,
@@ -488,7 +574,13 @@ mod tests {
     #[test]
     fn empty_rel_type_is_undirected_relates_to() {
         let rels = vec![rel("centre", "peer", "", Some(5))];
-        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let g = EgoSubgraph::build(
+            &Adjacency::build(&rels),
+            "centre",
+            1,
+            DEFAULT_NODE_CAP,
+            false,
+        );
         let e = edge(&g, "peer").unwrap();
         assert_eq!(e.rel_type, DEFAULT_REL_TYPE);
         assert_eq!(e.arrow, Arrow::None);

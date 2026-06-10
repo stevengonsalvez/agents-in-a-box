@@ -40,9 +40,17 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
 use ainb_plugin_sdk::KeyCode;
 
+use super::map::ego::Adjacency;
 use super::map::state::{Click, MapState, Nav};
 use super::{CORNFLOWER_BLUE, GOLD, LIST_HIGHLIGHT_BG, MUTED_GRAY, SELECTION_GREEN, SOFT_WHITE};
 use crate::data::{Community, DEFAULT_REL_TYPE, LearningRecord, Relationship};
+
+/// Canvas size the map's cached layout keys on when handling KEYBOARD nav /
+/// recentre (which has no `area` — it arrives via `handle_key`, not `render`).
+/// Navigation walks the ring/slot structure, which is layout-DIMENSION
+/// independent, so any consistent size is correct; the live render re-keys the
+/// cache to the real viewport. Matches the historical 80×24 baseline.
+const MAP_NAV_VIEWPORT: (u16, u16) = (80, 24);
 
 /// Which graph view is active. `c` toggles Entities ⇄ Communities; `v` cycles
 /// the radial Map in and out (returning to Entities).
@@ -93,9 +101,12 @@ pub struct GraphState {
     /// `true` once `g` has focused the graph (so `↑↓`/`c` route here). The shell
     /// releases this on `Backspace`.
     focused: bool,
-    /// Flattened typed relationships across every record — the source the radial
-    /// map builds its ego subgraph from (the text views use `nodes` instead).
-    relationships: Vec<Relationship>,
+    /// Pre-built undirected adjacency over every record's typed relationships —
+    /// the source the radial map builds its ego subgraphs from. Built ONCE in
+    /// [`Self::set_records`] (O(R)) and shared across every ego extraction so the
+    /// recentre animation / per-keystroke re-extracts are O(degree), not O(R)
+    /// (the text views use `nodes` instead).
+    adjacency: Adjacency,
     /// Radial map interaction state — `Some` only while the `Map` view is active.
     map: Option<MapState>,
     /// Absolute (plugin-viewport) rect the map last painted into, stashed during
@@ -137,10 +148,14 @@ impl GraphState {
                 Node { name, edges }
             })
             .collect();
-        // Keep the raw typed relationships for the radial map's ego extraction
-        // (both-direction adjacency + strength + arrows; the `nodes` list above
-        // is outgoing-only).
-        self.relationships = records.iter().flat_map(|r| r.relationships.iter().cloned()).collect();
+        // Build the typed adjacency ONCE (O(R) over every edge) for the radial
+        // map's ego extraction (both-direction adjacency + strength + arrows; the
+        // `nodes` list above is outgoing-only). Every later ego rebuild — the
+        // 6-frame recentre animation, each keystroke, each click — reuses this,
+        // so it costs O(degree(center)), not O(R).
+        let relationships: Vec<Relationship> =
+            records.iter().flat_map(|r| r.relationships.iter().cloned()).collect();
+        self.adjacency = Adjacency::build(&relationships);
         self.clamp_selection();
     }
 
@@ -214,21 +229,25 @@ impl GraphState {
             self.map = None;
             return true;
         }
-        let rels = self.relationships.clone();
+        // Borrow the shared adjacency immutably, disjoint from `&mut self.map`,
+        // so the map navigation reuses the pre-built adjacency (no per-keystroke
+        // `relationships.clone()` + O(R) rebuild). `MAP_NAV_VIEWPORT` is the
+        // canvas size the map's cached layout keys on for keyboard nav — the
+        // ring/slot structure (what nav walks) is dimension-independent, so any
+        // consistent size works; the real paint re-keys to the live viewport.
+        let adj = &self.adjacency;
+        let (w, h) = MAP_NAV_VIEWPORT;
         let Some(map) = self.map.as_mut() else {
             return false;
         };
         match code {
-            KeyCode::Char { ch: 'h' } => map.toggle_hop(),
-            KeyCode::Char { ch: 'e' } => map.toggle_expand(),
-            KeyCode::Enter => {
-                let ego = map.subgraph(&rels);
-                map.recentre_selected(&ego)
-            }
-            KeyCode::Up => nav(map, &rels, Nav::Up),
-            KeyCode::Down => nav(map, &rels, Nav::Down),
-            KeyCode::Left => nav(map, &rels, Nav::Left),
-            KeyCode::Right => nav(map, &rels, Nav::Right),
+            KeyCode::Char { ch: 'h' } => map.toggle_hop(adj),
+            KeyCode::Char { ch: 'e' } => map.toggle_expand(adj),
+            KeyCode::Enter => map.recentre_selected(adj, w, h),
+            KeyCode::Up => map.navigate(adj, w, h, Nav::Up),
+            KeyCode::Down => map.navigate(adj, w, h, Nav::Down),
+            KeyCode::Left => map.navigate(adj, w, h, Nav::Left),
+            KeyCode::Right => map.navigate(adj, w, h, Nav::Right),
             _ => false,
         }
     }
@@ -263,7 +282,7 @@ impl GraphState {
         let map = self.map.as_ref()?;
         let sel = map.selected();
         // Skip the synthetic `+N more` node — it isn't a real entity.
-        let ego = map.subgraph(&self.relationships);
+        let ego = map.subgraph(&self.adjacency);
         let is_overflow = ego.nodes.iter().any(|n| n.name == sel && n.overflow);
         (!is_overflow).then(|| sel.to_string())
     }
@@ -274,12 +293,12 @@ impl GraphState {
         let Some(area) = self.last_map_area.get() else {
             return false;
         };
-        let rels = self.relationships.clone();
+        // Borrow the shared adjacency immutably, disjoint from `&mut self.map`.
+        let adj = &self.adjacency;
         let Some(map) = self.map.as_mut() else {
             return false;
         };
-        let ego = map.subgraph(&rels);
-        !matches!(map.handle_click(&ego, area, col, row), Click::Miss)
+        !matches!(map.handle_click(adj, area, col, row), Click::Miss)
     }
 
     /// Advance the map recentre animation one frame (driven by the plugin's
@@ -356,7 +375,7 @@ pub fn render(buf: &mut RBuffer, area: RRect, state: &GraphState) {
         // mouse click hit-tests against exactly what was painted.
         state.last_map_area.set(Some(area));
         if let Some(map) = state.map.as_ref() {
-            map.render_view(buf, area, &state.relationships);
+            map.render_view(buf, area, &state.adjacency);
         }
         return;
     }
@@ -544,12 +563,6 @@ fn render_help_bar(buf: &mut RBuffer, area: RRect, state: &GraphState) {
     spans.extend(help_key("Bksp", "back"));
     spans.extend(help_key("Tab", "pane"));
     Paragraph::new(Line::from(spans)).render(area, buf);
-}
-
-/// Build the ego subgraph for the map's current state and move the selection.
-fn nav(map: &mut MapState, rels: &[Relationship], dir: Nav) -> bool {
-    let ego = map.subgraph(rels);
-    map.navigate(&ego, dir)
 }
 
 /// A rounded panel with a gold title; the border is gold when `active`
