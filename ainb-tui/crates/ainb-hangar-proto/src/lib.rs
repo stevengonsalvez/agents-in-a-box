@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod auth;
 pub mod events;
 pub mod methods;
 pub mod settings;

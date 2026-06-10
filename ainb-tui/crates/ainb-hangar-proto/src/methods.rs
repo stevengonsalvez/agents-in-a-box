@@ -143,6 +143,15 @@ pub const HANGAR_HEALTH: &str = "hangar/health";
 /// view-layer snapshot, **not** a persisted aggregate.
 pub const HANGAR_DAEMON_HEALTH: &str = "hangar/daemon_health";
 
+/// `auth/hello` — authenticate a freshly-opened socket connection.
+///
+/// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
+/// daemon token read from `{hangar_home}/hangar/daemon.token`). Result: `{}`.
+/// MUST be the **first frame** of every connection; the daemon answers any
+/// other first frame (or a token that fails the constant-time digest check)
+/// with an [`crate::auth::UNAUTHORIZED`] error and closes the connection.
+pub const AUTH_HELLO: &str = "auth/hello";
+
 /// `ping` — bare liveness probe. Params: `{}`. Result: `{}`.
 pub const PING: &str = "ping";
 
@@ -170,6 +179,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASK_TRANSITION,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
+    AUTH_HELLO,
     PING,
 ];
 
@@ -257,6 +267,7 @@ mod tests {
             HANGAR_TASK_TRANSITION,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
+            AUTH_HELLO,
             PING,
         ];
         for m in declared {
