@@ -202,6 +202,73 @@ pub struct TaskTransitionParams {
     pub to_status: String,
 }
 
+/// A three-state edit instruction for a nullable issue field (e38.8).
+///
+/// A bare `Option<T>` collapses "leave this field unchanged" and "clear this
+/// field to NULL" into the same `None`, which a partial-update RPC must keep
+/// distinct. This wrapper separates the two:
+///
+/// - the **key omitted** in the request JSON → `Keep` (leave the column as-is);
+/// - the key present as **`null`** → `Clear` (set the column to NULL);
+/// - the key present with a **value** → `Set(value)` (overwrite the column).
+///
+/// `#[serde(untagged)]` lets a wire `null` decode as `Clear` and a wire value as
+/// `Set`; the *absent* case is supplied by `#[serde(default)]` on the field that
+/// holds this wrapper (which yields [`FieldUpdate::Keep`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(untagged)]
+pub enum FieldUpdate<T> {
+    /// The key was present with an explicit `null`: clear the column to NULL.
+    Clear,
+    /// The key was present with a value: overwrite the column with it.
+    Set(T),
+    /// The key was omitted: leave the column unchanged. The `default` variant so
+    /// `#[serde(default)]` on the holding field maps an absent key to this.
+    #[serde(skip)]
+    #[default]
+    Keep,
+}
+
+impl<T> FieldUpdate<T> {
+    /// `true` when this update leaves the column unchanged (the omitted case).
+    #[must_use]
+    pub const fn is_keep(&self) -> bool {
+        matches!(self, Self::Keep)
+    }
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_UPDATE`] (e38.8): edit one issue's
+/// fields, scoped to a workspace.
+///
+/// `workspace_id` + `issue_id` identify the row (the workspace is the
+/// tenant-isolation guard — a foreign-tenant issue id touches nothing). The
+/// remaining fields are partial-update instructions: a non-nullable field uses
+/// `Option<T>` (`None` = leave unchanged) and a nullable field uses
+/// [`FieldUpdate`] (omitted = leave, `null` = clear, value = set). The editable
+/// fields are the real `issue` columns — `state` / `assignee` / `priority` /
+/// `due_date`. There is no `project` column at v1, so project is not editable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueUpdateParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to edit (`issue.id`).
+    pub issue_id: String,
+    /// New lifecycle state (e.g. `"in_progress"`); `None` leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// New assignee actor-ref (`"agent:<id>"` / `"member:<id>"`); omitted leaves
+    /// it, an explicit `null` clears the assignee (unassign).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub assignee: FieldUpdate<String>,
+    /// New urgency `0..3` (P3..P0, HIGHER = MORE URGENT); `None` leaves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    /// New due date (epoch milliseconds); omitted leaves it, explicit `null`
+    /// clears the deadline.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub due_date: FieldUpdate<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +506,41 @@ mod tests {
         let json = r#"{"id":"task-1","workspace_id":"ws-1","agent_id":"agent-1","issue_id":null,"status":"queued","created_at":1}"#;
         let row: TaskCardRow = serde_json::from_str(json).unwrap();
         assert_eq!(row.priority, 0, "absent priority decodes to the P3 default");
+    }
+
+    /// `IssueUpdateParams` round-trips, and the three-state nullable wrapper
+    /// keeps "omitted" (`Keep`), "explicit null" (`Clear`), and "value" (`Set`)
+    /// distinct on the wire (e38.8).
+    #[test]
+    fn e38_issue_update_params_roundtrip_and_three_state() {
+        // A full edit: change state + reassign + bump priority + set a due date.
+        let full = IssueUpdateParams {
+            workspace_id: "ws-1".into(),
+            issue_id: "issue-1".into(),
+            state: Some("in_progress".into()),
+            assignee: FieldUpdate::Set("agent:a1".into()),
+            priority: Some(3),
+            due_date: FieldUpdate::Set(1_700_000_000_000),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
+
+        // The minimal edit (only the row identity) omits every optional field, so
+        // each decodes to its leave-unchanged variant.
+        let minimal = r#"{"workspace_id":"ws-1","issue_id":"issue-1"}"#;
+        let p: IssueUpdateParams = serde_json::from_str(minimal).unwrap();
+        assert_eq!(p.state, None, "absent state leaves it unchanged");
+        assert_eq!(p.priority, None, "absent priority leaves it unchanged");
+        assert!(p.assignee.is_keep(), "absent assignee leaves it unchanged");
+        assert!(p.due_date.is_keep(), "absent due_date leaves it unchanged");
+        // Keep-valued fields are omitted on re-serialize (byte-minimal request).
+        assert_eq!(serde_json::to_string(&p).unwrap(), minimal);
+
+        // An explicit `null` is the CLEAR instruction, distinct from omission.
+        let clear =
+            r#"{"workspace_id":"ws-1","issue_id":"issue-1","assignee":null,"due_date":null}"#;
+        let p: IssueUpdateParams = serde_json::from_str(clear).unwrap();
+        assert_eq!(p.assignee, FieldUpdate::Clear, "null assignee → clear");
+        assert_eq!(p.due_date, FieldUpdate::Clear, "null due_date → clear");
     }
 }

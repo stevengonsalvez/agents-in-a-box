@@ -126,6 +126,24 @@ pub const HANGAR_TASKS_LIST: &str = "hangar/tasks_list";
 /// transition is an `INVALID_PARAMS` error.
 pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
 
+/// `hangar/issue_update` — edit fields of one existing issue (e38.8).
+///
+/// Params: [`crate::snapshots::IssueUpdateParams`]
+/// (`{ workspace_id, issue_id, state?, assignee?, priority?, due_date? }`).
+/// Result: the refreshed [`crate::events::IssueRow`], or an error. Each `Option`
+/// field is "leave unchanged when absent"; `assignee` additionally distinguishes
+/// "clear the assignee" (an explicit JSON `null`) from "leave it" (the key
+/// omitted) via its [`crate::snapshots::FieldUpdate`] wrapper. The four editable
+/// fields are the real `issue` columns (`state` / `assignee` / `priority` /
+/// `due_date`); there is no `project` column at v1, so project is not editable.
+///
+/// Mutating + workspace-scoped: the daemon resolves the workspace and rejects a
+/// mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
+/// `hangar/task_transition`), and the update is scoped by `(id, workspace_id)`
+/// so a foreign-tenant issue id touches no row. After a committed edit the
+/// daemon pushes the matching [`crate::events::HangarEvent::IssueUpdated`].
+pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -177,6 +195,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_SET_ENABLED,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
+    HANGAR_ISSUE_UPDATE,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -233,6 +252,7 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_ISSUE_UPDATE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -265,6 +285,7 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_ISSUE_UPDATE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,
