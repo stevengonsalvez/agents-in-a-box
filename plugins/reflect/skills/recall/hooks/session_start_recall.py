@@ -240,6 +240,11 @@ def _main_body() -> NoReturn:
                 "--min-overlap", str(SESSION_START_MIN_OVERLAP),
                 "--max-tokens", str(SESSION_START_MAX_TOKENS),
                 "--tags", ",".join(tags),
+                # SG6: SessionStart queries are synthetic (cwd/branch/commit
+                # tokens, not a genuine ask) and come up empty on most
+                # sessions — recording them as knowledge gaps would surface
+                # the project name as a fake gap every session.
+                "--no-gap-log",
             ],
             capture_output=True,
             text=True,

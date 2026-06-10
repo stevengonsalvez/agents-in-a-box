@@ -136,6 +136,28 @@ else
 fi
 ```
 
+### 7. Knowledge Gaps (negative recall)
+
+Every 0-result recall is appended to `~/.reflect/knowledge-gaps.jsonl` by
+`recall.py` (normalized query + session id). Queries that came up empty in
+**>=2 distinct sessions** are knowledge gaps — users keep asking about them
+with no learnings in the KB. This is the curation backlog.
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect-status/scripts/knowledge_gaps.py
+```
+
+Shows:
+- Repeat gaps (normalized-query dedup'd, distinct-session counted)
+- Ask counts and last-seen dates
+- Total distinct 0-result queries on file
+
+Options: `--min-sessions 1` to include one-off gaps, `--format json` for
+programmatic use.
+
+**If repeat gaps exist**: Suggest capturing learnings for those topics via
+`/reflect` or `/reflect:ingest` — once indexed, the gap stops recurring.
+
 ## Review Mode
 
 When invoked as `reflect review` or when there are pending items, enter review mode.
@@ -238,6 +260,12 @@ Present everything in a clean dashboard format:
 - Orphaned dirs: 3
 - Total lines: 127
 - Suggest: /reflect:consolidate
+
+## Knowledge Gaps (negative recall)
+Knowledge gap — users keep asking about these with no learnings:
+- **istio sidecar injection failures** — 3 sessions, 5 asks, last 2026-04-11
+- **bun workspace hoisting** — 2 sessions, 2 asks, last 2026-04-09
+Suggest: capture learnings for these topics, then /reflect:ingest
 
 ## Pending Reviews: 2
 1. [MEDIUM] "Consider cursor-based pagination for large datasets" (5 days)

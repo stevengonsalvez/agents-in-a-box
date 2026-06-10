@@ -175,11 +175,16 @@ def find_recall_script() -> Path | None:
     return None
 
 
-def query_recall(query: str) -> tuple[str, list[str]]:
+def query_recall(query: str, session_id: str = "") -> tuple[str, list[str]]:
     """Run the recall script with the prompt as query.
 
     Returns ``(markdown_output, learning_ids)``. On any failure, returns
     ``("", [])`` — silent.
+
+    SG6: ``session_id`` is forwarded so a 0-result recall on a GENUINE user
+    ask lands in ~/.reflect/knowledge-gaps.jsonl keyed by session — the
+    cross-session repeat count is what promotes a gap into the
+    reflect-status curation backlog.
 
     The recall script emits markdown with learning IDs in ``[lrn-...]``
     style brackets; we extract those for the dedupe set. If we ever
@@ -189,17 +194,20 @@ def query_recall(query: str) -> tuple[str, list[str]]:
     recall = find_recall_script()
     if not recall or not UV_BIN:
         return "", []
+    cmd = [
+        UV_BIN, "run", "--quiet", str(recall),
+        query,
+        "--limit", str(USER_PROMPT_LIMIT * 3),  # over-fetch; dedupe filters
+        "--confidence", USER_PROMPT_CONFIDENCE,
+        "--format", "markdown",
+        "--max-chars", str(USER_PROMPT_MAX_CHARS * 2),
+        "--tags", "",
+    ]
+    if session_id:
+        cmd += ["--session-id", session_id]
     try:
         r = subprocess.run(
-            [
-                UV_BIN, "run", "--quiet", str(recall),
-                query,
-                "--limit", str(USER_PROMPT_LIMIT * 3),  # over-fetch; dedupe filters
-                "--confidence", USER_PROMPT_CONFIDENCE,
-                "--format", "markdown",
-                "--max-chars", str(USER_PROMPT_MAX_CHARS * 2),
-                "--tags", "",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -368,7 +376,7 @@ def _main_body() -> NoReturn:
         emit("")
 
     # Query recall with the prompt itself.
-    markdown, _ = query_recall(prompt)
+    markdown, _ = query_recall(prompt, session_id)
     if not markdown:
         emit("")
 

@@ -162,6 +162,18 @@ _STOPWORDS = frozenset(
     "get got use used using my your".split()
 )
 
+# SG6: negative-recall knowledge-gap tracking. An empty final result set is
+# itself a signal — the KB has nothing about something an agent needed. Each
+# 0-result recall appends {ts, query, normalized, session_id} to
+# ~/.reflect/knowledge-gaps.jsonl; the reflect-status aggregator
+# (skills/reflect-status/scripts/knowledge_gaps.py) surfaces queries that
+# came up empty in >=2 distinct sessions as a curation backlog ("users keep
+# asking about X with no learnings"). Disable with RECALL_GAP_LOG=0 or the
+# --no-gap-log flag (the SessionStart hook passes the flag — its queries are
+# synthetic cwd/branch strings, not genuine asks, and would surface as fake
+# gaps every session).
+GAP_LOG_ENABLED = os.environ.get("RECALL_GAP_LOG", "1") != "0"
+
 # R4: token-budget retrieval. Rough estimate — 1 token ≈ 4 chars — matching
 # Hindsight's budget-not-top-k contract (agents think in tokens).
 def _est_tokens(text: str) -> int:
@@ -1116,6 +1128,65 @@ def log_recall(query: str, mode: str, count: int, cached: bool) -> None:
         pass
 
 
+def normalize_gap_query(query: str) -> str:
+    """SG6: stable dedup key for a knowledge-gap entry.
+
+    Lowercased, stopword-filtered content terms (the SAME tokenizer the R7
+    OOD gate uses), sorted so word-order variants of one ask collapse to a
+    single key — "tmux kill server" and "kill tmux server" are the same
+    gap. Returns "" for vacuous queries (all stopwords / short tokens);
+    those are never logged.
+    """
+    return " ".join(sorted(_content_terms(query)))
+
+
+def _gap_session_id(explicit: str | None) -> str:
+    """SG6: session identity for cross-session repeat detection.
+
+    Prefers the caller-supplied id (``--session-id`` from a hook), then
+    $CLAUDE_SESSION_ID. Without either, falls back to a per-day pseudo-id
+    so anonymous repeats on DIFFERENT days still count as distinct
+    sessions while N asks within one anonymous day count as one.
+    """
+    sid = (explicit or os.environ.get("CLAUDE_SESSION_ID", "") or "").strip()
+    if sid:
+        return sid
+    return "unknown-" + datetime.now().strftime("%Y-%m-%d")
+
+
+def log_knowledge_gap(query: str, session_id: str | None = None) -> None:
+    """SG6: append a 0-result recall to ``~/.reflect/knowledge-gaps.jsonl``.
+
+    Negative recall is unused information — silently dropping an empty
+    result hides exactly the queries the KB SHOULD cover. Append-only
+    jsonl with the same silent-fail contract as :func:`log_recall`: a
+    logging failure must never break the recall path.
+    """
+    if not GAP_LOG_ENABLED:
+        return
+    normalized = normalize_gap_query(query)
+    if not normalized:
+        return  # vacuous query — not a meaningful gap
+    base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
+    log = base / "knowledge-gaps.jsonl"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "query": query[:200],
+                        "normalized": normalized,
+                        "session_id": _gap_session_id(session_id),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
 # --- Core entry ----------------------------------------------------------
 
 def recall(
@@ -1132,6 +1203,8 @@ def recall(
     min_overlap: float = 0.0,
     use_mmr: bool = True,
     mmr_lambda: float | None = None,
+    session_id: str | None = None,
+    gap_log: bool = True,
 ) -> RecallResult:
     """High-level API: query → ranked Learnings. Never raises on KB issues.
 
@@ -1141,6 +1214,11 @@ def recall(
     R3: ``use_mmr`` (ANDed with the RECALL_MMR env gate) selects the final
     top-k with Maximal Marginal Relevance; ``mmr_lambda`` overrides the
     default λ (None => MMR_LAMBDA).
+    SG6: a final empty result set (including OOD-gated empties — "nearest
+    junk only" IS a gap) is appended to knowledge-gaps.jsonl keyed by
+    ``session_id``; ``gap_log=False`` (ANDed with the RECALL_GAP_LOG env
+    gate) opts a synthetic-query caller out. Infra errors (CLI missing,
+    search failed) are NOT gaps and never logged.
     """
     mmr_on = MMR_ENABLED and use_mmr  # R3
     cli = find_learnings_cli()
@@ -1177,6 +1255,8 @@ def recall(
                 learnings = learnings[:limit]
             learnings = filter_by_token_budget(learnings, max_tokens)  # R4
             log_recall(query, mode, len(learnings), cached=True)
+            if gap_log and not learnings:  # SG6
+                log_knowledge_gap(query, session_id)
             return RecallResult(
                 learnings, query, mode, cache_hit=True, ood_gated=gated,
                 scores=rank_scores,
@@ -1275,6 +1355,8 @@ def recall(
         learnings = learnings[:limit]
     learnings = filter_by_token_budget(learnings, max_tokens)  # R4
     log_recall(query, mode, len(learnings), cached=False)
+    if gap_log and not learnings:  # SG6
+        log_knowledge_gap(query, session_id)
     return RecallResult(learnings, query, mode, ood_gated=gated, scores=rank_scores)
 
 
@@ -1300,6 +1382,13 @@ def main() -> int:
     ap.add_argument("--mmr-lambda", type=float, default=None,
                     help="R3: MMR relevance↔diversity trade-off λ in [0,1] "
                          f"(default {MMR_LAMBDA}; 1.0 = pure relevance)")
+    ap.add_argument("--session-id", default=None,
+                    help="SG6: session id recorded with knowledge-gap entries "
+                         "(falls back to $CLAUDE_SESSION_ID, then a per-day "
+                         "pseudo-id)")
+    ap.add_argument("--no-gap-log", action="store_true",
+                    help="SG6: don't record a 0-result run as a knowledge gap "
+                         "(synthetic-query callers like the SessionStart hook)")
     args = ap.parse_args()
 
     query = " ".join(args.query).strip()
@@ -1322,6 +1411,8 @@ def main() -> int:
         min_overlap=args.min_overlap,
         use_mmr=not args.no_mmr,
         mmr_lambda=args.mmr_lambda,
+        session_id=args.session_id,
+        gap_log=not args.no_gap_log,
     )
 
     if result.error:
