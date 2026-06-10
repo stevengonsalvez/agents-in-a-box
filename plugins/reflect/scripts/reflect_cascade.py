@@ -69,6 +69,16 @@ snapshot first), DELETE retires it non-destructively. Retrieval treats
 observations as a separate tier — open-domain queries surface them FIRST
 (recall_tiered / reflect_db.recall_observation_tier).
 
+O2 auto-refreshing conventions doc: every executed observation action also
+back-reacts on the conventions layer — the per-project CONVENTIONS.md
+(conventions_generator) aggregating the scope's observations regenerates
+inline (``trigger_conventions_refresh``). Same trigger shape as R13, but
+pointed at conventions instead of skills, and regeneration happens directly
+rather than via a queued drain task because conventions rendering is
+deterministic markdown over the observations table — no LLM needed. This is
+the Hindsight ``trigger.refresh_after_consolidation`` shape: consolidation
+landing on the bank refreshes the mental models built over it.
+
 CLI:
     reflect_cascade.py prepare <transcript.jsonl> [--out SLICE] [--context N]
         -> JSON {action, reason, signal_count, slice_path, orig_tokens,
@@ -567,6 +577,28 @@ def _build_observation_block(observations: list[dict], transcript_path: str) -> 
     )
 
 
+def trigger_conventions_refresh(scopes) -> int:
+    """O2: regenerate the conventions doc(s) covering *scopes*.
+
+    The R13 trigger shape pointed at the conventions layer: observation
+    actions landing in a scope refresh every registered CONVENTIONS.md that
+    aggregates it (and bootstrap one for a brand-new scope). Unlike skill
+    refreshes — which queue a drain task because rewriting a SKILL.md needs
+    the LLM — conventions regeneration is deterministic markdown over the
+    observations table, so it happens inline. Returns the number of docs
+    regenerated. Best-effort end to end: a refresh failure must never fail
+    the observation write itself.
+    """
+    refreshed = 0
+    for scope in sorted({str(s or "").strip() for s in (scopes or [])} - {""}):
+        try:
+            import conventions_generator
+            refreshed += conventions_generator.refresh_for_scope(scope)
+        except Exception:
+            continue
+    return refreshed
+
+
 def execute_observation_actions(actions, *,
                                 scope: str = _OBSERVATION_SCOPE_DEFAULT) -> dict:
     """O1: apply structured CREATE/UPDATE/DELETE actions to observations.
@@ -582,18 +614,24 @@ def execute_observation_actions(actions, *,
                  fires first (S6) — re-citing known ids is an idempotent skip
     - DELETE  -> non-destructive retire (status -> 'retired' + reason)
 
+    O2: every executed action back-reacts on the conventions layer — the
+    CONVENTIONS.md docs aggregating the touched scopes regenerate inline
+    (``conventions_refreshed`` counts them; see
+    :func:`trigger_conventions_refresh`).
+
     Per-action failures are collected in ``errors`` — one malformed action
     never blocks the rest of the batch (same contract as
     :func:`execute_revision_actions`).
     """
     summary = {"executed": 0, "created": 0, "updated": 0, "deleted": 0,
-               "skipped": 0, "errors": []}
+               "skipped": 0, "conventions_refreshed": 0, "errors": []}
     try:
         import reflect_db
     except Exception as exc:  # pragma: no cover - import environment broken
         summary["errors"].append(f"observations DB unavailable: {exc}")
         return summary
 
+    scopes_touched: set[str] = set()
     for raw in actions or []:
         if not isinstance(raw, dict):
             summary["skipped"] += 1
@@ -610,7 +648,8 @@ def execute_observation_actions(actions, *,
                     summary["skipped"] += 1
                     summary["errors"].append("UPDATE missing target_id")
                     continue
-                if reflect_db.get_observation(target) is None:
+                row = reflect_db.get_observation(target)
+                if row is None:
                     summary["skipped"] += 1
                     summary["errors"].append(
                         f"UPDATE {target}: observation not found")
@@ -619,6 +658,7 @@ def execute_observation_actions(actions, *,
                     target, correction_ids, content=content or None,
                 ):
                     summary["updated"] += 1
+                    scopes_touched.add(str(row.get("scope") or scope))
                 else:
                     # Idempotent: every cited correction already recorded.
                     summary["skipped"] += 1
@@ -638,6 +678,7 @@ def execute_observation_actions(actions, *,
                     reason=reason or "observation no longer holds",
                 ):
                     summary["deleted"] += 1
+                    scopes_touched.add(str(row.get("scope") or scope))
                 else:
                     summary["skipped"] += 1  # already retired — idempotent
             elif action == "CREATE":
@@ -645,19 +686,25 @@ def execute_observation_actions(actions, *,
                     summary["skipped"] += 1
                     summary["errors"].append("CREATE missing content")
                     continue
+                effective_scope = str(raw.get("scope", "") or scope)
                 reflect_db.add_observation(
                     content,
                     category=str(raw.get("category", "") or "Unknown"),
-                    scope=str(raw.get("scope", "") or scope),
+                    scope=effective_scope,
                     source_correction_ids=correction_ids,
                 )
                 summary["created"] += 1
+                scopes_touched.add(effective_scope)
             else:
                 summary["skipped"] += 1
                 summary["errors"].append(f"unknown action: {action or '<empty>'}")
         except Exception as exc:
             summary["errors"].append(f"{action} {target or content[:40]}: {exc}")
     summary["executed"] = summary["created"] + summary["updated"] + summary["deleted"]
+    # O2: observation changes back-react on the conventions layer — the docs
+    # aggregating the touched scopes regenerate inline (best-effort).
+    if scopes_touched:
+        summary["conventions_refreshed"] = trigger_conventions_refresh(scopes_touched)
     return summary
 
 
@@ -1135,6 +1182,7 @@ def main() -> None:
             else:
                 print(json.dumps({"executed": 0, "created": 0, "updated": 0,
                                   "deleted": 0, "skipped": 0,
+                                  "conventions_refreshed": 0,
                                   "errors": [error]}))
             sys.exit(1)
         if isinstance(parsed, dict):

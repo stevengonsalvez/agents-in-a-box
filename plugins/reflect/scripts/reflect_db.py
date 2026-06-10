@@ -417,6 +417,31 @@ CREATE TABLE IF NOT EXISTS observation_history (
 );
 """
 
+# O2: auto-refreshing per-project conventions doc — the pre-synthesized
+# "what does this project generally do?" aggregate over O1 observations
+# (Hindsight ``mental_models`` + ``trigger.refresh_after_consolidation``
+# shape). One row per project_id; ``content`` mirrors the on-disk
+# CONVENTIONS.md materialized at ``doc_path``; ``query`` is the curated
+# source query the doc answers; ``scope_tags`` is the JSON list of
+# observation scopes the doc aggregates. ``is_stale`` is the stored
+# trigger flag (R13 shape — set by mark_conventions_docs_stale, cleared
+# by the next upsert); the computed half (R14 shape — any in-scope
+# observation changed after ``last_refreshed_at``) lives in
+# :func:`compute_conventions_is_stale`.
+_CONVENTIONS_DOCS_DDL = """
+CREATE TABLE IF NOT EXISTS conventions_docs (
+    project_id          TEXT PRIMARY KEY,
+    query               TEXT NOT NULL DEFAULT '',
+    content             TEXT NOT NULL DEFAULT '',
+    scope_tags          TEXT NOT NULL DEFAULT '[]',
+    doc_path            TEXT NOT NULL DEFAULT '',
+    observation_count   INTEGER NOT NULL DEFAULT 0,
+    last_refreshed_at   TEXT NOT NULL,
+    is_stale            INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -461,6 +486,7 @@ _SCHEMA_DDL = (
     + _SLOTS_DDL
     + _OBSERVATIONS_DDL
     + _OBSERVATION_HISTORY_DDL
+    + _CONVENTIONS_DOCS_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -807,6 +833,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_SLOTS_DDL)
         conn.execute(_OBSERVATIONS_DDL)
         conn.execute(_OBSERVATION_HISTORY_DDL)
+        conn.execute(_CONVENTIONS_DOCS_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -3282,6 +3309,180 @@ def compute_skill_is_stale(
 
 
 # ---------------------------------------------------------------------------
+# Conventions docs (O2: auto-refreshing per-project conventions aggregate —
+# hindsight mental_models refresh_after_consolidation shape)
+# ---------------------------------------------------------------------------
+# The doc row is the DB source of truth; the on-disk CONVENTIONS.md (written
+# by ``conventions_generator``) is its materialization. Rendering and file
+# I/O live in conventions_generator.py (R20-style split: this module owns
+# the table, the generator owns the artefact).
+
+CONVENTIONS_REFRESHED_EVENT = "conventions_doc_refreshed"
+
+
+def upsert_conventions_doc(
+    project_id: str,
+    *,
+    query: str = "",
+    content: str = "",
+    scope_tags: Optional[list[str]] = None,
+    doc_path: str = "",
+    observation_count: int = 0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Insert or refresh the conventions-doc row for *project_id*.
+
+    Every upsert IS a refresh: ``last_refreshed_at`` moves to now and the
+    stored ``is_stale`` flag clears (the doc was just regenerated from the
+    live observations, so by definition it is current). ``created_at`` is
+    preserved across refreshes. Returns the project_id (natural key).
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            """INSERT INTO conventions_docs
+               (project_id, query, content, scope_tags, doc_path,
+                observation_count, last_refreshed_at, is_stale, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(project_id) DO UPDATE SET
+                   query = excluded.query,
+                   content = excluded.content,
+                   scope_tags = excluded.scope_tags,
+                   doc_path = excluded.doc_path,
+                   observation_count = excluded.observation_count,
+                   last_refreshed_at = excluded.last_refreshed_at,
+                   is_stale = 0""",
+            (
+                project_id,
+                query,
+                content,
+                json.dumps(scope_tags or []),
+                doc_path,
+                max(0, int(observation_count)),
+                now,
+                now,
+            ),
+        )
+        add_event(
+            CONVENTIONS_REFRESHED_EVENT,
+            None,
+            {
+                "project_id": project_id,
+                "doc_path": doc_path,
+                "observation_count": max(0, int(observation_count)),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return project_id
+
+
+def get_conventions_doc(
+    project_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch one conventions-doc row (``scope_tags`` decoded to a list)."""
+    if not project_id:
+        return None
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM conventions_docs WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["scope_tags"] = _decode_tags(record.get("scope_tags"))
+    return record
+
+
+def get_conventions_docs(
+    *, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Every conventions-doc row (``scope_tags`` decoded), project-ordered."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM conventions_docs ORDER BY project_id"
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["scope_tags"] = _decode_tags(record.get("scope_tags"))
+        out.append(record)
+    return out
+
+
+def mark_conventions_docs_stale(
+    project_ids: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """O2/R13 shape: flag the docs for *project_ids* stale. Returns rows
+    newly flagged. A stale doc stops injecting at SessionStart until the
+    next regeneration (``upsert_conventions_doc`` clears the flag)."""
+    if not project_ids:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in project_ids)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE conventions_docs SET is_stale = 1 "
+            f"WHERE project_id IN ({marks}) AND is_stale = 0",
+            project_ids,
+        )
+    return cur.rowcount
+
+
+def compute_conventions_is_stale(
+    project_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[bool]:
+    """O2/R14 shape: computed staleness for one conventions doc.
+
+    Mirrors :func:`compute_skill_is_stale` (the hindsight
+    ``compute_mental_model_is_stale`` port): the doc is stale iff its
+    STORED flag is set, OR any observation in its scope was created,
+    updated, or retired after ``last_refreshed_at``. Scope = the doc's
+    ``scope_tags`` plus its own project_id plus ``global`` (a global
+    convention applies in every project). Retired observations count —
+    a convention that stopped holding must drop out of the doc, so its
+    retirement stales it just like new evidence does.
+
+    Timestamp parsing is tolerant (the A3 rules): an observation with an
+    unparseable ``updated_at`` never flips the doc, and a doc with an
+    unparseable ``last_refreshed_at`` falls back to its stored flag alone.
+    Returns None when *project_id* has no registered doc. Nothing is
+    persisted — the stored flag stays the trigger's.
+    """
+    row = get_conventions_doc(project_id, conn=conn)
+    if row is None:
+        return None
+    if row.get("is_stale"):
+        return True
+    floor = _parse_forget_after(row.get("last_refreshed_at"))
+    if floor is None:
+        return False
+    conn = conn or get_conn()
+    scopes = sorted(
+        {str(s).strip() for s in (row.get("scope_tags") or []) if str(s).strip()}
+        | {project_id, "global"}
+    )
+    marks = ", ".join("?" for _ in scopes)
+    candidates = conn.execute(
+        f"SELECT updated_at FROM observations WHERE scope IN ({marks})",
+        scopes,
+    ).fetchall()
+    for candidate in candidates:
+        updated = _parse_forget_after(candidate["updated_at"])
+        if updated is not None and updated > floor:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Memory slots (A1: pinned editable agent scratchpads, agentmemory shape)
 # ---------------------------------------------------------------------------
 
@@ -3758,6 +3959,7 @@ def main() -> None:
             "slots",
             "observations",
             "observation_history",
+            "conventions_docs",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")

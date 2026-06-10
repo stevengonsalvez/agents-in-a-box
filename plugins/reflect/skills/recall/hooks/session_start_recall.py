@@ -21,6 +21,13 @@ any skill hit or recall result, and unlike the skills tier they never
 suppress the lower tiers: the slots block is PREPENDED to whatever the
 rest of the hierarchy produces.
 
+O2 (rides REFLECT_TIERED_INJECT): the per-project conventions doc is a
+Tier-1 ambient pointer — when a fresh CONVENTIONS.md exists for this
+project, ONE line (summary + path) is prepended alongside the slots block.
+Never the doc body, and never when the doc is stale (the R14-shaped
+``compute_conventions_is_stale`` check) — a wrong pointer is worse than
+no pointer. Like slots, it never suppresses the lower tiers.
+
 Usage in settings.json:
 {
   "hooks": {
@@ -95,6 +102,10 @@ SKILL_TIER_DEFAULT_MIN_SCORE = 2.0
 # (mirrors agentmemory's SLOTS=on gate); char budget for the slots block.
 SLOTS_FLAG = "REFLECT_SLOTS"
 SLOT_TIER_MAX_CHARS = 4000
+# O2: opt-in flag for materializing a CONVENTIONS.md symlink in the project
+# root (writing into user repos is intrusive — the injected path already
+# makes the doc readable without it).
+CONVENTIONS_SYMLINK_FLAG = "REFLECT_CONVENTIONS_SYMLINK"
 
 
 # --- Context extraction --------------------------------------------------
@@ -225,6 +236,54 @@ def join_blocks(*blocks: str) -> str:
     return "\n\n".join(b for b in blocks if b)
 
 
+# --- O2: conventions tier (Tier-1 ambient — pre-synthesized doc pointer) --
+
+def conventions_symlink_enabled() -> bool:
+    """Opt-in flag for the project-root CONVENTIONS.md symlink (read at
+    call time so settings.json env stanzas and tests can flip it)."""
+    return os.environ.get(CONVENTIONS_SYMLINK_FLAG, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def conventions_tier_context(cwd: Path) -> str:
+    """Tier 1 ambient of the inject hierarchy (O2): the per-project
+    conventions doc, surfaced as a 1-line summary + path — NEVER the doc
+    body. Reading the doc is the agent's choice and costs zero boot tokens
+    (it is a pre-synthesized regular file under the reflect state dir).
+
+    Rides the R10 tiered-inject flag. A stale doc (R14-shaped check: any
+    in-scope observation changed after last_refreshed_at, or the stored
+    trigger flag is set) injects NOTHING — a wrong pointer is worse than
+    no pointer. Like the slots tier, the block never suppresses lower
+    tiers: it is PREPENDED to whatever the rest of the hierarchy produces.
+
+    Silent-fail: any error (missing module, locked DB, broken config)
+    returns "" so SessionStart degrades to the conventions-less behaviour.
+    """
+    if not tiered_inject_enabled():
+        return ""
+    try:
+        # Lazy imports: only pay the sqlite cost when the flag is on.
+        # scripts/ is already on sys.path (silent_fail import above).
+        import conventions_generator
+        import reflect_db
+
+        conn = reflect_db.get_conn()
+        project_id = reflect_db.derive_slot_project_id(cwd)
+        line = conventions_generator.session_inject_line(project_id, conn=conn)
+        if line and conventions_symlink_enabled():
+            try:
+                conventions_generator.symlink_into_project(
+                    project_id, cwd, conn=conn,
+                )
+            except Exception:
+                pass  # the injected path still works without the symlink
+        return line
+    except Exception:
+        return ""
+
+
 # --- R10: skills tier (curated beats raw) --------------------------------
 
 def tiered_inject_enabled() -> bool:
@@ -345,23 +404,27 @@ def _main_body() -> NoReturn:
         emit("")
 
     # A1: slots are Tier-0 — agent-curated working memory injects BEFORE
-    # any recall result, and is prepended to every emit path below.
-    slots_block = slot_tier_context(cwd)
+    # any recall result. O2: the conventions doc pointer is Tier-1 ambient
+    # (1 line: summary + path; nothing when stale). Both are prepended to
+    # every emit path below — ambient context never suppresses retrieval.
+    ambient_block = join_blocks(
+        slot_tier_context(cwd), conventions_tier_context(cwd),
+    )
 
     query, tags = build_query(cwd)
     if not query:
-        emit(slots_block)
+        emit(ambient_block)
 
     # R10: tiered inject — skills (curated) are the top retrieval tier. A
     # strong skill hit wins outright; the learnings recall below only runs
     # when the skills tier is empty/stale (or the flag is off).
     skill_block = skill_tier_context(query)
     if skill_block:
-        emit(join_blocks(slots_block, skill_block))
+        emit(join_blocks(ambient_block, skill_block))
 
     recall = find_recall_script()
     if not recall or not UV_BIN:
-        emit(slots_block)
+        emit(ambient_block)
 
     # D9: SessionStart must feel instant. 10s cap — if recall is slower
     # than that, prefer empty context over a stalled session boot. The
@@ -395,12 +458,12 @@ def _main_body() -> NoReturn:
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
-        emit(slots_block)
+        emit(ambient_block)
 
     if r.returncode != 0:
-        emit(slots_block)
+        emit(ambient_block)
 
-    emit(join_blocks(slots_block, (r.stdout or "").strip()))
+    emit(join_blocks(ambient_block, (r.stdout or "").strip()))
 
 
 def main() -> NoReturn:
