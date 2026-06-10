@@ -9552,9 +9552,36 @@ impl App {
             // Drain the cached frame (if any) into the screen map. The
             // plugin task pushes a fresh frame each time it returns from
             // `plugin/render`; `try_recv_render` is the non-blocking
-            // hand-off the render thread relies on.
+            // hand-off the render thread relies on. Unconditional (no
+            // visibility gate): a frame that completed just before the
+            // user navigated away must still land in the cache so the
+            // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+            }
+
+            // Visibility gate: only the plugin owning the focused screen
+            // gets render kicks. `LayoutComponent::render` dispatches
+            // exactly `state.current_screen` through the screen registry,
+            // so a hidden screen's buffer is never painted — kicking its
+            // renders only burns CPU. Concretely this stops (a) a
+            // self-animating plugin (search spinner returning
+            // `redraw=true`, which re-marks the dirty flag each frame)
+            // from re-rendering an invisible screen at tick cadence, and
+            // (b) the startup storm where the registration-seeded dirty
+            // flag kicked all five screen plugins on the first tick —
+            // `Command::Render` lazy-spawns the subprocess via
+            // `ensure_running`, so that defeated `spawn = "lazy"`. Eager
+            // plugins are unaffected: registration pokes them with
+            // `EnsureSpawned` (see `register_kept` in the runtime), not
+            // this loop.
+            //
+            // MUST stay above `take_render_dirty`: the gate skips the
+            // consume, so a hidden plugin's dirty flag survives until the
+            // user opens the screen and the first tick after the switch
+            // kicks the deferred paint.
+            if self.state.current_screen != *screen_id {
+                continue;
             }
 
             // Viewport comes from the previous frame's allocated area
@@ -10024,6 +10051,139 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod plugin_render_gate_tests {
+    //! Visibility gate on the render-tick loop: only the plugin owning
+    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
+    //! only after the screen check) so the deferred first paint happens
+    //! on the first tick after the user opens the screen.
+
+    use std::path::PathBuf;
+
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    };
+    use ainb_plugin_runtime::{PluginId, RegisteredPlugin, Runtime};
+
+    use super::App;
+    use crate::app::screens::ids;
+
+    fn lazy_manifest(name: &str) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities::default(),
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: Vec::new(),
+        }
+    }
+
+    /// Real runtime + an `App` wired to it, with the named lazy plugins
+    /// registered. The binary path is deliberately nonexistent — these
+    /// tests assert host-side kick bookkeeping only; an actual spawn
+    /// attempt would fail harmlessly on the runtime's executor.
+    fn app_with_plugins(names: &[&str]) -> (Runtime, App) {
+        let (runtime, handle) = Runtime::new().expect("runtime constructs without plugins");
+        for name in names {
+            runtime.register(RegisteredPlugin::new(
+                lazy_manifest(name),
+                PathBuf::from("/nonexistent/plugin-binary"),
+                PathBuf::from("/nonexistent/manifest.toml"),
+            ));
+        }
+        let mut app = App::new();
+        app.state.plugin_runtime = Some(handle);
+        (runtime, app)
+    }
+
+    #[test]
+    fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+        app.tick_plugin_renders();
+
+        // No kick: `plugin_last_render_viewport` is only written when a
+        // render is dispatched.
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "hidden screen must not receive a render kick"
+        );
+        // The registration-seeded dirty flag survived both ticks, so the
+        // deferred first paint still happens when the screen opens.
+        assert!(
+            handle.take_render_dirty(&pid),
+            "hidden plugin's dirty flag must survive the gated ticks"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn dirty_plugin_kicks_on_first_tick_after_screen_switch() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        // Ticks while hidden: gated, dirty preserved (proved above).
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+
+        // User opens the learnings screen → first tick kicks the render.
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert_eq!(
+            app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
+            Some(&(0, 0)),
+            "first tick after the switch must kick a render at the seed viewport"
+        );
+        assert!(
+            !handle.take_render_dirty(&pid),
+            "the kick must consume the dirty flag"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn only_the_focused_plugin_screen_is_kicked() {
+        let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert!(
+            app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "focused plugin screen must be kicked"
+        );
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            "unfocused plugin screen must not be kicked"
+        );
+        assert!(
+            handle.take_render_dirty(&PluginId::from("burndown")),
+            "unfocused plugin must stay dirty for its deferred first paint"
+        );
+
+        runtime.shutdown();
+    }
+}
 
 #[cfg(test)]
 mod panel_close_tests {
