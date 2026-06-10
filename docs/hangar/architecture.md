@@ -77,7 +77,7 @@ Two loops run continuously and independently: the **dispatch loop** (control pla
 **Dispatch loop (control):**
 
 1. `ainb hangar issue create --assign <agent>` (or an autopilot tick) enqueues an `agent_task_queue` row.
-2. The daemon **claim loop** atomically claims the oldest queued task for an idle runtime (`queued → dispatched`), respecting per-agent `max_concurrent_tasks` and the per-(issue, agent) active-set guard.
+2. The daemon **claim loop** atomically claims the most urgent (then oldest) queued task for an idle runtime (`queued → dispatched`) — `ORDER BY priority DESC, created_at, id` — respecting per-agent `max_concurrent_tasks` and the per-(issue, agent) active-set guard.
 3. It **materialises skills** into the task's per-task directory at the provider-native path (`.claude/skills/`, `.codex/skills/`, `.agent_context/skills/` …) — copied, scripts `chmod 0755`, kept outside the worktree git root so `git status` stays clean.
 4. It spawns the provider in an isolated git worktree (`dispatched → running`), streaming the transcript.
 5. On a terminal transition the **FSM finalize** path runs idempotently: it stamps `done/failed/cancelled`, cascades `autopilot_run.completed_at` when the task belongs to an autopilot run, and captures any `gh pr create` URL into `result.pr_url`.
@@ -96,6 +96,7 @@ Every unit of agent work is an `agent_task_queue` row walking a strict finite-st
 ![Task FSM state machine](./diagrams/arch-task-fsm.svg)
 
 - **Per-(issue, agent) concurrency** — task work on one issue serialises per **agent**, not globally (decision: adopt Multica's `ClaimAgentTask` model, closing parity-review design gap 03). The partial unique index `idx_one_pending_task_per_issue_agent` (migration 0012, replacing 0004's global-per-issue scope) allows at most one *pending* (`queued`/`dispatched`) task per `(issue_id, agent_id)`, and the claim SQL's `NOT EXISTS` active-set guard refuses to dispatch an agent a second `queued`/`dispatched`/`running` task for an issue it is already working — so different agents work one issue in parallel while the same agent's duplicate fires still coalesce.
+- **Priority ordering** — the claim drains `ORDER BY priority DESC, created_at, id` (decision: adopt Multica's `priority DESC, created_at` claim ordering, closing the parity-review "no expedite path" design gap). `agent_task_queue.priority` (migration 0013) is an integer **0..3 mapping P3..P0 — higher = more urgent**: `0` = P3 (the routine default, so untouched enqueue paths stay strict-FIFO), `3` = P0 (claimed first). Equal priorities keep the FIFO `created_at, id` tiebreak. `ainb hangar issue create --priority N --assign <agent>` stamps it onto the enqueued task; a retry child inherits its parent's priority.
 - **Idempotent finalize** — concurrent complete-vs-cancel resolves deterministically (first wins, loser no-ops); a terminal row never re-transitions.
 - **Retry** — a failure with a *retryable* reason (e.g. runtime offline) spawns a child task linked by `parent_task_id`, capped by `max_attempts`; `agent_error` does not retry.
 - **TTL sweepers** — stale `queued` (2h) / `dispatched` (5min) / `running` (2.5h) rows are swept to `failed` in idempotent batches (cap 500).
@@ -111,7 +112,7 @@ A single SQLite database, workspace-tenant from migration 0001. Every row is sco
 |-------|--------|
 | **Tenancy** | `workspace` (slug unique), `user` (email unique), `member` (role) |
 | **Actors** | `agent_runtime` (status), `agent` (runtime, visibility, owner) |
-| **Work** | `issue` + `comment`; `agent_task_queue` (status, attempt, `parent_task_id`, `result` JSON, `autopilot_run_id`) with a partial unique index = one pending task per (issue, agent) |
+| **Work** | `issue` + `comment`; `agent_task_queue` (status, `priority` 0..3 = P3..P0, attempt, `parent_task_id`, `result` JSON, `autopilot_run_id`) with a partial unique index = one pending task per (issue, agent) |
 | **Skills** | `skill` (unique per workspace/name), `skill_file`, `agent_skill` (M:N junction) |
 | **Auth** | `pat` + `daemon_token` (sha256 only), `beads_mapping` (hangar↔bd) |
 | **Autopilots** | `autopilot` (cron_expr, max_concurrent_runs, next_tick_at, enabled), `autopilot_run` (status, completed_at) |
