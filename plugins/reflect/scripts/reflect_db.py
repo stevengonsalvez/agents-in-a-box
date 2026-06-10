@@ -85,6 +85,8 @@ _LEARNING_COLUMNS = (
     "source_quote",
     "source_quote_hash",
     "content_hash",
+    "source_memory_ids",
+    "proof_count",
     "session_id",
     "thread_id",
     "privacy_level",
@@ -142,6 +144,8 @@ CREATE TABLE IF NOT EXISTS learnings (
     source_quote            TEXT NOT NULL DEFAULT '',
     source_quote_hash       TEXT NOT NULL DEFAULT '',
     content_hash            TEXT NOT NULL DEFAULT '',
+    source_memory_ids       TEXT NOT NULL DEFAULT '[]',
+    proof_count             INTEGER NOT NULL DEFAULT 1,
     session_id              TEXT NOT NULL DEFAULT '',
     thread_id               TEXT NOT NULL DEFAULT '',
     privacy_level           TEXT NOT NULL DEFAULT '{PrivacyLevel.INTERNAL.value}'
@@ -472,6 +476,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "source_quote_hash",
             "ALTER TABLE learnings ADD COLUMN source_quote_hash TEXT NOT NULL DEFAULT ''",
         ),
+        (
+            "source_memory_ids",
+            "ALTER TABLE learnings ADD COLUMN source_memory_ids TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "proof_count",
+            "ALTER TABLE learnings ADD COLUMN proof_count INTEGER NOT NULL DEFAULT 1",
+        ),
         ("session_id", "ALTER TABLE learnings ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"),
         ("thread_id", "ALTER TABLE learnings ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''"),
         (
@@ -645,6 +657,29 @@ def get_events_by_type(
 # ---------------------------------------------------------------------------
 
 
+def _dedupe_source_ids(values: Any) -> list[str]:
+    """Normalize a source_memory_ids payload to a unique, order-preserving
+    list of non-empty strings. Tolerates None / scalars / JSON strings."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        try:
+            parsed = json.loads(values)
+            values = parsed if isinstance(parsed, list) else [values]
+        except (json.JSONDecodeError, TypeError):
+            values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
 def add_learning(
     title: str,
     category: str = "Unknown",
@@ -659,6 +694,8 @@ def add_learning(
     source_kind: str = "",
     source_quote: str = "",
     source_quote_hash: str = "",
+    source_memory_ids: Optional[list[str]] = None,
+    proof_count: int = 1,
     session_id: str = "",
     thread_id: str = "",
     privacy_level: str = PrivacyLevel.INTERNAL.value,
@@ -676,21 +713,29 @@ def add_learning(
     to the user (see ``RESTRICTED`` / ``SECRET_REDACTED`` in
     ``PrivacyLevel``). Storing raw lets future queries re-evaluate the
     redaction policy without losing the original evidence.
+
+    S4 provenance: CREATE always starts ``proof_count`` at 1 (or higher
+    when the caller already aggregated evidence) and stores
+    ``source_memory_ids`` as a unique, order-preserving JSON list. The
+    UPDATE half of the contract lives in :func:`add_learning_proof`.
     """
     conn = conn or get_conn()
     lid = _new_id()
     provider = source_provider or source_tool
     quote_hash = source_quote_hash or (_stable_text_hash(source_quote) if source_quote else "")
+    memory_ids = _dedupe_source_ids(source_memory_ids)
+    effective_proof_count = max(1, int(proof_count))
     now = _now_iso()
     with conn:
         conn.execute(
             """INSERT INTO learnings
                (id, title, category, confidence, status, scope, source_tool,
                 source_provider, source_kind, source_path, source_quote,
-                source_quote_hash, content_hash, session_id, thread_id,
+                source_quote_hash, content_hash, source_memory_ids,
+                proof_count, session_id, thread_id,
                 privacy_level, artifact_path, sidecar_path, commit_hash,
                 supersedes_learning_id, superseded_by_learning_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lid,
                 title,
@@ -705,6 +750,8 @@ def add_learning(
                 source_quote,
                 quote_hash,
                 content_hash,
+                json.dumps(memory_ids),
+                effective_proof_count,
                 session_id,
                 thread_id,
                 privacy_level,
@@ -802,6 +849,74 @@ def get_learning(
         (learning_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def get_learnings_by_content_hash(
+    content_hash: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return every learning row carrying *content_hash* (oldest first)."""
+    if not content_hash:
+        return []
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM learnings WHERE content_hash = ? ORDER BY created_at",
+        (content_hash,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_learning_proof(
+    learning_id: str,
+    source_memory_id: str = "",
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """S4 UPDATE path: append *source_memory_id* and bump ``proof_count``.
+
+    Re-observing evidence for an existing learning strengthens it instead
+    of duplicating it. Semantics:
+
+    - new (non-empty) source id → appended to ``source_memory_ids``
+      (uniqueness preserved) and ``proof_count`` incremented;
+    - already-recorded source id → idempotent no-op (returns False), so
+      re-ingesting the same transcript can never inflate evidence;
+    - empty source id → anonymous evidence: ``proof_count`` is bumped but
+      the list is untouched (callers without a stable source identifier).
+
+    Returns True when the row was updated.
+    """
+    conn = conn or get_conn()
+    row = get_learning(learning_id, conn=conn)
+    if row is None:
+        return False
+
+    sources = _dedupe_source_ids(row.get("source_memory_ids"))
+    sid = str(source_memory_id).strip()
+    if sid and sid in sources:
+        return False
+    if sid:
+        sources.append(sid)
+
+    new_proof_count = max(1, int(row.get("proof_count") or 1)) + 1
+    with conn:
+        conn.execute(
+            "UPDATE learnings SET source_memory_ids = ?, proof_count = ? WHERE id = ?",
+            (json.dumps(sources), new_proof_count, learning_id),
+        )
+        add_event(
+            "proof_added",
+            learning_id,
+            {
+                "source_memory_id": sid,
+                "proof_count": new_proof_count,
+                "source_count": len(sources),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return True
 
 
 # ---------------------------------------------------------------------------

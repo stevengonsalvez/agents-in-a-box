@@ -61,6 +61,10 @@ REFLECT_CLI_NAME = "reflect"
 LEGACY_LEARNINGS_CLI = Path.home() / ".learnings" / "cli" / "learnings"
 
 CONFIDENCE_WEIGHTS = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
+# S4: proof-count boost strength. With proof_norm clamped to [0, 1] the
+# multiplier stays within ±5% (1 ± alpha/2) — evidence nudges ordering
+# between near-ties without overpowering confidence/recency.
+PROOF_COUNT_ALPHA = 0.1
 CHUNK_SEPARATOR = "--New Chunk--"
 ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 
@@ -148,6 +152,25 @@ class Learning:
             # yaml sometimes leaves unquoted lists as strings; split tolerantly
             raw = [t.strip() for t in re.split(r"[\[\],]", raw) if t.strip()]
         return [str(t).strip() for t in raw]
+
+    @property
+    def proof_count(self) -> int | None:
+        """S4: evidence count from frontmatter (top-level or under provenance).
+
+        Returns None when absent or malformed — the reranker treats None as
+        a neutral baseline so legacy notes are never penalised.
+        """
+        raw = self.frontmatter.get("proof_count")
+        if raw is None:
+            provenance = self.frontmatter.get("provenance")
+            if isinstance(provenance, dict):
+                raw = provenance.get("proof_count")
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def how_to_apply(self) -> str:
@@ -394,7 +417,7 @@ def rerank(
     now: datetime | None = None,
 ) -> list[Learning]:
     """
-    D8: score = confidence × recency × (1 + tag_bonus).
+    D8 + S4: score = confidence × recency × (1 + tag_bonus) × proof_boost.
     Sorts in-place and returns the same list.
     """
     now = now or datetime.now(tz=None)
@@ -417,10 +440,24 @@ def rerank(
                 pass
         lt = set(t.lower() for t in lrn.tags)
         bonus = 0.1 * len(qt & lt) if qt else 0.0
-        return c * recency * (1 + bonus)
+        return c * recency * (1 + bonus) * proof_count_boost(lrn.proof_count)
 
     learnings.sort(key=score, reverse=True)
     return learnings
+
+
+def proof_count_boost(proof_count: int | None) -> float:
+    """S4: log-normalized evidence multiplier, bounded to ±5% (alpha=0.1).
+
+    proof_norm = clamp(0.5 + ln(proof_count)/10, 0, 1); missing or
+    single-proof learnings sit exactly at the neutral 0.5 baseline so the
+    multiplier is precisely 1.0 — legacy notes rank identically to before.
+    """
+    if proof_count is not None and proof_count >= 1:
+        proof_norm = min(1.0, max(0.0, 0.5 + math.log(proof_count) / 10.0))
+    else:
+        proof_norm = 0.5
+    return 1.0 + PROOF_COUNT_ALPHA * (proof_norm - 0.5)
 
 
 def filter_by_confidence(learnings: list[Learning], threshold: str) -> list[Learning]:

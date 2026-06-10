@@ -19,6 +19,8 @@ provenance:
   source_path: "{{SOURCE_PATH}}"
   content_hash: "{{CONTENT_HASH}}"
   detected_at: {{ISO_TIMESTAMP}}
+  source_memory_ids: [{{EPISODE_ID}}]  # unique; UPDATE appends, never duplicates
+  proof_count: 1                       # CREATE starts at 1; UPDATE increments
 ---
 
 ## Problem

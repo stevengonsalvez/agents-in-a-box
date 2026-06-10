@@ -64,6 +64,7 @@ class Prep:
     slice_tokens: int            # rough estimate of the slice we will reflect on
     slice_path: Optional[str] = None
     signal_hash: str = ""
+    proof_bumped: int = 0          # S4: learnings whose proof_count we bumped
 
 
 def _est_tokens(text: str) -> int:
@@ -93,6 +94,27 @@ def _signal_hash_seen(signal_hash: str) -> bool:
         return signal_hash in get_known_content_hashes()
     except Exception:
         return False
+
+
+def _record_proof_for_hash(signal_hash: str, source_memory_id: str) -> int:
+    """S4 UPDATE path: a dup signal set is new EVIDENCE, not noise.
+
+    When the dedup fast-path skips a transcript whose signal hash already
+    matches a stored learning, append the transcript as a source and bump
+    that learning's proof_count so recall can trust well-evidenced rules.
+    Best-effort: returns 0 if the DB is unavailable (the skip still happens).
+    """
+    if not signal_hash:
+        return 0
+    try:
+        from reflect_db import add_learning_proof, get_learnings_by_content_hash
+        bumped = 0
+        for row in get_learnings_by_content_hash(signal_hash):
+            if add_learning_proof(row["id"], source_memory_id):
+                bumped += 1
+        return bumped
+    except Exception:
+        return 0
 
 
 def slice_dialogue(text: str, signals, context_lines: int = _DEFAULT_CONTEXT_LINES,
@@ -145,8 +167,9 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
     signals = detect_signals(dialogue)
     signal_hash = _signal_set_hash(signals)
     if _signal_hash_seen(signal_hash):
+        bumped = _record_proof_for_hash(signal_hash, str(p))
         return Prep("skip", "dup-signal-hash", len(signals), orig_tokens, 0,
-                    signal_hash=signal_hash)
+                    signal_hash=signal_hash, proof_bumped=bumped)
 
     sliced = slice_dialogue(dialogue, signals, context_lines)
     if not sliced.strip():
