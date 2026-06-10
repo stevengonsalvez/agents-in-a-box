@@ -29,7 +29,19 @@ pub struct SnapshotEntry {
     pub payload: Bytes,
     /// Monotonic version. Starts at 1 on first publish.
     pub version: Version,
+    /// Who published this entry. Plugins publish under their own id
+    /// (stamped by the per-plugin task, not self-reported); host-side
+    /// publishes use [`HOST_PUBLISHER`]. Lets topic consumers with
+    /// host-level semantics (e.g. `ui.close_request`) reject publishes
+    /// from plugins that don't own the resource they name.
+    pub publisher: PluginId,
 }
+
+/// Publisher id stamped on host-side `RuntimeHandle::publish_snapshot`
+/// calls. Reserved — both plugin discovery and `Runtime::register`
+/// reject a plugin whose manifest name is `host`, so no plugin can
+/// claim this id on any registration path.
+pub const HOST_PUBLISHER: &str = "host";
 
 /// Concurrent snapshot store.
 ///
@@ -42,7 +54,7 @@ pub struct SnapshotStore {
 
 #[derive(Debug, Default)]
 struct Inner {
-    entries: HashMap<Topic, (Bytes, Version)>,
+    entries: HashMap<Topic, (Bytes, Version, PluginId)>,
     /// Subscribers per topic, keyed by topic. Stored here so the store
     /// can answer "who subscribes to X?" in one read lock.
     subscribers: HashMap<Topic, HashSet<PluginId>>,
@@ -57,19 +69,24 @@ impl SnapshotStore {
         Self::default()
     }
 
-    /// Publish a payload under `topic`. Returns the new version.
+    /// Publish a payload under `topic`, stamped with `publisher`.
+    /// Returns the new version.
+    ///
+    /// `publisher` is the plugin id the per-plugin task observed on the
+    /// wire connection (or [`HOST_PUBLISHER`] for host-side publishes)
+    /// — never a value the payload self-reports.
     #[must_use]
-    pub fn publish(&self, topic: Topic, payload: Bytes) -> Version {
+    pub fn publish(&self, topic: Topic, payload: Bytes, publisher: PluginId) -> Version {
         let mut inner = self.inner.write();
         inner.counter += 1;
         let version = inner.counter;
-        inner.entries.insert(topic, (payload, version));
+        inner.entries.insert(topic, (payload, version, publisher));
         version
     }
 
-    /// Latest payload for `topic`, plus its version.
+    /// Latest payload for `topic`, plus its version and publisher.
     #[must_use]
-    pub fn get(&self, topic: &Topic) -> Option<(Bytes, Version)> {
+    pub fn get(&self, topic: &Topic) -> Option<(Bytes, Version, PluginId)> {
         let inner = self.inner.read();
         inner.entries.get(topic).cloned()
     }
@@ -77,7 +94,7 @@ impl SnapshotStore {
     /// Latest payload only (for the sync `RuntimeHandle::snapshot_get`).
     #[must_use]
     pub fn payload(&self, topic: &Topic) -> Option<Bytes> {
-        self.get(topic).map(|(p, _)| p)
+        self.get(topic).map(|(p, _, _)| p)
     }
 
     /// Register `plugin` as a subscriber to `topic`.
@@ -107,7 +124,7 @@ impl SnapshotStore {
     /// Snapshot of all `(topic, version)` pairs. Test helper.
     #[must_use]
     pub fn topics(&self) -> Vec<(Topic, Version)> {
-        self.inner.read().entries.iter().map(|(t, (_, v))| (t.clone(), *v)).collect()
+        self.inner.read().entries.iter().map(|(t, (_, v, _))| (t.clone(), *v)).collect()
     }
 }
 
@@ -118,20 +135,47 @@ mod tests {
     #[test]
     fn publish_then_get_round_trips() {
         let s = SnapshotStore::new();
-        let v = s.publish(Topic::from("t"), Bytes::from_static(b"hello"));
+        let v = s.publish(
+            Topic::from("t"),
+            Bytes::from_static(b"hello"),
+            PluginId::from("p1"),
+        );
         assert_eq!(v, 1);
-        let (p, v2) = s.get(&Topic::from("t")).unwrap();
+        let (p, v2, publisher) = s.get(&Topic::from("t")).unwrap();
         assert_eq!(&p[..], b"hello");
         assert_eq!(v2, 1);
+        assert_eq!(publisher, PluginId::from("p1"));
     }
 
     #[test]
     fn version_monotonic_across_topics() {
         let s = SnapshotStore::new();
-        let v1 = s.publish(Topic::from("a"), Bytes::from_static(b"1"));
-        let v2 = s.publish(Topic::from("b"), Bytes::from_static(b"2"));
-        let v3 = s.publish(Topic::from("a"), Bytes::from_static(b"3"));
+        let p = PluginId::from("p1");
+        let v1 = s.publish(Topic::from("a"), Bytes::from_static(b"1"), p.clone());
+        let v2 = s.publish(Topic::from("b"), Bytes::from_static(b"2"), p.clone());
+        let v3 = s.publish(Topic::from("a"), Bytes::from_static(b"3"), p);
         assert!(v1 < v2 && v2 < v3);
+    }
+
+    #[test]
+    fn republish_overwrites_publisher() {
+        // Latest-publish-wins applies to the publisher stamp too — a
+        // consumer must never see topic bytes from one plugin paired
+        // with another plugin's identity.
+        let s = SnapshotStore::new();
+        let _ = s.publish(
+            Topic::from("t"),
+            Bytes::from_static(b"a"),
+            PluginId::from("p1"),
+        );
+        let _ = s.publish(
+            Topic::from("t"),
+            Bytes::from_static(b"b"),
+            PluginId::from("p2"),
+        );
+        let (p, _, publisher) = s.get(&Topic::from("t")).unwrap();
+        assert_eq!(&p[..], b"b");
+        assert_eq!(publisher, PluginId::from("p2"));
     }
 
     #[test]

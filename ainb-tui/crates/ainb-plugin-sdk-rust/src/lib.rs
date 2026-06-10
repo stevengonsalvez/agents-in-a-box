@@ -55,5 +55,6 @@ pub use ainb_plugin_protocol::{
         SpawnManagedSubprocessResult, UnixSocketCloseParams, UnixSocketDialParams,
         UnixSocketDialResult, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams, Viewport,
     },
+    topics,
     wire_buffer::{Cell, Color, Coord, WireBuffer},
 };

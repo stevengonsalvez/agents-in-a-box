@@ -67,6 +67,17 @@ pub fn discover(root: &Path) -> Result<Vec<RegisteredPlugin>, RuntimeError> {
         }
         let bytes = std::fs::read_to_string(&manifest_path)?;
         let manifest: Manifest = toml::from_str(&bytes)?;
+        // `host` is the reserved publisher id for host-side
+        // `RuntimeHandle::publish_snapshot` calls (see
+        // `snapshot::HOST_PUBLISHER`). A plugin claiming it could
+        // impersonate the host on the snapshot bus — skip it.
+        if manifest.plugin.name == crate::snapshot::HOST_PUBLISHER {
+            tracing::warn!(
+                dir = %dir.display(),
+                "plugin name `host` is reserved — skipping"
+            );
+            continue;
+        }
         let binary_path = dir.join(&manifest.plugin.name);
         out.push(RegisteredPlugin::new(manifest, binary_path, manifest_path));
     }

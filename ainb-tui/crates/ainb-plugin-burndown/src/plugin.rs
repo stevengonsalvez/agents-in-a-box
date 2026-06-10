@@ -10,7 +10,7 @@
 use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
     Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, SdkError, WireBuffer,
+    Result, SdkError, WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
     ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
@@ -186,9 +186,9 @@ impl Plugin for BurndownPlugin {
     /// exists in `ui.rs`:
     ///
     /// - `Backspace` → `pop_filter_chip` / `zoom_handle_esc` (plan:
-    ///   `pop_filter`; originally bound to `Esc` but the host now
-    ///   reserves `Esc` for navigation back to home — see
-    ///   `is_host_reserved_key` in ainb-core).
+    ///   `pop_filter`). `Esc` performs the same one-level pop and, at
+    ///   the root view, publishes `ui.close_request` so the host closes
+    ///   the screen — see `is_host_reserved_key` in ainb-core.
     /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
     /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
     ///
@@ -269,6 +269,25 @@ impl Plugin for BurndownPlugin {
                 // Always treat `y` as handled so generation bumps and the
                 // flash (or the no-op) renders.
                 true
+            }
+            KeyCode::Esc => {
+                // Esc pops one internal level via the pure dispatch
+                // (detail drawer → search overlay → zoom → filter chip).
+                // At the root view nothing is left to pop — publish
+                // `ui.close_request` so the host closes this screen back
+                // to wherever the user opened it from. Best effort: if
+                // the publish is lost the user just presses Esc again.
+                let popped = self.dispatch_key_pure(&params.key.code);
+                if !popped {
+                    let req = topics::UiCloseRequest {
+                        screen_id: params.screen_id.clone(),
+                    };
+                    let payload = serde_json::to_vec(&req).unwrap_or_default();
+                    let _ = host
+                        .snapshot_publish(topics::UI_CLOSE_REQUEST, bytes::Bytes::from(payload))
+                        .await;
+                }
+                popped
             }
             _ => self.dispatch_key_pure(&params.key.code),
         };
@@ -954,16 +973,29 @@ impl BurndownPlugin {
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
-            // `Backspace` (not `Esc`) handles pop-state: close zoom if
-            // open, otherwise pop the most recent filter chip. Esc is
-            // host-reserved — it always bubbles up to navigate back to
-            // home. See the doc on `is_host_reserved_key` in
-            // ainb-core/src/app/screens/builtin.rs for the rationale.
+            // `Backspace` handles pop-state: close zoom if open,
+            // otherwise pop the most recent filter chip. `Esc` (below)
+            // performs the same one-level pop but additionally signals
+            // the host once the root view is reached.
             KeyCode::Backspace => {
                 if self.ui.is_zoomed() {
                     let _ = self.ui.zoom_handle_esc();
                 } else {
                     let _ = self.ui.pop_filter_chip();
+                }
+            }
+            // One-level pop, mirroring Backspace: the zoom ladder first
+            // (detail drawer → search overlay → zoom), then the newest
+            // filter chip. Returning `false` at the root view (nothing
+            // left to pop) makes the async `handle_key` publish
+            // `ui.close_request` so the host closes the screen back to
+            // wherever it was opened from. See `is_host_reserved_key`
+            // in ainb-core/src/app/screens/builtin.rs for the host side.
+            KeyCode::Esc => {
+                if self.ui.zoom_handle_esc() {
+                    // Consumed by the zoom ladder.
+                } else if self.ui.pop_filter_chip().is_none() {
+                    return false;
                 }
             }
             KeyCode::Char { ch: 'p' } => self.ui.cycle_provider_filter(),
@@ -1112,15 +1144,94 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn esc_is_not_claimed_by_plugin() {
-        // Esc is host-reserved (see `is_host_reserved_key` in
-        // ainb-core/src/app/screens/builtin.rs) so the runtime should
-        // never forward it. Defensively assert dispatch returns false
-        // even if it does — the plugin must NOT claim Esc, otherwise
-        // pressing it on the analytics screen would swallow the
-        // navigation-back keystroke.
+    fn esc_at_root_is_not_claimed() {
+        // At the root view (no zoom, no overlay, no filter chips) there
+        // is nothing left to pop, so the dispatch must return false —
+        // that's the signal `handle_key` uses to publish
+        // `ui.close_request` and have the host close the screen. If
+        // this started returning true, Esc on the analytics root would
+        // silently do nothing forever.
         let mut p = BurndownPlugin::default();
         assert!(!p.dispatch_key_pure(&KeyCode::Esc));
+    }
+
+    #[test]
+    fn esc_pops_one_level_before_signalling_close() {
+        // Esc mirrors Backspace's one-level pop: zoomed → unzoom (claimed),
+        // then a second Esc at the root is unclaimed (close signal).
+        let mut p = BurndownPlugin::default();
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the unzoom"
+        );
+        assert!(!p.ui.is_zoomed(), "Esc must exit zoom");
+
+        assert!(
+            !p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc at the root must be unclaimed so handle_key publishes ui.close_request"
+        );
+    }
+
+    #[test]
+    fn esc_pops_filter_chip_before_signalling_close() {
+        use crate::data::usage::{BranchUsage, TokenBucket, UsageData, UsagePeriod};
+        use crate::ui::UsagePanel;
+
+        // Commit a branch chip (same setup as the Enter regression test),
+        // then assert Esc pops it before going unclaimed at the root.
+        let mut p = BurndownPlugin::default();
+        let mut data = UsageData::default();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: TokenBucket {
+                input_tokens: 100,
+                output_tokens: 100,
+                ..Default::default()
+            },
+        }];
+        p.data = Some(std::sync::Arc::new(data));
+        p.ui.data = None;
+        p.ui.focused_panel = Some(UsagePanel::ByBranch);
+        p.ui.focus_row = 0;
+        p.ui.period = UsagePeriod::All;
+        assert!(p.dispatch_key_pure(&KeyCode::Enter));
+        assert_eq!(p.ui.filters.branch, vec!["main".to_string()]);
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the chip pop"
+        );
+        assert!(p.ui.filters.branch.is_empty(), "Esc must pop the chip");
+        assert!(
+            !p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc with no chips left must be unclaimed (close signal)"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_zoom_search_before_unzooming() {
+        // With the `/` search overlay open inside zoom, Esc closes the
+        // overlay first (one level), keeping the zoom; only subsequent
+        // presses unzoom and then signal close.
+        let mut p = BurndownPlugin::default();
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.dispatch_key_pure(&ch('/')));
+        assert!(p.ui.zoom_search_active);
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the search cancel"
+        );
+        assert!(
+            !p.ui.zoom_search_active,
+            "Esc must close the search overlay"
+        );
+        assert!(p.ui.is_zoomed(), "search cancel must not also unzoom");
     }
 
     #[test]

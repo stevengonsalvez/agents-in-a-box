@@ -212,6 +212,7 @@ pub enum AppEvent {
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
+    PanelBack,               // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
     InboxMoveDown,           // Inbox: move selection down one row
@@ -1137,8 +1138,21 @@ impl EventHandler {
         use crate::app::state::FocusedPane;
 
         match key_event.code {
-            // Return to home screen (quit only available from HomeScreen)
-            KeyCode::Char('q') | KeyCode::Esc => Some(AppEvent::GoToHomeScreen),
+            // Return to home screen (quit only available from HomeScreen).
+            // Plugin screens normally consume Esc via the forwarder above,
+            // but when the plugin is unavailable (runtime down, plugin
+            // disabled — the placeholder is showing) the key falls through
+            // to here: pop back to wherever the panel was opened from
+            // instead of hardcoding home.
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if crate::app::screens::builtin::plugin_id_for_screen(&state.current_screen)
+                    .is_some()
+                {
+                    Some(AppEvent::PanelBack)
+                } else {
+                    Some(AppEvent::GoToHomeScreen)
+                }
+            }
             KeyCode::Tab => {
                 tracing::debug!(
                     "Tab key pressed, current focused_pane: {:?}",
@@ -1280,6 +1294,16 @@ impl EventHandler {
             // where `handle_home_screen_keys` also binds it. Without this arm
             // the menu hint pointed at a dead key.
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
+            // Panel screens mirror their home-menu letters here so every
+            // panel opens from the session list too (i stats, w witr,
+            // k skills — same set `handle_home_screen_keys` binds).
+            // GoToStats/GoToSkills save `previous_screen`, so closing the
+            // panel lands back on the session list, not home. GoToWitr is
+            // a tmux suspend/attach that never changes `current_screen`,
+            // so quitting witr resumes here automatically.
+            KeyCode::Char('i') => Some(AppEvent::GoToStats),
+            KeyCode::Char('w') => Some(AppEvent::GoToWitr),
+            KeyCode::Char('k') => Some(AppEvent::GoToSkills),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1995,7 +2019,7 @@ impl EventHandler {
     ///   - q / Esc         back to previous screen (home if none)
     fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::GoToHomeScreen),
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
             KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
             KeyCode::PageUp => Some(AppEvent::InboxPageUp),
@@ -2241,6 +2265,16 @@ impl EventHandler {
             AppEvent::GoToHomeScreen => {
                 tracing::info!("Navigating to HomeScreen");
                 state.current_screen = screen_ids::HOME.to_string();
+            }
+            AppEvent::PanelBack => {
+                // Panels (inbox, stats, skills, plugin screens) open from
+                // either the home menu or the session list; closing one
+                // returns to wherever it was opened from rather than
+                // hardcoding HOME. Mirrors GitViewBack's pop semantics.
+                let target =
+                    state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
+                tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
+                state.current_screen = target;
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
@@ -3431,9 +3465,10 @@ impl EventHandler {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Inbox => {
-                        state.previous_screen = Some(state.current_screen.clone());
-                        state.current_screen = screen_ids::INBOX.to_string();
-                        state.inbox_state.refresh();
+                        // Route through the canonical event so the
+                        // origin-save (and its self-clobber guard) has
+                        // exactly one code path.
+                        Self::process_event(AppEvent::GoToInbox, state);
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
@@ -3449,10 +3484,10 @@ impl EventHandler {
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
-                        state.current_screen = screen_ids::ANALYTICS.to_string();
-                        // Data load lives inside the burndown plugin
-                        // now (Phase 3 cutover); host no longer
-                        // pre-populates state for the analytics screen.
+                        // Canonical event saves `previous_screen` so the
+                        // panel's Esc-close returns here, not to a stale
+                        // origin from an earlier flow.
+                        Self::process_event(AppEvent::GoToStats, state);
                     }
                     SidebarItem::Witr => {
                         tracing::info!(
@@ -3477,8 +3512,7 @@ impl EventHandler {
                     }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
-                        state.current_screen = screen_ids::SKILLS.to_string();
-                        state.start_background_skills_load(false);
+                        Self::process_event(AppEvent::GoToSkills, state);
                     }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
@@ -3642,6 +3676,9 @@ impl EventHandler {
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
+                if state.current_screen != screen_ids::ANALYTICS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
@@ -3679,12 +3716,17 @@ impl EventHandler {
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
+                if state.current_screen != screen_ids::SKILLS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
-                state.previous_screen = Some(state.current_screen.clone());
+                if state.current_screen != screen_ids::INBOX {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::INBOX.to_string();
                 state.inbox_state.refresh();
             }
@@ -3692,6 +3734,13 @@ impl EventHandler {
                 tracing::info!("Navigating to Hangar");
                 // Plugin-owned screen: the `hangar-tui` subprocess renders it and
                 // owns its own data load (snapshot RPCs over the daemon socket).
+                // Save the origin like every other panel so Esc (which on plugin
+                // screens resolves to `PanelBack`, and via `ui.close_request` once
+                // hangar-tui adopts it) pops back to where it was opened from
+                // rather than a stale `previous_screen` left by an earlier panel.
+                if state.current_screen != screen_ids::HANGAR {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
@@ -4583,7 +4632,7 @@ impl EventHandler {
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
-                state.current_screen = screen_ids::HOME.to_string();
+                Self::process_event(AppEvent::PanelBack, state);
             }
             AppEvent::SkillsNextProvider => {
                 state.skills_state.next_provider();
@@ -5171,6 +5220,121 @@ mod navigate_to_tests {
         assert!(!is_known_screen_id(""));
         assert!(!is_known_screen_id("not-a-screen"));
         assert!(!is_known_screen_id("home2"));
+    }
+}
+
+#[cfg(test)]
+mod panel_back_tests {
+    use super::*;
+    use crate::app::screens::ids;
+
+    /// Panels opened from the session list must return there on close —
+    /// not hardcode home. Covers stats (analytics) end-to-end:
+    /// open saves the origin, PanelBack pops it.
+    #[test]
+    fn go_to_stats_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        assert_eq!(state.current_screen, ids::ANALYTICS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert!(
+            state.previous_screen.is_none(),
+            "pop must consume the origin"
+        );
+    }
+
+    #[test]
+    fn go_to_inbox_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToInbox, &mut state);
+        assert_eq!(state.current_screen, ids::INBOX);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
+    /// it must therefore save its origin on entry like every other panel,
+    /// or it would pop a stale `previous_screen` left by an earlier panel.
+    #[test]
+    fn go_to_hangar_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.current_screen, ids::HANGAR);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Regression for the stale-origin edge the review flagged: open a
+    /// panel from the session list (sets previous_screen=session_list),
+    /// leave it WITHOUT Esc (straight to home), then open Hangar from
+    /// home. Hangar's Esc must return to HOME, not the stale session_list.
+    #[test]
+    fn hangar_does_not_pop_a_stale_origin_from_an_earlier_panel() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        EventHandler::process_event(AppEvent::GoToStats, &mut state); // previous=session_list
+        EventHandler::process_event(AppEvent::GoToHomeScreen, &mut state); // leave without Esc
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(
+            state.current_screen,
+            ids::HOME,
+            "Hangar must not pop the stale session_list origin"
+        );
+    }
+
+    #[test]
+    fn panel_back_falls_back_to_home_when_no_origin() {
+        let mut state = AppState::default();
+        state.current_screen = ids::INBOX.to_string();
+        state.previous_screen = None;
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Re-firing the open event while already on the panel must not
+    /// clobber the saved origin with the panel's own id (which would
+    /// make PanelBack a self-loop).
+    #[test]
+    fn reopening_panel_does_not_overwrite_origin_with_itself() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+    }
+
+    /// Skills uses GoToSkills (spawns a background load → needs a
+    /// runtime) and exits via SkillsBack, which shares PanelBack's pop.
+    #[tokio::test]
+    async fn skills_back_returns_to_origin() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToSkills, &mut state);
+        assert_eq!(state.current_screen, ids::SKILLS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::SkillsBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
     }
 }
 

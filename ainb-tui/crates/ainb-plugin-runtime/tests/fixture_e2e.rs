@@ -133,8 +133,21 @@ fn send_key_forwards_handle_key_notification() {
     let (rt, handle) = build_runtime();
     let id = register_fixture(&rt);
 
-    // Lazy-spawn the plugin so there's a stdin to write to.
-    drop(handle.render(&id, Viewport::new(20, 5), 0));
+    // Lazy-spawn the plugin and WAIT for the first render to complete
+    // before sending the key. `send_key` reports enqueue success, not
+    // delivery: the priority key channel is drained ahead of the main
+    // command inbox (`biased;` select), so a key enqueued before the
+    // plugin task has processed the spawn-triggering Render command
+    // races it, loses, and is dropped-idle (`handle_key_command`'s
+    // `child.is_none()` arm). Awaiting the render outcome proves the
+    // child is up, which is the precondition this test needs.
+    let render_rx = handle.render(&id, Viewport::new(20, 5), 0);
+    rt.tokio_handle().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), render_rx)
+            .await
+            .expect("spawn render timed out")
+            .expect("spawn render channel closed")
+    });
 
     // Send a single key. Fixture re-publishes the params as a snapshot.
     let key = ainb_plugin_runtime::KeyEvent {
@@ -142,16 +155,10 @@ fn send_key_forwards_handle_key_notification() {
         mods: 0,
         kind: ainb_plugin_runtime::KeyKind::Press,
     };
-    // Retry briefly in case the spawn hasn't completed yet — `send_key`
-    // drops on idle (the plugin task hasn't transitioned to Running),
-    // which would race with the lazy-spawn we just kicked off.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if handle.send_key(&id, "ainb_analytics", key.clone()) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        handle.send_key(&id, "ainb_analytics", key),
+        "send_key enqueue failed"
+    );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut payload = None;
@@ -365,6 +372,28 @@ fn sigkill_triggers_respawn_then_quarantine() {
     panic!(
         "reload didn't clear quarantine; state = {:?}",
         handle.lifecycle_state(&id)
+    );
+}
+
+// `host` is the reserved publisher id stamped on host-side snapshot
+// publishes; a plugin must not be able to register under it on ANY path
+// (discovery filters it; `Runtime::register` rejects it too). Build a
+// manifest named `host` and register it directly — it must be a no-op,
+// so the runtime never knows a `host` plugin (lifecycle_state == None).
+#[test]
+fn register_rejects_reserved_host_name() {
+    let (rt, handle) = build_runtime();
+    let mut manifest = fixture_manifest();
+    manifest.plugin.name = "host".into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    rt.register(plugin);
+    assert!(
+        handle.lifecycle_state(&PluginId::from("host")).is_none(),
+        "a plugin named `host` must be refused by Runtime::register"
     );
 }
 

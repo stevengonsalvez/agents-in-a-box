@@ -142,21 +142,19 @@ pub fn crossterm_to_protocol_key(
 /// - `?` / `H` → help toggle (already short-circuited above
 ///   `handle_key_event`'s plugin branch, but listed here for parity in
 ///   the `PluginScreen` trait impl path).
-/// - `Esc` → pop screen / return to home. The plugin/handle_key wire
-///   method is a one-way notification (no `consumed` reply), so once
-///   the host forwards a keystroke it has no way to know whether the
-///   plugin had any state to consume it. The user-visible failure is
-///   Esc-from-burndown silently disappearing into the plugin even when
-///   there's no filter chip or zoom to pop. Until the wire protocol is
-///   extended with a `consumed: bool` result for `plugin/handle_key`,
-///   Esc belongs to the host. Plugins re-bind internal pop semantics
-///   to `Backspace` (see burndown's `KeyCode::Backspace` handler).
 ///
-///   UX note: a side-effect of routing Esc straight to the host is
-///   that Esc on a *zoomed* plugin view does NOT first un-zoom — it
-///   navigates straight to home, discarding zoom state. Users who
-///   want a one-level pop press `Backspace` (closes zoom, stays on
-///   the screen). The burndown help bar advertises both keys.
+/// `Esc` is plugin-owned (it used to be host-reserved): it pops one
+/// internal level (detail drawer, search overlay, zoom, filter chip)
+/// and, once the plugin is already at its root view, the plugin
+/// publishes `ui.close_request` on the snapshot bus to ask the host to
+/// close the screen. The host's event loop polls that topic by version
+/// (`AppState::tick_panel_close_requests`) and pops back to the screen
+/// the panel was opened from. This replaces the old behaviour where
+/// Esc on a zoomed plugin view discarded zoom state and jumped
+/// straight home. `Backspace` remains a plugin-internal alias for the
+/// same one-level pop. When the plugin is missing or its runtime is
+/// down, the forwarder returns `NotHandled` and Esc falls through to
+/// the central dispatch, which still closes the placeholder screen.
 ///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
@@ -168,7 +166,6 @@ pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
     match key.code {
         CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
         CtKey::Char('?' | 'H') => true,
-        CtKey::Esc => true,
         _ => false,
     }
 }
@@ -199,7 +196,23 @@ pub fn forward_key_to_focused_plugin(
         return EventOutcome::Handled;
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    if !delivered
+        && matches!(
+            key.code,
+            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
+        )
+    {
+        // Plugin unregistered or its task is gone — the screen is
+        // showing the "plugin unavailable" placeholder and the key
+        // just got dropped on the floor. Esc/q must stay escapable
+        // there (the central dispatch resolves them to PanelBack), or
+        // the user is trapped with only Ctrl+C. Other keys stay
+        // claimed so the session-list fallthrough's destructive
+        // bindings (`d` delete, `n` new session, …) can't fire from a
+        // dead plugin screen.
+        return EventOutcome::NotHandled;
+    }
     EventOutcome::Handled
 }
 
@@ -885,11 +898,10 @@ mod tests {
             CtKey::Char('H'),
             KeyModifiers::NONE
         )));
-        // Esc is reserved: it must always bubble to the host so the
-        // screen pops back to home — see the doc on
-        // `is_host_reserved_key`. Plugins use `Backspace` for pop-state
-        // semantics instead.
-        assert!(is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
+        // Esc is plugin-owned (overlay-panels redesign): the plugin pops
+        // one internal level per press and publishes `ui.close_request`
+        // at its root — see the doc on `is_host_reserved_key`.
+        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
@@ -919,5 +931,58 @@ mod tests {
         // Non-plugin screens return None so the forwarder bails early.
         assert_eq!(plugin_id_for_screen(ids::HOME), None);
         assert_eq!(plugin_id_for_screen("nonsense"), None);
+    }
+
+    /// Regression (PR #249 review HIGH-1): with the runtime up but the
+    /// plugin NOT registered — exactly the "[plugin unavailable]"
+    /// placeholder state — `send_key` drops the keystroke. Esc/q must
+    /// fall through to the central dispatch (→ PanelBack) so the
+    /// placeholder stays escapable; every other key stays claimed so
+    /// session-list bindings (`d` delete, `n` new session, …) can't
+    /// fire from a dead plugin screen.
+    #[test]
+    fn undelivered_esc_and_q_fall_through_on_placeholder_screen() {
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        // Real runtime, zero plugins registered → lifecycle_state(burndown)
+        // is None and send_key returns false.
+        let (runtime, handle) =
+            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
+        let mut state = crate::app::state::AppState::default();
+        state.plugin_runtime = Some(handle);
+        state.current_screen = ids::ANALYTICS.to_string();
+
+        let mk = |code| CtEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Esc)),
+                EventOutcome::NotHandled
+            ),
+            "undelivered Esc must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('q'))),
+                EventOutcome::NotHandled
+            ),
+            "undelivered q must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('d'))),
+                EventOutcome::Handled
+            ),
+            "undelivered non-nav keys stay claimed — no destructive fallthrough"
+        );
+
+        runtime.shutdown();
     }
 }

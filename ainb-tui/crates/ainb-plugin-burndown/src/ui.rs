@@ -1767,7 +1767,7 @@ fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, state: &UsageViewState, 
         ),
         Span::styled("  ", Style::default()),
         Span::styled(
-            "↑↓ row · [ ] col · < > resize · y copy · = reset · / search · BkSp unzoom · Esc home",
+            "↑↓ row · [ ] col · < > resize · y copy · = reset · / search · BkSp/Esc unzoom",
             Style::default().fg(MUTED_GRAY),
         ),
     ];
@@ -4339,7 +4339,7 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             Span::styled("z/BkSp", Style::default().fg(GOLD)),
             Span::styled(" unzoom  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Esc", Style::default().fg(GOLD)),
-            Span::styled(" home  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" back  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("j/k", Style::default().fg(GOLD)),
             Span::styled(" row  ", Style::default().fg(MUTED_GRAY)),
         ];
@@ -4359,8 +4359,9 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     ];
     if on_burndown {
         // Burndown view: z zoom; Tab pivots panels; Enter/X commit chips; C clears.
-        // `BkSp` = Backspace (pop chip / unzoom); Esc is reserved by the host
-        // for navigation back to home, so it's listed in the trailing block.
+        // `BkSp` = Backspace (pop chip / unzoom); Esc does the same one-level
+        // pop and, at the root view, asks the host to close the screen — so
+        // the trailing block lists it as `Esc back`.
         spans.extend_from_slice(&[
             Span::styled("z", Style::default().fg(GOLD)),
             Span::styled(" zoom  ", Style::default().fg(MUTED_GRAY)),
