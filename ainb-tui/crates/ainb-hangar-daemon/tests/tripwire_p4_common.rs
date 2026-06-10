@@ -181,6 +181,14 @@ pub fn prepare_pipeline_with(extra_env: &[(&str, &str)]) -> Pipeline {
     // first to undo this.
     seed_first_run_ack(home.path());
 
+    // Pre-dismiss the notifyd first-run install prompt: a fresh $HOME has no
+    // `~/.agents-in-a-box/install.json`, so `maybe_prompt_notify_install`
+    // raises a ConfirmationDialog whose key handler swallows every key except
+    // ←/→/Tab/Enter/Esc — including the `g` Hangar nav — deadlocking every TUI
+    // tripwire at its full poll deadline (dialog ships since PR #194 /
+    // 642dd6b4, which reached this branch via the main merge).
+    seed_notify_prompt_dismissed(home.path());
+
     // Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
     let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
@@ -226,6 +234,22 @@ fn seed_first_run_ack(home: &Path) {
 /// [`prepare_pipeline`]'s default ack seed.
 pub fn clear_first_run_ack(home: &Path) {
     let _ = std::fs::remove_file(state_toml_path(home));
+}
+
+/// Pre-dismiss the notifyd first-run install prompt by writing an
+/// `InstallRecord` with `prompt_dismissed = true` to
+/// `{home}/.agents-in-a-box/install.json` (the exact shape
+/// `ainb-plugin-notifyd/src/install.rs` deserializes). Without it the host
+/// raises the "Get notified when a session needs you?" ConfirmationDialog on
+/// every launch under a fresh `$HOME`, and that dialog intercepts all nav keys.
+fn seed_notify_prompt_dismissed(home: &Path) {
+    let base = home.join(".agents-in-a-box");
+    let _ = std::fs::create_dir_all(&base);
+    let _ = std::fs::write(
+        base.join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"claude_plugin_dir\":null,\
+         \"codex_hooks_json\":null,\"plugin_version\":null,\"prompt_dismissed\":true}\n",
+    );
 }
 
 /// Write a completed `onboarding.toml` under the isolated `$HOME` so the wizard
