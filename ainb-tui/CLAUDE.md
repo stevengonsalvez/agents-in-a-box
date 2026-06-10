@@ -206,6 +206,15 @@ Docker sessions keep their per-container MCP init. Servers whose commands
 don't resolve on the host (e.g. the built-in container-path defaults) are
 skipped automatically.
 
+No hand-written TOML required: stdio servers found in a worktree's existing
+`.mcp.json` are auto-imported into the pool at session create (sessions
+push definitions to the running daemon over the control socket), and
+`ainb mcp import [--user]` persists project `.mcp.json` + Claude user-scope
+servers into `[mcp_servers.*]` config. `ainb mcp install --codex --copilot`
+points `~/.codex/config.toml` / `~/.copilot/mcp-config.json` at the pool
+shim (with `.bak` backups) so Codex and Copilot sessions share the same
+backend processes as Claude.
+
 ## Monorepo Context
 
 This TUI can reference packages from the parent `toolkit/` directory. Git operations work against the monorepo root.
