@@ -143,8 +143,8 @@ pub(crate) fn run_blocking_scan(
 /// land at ~600 KiB, others at ~12 MiB because of long bash-command
 /// strings or user_message bodies. A fixed call-count budget therefore
 /// can't guarantee staying under the wire cap. [`chunk_usage_data`]
-/// re-encodes the candidate chunk after each call appended and cuts
-/// as soon as the actual msgpack size crosses this threshold.
+/// sizes each item once as it's appended and cuts as soon as the
+/// running encoded size would cross this threshold.
 ///
 /// Set to 2 MiB → ~2.7 MiB after base64 → ~2.7 MiB JSON frame, well
 /// under the 16 MiB framer cap.
@@ -545,22 +545,34 @@ impl SessionReader {
     }
 }
 
-/// How many calls to push into a chunk between size probes. Tuned
-/// to balance encoder cost (O(n^2) worst case if STEP=1) against
-/// chunk granularity (larger STEP = fatter chunks because we only
-/// detect overshoot at probe time). With STEP=64 and a 2 MiB target,
-/// the chunker pays at most `target/avg_call_bytes` encodes per
-/// chunk — a few dozen for real data.
-const CHUNKER_PROBE_STEP: usize = 64;
+/// Headroom added to the per-chunk running-size estimate to cover
+/// msgpack array-header growth: each of the three tail arrays encodes
+/// a 1-byte header while empty (fixarray) that grows to at most 5
+/// bytes (`array 32`) as items append — ≤ 12 bytes of growth total,
+/// rounded up generously.
+const CHUNKER_HEADER_SLACK: usize = 64;
 
 /// Identifier for which tail-chunkable vec a chunker push came from.
 /// Lets the spill-back path return the just-popped item to the right
-/// queue when an over-target probe forces a cut.
+/// queue when the per-chunk verification encode finds an overshoot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TailQueue {
     Calls,
     Sessions,
     ShellCommands,
+}
+
+/// Encoded msgpack size of one value on its own. msgpack array
+/// elements are plain concatenated values, so an item's standalone
+/// encoding is byte-for-byte what it contributes inside a tail vec —
+/// which is what makes the chunker's running-sum sizing exact (modulo
+/// the array headers covered by [`CHUNKER_HEADER_SLACK`]).
+///
+/// An encode failure returns 0: the item still ships, and the same
+/// failure then surfaces at publish time exactly as it would have
+/// before sizing existed.
+fn encoded_len<T: serde::Serialize>(item: &T) -> usize {
+    rmp_serde::to_vec_named(item).map_or(0, |b| b.len())
 }
 
 /// Split a `UsageData` snapshot into one or more `UsageDataEvent`
@@ -589,11 +601,19 @@ enum TailQueue {
 /// to ~17 MiB and tripped the 16 MiB framer cap — see WIRE_VERSION
 /// docs for the incident report.
 ///
-/// Re-encodes the candidate chunk after every [`CHUNKER_PROBE_STEP`]
-/// items appended; cuts when the encoded msgpack size crosses
-/// `target_bytes`. Pop priority is `calls` → `sessions` →
-/// `shell_commands`, draining the biggest queue first so the chunk
-/// count for call-dominated snapshots matches the v3 distribution.
+/// **Sizing strategy (issue #255).** Each tail item is encoded exactly
+/// once, when it's popped: the chunk cuts when `envelope base +
+/// Σ item sizes + header slack` would cross `target_bytes`. One
+/// verification encode runs per chunk as a safety net (spilling items
+/// back if the estimate ever under-counted — it shouldn't, msgpack
+/// array elements concatenate). The previous implementation re-encoded
+/// the whole candidate chunk every 64 items, which on a ~126-chunk
+/// real-data snapshot meant ~7.8 GB of redundant encoding and ~20 s of
+/// the measured ~23 s refresh cost.
+///
+/// Pop priority is `calls` → `sessions` → `shell_commands`, draining
+/// the biggest queue first so the chunk count for call-dominated
+/// snapshots matches the v3 distribution.
 pub(crate) fn chunk_usage_data(
     mut data: UsageData,
     published_ns: u64,
@@ -624,124 +644,144 @@ pub(crate) fn chunk_usage_data(
         data,
     });
 
+    // Envelope base: encoded size of an empty tail chunk. msgpack
+    // encodes `u32` with 1–5 bytes depending on magnitude, so probe
+    // with `u32::MAX` — the base must never under-count a late chunk.
+    let envelope_base = encoded_len(&UsageDataEvent {
+        version: WIRE_VERSION,
+        published_ns,
+        partial,
+        chunk_index: u32::MAX,
+        is_final: true,
+        data: UsageData::default(),
+    });
+
     let mut chunk_index: u32 = 1;
     while !(calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty()) {
         let mut chunk_data = UsageData::default();
-        let mut since_probe = 0usize;
+        let mut running = envelope_base + CHUNKER_HEADER_SLACK;
+        let mut items_in_chunk = 0usize;
 
         loop {
             // Pop priority: calls (largest) → sessions → shell_commands.
+            // Peek-encode-decide: an item that would push the chunk over
+            // target stays at the front of its queue for the next chunk
+            // — no spill bookkeeping on the normal path.
+            let item_size = if let Some(c) = calls_q.front() {
+                encoded_len(c)
+            } else if let Some(s) = sessions_q.front() {
+                encoded_len(s)
+            } else if let Some(s) = shell_q.front() {
+                encoded_len(s)
+            } else {
+                break; // every queue drained
+            };
+
+            // Cut before the overshooting item — unless the chunk is
+            // still empty: single-item chunks always ship so a giant
+            // outlier (e.g. one 5 MiB user_message) can't stall the loop.
+            if items_in_chunk > 0 && running + item_size >= target_bytes {
+                break;
+            }
+
             if let Some(c) = calls_q.pop_front() {
                 chunk_data.calls.push(c);
             } else if let Some(s) = sessions_q.pop_front() {
                 chunk_data.sessions.push(s);
             } else if let Some(s) = shell_q.pop_front() {
                 chunk_data.shell_commands.push(s);
-            } else {
-                break; // every queue drained
             }
-            since_probe += 1;
+            running += item_size;
+            items_in_chunk += 1;
+        }
 
-            let all_empty = calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty();
-            // Probe when we've accumulated STEP items, or when every
-            // queue just drained (so we don't miss tiny final overshoots).
-            if since_probe < CHUNKER_PROBE_STEP && !all_empty {
-                continue;
-            }
-            since_probe = 0;
+        // Safety net: one verification encode per chunk. The running
+        // sum is exact up to array headers (covered by the slack), so
+        // this should never trigger — but an estimate bug here would
+        // otherwise ship a frame the host framer rejects, so verify
+        // and spill items back until the chunk really fits.
+        let verify_event = UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns,
+            partial,
+            chunk_index,
+            is_final: calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty(),
+            data: chunk_data.clone(),
+        };
+        let verified_size =
+            rmp_serde::to_vec_named(&verify_event).map(|b| b.len()).unwrap_or(target_bytes);
+        let chunk_item_count =
+            chunk_data.calls.len() + chunk_data.sessions.len() + chunk_data.shell_commands.len();
+        if verified_size >= target_bytes && chunk_item_count > 1 {
+            tracing::warn!(
+                verified_size,
+                target_bytes,
+                "session-reader chunker: size estimate under-counted; spilling"
+            );
+            loop {
+                // Choose the spill source: whichever tail vec
+                // currently has the most items. Re-evaluate every
+                // iteration because vecs shrink.
+                let from = if chunk_data.calls.len() >= chunk_data.sessions.len()
+                    && chunk_data.calls.len() >= chunk_data.shell_commands.len()
+                    && !chunk_data.calls.is_empty()
+                {
+                    TailQueue::Calls
+                } else if chunk_data.sessions.len() >= chunk_data.shell_commands.len()
+                    && !chunk_data.sessions.is_empty()
+                {
+                    TailQueue::Sessions
+                } else if !chunk_data.shell_commands.is_empty() {
+                    TailQueue::ShellCommands
+                } else {
+                    break; // nothing left to spill
+                };
 
-            let probe_event = UsageDataEvent {
-                version: WIRE_VERSION,
-                published_ns,
-                partial,
-                chunk_index,
-                is_final: all_empty,
-                data: chunk_data.clone(),
-            };
-            let probe_size =
-                rmp_serde::to_vec_named(&probe_event).map(|b| b.len()).unwrap_or(target_bytes);
-
-            // Cut on probe overshoot, but only if the chunk has >1 item
-            // total — single-item chunks always ship so a giant outlier
-            // (e.g. one 5 MiB user_message) can't stall the loop.
-            //
-            // Spill in a loop, not just once: STEP=64 means the chunk
-            // can land many MiB over budget when one of those 64 items
-            // is a 100+ KiB outlier. Single-spill would still ship a
-            // chunk 50× over target. Each iteration picks the largest
-            // tail vec as the spill source (best chance of cheaply
-            // shrinking the chunk) and re-probes; keep spilling until
-            // we're back under target or only 1 item remains.
-            let chunk_item_count = chunk_data.calls.len()
-                + chunk_data.sessions.len()
-                + chunk_data.shell_commands.len();
-            if probe_size >= target_bytes && chunk_item_count > 1 {
-                loop {
-                    // Choose the spill source: whichever tail vec
-                    // currently has the most items. Re-evaluate every
-                    // iteration because vecs shrink.
-                    let from = if chunk_data.calls.len() >= chunk_data.sessions.len()
-                        && chunk_data.calls.len() >= chunk_data.shell_commands.len()
-                        && !chunk_data.calls.is_empty()
-                    {
-                        TailQueue::Calls
-                    } else if chunk_data.sessions.len() >= chunk_data.shell_commands.len()
-                        && !chunk_data.sessions.is_empty()
-                    {
-                        TailQueue::Sessions
-                    } else if !chunk_data.shell_commands.is_empty() {
-                        TailQueue::ShellCommands
-                    } else {
-                        break; // nothing left to spill
-                    };
-
-                    match from {
-                        TailQueue::Calls => {
-                            if let Some(spill) = chunk_data.calls.pop() {
-                                calls_q.push_front(spill);
-                            }
-                        }
-                        TailQueue::Sessions => {
-                            if let Some(spill) = chunk_data.sessions.pop() {
-                                sessions_q.push_front(spill);
-                            }
-                        }
-                        TailQueue::ShellCommands => {
-                            if let Some(spill) = chunk_data.shell_commands.pop() {
-                                shell_q.push_front(spill);
-                            }
+                match from {
+                    TailQueue::Calls => {
+                        if let Some(spill) = chunk_data.calls.pop() {
+                            calls_q.push_front(spill);
                         }
                     }
-
-                    let remaining_items = chunk_data.calls.len()
-                        + chunk_data.sessions.len()
-                        + chunk_data.shell_commands.len();
-                    if remaining_items <= 1 {
-                        // Single-item chunks always ship (giant-outlier
-                        // protection). Even if still oversize, exit
-                        // here rather than spill the lone survivor.
-                        break;
+                    TailQueue::Sessions => {
+                        if let Some(spill) = chunk_data.sessions.pop() {
+                            sessions_q.push_front(spill);
+                        }
                     }
-
-                    // Re-probe. Cost is O(chunk_data_encoded_size) per
-                    // probe — at ~1 MiB target and 100 KiB outliers,
-                    // worst case ~10 probes per cut, totally affordable
-                    // relative to the I/O cost of the actual publish.
-                    let probe = UsageDataEvent {
-                        version: WIRE_VERSION,
-                        published_ns,
-                        partial,
-                        chunk_index,
-                        is_final: calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty(),
-                        data: chunk_data.clone(),
-                    };
-                    let probe_after_spill =
-                        rmp_serde::to_vec_named(&probe).map(|b| b.len()).unwrap_or(target_bytes);
-                    if probe_after_spill < target_bytes {
-                        break;
+                    TailQueue::ShellCommands => {
+                        if let Some(spill) = chunk_data.shell_commands.pop() {
+                            shell_q.push_front(spill);
+                        }
                     }
                 }
-                break;
+
+                let remaining_items = chunk_data.calls.len()
+                    + chunk_data.sessions.len()
+                    + chunk_data.shell_commands.len();
+                if remaining_items <= 1 {
+                    // Single-item chunks always ship (giant-outlier
+                    // protection). Even if still oversize, exit
+                    // here rather than spill the lone survivor.
+                    break;
+                }
+
+                // Re-probe. Cost is O(chunk_data_encoded_size) per
+                // probe — at ~1 MiB target and 100 KiB outliers,
+                // worst case ~10 probes per cut, totally affordable
+                // relative to the I/O cost of the actual publish.
+                let probe = UsageDataEvent {
+                    version: WIRE_VERSION,
+                    published_ns,
+                    partial,
+                    chunk_index,
+                    is_final: calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty(),
+                    data: chunk_data.clone(),
+                };
+                let probe_after_spill =
+                    rmp_serde::to_vec_named(&probe).map(|b| b.len()).unwrap_or(target_bytes);
+                if probe_after_spill < target_bytes {
+                    break;
+                }
             }
         }
 
