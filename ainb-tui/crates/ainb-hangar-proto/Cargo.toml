@@ -1,0 +1,44 @@
+[package]
+name = "ainb-hangar-proto"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar wire protocol: pure JSON-RPC 2.0 envelope types shared by the daemon and the plugin SDK. No host or IO dependencies."
+categories = ["data-structures", "encoding"]
+keywords = ["ainb", "hangar", "json-rpc", "protocol", "wire"]
+
+[lib]
+name = "ainb_hangar_proto"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Pure, IO-free domain vocabulary (typed ids only). No SQLite/tokio, so the
+# proto crate keeps its "no host deps" discipline — it borrows the id newtypes
+# to address rows carried on the wire.
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+chrono = { workspace = true }
+
+# Local lint config rather than `workspace = true`: the workspace-level lints
+# declare lint groups (clippy::all/pedantic/nursery/cargo) at the same priority
+# as specific lints, which rustc rejects. Mirror the intent locally so
+# `cargo clippy -p ainb-hangar-proto --all-targets -- -D warnings` stays clean.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

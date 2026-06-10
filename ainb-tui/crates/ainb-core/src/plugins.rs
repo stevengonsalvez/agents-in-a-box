@@ -15,11 +15,71 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use ainb_plugin_runtime::workspace_store::{
+    StateTomlWorkspaceStore, WorkspaceInfo, default_state_path,
+};
 use ainb_plugin_runtime::{Runtime, RuntimeError, RuntimeHandle};
 use tracing::{debug, info, warn};
 
 use crate::config::PluginsConfig;
+
+/// Build the host workspace store for the `host/workspace_*` caps (P5.5),
+/// seeding its catalogue from the Hangar `workspace` table.
+///
+/// The switch *state* lives in `state.toml` (resolved via
+/// [`default_state_path`]); the *catalogue* (which workspaces exist, with their
+/// ULID id + slug + name) is read once from the daemon's SQLite store. A
+/// failure to resolve the path or read the DB degrades to an empty catalogue —
+/// the caps then return an empty list / reject unknown ids rather than crashing
+/// startup.
+fn build_workspace_store() -> Arc<StateTomlWorkspaceStore> {
+    let path = default_state_path().unwrap_or_else(|_| PathBuf::from("state.toml"));
+    let catalogue = load_workspace_catalogue();
+    Arc::new(StateTomlWorkspaceStore::new(path, catalogue))
+}
+
+/// Read the workspace catalogue from the Hangar store DB.
+///
+/// `init_plugin_runtime` may be called from *within* a tokio runtime (the app's
+/// main runtime), so a naive `block_on` on a nested runtime panics with "Cannot
+/// start a runtime from within a runtime". The one-shot async query is therefore
+/// run on a dedicated OS thread (which carries no ambient runtime), where a
+/// fresh current-thread runtime's `block_on` is legal. Any error yields an empty
+/// catalogue (logged at debug) — startup never fails on a missing/locked DB.
+fn load_workspace_catalogue() -> Vec<WorkspaceInfo> {
+    std::thread::spawn(|| {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return Vec::new();
+        };
+        rt.block_on(async {
+            let store = match ainb_hangar_store::Store::open_default().await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(error = %e, "hangar workspace catalogue unavailable");
+                    return Vec::new();
+                }
+            };
+            let rows: Result<Vec<(String, String, String)>, _> =
+                sqlx::query_as("SELECT id, slug, name FROM workspace ORDER BY created_at")
+                    .fetch_all(store.pool())
+                    .await;
+            match rows {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|(id, slug, name)| WorkspaceInfo { id, slug, name })
+                    .collect(),
+                Err(e) => {
+                    debug!(error = %e, "hangar workspace query failed");
+                    Vec::new()
+                }
+            }
+        })
+    })
+    .join()
+    .unwrap_or_default()
+}
 
 /// Outcome of [`init_plugin_runtime`] — kept for parity with the previous
 /// `LoadOutcome` type so callers (CLI, smoke tests) can log discovery results
@@ -37,7 +97,11 @@ pub struct LoadOutcome {
 /// for the lifetime of the app — dropping it joins every plugin task and tears
 /// down the tokio executor.
 pub fn init_plugin_runtime() -> Result<(Runtime, RuntimeHandle, LoadOutcome), RuntimeError> {
-    let (runtime, handle) = Runtime::new()?;
+    let (runtime, handle) = Runtime::with_config_and_stores(
+        ainb_plugin_runtime::RuntimeConfig::default(),
+        ainb_plugin_runtime::secret_store::default_backend(),
+        build_workspace_store(),
+    )?;
     let mut outcome = LoadOutcome::default();
 
     // Operator escape hatch — `AINB_DISABLE_PLUGINS=1` skips discovery

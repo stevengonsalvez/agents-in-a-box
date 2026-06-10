@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760">
+  <defs>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}</style>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#5a4a3a"/></marker>
+    <marker id="arrBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#2563eb"/></marker>
+    <marker id="arrClay" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#D97757"/></marker>
+    <marker id="arrOlive" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#788C5D"/></marker>
+    <marker id="arrPurple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#7c3aed"/></marker>
+  </defs>
+  <rect width="1200" height="760" fill="#f8f6f3"/>
+  <text x="600" y="32" text-anchor="middle" font-size="20" font-weight="700" fill="#141413">ainb today — current architecture (May 2026)</text>
+  <text x="600" y="52" text-anchor="middle" font-size="12" fill="#5a4a3a">Filesystem-centric · local-first · zero server · TUI-only UI · plugin host · swarm orchestration</text>
+  <text x="60" y="92" font-size="12" font-weight="600" fill="#788C5D">USER SURFACE</text>
+  <rect x="60" y="100" width="280" height="70" rx="8" fill="#ffffff" stroke="#D97757" stroke-width="1.5"/>
+  <text x="200.0" y="133.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Ratatui TUI</text>
+  <text x="200.0" y="149.0" text-anchor="middle" font-size="11" fill="#5a4a3a">burndown · agents · usage · width-aware</text>
+  <rect x="360" y="100" width="280" height="70" rx="8" fill="#ffffff" stroke="#D97757" stroke-width="1.5"/>
+  <text x="500.0" y="133.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">ainb CLI</text>
+  <text x="500.0" y="149.0" text-anchor="middle" font-size="11" fill="#5a4a3a">subcommands via clap</text>
+  <rect x="660" y="100" width="280" height="70" rx="8" fill="#ffffff" stroke="#D97757" stroke-width="1.5"/>
+  <text x="800.0" y="133.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Claude Code (host harness)</text>
+  <text x="800.0" y="149.0" text-anchor="middle" font-size="11" fill="#5a4a3a">skills · slash commands · MCP</text>
+  <rect x="960" y="100" width="200" height="70" rx="8" fill="#fdf4e3" stroke="#D97757" stroke-width="1.5"/>
+  <text x="1060.0" y="133.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Subagent fleet</text>
+  <text x="1060.0" y="149.0" text-anchor="middle" font-size="11" fill="#5a4a3a">100+ agents in toolkit/</text>
+  <text x="60" y="200" font-size="12" font-weight="600" fill="#788C5D">RUST CORE (workspace)</text>
+  <rect x="60" y="208" width="1100" height="180" rx="10" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <rect x="80" y="226" width="220" height="60" rx="8" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="190.0" y="254.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">ainb-core</text>
+  <text x="190.0" y="270.0" text-anchor="middle" font-size="11" fill="#5a4a3a">burndown · usage analyzer</text>
+  <rect x="320" y="226" width="240" height="60" rx="8" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="440.0" y="254.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Plugin host v2</text>
+  <text x="440.0" y="270.0" text-anchor="middle" font-size="11" fill="#5a4a3a">JSON-RPC subprocess · cap-gated</text>
+  <rect x="580" y="226" width="240" height="60" rx="8" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="700.0" y="254.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Multi-provider abstraction</text>
+  <text x="700.0" y="270.0" text-anchor="middle" font-size="11" fill="#5a4a3a">Claude · Codex · Copilot · Gemini</text>
+  <rect x="840" y="226" width="300" height="60" rx="8" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="990.0" y="254.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Plugin manifest + SDK</text>
+  <text x="990.0" y="270.0" text-anchor="middle" font-size="11" fill="#5a4a3a">TOML · capability tokens · CTS</text>
+  <rect x="80" y="306" width="360" height="60" rx="8" fill="#fdf4e3" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="260.0" y="334.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">reflect-kb (Python + GraphRAG)</text>
+  <text x="260.0" y="350.0" text-anchor="middle" font-size="11" fill="#5a4a3a">QMD store · entity sidecars · vector + graph</text>
+  <rect x="460" y="306" width="220" height="60" rx="8" fill="#fdf4e3" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="570.0" y="334.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">beads CLI</text>
+  <text x="570.0" y="350.0" text-anchor="middle" font-size="11" fill="#5a4a3a">git-backed issue tracker</text>
+  <rect x="700" y="306" width="200" height="60" rx="8" fill="#fdf4e3" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="800.0" y="334.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">swarm-lib.sh</text>
+  <text x="800.0" y="350.0" text-anchor="middle" font-size="11" fill="#5a4a3a">topological dispatch</text>
+  <rect x="920" y="306" width="220" height="60" rx="8" fill="#fdf4e3" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="1030.0" y="334.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">claude-peers MCP</text>
+  <text x="1030.0" y="350.0" text-anchor="middle" font-size="11" fill="#5a4a3a">inter-instance messaging</text>
+  <text x="60" y="410" font-size="12" font-weight="600" fill="#788C5D">EXECUTION (tmux + filesystem)</text>
+  <rect x="60" y="418" width="1100" height="120" rx="10" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <rect x="80" y="436" width="240" height="80" rx="8" fill="#fdf4e3" stroke="#D97757" stroke-width="1.5"/>
+  <text x="200.0" y="474.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">tmux sessions</text>
+  <text x="200.0" y="490.0" text-anchor="middle" font-size="11" fill="#5a4a3a">watchdog daemon · auto-recovery</text>
+  <rect x="340" y="436" width="280" height="80" rx="8" fill="#fdf4e3" stroke="#D97757" stroke-width="1.5"/>
+  <text x="480.0" y="474.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Agent worktrees (volatile)</text>
+  <text x="480.0" y="490.0" text-anchor="middle" font-size="11" fill="#5a4a3a">git worktree per task · short-lived</text>
+  <rect x="640" y="436" width="240" height="80" rx="8" fill="#fdf4e3" stroke="#D97757" stroke-width="1.5"/>
+  <text x="760.0" y="474.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Claude Code subprocesses</text>
+  <text x="760.0" y="490.0" text-anchor="middle" font-size="11" fill="#5a4a3a">or Codex/Copilot/Gemini</text>
+  <rect x="900" y="436" width="240" height="80" rx="8" fill="#fdf4e3" stroke="#D97757" stroke-width="1.5"/>
+  <text x="1020.0" y="474.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Skills materialized</text>
+  <text x="1020.0" y="490.0" text-anchor="middle" font-size="11" fill="#5a4a3a">toolkit/packages/skills</text>
+  <text x="60" y="560" font-size="12" font-weight="600" fill="#788C5D">STATE (filesystem only — no server)</text>
+  <rect x="60" y="568" width="260" height="70" rx="8" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <text x="190.0" y="601.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Beads SQLite DB</text>
+  <text x="190.0" y="617.0" text-anchor="middle" font-size="11" fill="#5a4a3a">(per worktree, BEADS_DIR)</text>
+  <rect x="340" y="568" width="260" height="70" rx="8" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <text x="470.0" y="601.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">JSON files + session.yaml</text>
+  <text x="470.0" y="617.0" text-anchor="middle" font-size="11" fill="#5a4a3a">ad-hoc state per script</text>
+  <rect x="620" y="568" width="260" height="70" rx="8" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <text x="750.0" y="601.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">Git commits + branches</text>
+  <text x="750.0" y="617.0" text-anchor="middle" font-size="11" fill="#5a4a3a">PR history is the audit log</text>
+  <rect x="900" y="568" width="260" height="70" rx="8" fill="#ffffff" stroke="#141413" stroke-width="1.5"/>
+  <text x="1030.0" y="601.0" text-anchor="middle" font-size="13" font-weight="600" fill="#141413">QMD knowledge base</text>
+  <text x="1030.0" y="617.0" text-anchor="middle" font-size="11" fill="#5a4a3a">reflect-kb global archive</text>
+  <path d="M200,170 L200,208" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M500,170 L500,208" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M800,170 L800,208" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M1060,170 L1060,208" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M200,388 L200,418" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M500,388 L500,418" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M800,388 L800,418" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M1030,388 L1030,418" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M200,538 L200,568" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M500,538 L500,568" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M800,538 L800,568" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path d="M1030,538 L1030,568" stroke="#5a4a3a" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="60" y="670" font-size="12" font-weight="600" fill="#788C5D">WHAT AINB ALREADY HAS THAT MULTICA DOESN&apos;T</text>
+  <rect x="60" y="678" width="1100" height="68" rx="6" fill="#fdf4e3" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="76" y="698" font-size="11" fill="#141413">• reflect-kb GraphRAG knowledge compounding · 170+ learnings indexed · cross-session retrieval (Multica has nothing)</text>
+  <text x="76" y="715" font-size="11" fill="#141413">• Plugin host v2 with capability-gated JSON-RPC + CTS (Multica has no plugin layer at all)</text>
+  <text x="76" y="732" font-size="11" fill="#141413">• Topological swarm dispatch with watchdog (Multica&apos;s Squad routing is simpler) · 9-tool portability via single skill format</text>
+</svg>

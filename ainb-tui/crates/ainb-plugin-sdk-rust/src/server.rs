@@ -62,7 +62,16 @@ impl<P: Plugin> Server<P> {
 
     /// Run the dispatcher reading from real `stdin`, writing to real
     /// `stdout`. Blocks until either side closes.
+    ///
+    /// Before entering the read loop this installs the
+    /// [`crate::parent_watch`] backstop: on macOS, a background task that
+    /// self-exits the plugin if the host process dies without closing our
+    /// stdin (crash / `SIGKILL`), preventing orphaned plugins from
+    /// reparenting to `launchd`. It is a no-op on Linux (the host installs
+    /// `PR_SET_PDEATHSIG`) and other targets. The normal stdin-EOF graceful
+    /// exit below is unaffected.
     pub async fn run_stdio(self) -> Result<()> {
+        crate::parent_watch::spawn_parent_death_watcher();
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
         self.run(stdin, stdout).await

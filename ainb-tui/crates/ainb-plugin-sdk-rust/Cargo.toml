@@ -25,6 +25,14 @@ async-trait = "0.1"
 tracing = { workspace = true }
 toml = { workspace = true }
 
+# `getppid()` for the macOS parent-death watcher (`parent_watch`). nix is a
+# *safe* wrapper around the syscall, so the SDK keeps `unsafe_code = "forbid"`.
+# Only the macOS path runs the watcher (Linux is covered host-side by
+# `PR_SET_PDEATHSIG`), so the dep is scoped to macOS — other targets compile
+# the no-op stub with zero extra deps.
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 

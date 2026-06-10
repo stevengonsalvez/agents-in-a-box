@@ -212,6 +212,7 @@ pub enum AppEvent {
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
+    GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
     InboxMoveDown,           // Inbox: move selection down one row
     InboxPageUp,             // Inbox: jump 10 rows up
@@ -2029,6 +2030,7 @@ impl EventHandler {
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
             KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
@@ -3685,6 +3687,12 @@ impl EventHandler {
                 state.previous_screen = Some(state.current_screen.clone());
                 state.current_screen = screen_ids::INBOX.to_string();
                 state.inbox_state.refresh();
+            }
+            AppEvent::GoToHangar => {
+                tracing::info!("Navigating to Hangar");
+                // Plugin-owned screen: the `hangar-tui` subprocess renders it and
+                // owns its own data load (snapshot RPCs over the daemon socket).
+                state.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
             AppEvent::InboxMoveDown => state.inbox_state.move_down(1),

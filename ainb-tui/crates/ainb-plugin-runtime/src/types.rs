@@ -4,9 +4,21 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ainb_plugin_protocol::params::CliDispatchResult;
+use ainb_plugin_protocol::params::{CliDispatchResult, LogParams};
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
+use parking_lot::RwLock;
+
+/// Sink invoked for every `host/log` line a plugin emits.
+///
+/// Production runs leave this empty (logs go to `tracing` as before).
+/// Tests install a tap via [`crate::RuntimeHandle::install_log_tap`] to
+/// capture sentinel log lines host-side — the anti-cheat witness that a
+/// cap-allowed handler actually executed rather than being bypassed.
+pub type LogTapFn = Arc<dyn Fn(&LogParams) + Send + Sync>;
+
+/// Shared, optionally-installed log tap. Cloned into every plugin task.
+pub type LogTap = Arc<RwLock<Option<LogTapFn>>>;
 
 /// Newtype around the manifest `[plugin].name`. Cheap to clone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
