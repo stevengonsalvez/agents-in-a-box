@@ -629,6 +629,38 @@ async fn migration_0013_adds_task_priority_column() {
 }
 
 #[tokio::test]
+async fn migration_0014_adds_issue_priority_due_date_labels_columns() {
+    // The issue create flow (parity-review gap: "create-issue partial — no
+    // priority/dates/labels") needs the issue itself to carry urgency, a due
+    // date, and labels. Three columns land on `issue`:
+    //   - `priority INTEGER NOT NULL DEFAULT 0` (0..3 = P3..P0, higher = more
+    //     urgent), mirroring `agent_task_queue.priority` (migration 0013);
+    //   - `due_date INTEGER` (epoch millis, nullable — no due date by default);
+    //   - `labels TEXT NOT NULL DEFAULT '[]'` (a JSON array of label strings;
+    //     the full labels table + attach/detach RPC is a SEPARATE bead).
+    // ALTER TABLE ADD COLUMN rewrites the catalog SQL, so each shows up in
+    // `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("priority INTEGER NOT NULL DEFAULT 0"),
+        "issue.priority default 0: {issue}"
+    );
+    assert!(
+        issue.contains("due_date INTEGER"),
+        "issue.due_date nullable epoch-ms: {issue}"
+    );
+    assert!(
+        issue.contains("labels TEXT NOT NULL DEFAULT '[]'"),
+        "issue.labels default empty JSON array: {issue}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn all_migrations_create_exactly_seventeen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
