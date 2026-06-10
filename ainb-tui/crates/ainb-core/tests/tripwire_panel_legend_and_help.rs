@@ -126,10 +126,10 @@ fn session_list_legend_advertises_every_panel() {
     launch_to_home(&session, home_tmp.path());
 
     send_key(&session, "s");
-    // The panel line renders the five shortcuts together; wait for the
+    // The panel line renders the six shortcuts together; wait for the
     // whole group so we don't race a half-painted legend.
     let cap = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("b inbox") && c.contains("m memory")
+        c.contains("b inbox") && c.contains("t abtop")
     });
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
     kill_session(&session);
@@ -138,7 +138,9 @@ fn session_list_legend_advertises_every_panel() {
     // pairs as the legend paints them (key span + description span are
     // adjacent in the capture). A missing token means a panel is
     // reachable but undiscoverable from the session list.
-    for token in ["b inbox", "i stats", "w witr", "k skills", "m memory"] {
+    for token in [
+        "b inbox", "i stats", "w witr", "k skills", "m memory", "t abtop",
+    ] {
         assert!(
             final_cap.contains(token),
             "session-list legend missing panel shortcut {token:?}:\n---\n{final_cap}\n---"
@@ -175,6 +177,7 @@ fn help_overlay_documents_panels_section() {
         "Witr process browser (quit witr to return)",
         "Skills browser (Esc closes)",
         "Memory / learnings browser (Esc closes)",
+        "Abtop agent monitor (quit abtop to return)",
     ] {
         assert!(
             final_cap.contains(token),

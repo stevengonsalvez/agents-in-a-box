@@ -1314,16 +1314,17 @@ impl EventHandler {
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
-            // k skills, m memory — same set `handle_home_screen_keys`
-            // binds). GoToStats/GoToSkills/GoToLearnings save
-            // `previous_screen`, so closing the panel lands back on the
-            // session list, not home. GoToWitr is a tmux suspend/attach
-            // that never changes `current_screen`, so quitting witr
-            // resumes here automatically.
+            // k skills, m memory, t abtop — same set
+            // `handle_home_screen_keys` binds). GoToStats/GoToSkills/
+            // GoToLearnings save `previous_screen`, so closing the panel
+            // lands back on the session list, not home. GoToWitr /
+            // GoToAbtop are tmux suspend/attach that never change
+            // `current_screen`, so quitting them resumes here automatically.
             KeyCode::Char('i') => Some(AppEvent::GoToStats),
             KeyCode::Char('w') => Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => Some(AppEvent::GoToSkills),
             KeyCode::Char('m') => Some(AppEvent::GoToLearnings),
+            KeyCode::Char('t') => Some(AppEvent::GoToAbtop),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
