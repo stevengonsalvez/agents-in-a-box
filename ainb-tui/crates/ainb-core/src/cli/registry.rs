@@ -680,8 +680,41 @@ async fn dispatch_inner(
     // canonical encoding is asserted byte-for-byte by
     // `refresh_request_hard_wire_bytes_are_pinned` in
     // ainb-plugin-types-sessions — change one, that test fails.
+    // (The exact-token argv scan cannot fire on malformed invocations:
+    // clap validates the full `usage` surface in the registry hook
+    // before dispatch_inner runs, so a typo'd command errors out
+    // before any publish.)
     if argv.iter().any(|a| a == "--hard") {
         const HARD_REFRESH_MSGPACK: [u8; 7] = [0x81, 0xA4, b'h', b'a', b'r', b'd', 0xC3];
+        // Publishing to a topic with no subscriber yet is a silent
+        // no-op — racing session-reader's on_init subscribe would
+        // silently downgrade --hard to a normal refresh. Wait (bounded)
+        // for both subscribers to finish init: session-reader
+        // subscribes to refresh_request during on_init, and burndown
+        // must observe the hard request to drop its stale snapshot so
+        // the retry loop below can only be satisfied by post-rebuild
+        // data.
+        let session_reader = PluginId::from("session-reader");
+        let subscribe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            use ainb_plugin_runtime::LifecycleState;
+            let sr = handle.lifecycle_state(&session_reader);
+            let bd = handle.lifecycle_state(&burndown);
+            if matches!(sr, Some(LifecycleState::Running))
+                && matches!(bd, Some(LifecycleState::Running))
+            {
+                break;
+            }
+            if std::time::Instant::now() >= subscribe_deadline {
+                eprintln!(
+                    "warning: --hard requested but plugins not running yet \
+                     (session-reader: {sr:?}, burndown: {bd:?}); the hard \
+                     refresh may be downgraded to a normal one"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         handle.publish_snapshot(
             "sessions.refresh_request",
             bytes::Bytes::from_static(&HARD_REFRESH_MSGPACK),

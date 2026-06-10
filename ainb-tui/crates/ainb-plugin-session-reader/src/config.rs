@@ -38,10 +38,12 @@ impl Default for SessionReaderConfig {
 }
 
 impl SessionReaderConfig {
-    /// The effective window, clamped to at least one day.
+    /// The effective window, clamped to [1, 36500] days (a zero window
+    /// cannot disable recency; an absurd one cannot overflow the
+    /// nanosecond watermark arithmetic).
     #[must_use]
     pub fn window_days(self) -> u32 {
-        self.incremental_window_days.max(1)
+        self.incremental_window_days.clamp(1, 36_500)
     }
 }
 

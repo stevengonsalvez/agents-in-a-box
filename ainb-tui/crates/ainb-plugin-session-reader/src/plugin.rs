@@ -100,7 +100,8 @@ pub(crate) fn run_blocking_scan(
     let cold_start = stored.is_none();
 
     if cache_opt.is_some() {
-        let watermark = now_ns().saturating_sub(u64::from(window_days) * NANOS_PER_DAY);
+        let watermark =
+            now_ns().saturating_sub(u64::from(window_days).saturating_mul(NANOS_PER_DAY));
         let outcome = scanner::scan_incremental(roots, &mut cache_opt, stored, watermark, reporter);
         if outcome.stable_rebuilt {
             if let Some(cache) = cache_opt.as_mut() {
@@ -279,6 +280,15 @@ impl SessionReader {
         self.cache = None;
         self.cache_init = false;
         if let Some(path) = crate::cache::default_db_path() {
+            // Take the WAL/SHM siblings with the db: SQLite can
+            // recover a leftover -wal into a freshly created database,
+            // silently resurrecting rows this flush just promised were
+            // gone.
+            for suffix in ["-wal", "-shm"] {
+                let mut sibling = path.as_os_str().to_owned();
+                sibling.push(suffix);
+                let _ = std::fs::remove_file(std::path::Path::new(&sibling));
+            }
             match std::fs::remove_file(&path) {
                 Ok(()) => {
                     let _ = host
@@ -459,9 +469,18 @@ impl SessionReader {
                 outcome.data
             }
             Err(err) => {
+                // The panicked closure took ownership of the cache and
+                // stable rollup with it — both are gone. Re-arm
+                // ensure_cache (cache_init is already true, so without
+                // this reset it would no-op forever and every future
+                // refresh would silently take the cache-less FULL-scan
+                // path — the exact CPU regression this plugin exists
+                // to prevent).
+                self.cache_init = false;
                 let _ = host
                     .log_info(format!(
                         "session-reader: scan task join error: {err}; \
+                        cache handle lost with the panicked task — reopening, \
                         falling back to in-line scan"
                     ))
                     .await;

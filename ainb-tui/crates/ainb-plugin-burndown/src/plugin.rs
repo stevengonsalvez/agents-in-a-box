@@ -148,6 +148,13 @@ impl Plugin for BurndownPlugin {
         // walking the per-provider dirs on a cold cache. Failure is
         // non-fatal — the legacy ⏳ Waiting spinner remains.
         let _ = host.snapshot_subscribe("sessions.scan_progress").await;
+        // Subscribe to refresh requests so a HARD refresh (from our own
+        // R-confirm or the CLI --hard) drops the in-memory snapshot:
+        // the dashboard falls back to the scanning skeleton, and the
+        // CLI dispatch retry loop can only be satisfied by data
+        // published AFTER the rebuild — never by the pre-wipe snapshot
+        // the user just declared distrusted.
+        let _ = host.snapshot_subscribe("sessions.refresh_request").await;
 
         // Trigger a fresh publish. Eager-spawned session-reader runs
         // its first publish during its own `on_init`, which races
@@ -171,6 +178,28 @@ impl Plugin for BurndownPlugin {
             }
             "sessions.scan_progress" => {
                 self.ingest_scan_progress(host, &params.payload).await;
+            }
+            "sessions.refresh_request" => {
+                // Empty payload = incremental ping (our own r key, the
+                // FS watcher) — nothing to do. Only a hard refresh
+                // invalidates what is on screen.
+                let hard = !params.payload.is_empty()
+                    && rmp_serde::from_slice::<RefreshRequest>(&params.payload)
+                        .map(|req| req.hard)
+                        .unwrap_or(false);
+                if hard {
+                    self.data = None;
+                    self.pending = None;
+                    self.ui.data = None;
+                    self.ui.cached_filtered = None;
+                    self.filter_cache = None;
+                    self.generation = self.generation.wrapping_add(1);
+                    let _ = host
+                        .log_info(
+                            "burndown: hard refresh observed — dropped snapshot, awaiting rebuild",
+                        )
+                        .await;
+                }
             }
             _ => {}
         }

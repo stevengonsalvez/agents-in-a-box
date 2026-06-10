@@ -1104,16 +1104,25 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
 /// so it never fires from a single keypress. `Esc` is host-reserved
 /// (pops the screen), so cancel rides `n` / any other key.
 fn render_hard_refresh_confirm(buf: &mut Buffer, area: Rect) {
-    let w = 56.min(area.width.saturating_sub(2)).max(20);
-    let h = 7.min(area.height.saturating_sub(2)).max(5);
+    // Below this the overlay copy is unreadable anyway, and a rect
+    // wider/taller than the buffer would panic ratatui's
+    // Buffer::get_mut. The key handling still works without the
+    // overlay (y confirms / anything cancels) — degraded, not broken.
+    if area.width < 20 || area.height < 5 {
+        return;
+    }
+    let w = 56.min(area.width.saturating_sub(2));
+    let h = 7.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
+    // Belt-and-braces: never paint outside the buffer.
     let rect = Rect {
         x,
         y,
         width: w,
         height: h,
-    };
+    }
+    .intersection(area);
 
     ratatui::widgets::Widget::render(Clear, rect, buf);
     let block = Block::default()
@@ -5009,6 +5018,28 @@ mod cross_filter_tests {
             !flat.contains("Re-parses ALL session history"),
             "overlay leaked into normal render"
         );
+    }
+
+    /// Regression (review MAJOR-3): the confirm overlay must never
+    /// panic on tiny viewports — ratatui's Buffer panics on
+    /// out-of-bounds writes, and a render panic kills the plugin.
+    #[test]
+    fn hard_refresh_confirm_overlay_survives_tiny_viewports() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut state = UsageViewState::default();
+        state.confirm_hard = true;
+
+        for (w, h) in [(1u16, 1u16), (5, 3), (12, 4), (19, 5), (21, 4), (25, 6)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            terminal
+                .draw(|frame| {
+                    let area = frame.size();
+                    render(frame.buffer_mut(), area, &state);
+                })
+                .unwrap_or_else(|e| panic!("render panicked at {w}x{h}: {e}"));
+        }
     }
 
     #[test]

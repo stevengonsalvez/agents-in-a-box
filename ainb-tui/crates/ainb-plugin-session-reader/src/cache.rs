@@ -228,8 +228,17 @@ impl UsageCache {
     /// next scan re-parses every file from source and the incremental
     /// path sees no stable aggregate (cold start).
     pub fn clear(&mut self) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM file_cache", [])?;
-        self.conn.execute("DELETE FROM stable_aggregate", [])?;
+        // One transaction + busy retry: under cross-process contention a
+        // partial wipe (file_cache gone, rollup still present) must
+        // never become visible to the other instance.
+        with_busy_retry(|| {
+            self.conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DELETE FROM file_cache;
+                 DELETE FROM stable_aggregate;
+                 COMMIT;",
+            )
+        })?;
         // VACUUM is a tidiness operation; failure here doesn't matter.
         if let Err(err) = self.conn.execute("VACUUM", []) {
             tracing::warn!("session-reader cache VACUUM after clear failed: {err}");
@@ -316,7 +325,11 @@ impl UsageCache {
             )?;
         }
 
-        if version != SCHEMA_VERSION {
+        // Only stamp UP. A db written by a NEWER build (two ainb
+        // versions sharing one usage.sqlite) must keep its higher
+        // version: stamping it down would make the newer binary re-run
+        // its migrations against an already-migrated schema.
+        if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
@@ -558,6 +571,26 @@ mod tests {
             cache.load_stable().expect("load").is_none(),
             "clear() wipes the stable aggregate"
         );
+    }
+
+    #[test]
+    fn newer_schema_version_is_never_stamped_down() {
+        // Two ainb versions share one usage.sqlite. A db written by a
+        // NEWER build must keep its higher user_version: stamping it
+        // down would make the newer binary re-run its migrations
+        // against an already-migrated schema.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("usage.sqlite");
+        {
+            let cache = UsageCache::open(&db).expect("open v2");
+            cache.conn.pragma_update(None, "user_version", 99).expect("fake v99");
+        }
+        let cache = UsageCache::open(&db).expect("reopen");
+        let version: i64 = cache
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("pragma");
+        assert_eq!(version, 99, "future schema version preserved");
     }
 
     #[test]

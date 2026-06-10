@@ -987,7 +987,7 @@ fn nanos_to_usd(nanos: i64) -> f64 {
 /// [`merge`]'s `cost_usd` arm: any `Some` survives, two `Some`s add.
 fn add_cost_nanos(into: &mut Option<i64>, from: Option<i64>) {
     *into = match (*into, from) {
-        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         (None, None) => None,
@@ -1011,12 +1011,18 @@ fn call_bucket(call: &ProviderCall) -> TokenBucket {
 }
 
 fn merge(into: &mut TokenBucket, from: &TokenBucket) {
-    into.input_tokens += from.input_tokens;
-    into.cache_creation_tokens += from.cache_creation_tokens;
-    into.cache_read_tokens += from.cache_read_tokens;
-    into.output_tokens += from.output_tokens;
-    into.reasoning_tokens += from.reasoning_tokens;
-    into.call_count += from.call_count;
+    // Saturating sums: token counts come straight from on-disk JSONL
+    // (corruptible / hostile), and a debug-build overflow panic inside
+    // the blocking scan task would cost the plugin its cache handle.
+    // Unsigned saturating addition stays associative, so the
+    // byte-identity merge contract is unaffected.
+    into.input_tokens = into.input_tokens.saturating_add(from.input_tokens);
+    into.cache_creation_tokens =
+        into.cache_creation_tokens.saturating_add(from.cache_creation_tokens);
+    into.cache_read_tokens = into.cache_read_tokens.saturating_add(from.cache_read_tokens);
+    into.output_tokens = into.output_tokens.saturating_add(from.output_tokens);
+    into.reasoning_tokens = into.reasoning_tokens.saturating_add(from.reasoning_tokens);
+    into.call_count = into.call_count.saturating_add(from.call_count);
     into.cost_usd = match (into.cost_usd, from.cost_usd) {
         (Some(a), Some(b)) => Some(a + b),
         (Some(a), None) => Some(a),
