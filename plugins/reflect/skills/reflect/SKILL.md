@@ -363,6 +363,48 @@ Episode notes are raw session snapshots for provenance -- they do NOT require ap
 
 Use template at `assets/episode_template.md`.
 
+## Belief Revision on Ingest (Drain)
+
+When `/reflect` runs headlessly from the drain, the cascade slice may carry a
+`## Related existing learnings (belief revision)` section: existing learnings
+whose titles overlap this session's signals, plus the exact `revise` command
+to execute against them. When that section is present, every finding maps to
+exactly ONE structured action instead of unconditionally creating a new note:
+
+| Action | When | Effect |
+|--------|------|--------|
+| `CREATE` | genuinely new knowledge — no listed learning covers the same rule/facet | new learning row (`proof_count` starts at 1) |
+| `UPDATE` | finding restates a listed learning (same rule, fix, or decision) | merges as evidence: `proof_count`++, transcript appended to `source_memory_ids`, history snapshot recorded |
+| `DELETE` | new evidence directly contradicts or supersedes a listed learning | retires it non-destructively: status → `reverted` + reason; history snapshot kept |
+
+**Revision rules:**
+- **PREFER UPDATE OVER CREATE**: one canonical learning with many proofs beats
+  near-duplicate siblings. Re-observed evidence strengthens; it never duplicates.
+- Match by the specific rule/facet, not by general topic — "never use var"
+  updates only the var learning, not every TypeScript learning.
+- Be very conservative with `DELETE` — only when directly contradicted or
+  superseded, never just because a learning is old.
+- Every action carries a one-sentence `reason` (audited to catch duplicate creates).
+
+**Action contract** (JSON array handed to the cascade):
+
+```json
+[{"action": "UPDATE", "target_id": "<id>", "reason": "restates existing rule"},
+ {"action": "DELETE", "target_id": "<id>", "reason": "superseded by new fix"},
+ {"action": "CREATE", "content": "<one-line learning>", "reason": "no existing match"}]
+```
+
+Execute via the cascade (stdlib-only, no engine deps):
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_cascade.py revise \
+    --source "<transcript-path>" \
+    --actions '[{"action":"UPDATE","target_id":"<id>","reason":"..."}]'
+```
+
+The interactive `/reflect` flow is unchanged — this section only applies when
+the input explicitly carries the related-learnings block.
+
 ## Toggle Auto-Reflect
 
 ```

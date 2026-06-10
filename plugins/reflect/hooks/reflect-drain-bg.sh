@@ -444,13 +444,20 @@ process_entry() {
     fi
 
     # Build the prompt. The /reflect skill analyzes whatever path we hand it —
-    # the cascade slice when enabled, else the full transcript.
+    # the cascade slice when enabled, else the full transcript. The belief-
+    # revision paragraph (S5) is intentionally thin: the cascade embeds the
+    # full action contract + exact 'revise' command inside the slice itself,
+    # so the prompt only has to point the writer at it.
     local prompt
     prompt="/reflect
 
 Process the transcript at: ${reflect_target}
 
-Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow. When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
+Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow.
+
+Belief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.
+
+When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
 
     local out_json exit_code
     # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
