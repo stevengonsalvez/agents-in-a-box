@@ -762,9 +762,12 @@ impl AppConfig {
     pub fn get_config_paths() -> Vec<PathBuf> {
         let mut paths = vec![];
 
-        // 1. Local project config
+        // 1. Local project config — `.ainb/` is canonical; `.agents-box/`
+        //    is the legacy location, still read but listed first so an
+        //    `.ainb/` file wins when both exist (later files override).
         if let Ok(cwd) = std::env::current_dir() {
             paths.push(cwd.join(".agents-box").join("config.toml"));
+            paths.push(cwd.join(".ainb").join("config.toml"));
         }
 
         // 2. User config (~/.agents-in-a-box/config.toml)
@@ -1240,6 +1243,17 @@ mod tests {
             base.usage.model_aliases.get("cursor-auto"),
             Some(&"claude-sonnet-4-5".to_string())
         );
+    }
+
+    #[test]
+    fn project_config_paths_prefer_ainb_over_legacy() {
+        let paths = AppConfig::get_config_paths();
+        let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
+        let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
+        let (ainb, legacy) = (ainb.expect(".ainb path missing"), legacy.expect("legacy path missing"));
+        // Later files override earlier ones in load(), so `.ainb` must come
+        // after `.agents-box` for the canonical location to win.
+        assert!(ainb > legacy, "expected .ainb after legacy, got {paths:?}");
     }
 
     #[test]
