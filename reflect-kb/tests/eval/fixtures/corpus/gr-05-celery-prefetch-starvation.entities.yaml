@@ -1,0 +1,15 @@
+document_id: gr-05-celery-prefetch-starvation
+extracted_at: '2026-04-05T00:00:00'
+entities:
+  - name: "celery-prefetch"
+    type: config
+    description: "worker prefetch multiplier"
+  - name: "task-starvation"
+    type: error
+    description: "idle workers with queued tasks"
+relationships:
+  - source: "task-starvation"
+    target: "celery-prefetch"
+    type: caused_by
+    description: "hoarding via prefetch"
+    strength: 9

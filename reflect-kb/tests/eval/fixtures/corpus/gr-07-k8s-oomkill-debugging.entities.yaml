@@ -1,0 +1,15 @@
+document_id: gr-07-k8s-oomkill-debugging
+extracted_at: '2026-04-12T00:00:00'
+entities:
+  - name: "oomkill"
+    type: error
+    description: "kernel OOM pod kill"
+  - name: "worker-memory-leak"
+    type: error
+    description: "RSS creep in workers"
+relationships:
+  - source: "oomkill"
+    target: "worker-memory-leak"
+    type: relates_to
+    description: "leaks end as OOM kills"
+    strength: 7

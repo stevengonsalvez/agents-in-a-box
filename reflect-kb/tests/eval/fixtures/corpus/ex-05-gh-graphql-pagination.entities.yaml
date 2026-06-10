@@ -1,0 +1,15 @@
+document_id: ex-05-gh-graphql-pagination
+extracted_at: '2026-03-18T00:00:00'
+entities:
+  - name: "gh-cli"
+    type: tool
+    description: "GitHub CLI"
+  - name: "cursor-pagination"
+    type: pattern
+    description: "GraphQL paging idiom"
+relationships:
+  - source: "gh-cli"
+    target: "cursor-pagination"
+    type: uses
+    description: "manual cursor loop for GraphQL"
+    strength: 7

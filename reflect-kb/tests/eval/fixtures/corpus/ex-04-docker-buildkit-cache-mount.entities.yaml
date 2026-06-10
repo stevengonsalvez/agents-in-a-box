@@ -1,0 +1,15 @@
+document_id: ex-04-docker-buildkit-cache-mount
+extracted_at: '2026-04-02T00:00:00'
+entities:
+  - name: "buildkit"
+    type: technology
+    description: "docker build engine"
+  - name: "cache-mount"
+    type: pattern
+    description: "persistent build cache"
+relationships:
+  - source: "cache-mount"
+    target: "buildkit"
+    type: part_of
+    description: "BuildKit mount feature"
+    strength: 6
