@@ -309,8 +309,9 @@ impl RuntimeHandle {
 
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
     /// fan-out happens on the tokio runtime. Stamped with the reserved
-    /// [`crate::snapshot::HOST_PUBLISHER`] id — discovery refuses to
-    /// register a plugin named `host`, so the stamp is unforgeable.
+    /// [`crate::snapshot::HOST_PUBLISHER`] id — both discovery and
+    /// `Runtime::register` refuse a plugin named `host`, so the stamp is
+    /// unforgeable on every registration path.
     pub fn publish_snapshot(&self, topic: &str, payload: Bytes) -> u64 {
         let topic_owned = Topic::from(topic);
         let v = self.inner.snapshots.publish(

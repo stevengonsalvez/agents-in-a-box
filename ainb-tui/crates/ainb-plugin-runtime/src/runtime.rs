@@ -251,6 +251,16 @@ impl Runtime {
     /// waiting for a first request. Required for pure-publisher
     /// plugins (e.g. session-reader) that no caller drives directly.
     pub fn register(&self, plugin: RegisteredPlugin) {
+        // `host` is the reserved publisher id stamped on host-side
+        // snapshot publishes (see `snapshot::HOST_PUBLISHER`). Discovery
+        // already filters it, but test/CTS harnesses register plugins
+        // directly through here — reject it here too so the
+        // "no plugin can claim this id" guarantee holds on every path,
+        // not just on-disk discovery.
+        if plugin.id.as_str() == crate::snapshot::HOST_PUBLISHER {
+            tracing::warn!("refusing to register a plugin named `host` — reserved publisher id");
+            return;
+        }
         let arc = Arc::new(plugin);
         self.channels.register((*arc).clone());
         let eager = matches!(
