@@ -116,7 +116,15 @@ fn landlock_supported() -> bool {
 /// `pre_exec`; returns an `io::Error` on any failure so the spawn fails closed.
 fn apply_landlock(read_roots: &[PathBuf], write_roots: &[PathBuf]) -> std::io::Result<()> {
     let read_access = AccessFs::from_read(ABI_TARGET);
-    let write_access = AccessFs::from_all(ABI_TARGET);
+    // Write roots grant write WITHOUT read — matching the macOS Seatbelt profile
+    // (file-write* on temp, file-read* only on the read roots). Landlock's
+    // `from_all` includes `ReadFile`, so without removing it a writable `/tmp`
+    // (the process temp write root from `SandboxPolicy::confined_to`) would also
+    // be *readable*, letting the confined agent read any secret another process
+    // left under `/tmp`. The task workdir stays fully readable: it is ALSO a read
+    // root, and Landlock unions the per-path rules.
+    let mut write_access = AccessFs::from_all(ABI_TARGET);
+    write_access.remove(AccessFs::ReadFile);
 
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
