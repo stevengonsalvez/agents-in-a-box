@@ -131,18 +131,7 @@ pub async fn agents_list(
     let mut out = Vec::new();
 
     for agent in AgentRepo::list_by_workspace(pool, workspace_id).await? {
-        let presence = match AgentRuntimeRepo::get(pool, &agent.runtime_id).await? {
-            Some(rt) => presence_from_status(&rt.status),
-            None => PresenceState::Offline,
-        };
-        out.push(ActorRow {
-            actor_ref: format!("agent:{}", agent.id),
-            display_name: agent.name,
-            subtitle: "agent".to_string(),
-            presence,
-            is_agent: true,
-            recent_rank: None,
-        });
+        out.push(agent_actor_row(pool, &agent).await?);
     }
 
     for member in members_of(pool, workspace_id).await? {
@@ -191,6 +180,95 @@ fn presence_from_status(status: &str) -> PresenceState {
         "online" => PresenceState::Online,
         "unstable" => PresenceState::Unstable,
         _ => PresenceState::Offline,
+    }
+}
+
+/// Map one store [`Agent`](ainb_hangar_store::repo::agent::Agent) onto its picker
+/// [`ActorRow`], deriving presence from the backing runtime's status.
+///
+/// Shared by [`agents_list`] and the e38.15 agent-CRUD wrappers
+/// ([`agent_update`] / [`agent_archive`]) so the row a mutation answers with is
+/// byte-identical to the same agent's `agents_list` row. A missing runtime maps
+/// to `Offline` (the runtime FK is required, but a deleted-out-of-band runtime
+/// must not panic the snapshot).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the runtime lookup fails.
+async fn agent_actor_row(
+    pool: &SqlitePool,
+    agent: &ainb_hangar_store::repo::agent::Agent,
+) -> Result<ActorRow, sqlx::Error> {
+    let presence = match AgentRuntimeRepo::get(pool, &agent.runtime_id).await? {
+        Some(rt) => presence_from_status(&rt.status),
+        None => PresenceState::Offline,
+    };
+    Ok(ActorRow {
+        actor_ref: format!("agent:{}", agent.id),
+        display_name: agent.name.clone(),
+        subtitle: "agent".to_string(),
+        presence,
+        is_agent: true,
+        recent_rank: None,
+    })
+}
+
+/// Edit one agent's config knobs, scoped to `workspace_id`, then re-read the row
+/// as a wire [`ActorRow`] (`hangar/agent_update`, e38.15).
+///
+/// `update` is the already-validated partial edit (the daemon maps the wire
+/// params before this call). The write is workspace-scoped at the SQL boundary,
+/// so a foreign-tenant agent id touches no row. Returns `Some(row)` with the
+/// refreshed agent when exactly one row was edited, `None` when the
+/// `(id, workspace)` pair matched nothing (the not-found / cross-tenant case the
+/// caller surfaces as an error). The re-read reuses [`agent_actor_row`] so the
+/// response row matches an `agents_list` snapshot of the agent.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault, or a malformed stored row on the
+/// re-read.
+pub async fn agent_update(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    agent_id: &str,
+    update: &ainb_hangar_store::repo::agent::AgentConfigUpdate,
+) -> Result<Option<ActorRow>, sqlx::Error> {
+    let touched = AgentRepo::update_config(pool, workspace_id, agent_id, update).await?;
+    if !touched {
+        return Ok(None);
+    }
+    match AgentRepo::get(pool, agent_id).await? {
+        Some(agent) => Ok(Some(agent_actor_row(pool, &agent).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Archive or un-archive one agent, scoped to `workspace_id`, then re-read the
+/// row as a wire [`ActorRow`] (`hangar/agent_archive`, e38.15).
+///
+/// Workspace-scoped at the SQL boundary: a foreign-tenant agent id flips no row.
+/// Returns `Some(row)` with the refreshed agent when the flip landed, `None` when
+/// the `(id, workspace)` pair matched nothing (the not-found / cross-tenant case
+/// the caller surfaces as an error).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault, or a malformed stored row on the
+/// re-read.
+pub async fn agent_archive(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    agent_id: &str,
+    archived: bool,
+) -> Result<Option<ActorRow>, sqlx::Error> {
+    let touched = AgentRepo::set_archived(pool, workspace_id, agent_id, archived).await?;
+    if !touched {
+        return Ok(None);
+    }
+    match AgentRepo::get(pool, agent_id).await? {
+        Some(agent) => Ok(Some(agent_actor_row(pool, &agent).await?)),
+        None => Ok(None),
     }
 }
 

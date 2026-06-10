@@ -451,6 +451,8 @@ async fn handle(
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
+        methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
+        methods::HANGAR_AGENT_ARCHIVE => handle_agent_archive(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -779,6 +781,114 @@ async fn handle_comment_add(
     {
         tracing::warn!(error = %e, "comment mention task spawn failed");
     }
+    to_value(&row)
+}
+
+/// Dispatch `hangar/agent_update` (e38.15): edit one agent's config knobs and
+/// answer with the refreshed [`ActorRow`](ainb_hangar_proto::events::ActorRow).
+///
+/// Mirrors [`handle_issue_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), maps the wire params onto the store's partial-edit struct, then drives
+/// the workspace-scoped edit. An `(agent_id, workspace)` pair that matches no row
+/// (an unknown id, or an agent owned by another tenant) is rejected as a
+/// not-found error — never a cross-tenant edit. This bead persists + exposes the
+/// config; the provider EXEC consumption of `model`/`args` is a separate bead
+/// (e38.16), so no event is pushed (the agent list is not event-driven — the
+/// plugin re-pulls `agents_list` after a mutation).
+async fn handle_agent_update(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params(
+        req,
+        "{ workspace_id, agent_id, name?, instructions?, model?, cli_args?, mcp_config?, \
+         thinking?, agent_env? }",
+    )?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let update = agent_config_update_from_params(&params);
+    // An edit with no field set is a client error: there is nothing to write.
+    if update.is_empty() {
+        return Err(invalid_params(
+            "nothing to update: set at least one of \
+             name/instructions/model/cli_args/mcp_config/thinking/agent_env",
+        ));
+    }
+    let row = snapshots::agent_update(pool, ws.as_str(), &params.agent_id, &update)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no agent `{}` in this workspace",
+            params.agent_id
+        )));
+    };
+    to_value(&row)
+}
+
+/// Map the wire [`AgentUpdateParams`] onto the store's [`AgentConfigUpdate`].
+///
+/// The four nullable text fields cross the boundary via the wire [`FieldUpdate`]
+/// (omitted / null / value) → the store's `Option<Option<_>>` (leave / clear /
+/// set); the two JSON collection fields and `name` map straight through.
+///
+/// [`AgentUpdateParams`]: ainb_hangar_proto::snapshots::AgentUpdateParams
+/// [`AgentConfigUpdate`]: ainb_hangar_store::repo::agent::AgentConfigUpdate
+/// [`FieldUpdate`]: ainb_hangar_proto::snapshots::FieldUpdate
+fn agent_config_update_from_params(
+    params: &ainb_hangar_proto::snapshots::AgentUpdateParams,
+) -> ainb_hangar_store::repo::agent::AgentConfigUpdate {
+    ainb_hangar_store::repo::agent::AgentConfigUpdate {
+        name: params.name.clone(),
+        instructions: field_to_nested(&params.instructions),
+        model: field_to_nested(&params.model),
+        cli_args: params.cli_args.clone(),
+        mcp_config: field_to_nested(&params.mcp_config),
+        thinking: field_to_nested(&params.thinking),
+        agent_env: params.agent_env.clone(),
+    }
+}
+
+/// Collapse a wire three-state [`FieldUpdate`](ainb_hangar_proto::snapshots::FieldUpdate)
+/// (omitted / null / value) into the store's nested-`Option` shape (leave / clear
+/// / set): `Keep → None`, `Clear → Some(None)`, `Set(v) → Some(Some(v))`. Shared
+/// by the four nullable agent config fields so the boundary mapping is written
+/// once.
+#[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
+fn field_to_nested<T: Clone>(
+    fu: &ainb_hangar_proto::snapshots::FieldUpdate<T>,
+) -> Option<Option<T>> {
+    use ainb_hangar_proto::snapshots::FieldUpdate;
+    match fu {
+        FieldUpdate::Keep => None,
+        FieldUpdate::Clear => Some(None),
+        FieldUpdate::Set(v) => Some(Some(v.clone())),
+    }
+}
+
+/// Dispatch `hangar/agent_archive` (e38.15): archive or un-archive one agent and
+/// answer with the refreshed [`ActorRow`](ainb_hangar_proto::events::ActorRow).
+///
+/// Mirrors [`handle_agent_update`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the workspace-scoped flip. A `(agent_id, workspace)`
+/// pair that matches no row is a not-found error, never a cross-tenant flip.
+async fn handle_agent_archive(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AgentArchiveParams =
+        parse_params(req, "{ workspace_id, agent_id, archived }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let row = snapshots::agent_archive(pool, ws.as_str(), &params.agent_id, params.archived)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no agent `{}` in this workspace",
+            params.agent_id
+        )));
+    };
     to_value(&row)
 }
 
@@ -1343,6 +1453,83 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/agent_update` edits a seeded agent's config through the dispatcher
+    /// and answers with the refreshed actor row (e38.15).
+    #[tokio::test]
+    async fn agent_update_edits_seeded_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "agent_id": "agent-1",
+                    "name": "claude-pro",
+                    "model": "claude-opus-4",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        assert_eq!(v["actor_ref"], "agent:agent-1");
+        assert_eq!(v["display_name"], "claude-pro");
+    }
+
+    /// An unknown agent id is rejected (not a silent no-op), mirroring the
+    /// mutating workspace-reject contract.
+    #[tokio::test]
+    async fn agent_update_unknown_agent_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "agent_id": "no-such-agent",
+                    "name": "ghost",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/agent_archive` flips the flag through the dispatcher and answers
+    /// with the refreshed actor row (e38.15).
+    #[tokio::test]
+    async fn agent_archive_flips_seeded_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_ARCHIVE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "agent_id": "agent-1",
+                    "archived": true,
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        assert_eq!(resp.result.unwrap()["actor_ref"], "agent:agent-1");
     }
 
     /// `hangar/skill_get` returns the seeded `commit` skill's detail, scoped to
