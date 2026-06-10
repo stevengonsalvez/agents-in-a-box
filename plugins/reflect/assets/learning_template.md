@@ -1,4 +1,12 @@
 ---
+# S9: this frontmatter holds ONLY semantic fields and is immutable after
+# write — content edits aside, nothing rewrites this file. Volatile ranking
+# signals (importance, maturity, recall_count, helpful_count, ignored_count,
+# stale_count, last_recalled_at) live in reflect.db's `learning_signals`
+# sidecar table and must NEVER be added here: per-query bumps would dirty
+# git-tracked notes and merge-conflict across teammates (ByteRover
+# runtime-signals sidecar shape). `updated` below reflects real content
+# modifications only — ranking updates never touch it.
 type: learning
 id: lrn-{{SLUG}}-{{HASH6}}
 created: {{ISO_TIMESTAMP}}

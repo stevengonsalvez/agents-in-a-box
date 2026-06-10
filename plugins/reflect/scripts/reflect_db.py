@@ -73,6 +73,30 @@ INDEX_BACKEND_VALUES = tuple(backend.value for backend in IndexBackend)
 ARTIFACT_TYPE_VALUES = tuple(artifact_type.value for artifact_type in ArtifactType)
 ARTIFACT_STATUS_VALUES = tuple(status.value for status in ArtifactStatus)
 
+# S9: maturity tiers for the learning_signals sidecar (ByteRover
+# MaturityTierSchema shape — draft/validated/core; new rows start as draft).
+MATURITY_TIERS: tuple[str, ...] = ("draft", "validated", "core")
+DEFAULT_MATURITY = "draft"
+# S9: importance is a 0–100 ranking weight (ByteRover RuntimeSignals
+# importance shape); new rows start at the neutral midpoint.
+DEFAULT_IMPORTANCE = 50.0
+
+# S9: ranking signals that may NEVER appear in note frontmatter — they change
+# per query and would dirty git-tracked markdown. Their only home is the
+# ``learning_signals`` sidecar table; note writers strip them via
+# :func:`strip_volatile_signal_fields`.
+VOLATILE_SIGNAL_FIELDS: frozenset[str] = frozenset(
+    {
+        "importance",
+        "maturity",
+        "recall_count",
+        "helpful_count",
+        "ignored_count",
+        "stale_count",
+        "last_recalled_at",
+    }
+)
+
 _LEARNING_COLUMNS = (
     "id",
     "title",
@@ -268,6 +292,22 @@ CREATE TABLE IF NOT EXISTS recall_events (
 );
 """
 
+_LEARNING_SIGNALS_DDL = f"""
+CREATE TABLE IF NOT EXISTS learning_signals (
+    learning_id      TEXT PRIMARY KEY REFERENCES learnings(id),
+    importance       REAL NOT NULL DEFAULT {DEFAULT_IMPORTANCE},
+    maturity         TEXT NOT NULL DEFAULT '{DEFAULT_MATURITY}'
+                     CHECK (maturity IN ({_quoted_csv(MATURITY_TIERS)})),
+    recall_count     INTEGER NOT NULL DEFAULT 0,
+    helpful_count    INTEGER NOT NULL DEFAULT 0,
+    ignored_count    INTEGER NOT NULL DEFAULT 0,
+    stale_count      INTEGER NOT NULL DEFAULT 0,
+    last_recalled_at TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+"""
+
 _ARTIFACTS_DDL = f"""
 CREATE TABLE IF NOT EXISTS artifacts (
     id              TEXT PRIMARY KEY,
@@ -364,6 +404,7 @@ _SCHEMA_DDL = (
     + _SOURCES_DDL
     + _INDEX_JOBS_DDL
     + _RECALL_EVENTS_DDL
+    + _LEARNING_SIGNALS_DDL
     + _ARTIFACTS_DDL
     + _LEARNING_HISTORY_DDL
     + _CONCEPT_INDEX_DDL
@@ -707,6 +748,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute(_INDEX_JOBS_DDL)
         conn.execute(_RECALL_EVENTS_DDL)
+        conn.execute(_LEARNING_SIGNALS_DDL)
         conn.execute(_ARTIFACTS_DDL)
         conn.execute(_LEARNING_HISTORY_DDL)
         conn.execute(_CONCEPT_INDEX_DDL)
@@ -721,6 +763,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE skills ADD COLUMN is_stale INTEGER NOT NULL DEFAULT 0"
             )
 
+    _backfill_learning_signals(conn)
     _backfill_concept_index(conn)
 
 
@@ -941,6 +984,10 @@ def add_learning(
                 now,
             ),
         )
+        # S9: seed the volatile-signals sidecar row alongside the learning
+        # (ByteRover curate-ADD shape) so ranking signals always have a DB
+        # home — note frontmatter never carries them.
+        _ensure_signals_row(conn, lid, now)
         add_event(
             "learning_added",
             lid,
@@ -1960,6 +2007,194 @@ def add_index_job(
     return jid
 
 
+# ---------------------------------------------------------------------------
+# Learning signals (S9: volatile ranking signals out of frontmatter)
+# ---------------------------------------------------------------------------
+# ByteRover runtime-signals-schema shape: ranking fields that change on every
+# query live in a sidecar store (here: the ``learning_signals`` table inside
+# reflect.db), never in note markdown frontmatter. Note files stay immutable
+# after write — per-query bumps touch only this table, so git-tracked notes
+# produce clean diffs and never merge-conflict on telemetry.
+
+
+def default_learning_signals() -> dict[str, Any]:
+    """S9: fresh sidecar values for a learning with no signals row yet.
+
+    Mirrors ByteRover's ``createDefaultRuntimeSignals`` — readers get these
+    defaults instead of a miss, so a missing row is indistinguishable from a
+    never-touched one."""
+    return {
+        "importance": DEFAULT_IMPORTANCE,
+        "maturity": DEFAULT_MATURITY,
+        "recall_count": 0,
+        "helpful_count": 0,
+        "ignored_count": 0,
+        "stale_count": 0,
+        "last_recalled_at": None,
+    }
+
+
+def strip_volatile_signal_fields(frontmatter: dict[str, Any]) -> dict[str, Any]:
+    """S9: return a copy of *frontmatter* without volatile ranking fields.
+
+    The write-time guard note writers apply before persisting markdown:
+    semantic fields pass through untouched; anything in
+    ``VOLATILE_SIGNAL_FIELDS`` (importance, maturity, recall/feedback
+    counters, last_recalled_at) is dropped — those live ONLY in the
+    ``learning_signals`` sidecar table."""
+    return {
+        key: value
+        for key, value in (frontmatter or {}).items()
+        if key not in VOLATILE_SIGNAL_FIELDS
+    }
+
+
+def _coerce_importance(value: Any, fallback: float) -> float:
+    """S9: normalize an importance to [0, 100]; unparseable → *fallback*."""
+    if value is None or isinstance(value, bool):
+        return fallback
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if num != num:  # NaN guard — NaN compares false to everything
+        return fallback
+    return min(100.0, max(0.0, num))
+
+
+def _coerce_maturity(value: Any, fallback: str) -> str:
+    """S9: normalize a maturity tier; unknown values keep *fallback*."""
+    if value is None:
+        return fallback
+    text = str(value).strip().lower()
+    return text if text in MATURITY_TIERS else fallback
+
+
+def _ensure_signals_row(
+    conn: sqlite3.Connection, learning_id: str, now: str,
+) -> None:
+    """Seed a default sidecar row when none exists (idempotent, no commit —
+    callers own the transaction)."""
+    conn.execute(
+        """INSERT OR IGNORE INTO learning_signals
+               (learning_id, created_at, updated_at)
+           VALUES (?, ?, ?)""",
+        (learning_id, now, now),
+    )
+
+
+def get_learning_signals(
+    learning_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """S9: read the volatile ranking signals for a learning.
+
+    The ONLY read path for these fields — recall/ranking must come here, not
+    to note frontmatter. A learning without a sidecar row yet returns the
+    ByteRover defaults (importance 50, maturity 'draft', zero counters)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM learning_signals WHERE learning_id = ?",
+        (learning_id,),
+    ).fetchone()
+    if row is None:
+        return {"learning_id": learning_id, **default_learning_signals()}
+    return dict(row)
+
+
+def set_learning_signals(
+    learning_id: str,
+    *,
+    importance: Optional[float] = None,
+    maturity: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """S9: upsert curated ranking signals for a learning.
+
+    ``importance`` is clamped to [0, 100]; an unknown ``maturity`` tier is
+    ignored (the current tier is kept — never a crash, never bad data in the
+    CHECK-constrained column). Returns the updated row, or None when the
+    learning doesn't exist (mirrors the no-op semantics of the other UPDATE
+    paths)."""
+    conn = conn or get_conn()
+    if get_learning(learning_id, conn=conn) is None:
+        return None
+    current = get_learning_signals(learning_id, conn=conn)
+    new_importance = _coerce_importance(importance, float(current["importance"]))
+    new_maturity = _coerce_maturity(maturity, str(current["maturity"]))
+    now = _now_iso()
+    with conn:
+        _ensure_signals_row(conn, learning_id, now)
+        conn.execute(
+            """UPDATE learning_signals
+               SET importance = ?, maturity = ?, updated_at = ?
+               WHERE learning_id = ?""",
+            (new_importance, new_maturity, now, learning_id),
+        )
+    return get_learning_signals(learning_id, conn=conn)
+
+
+def _bump_learning_signals(
+    conn: sqlite3.Connection,
+    learning_id: str,
+    *,
+    feedback: str,
+    now: str,
+) -> None:
+    """S9: per-query telemetry bump — sidecar table only, never markdown.
+
+    No commit of its own: runs inside the caller's ``with conn:`` block so
+    the bump lands atomically with the recall_events insert."""
+    _ensure_signals_row(conn, learning_id, now)
+    update_parts = [
+        "recall_count = recall_count + 1",
+        "last_recalled_at = ?",
+        "updated_at = ?",
+    ]
+    if feedback == "helpful":
+        update_parts.append("helpful_count = helpful_count + 1")
+    elif feedback == "ignored":
+        update_parts.append("ignored_count = ignored_count + 1")
+    elif feedback == "stale":
+        update_parts.append("stale_count = stale_count + 1")
+    conn.execute(
+        f"UPDATE learning_signals SET {', '.join(update_parts)} "
+        "WHERE learning_id = ?",
+        (now, now, learning_id),
+    )
+
+
+def _backfill_learning_signals(conn: sqlite3.Connection) -> None:
+    """S9 migration: seed sidecar rows for pre-existing learnings.
+
+    Copies the legacy volatile counters (recall/helpful/ignored/stale,
+    last_recalled_at) off the learnings table into ``learning_signals`` so
+    existing telemetry survives the move; importance/maturity start at the
+    ByteRover defaults. Idempotent — the NOT IN guard touches only learnings
+    without a sidecar row, so re-running on every init_db never resets
+    accumulated signals. Best-effort: a failure here must never block
+    schema migration."""
+    try:
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                """INSERT INTO learning_signals
+                       (learning_id, importance, maturity, recall_count,
+                        helpful_count, ignored_count, stale_count,
+                        last_recalled_at, created_at, updated_at)
+                   SELECT l.id, ?, ?, l.recall_count, l.helpful_count,
+                          l.ignored_count, l.stale_count, l.last_recalled_at,
+                          ?, ?
+                   FROM learnings l
+                   WHERE l.id NOT IN
+                         (SELECT learning_id FROM learning_signals)""",
+                (DEFAULT_IMPORTANCE, DEFAULT_MATURITY, now, now),
+            )
+    except Exception:
+        return
+
+
 def add_recall_event(
     learning_id: str,
     query: str,
@@ -2010,6 +2245,10 @@ def add_recall_event(
             f"UPDATE learnings SET {', '.join(update_parts)} WHERE id = ?",
             params,
         )
+        # S9: the canonical home for per-query telemetry is the
+        # learning_signals sidecar — markdown notes are never touched.
+        # (The learnings columns above stay in sync as a legacy mirror.)
+        _bump_learning_signals(conn, learning_id, feedback=feedback, now=now)
         add_event(
             "learning_recalled",
             learning_id,
