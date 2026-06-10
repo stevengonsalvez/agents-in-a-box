@@ -674,11 +674,14 @@ impl BurndownPlugin {
     /// latest known progress. Malformed payloads are logged and
     /// dropped — the skeleton just keeps showing the previous tick (or
     /// the ⏳ waiting line if no tick has arrived yet).
+    ///
+    /// A `done: true` event is terminal: the scan finished but decided
+    /// not to republish (session-reader's unchanged-snapshot
+    /// short-circuit), so no `usage_data` chunk is coming to clear the
+    /// banner — clear it here instead.
     async fn ingest_scan_progress(&mut self, host: &HostClient, payload: &[u8]) {
         match rmp_serde::from_slice::<ScanProgressEvent>(payload) {
-            Ok(evt) => {
-                self.scan_progress = Some(evt);
-            }
+            Ok(evt) => self.apply_scan_progress(evt),
             Err(e) => {
                 let _ = host
                     .log_info(format!(
@@ -686,6 +689,16 @@ impl BurndownPlugin {
                     ))
                     .await;
             }
+        }
+    }
+
+    /// Pure half of [`Self::ingest_scan_progress`] — unit-testable
+    /// without a `HostClient`.
+    fn apply_scan_progress(&mut self, evt: ScanProgressEvent) {
+        if evt.done {
+            self.scan_progress = None;
+        } else {
+            self.scan_progress = Some(evt);
         }
     }
 
@@ -1847,6 +1860,54 @@ mod scan_progress_tests {
         let outcome = p.apply_chunk_pure(event);
         assert_eq!(outcome, ChunkOutcome::Finalised);
         assert!(p.scan_progress.is_none());
+    }
+
+    #[test]
+    fn done_event_clears_in_flight_banner_without_data() {
+        // The unchanged-snapshot short-circuit (issue #255) ends a
+        // scan with NO usage_data publish — the terminal `done` event
+        // is the only thing that clears the banner.
+        let mut p = BurndownPlugin::default();
+        p.apply_scan_progress(ScanProgressEvent {
+            scanned: 7,
+            total: 10,
+            current_project: "mid-scan".into(),
+            done: false,
+        });
+        assert!(p.scan_progress.is_some(), "banner armed mid-scan");
+
+        let bytes = rmp_serde::to_vec_named(&ScanProgressEvent {
+            done: true,
+            ..ScanProgressEvent::default()
+        })
+        .expect("encode");
+        let decoded: ScanProgressEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        p.apply_scan_progress(decoded);
+        assert!(
+            p.scan_progress.is_none(),
+            "done event clears the banner with no data publish"
+        );
+    }
+
+    #[test]
+    fn pre_done_publisher_payload_decodes_with_done_false() {
+        // Wire back-compat: a pre-#255 session-reader publishes maps
+        // without the `done` key — serde's default must fill `false`.
+        #[derive(serde::Serialize)]
+        struct LegacyScanProgress {
+            scanned: u32,
+            total: u32,
+            current_project: String,
+        }
+        let bytes = rmp_serde::to_vec_named(&LegacyScanProgress {
+            scanned: 3,
+            total: 9,
+            current_project: "legacy".into(),
+        })
+        .expect("encode legacy");
+        let decoded: ScanProgressEvent = rmp_serde::from_slice(&bytes).expect("decode legacy");
+        assert!(!decoded.done, "missing field defaults to false");
+        assert_eq!(decoded.scanned, 3);
     }
 
     #[test]
