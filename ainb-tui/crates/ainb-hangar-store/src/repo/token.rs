@@ -69,6 +69,15 @@ pub struct PatRepo;
 /// Stateless typed wrapper over the `daemon_token` table.
 pub struct DaemonTokenRepo;
 
+/// Stateless typed wrapper over the single-row `daemon_socket_token` table.
+///
+/// Migration 0011 — the credential the daemon's unix-socket RPC server
+/// requires on every connection's first frame (`auth/hello`).
+/// Same hashing discipline as the other two: only the SHA-256 hex digest is
+/// stored; the plaintext lives solely in `{hangar_home}/hangar/daemon.token`
+/// (written once by the daemon at mint time, mode `0600`).
+pub struct SocketTokenRepo;
+
 /// Mint a fresh PAT for `user_id`, persist only its digest, and return the row
 /// alongside the plaintext to show **once**.
 ///
@@ -329,6 +338,59 @@ impl DaemonTokenRepo {
             .execute(pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+impl SocketTokenRepo {
+    /// The stored socket-token digest (lower-case hex SHA-256), or `None` when
+    /// no token has been minted yet (fresh database).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn get(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT sha256_token FROM daemon_socket_token WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Store (or replace) the socket-token digest. Upserts the single `id = 1`
+    /// row so a re-mint atomically supersedes the previous credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the upsert fails.
+    pub async fn set(
+        pool: &SqlitePool,
+        sha256_token: &str,
+        created_at: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO daemon_socket_token (id, sha256_token, created_at) VALUES (1, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET sha256_token = excluded.sha256_token, \
+             created_at = excluded.created_at",
+        )
+        .bind(sha256_token)
+        .bind(created_at)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Verify a presented socket-token `plaintext` against the stored digest.
+    ///
+    /// Re-hashes the plaintext and compares constant-time via
+    /// [`token::verify`] (the same core seam `pat` / `daemon_token` auth uses).
+    /// `false` on any miss: no stored token, or a digest mismatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the lookup query fails.
+    pub async fn verify(pool: &SqlitePool, plaintext: &str) -> Result<bool, sqlx::Error> {
+        let Some(stored) = Self::get(pool).await? else {
+            return Ok(false);
+        };
+        Ok(token::verify(plaintext, &stored))
     }
 }
 

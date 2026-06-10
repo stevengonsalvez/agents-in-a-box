@@ -333,3 +333,48 @@ async fn revoke_daemon_token_removes_row() {
             .is_none()
     );
 }
+
+/// `SocketTokenRepo` (migration 0011): a fresh database has no socket token,
+/// `set` upserts the single row, `verify` accepts the matching plaintext and
+/// rejects a tampered one, and a re-mint replaces the stored digest so the old
+/// plaintext stops verifying.
+#[tokio::test]
+async fn socket_token_set_verify_and_replace() {
+    use ainb_hangar_core::token::{TokenKind, mint};
+    use ainb_hangar_store::repo::token::SocketTokenRepo;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+
+    // Fresh database: nothing stored, nothing verifies.
+    assert!(SocketTokenRepo::get(store.pool()).await.expect("get").is_none());
+    assert!(
+        !SocketTokenRepo::verify(store.pool(), "mdt_ANYTHING").await.expect("verify"),
+        "no stored token must verify nothing"
+    );
+
+    let mut rng = seeded_rng();
+    let first = mint(TokenKind::Daemon, &mut rng);
+    SocketTokenRepo::set(store.pool(), &first.sha256_hex, FIXED_NOW)
+        .await
+        .expect("set");
+
+    assert_eq!(
+        SocketTokenRepo::get(store.pool()).await.expect("get").as_deref(),
+        Some(first.sha256_hex.as_str()),
+        "only the digest is stored"
+    );
+    assert!(SocketTokenRepo::verify(store.pool(), &first.plaintext).await.expect("verify"));
+    assert!(
+        !SocketTokenRepo::verify(store.pool(), "mdt_WRONG").await.expect("verify"),
+        "a wrong plaintext must not verify"
+    );
+
+    // Re-mint: the upsert replaces the single row; the old plaintext dies.
+    let second = mint(TokenKind::Daemon, &mut rng);
+    SocketTokenRepo::set(store.pool(), &second.sha256_hex, FIXED_NOW + 1)
+        .await
+        .expect("replace");
+    assert!(!SocketTokenRepo::verify(store.pool(), &first.plaintext).await.expect("verify"));
+    assert!(SocketTokenRepo::verify(store.pool(), &second.plaintext).await.expect("verify"));
+}

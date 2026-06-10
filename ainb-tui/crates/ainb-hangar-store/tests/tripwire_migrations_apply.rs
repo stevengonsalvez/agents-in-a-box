@@ -595,7 +595,7 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_sixteen_tables() {
+async fn all_migrations_create_exactly_seventeen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -618,6 +618,7 @@ async fn all_migrations_create_exactly_sixteen_tables() {
         "autopilot_run",
         "beads_mapping",
         "comment",
+        "daemon_socket_token",
         "daemon_token",
         "issue",
         "member",
@@ -627,7 +628,7 @@ async fn all_migrations_create_exactly_sixteen_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 16, "expected 16 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 17, "expected 17 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
