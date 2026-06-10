@@ -6,8 +6,11 @@
 //! so `dispatched_at` assertions are deterministic.
 //!
 //! The claim contract (mirrors Multica `task.go`):
-//! - claim flips exactly one oldest `queued` row for the runtime to
-//!   `dispatched` and stamps `dispatched_at = clock.now_ms()`,
+//! - claim flips exactly one `queued` row for the runtime to `dispatched`
+//!   and stamps `dispatched_at = clock.now_ms()`,
+//! - candidates order by `priority DESC, created_at, id` (Multica ordering
+//!   parity, migration 0013): urgent work jumps the queue; equal priorities
+//!   drain FIFO,
 //! - an empty queue returns `Ok(None)` (the daemon sleeps + retries; not an
 //!   error),
 //! - a runtime never claims another runtime's tasks,
@@ -208,6 +211,59 @@ async fn claim_skips_tasks_for_other_runtimes() {
 
     assert_eq!(a.id, "task-a");
     assert_eq!(b.id, "task-b");
+}
+
+#[tokio::test]
+async fn claim_drains_priority_desc_then_fifo() {
+    // Multica ordering parity: `ORDER BY priority DESC, created_at, id`.
+    // Higher priority (0..3 = P3..P0, higher = more urgent) jumps the queue
+    // even when a lower-priority task is older; equal priorities drain FIFO
+    // by created_at.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store, "rt-1", "agent-1", 10).await;
+
+    // (id, created_at, priority). task-p3-oldest is the OLDEST row overall but
+    // carries the default priority — it must drain LAST.
+    let seed: &[(&str, i64, i64)] = &[
+        ("task-p3-oldest", 50, 0),
+        ("task-p0-old", 100, 3),
+        ("task-p0-new", 200, 3),
+        ("task-p1", 150, 2),
+    ];
+    for (id, created_at, priority) in seed {
+        TaskRepo::insert(
+            store.pool(),
+            &new_task(id, "rt-1", "agent-1", None, *created_at),
+        )
+        .await
+        .expect("enqueue");
+        sqlx::query("UPDATE agent_task_queue SET priority = ? WHERE id = ?")
+            .bind(priority)
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .expect("set priority");
+    }
+
+    let clock = FixedClock(NOW_MS);
+    let mut drained = Vec::new();
+    while let Some(claimed) = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
+        .await
+        .expect("claim ok")
+    {
+        drained.push(claimed.id);
+    }
+    assert_eq!(
+        drained,
+        vec![
+            "task-p0-old".to_string(),    // priority 3, created 100
+            "task-p0-new".to_string(),    // priority 3, created 200 (FIFO tiebreak)
+            "task-p1".to_string(),        // priority 2
+            "task-p3-oldest".to_string(), // priority 0 — oldest, drains last
+        ],
+        "claim must drain priority DESC with FIFO (created_at, id) tiebreak"
+    );
 }
 
 #[tokio::test]

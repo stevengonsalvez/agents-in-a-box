@@ -1,8 +1,9 @@
 //! The `ClaimTask` service: atomic `queued -> dispatched` claim.
 //!
 //! [`ClaimTaskService::claim_for_runtime`] is the head of the daemon's work
-//! loop: a runtime polls for the oldest `queued` task it owns, atomically flips
-//! it to `dispatched`, and stamps `dispatched_at`. The whole transition is one
+//! loop: a runtime polls for the most urgent (then oldest) `queued` task it
+//! owns, atomically flips it to `dispatched`, and stamps `dispatched_at`. The
+//! whole transition is one
 //! `UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING *` statement so two
 //! daemons (or two poll iterations) can never claim the same row — `SQLite`
 //! serialises the write and `RETURNING` reports exactly the row this statement
@@ -59,8 +60,9 @@ pub struct ClaimedTask {
 pub struct ClaimTaskService;
 
 impl ClaimTaskService {
-    /// Atomically claim the oldest claimable `queued` task for `runtime_id`,
-    /// flipping it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
+    /// Atomically claim the most urgent claimable `queued` task for
+    /// `runtime_id` (`priority DESC`, then FIFO by `created_at, id`), flipping
+    /// it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
     ///
     /// A task is *claimable* when it is `queued`, bound to `runtime_id`, its
     /// agent has fewer than `max_concurrent_tasks` rows currently `running`,
@@ -108,8 +110,11 @@ impl ClaimTaskService {
 
 /// Atomic claim statement.
 ///
-/// The candidate sub-select picks the oldest `queued` task for the runtime
-/// whose agent is under its `max_concurrent_tasks` cap (a correlated COUNT of
+/// The candidate sub-select picks the most urgent `queued` task for the
+/// runtime — `ORDER BY priority DESC, created_at, id` (Multica ordering
+/// parity: higher `priority` jumps the queue, 0..3 = P3..P0 per migration
+/// 0013; equal priorities drain FIFO) — whose agent is under its
+/// `max_concurrent_tasks` cap (a correlated COUNT of
 /// the agent's `running` rows) AND has no other active (`queued` /
 /// `dispatched` / `running`) task for the same issue (the `NOT EXISTS`
 /// per-(issue, agent) guard — Multica `ClaimAgentTask` parity; `NULL`
@@ -135,7 +140,7 @@ WHERE id = ( \
           AND s.id <> q.id \
           AND s.status IN ('queued','dispatched','running') \
       ) \
-    ORDER BY q.created_at, q.id \
+    ORDER BY q.priority DESC, q.created_at, q.id \
     LIMIT 1 \
 ) \
 RETURNING id, workspace_id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at";
