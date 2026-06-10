@@ -6,11 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::fleet::enrich_cache;
 use crate::fleet::read::errors::detect_error_signals;
 use crate::fleet::read::jsonl_tail::{
-    AskUserQuestionData, last_ask_user_question, last_assistant_info, latest_transcript_for_cwd,
+    AskUserQuestionData, last_api_error_from_jsonl, last_ask_user_question, last_assistant_info,
+    latest_transcript_for_cwd,
 };
 use crate::fleet::types::{Session, Signal};
+
+/// JSONL ERR-fallback window — newest N transcript rows scanned when the pane
+/// capture finds no error.
+const ERR_JSONL_WINDOW: usize = 40;
 
 /// Default idle threshold (override via `AINB_FLEET_IDLE_MIN` or `--idle-min`).
 const DEFAULT_IDLE_MIN: i64 = 5;
@@ -52,6 +58,18 @@ pub struct NeedsRow {
     pub context: NeedsContext,
     /// Hint to the calling LLM about the answer-routing channel.
     pub route_hint: RouteHint,
+    /// blake3 key of the serialized context. The enrich producer writes its
+    /// drafted suggestion under this exact key, so the reader and producer
+    /// never disagree and an entry self-invalidates when the session advances.
+    #[serde(default)]
+    pub enrich_key: String,
+    /// Fresh cached suggestion, attached by the reader when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enriched: Option<String>,
+    /// True when this card has no fresh cache entry and enrichment is enabled —
+    /// i.e. it should be drafted by the producer (inline or batched agent).
+    #[serde(default)]
+    pub need_enrich: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -98,27 +116,28 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
     // 1. ASK — strongest signal, JSONL tool_use block.
     if let Some(path) = &transcript_path {
         if let Some(aq) = last_ask_user_question(path) {
-            return Some(NeedsRow {
-                session: input.session,
-                context: NeedsContext::Ask(aq),
-                route_hint,
-            });
+            return Some(make_row(input.session, NeedsContext::Ask(aq), route_hint));
         }
     }
 
-    // 2. ERR — API-error regex over pane + JSONL last text.
-    if let Some(pane) = input.pane_text.as_deref() {
-        let signals = detect_error_signals(pane, input.now_ms);
-        if let Some(Signal::ApiError { pattern, raw, .. }) = signals.into_iter().next() {
-            return Some(NeedsRow {
-                session: input.session,
-                context: NeedsContext::Err(ErrContext {
-                    pattern,
-                    snippet: raw,
-                }),
-                route_hint,
-            });
-        }
+    // 2. ERR — API-error regex over the pane, with a JSONL fallback when the
+    //    pane capture misses (error scrolled past the 80-line window, or the
+    //    capture itself failed/returned empty).
+    let err = input
+        .pane_text
+        .as_deref()
+        .and_then(|pane| first_api_error(pane, input.now_ms))
+        .or_else(|| {
+            transcript_path
+                .as_ref()
+                .and_then(|p| last_api_error_from_jsonl(p, ERR_JSONL_WINDOW, input.now_ms))
+        });
+    if let Some((pattern, snippet)) = err {
+        return Some(make_row(
+            input.session,
+            NeedsContext::Err(ErrContext { pattern, snippet }),
+            route_hint,
+        ));
     }
 
     // 3. WAIT — explicit opt-in marker.
@@ -132,14 +151,14 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
         .and_then(|s| s.strip_prefix("WAITING:"))
         .map(|rest| rest.trim().to_string());
     if let Some(text) = wait_text {
-        return Some(NeedsRow {
-            session: input.session,
-            context: NeedsContext::Wait(WaitContext {
+        return Some(make_row(
+            input.session,
+            NeedsContext::Wait(WaitContext {
                 marker: "WAITING:".to_string(),
                 text,
             }),
             route_hint,
-        });
+        ));
     }
 
     // 4. IDLE — assistant turn ended, no user follow-up, last seen N min ago.
@@ -152,20 +171,43 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
                 let age_ms = input.now_ms.saturating_sub(info.ts_ms);
                 let age_min = age_ms / 60_000;
                 if age_min >= input.idle_threshold_min {
-                    return Some(NeedsRow {
-                        session: input.session,
-                        context: NeedsContext::Idle(IdleContext {
+                    return Some(make_row(
+                        input.session,
+                        NeedsContext::Idle(IdleContext {
                             idle_minutes: age_min,
                             last_assistant_text: info.text_snippet,
                         }),
                         route_hint,
-                    });
+                    ));
                 }
             }
         }
     }
 
     None
+}
+
+/// Build a `NeedsRow`, stamping the content `enrich_key` from the serialized
+/// context. `enriched` / `need_enrich` are filled later by the orchestrator
+/// (it owns the cache lookup and the enable flag).
+fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> NeedsRow {
+    let enrich_key = enrich_cache::ctx_key(&serde_json::to_string(&context).unwrap_or_default());
+    NeedsRow {
+        session,
+        context,
+        route_hint,
+        enrich_key,
+        enriched: None,
+        need_enrich: false,
+    }
+}
+
+/// First API-error signal in `text`, as `(pattern, raw_snippet)`.
+fn first_api_error(text: &str, now_ms: i64) -> Option<(String, String)> {
+    detect_error_signals(text, now_ms).into_iter().find_map(|s| match s {
+        Signal::ApiError { pattern, raw, .. } => Some((pattern, raw)),
+        _ => None,
+    })
 }
 
 /// Advisory hint for the answer-routing channel. Mirrors the default

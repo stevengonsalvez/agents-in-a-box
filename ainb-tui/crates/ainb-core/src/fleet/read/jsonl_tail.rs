@@ -320,6 +320,27 @@ fn read_lines(path: &Path) -> Option<Vec<String>> {
     Some(reader.lines().map_while(Result::ok).collect())
 }
 
+/// Fallback ERR detection from the transcript. Reverse-scans the newest
+/// `window` JSONL rows (as raw text) for an API-error signal — used when the
+/// tmux pane capture misses the error (scrolled past the 80-line window, or
+/// the capture itself failed). Newest match wins. Returns `(pattern, raw)`.
+pub fn last_api_error_from_jsonl(path: &Path, window: usize, at_ms: i64) -> Option<(String, String)> {
+    let lines = read_lines(path)?;
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(window);
+    for row in lines[start..].iter().rev() {
+        let sigs = crate::fleet::read::errors::detect_error_signals(row, at_ms);
+        if let Some(crate::fleet::types::Signal::ApiError { pattern, raw, .. }) =
+            sigs.into_iter().next()
+        {
+            return Some((pattern, raw));
+        }
+    }
+    None
+}
+
 fn parse_ts_ms(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())
 }
@@ -478,5 +499,42 @@ mod tests {
     fn synth_skips_user_rows() {
         let rows = vec![r#"{"type":"user","message":{"content":"hello"}}"#.to_string()];
         assert!(synthesize_from_rows(&rows).is_none());
+    }
+
+    #[test]
+    fn jsonl_err_fallback_finds_error_row() {
+        use std::io::Write;
+        let path =
+            std::env::temp_dir().join(format!("ainb-jsonl-err-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"all good"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"type":"system","content":"API Error: rate_limited please retry"}}"#)
+            .unwrap();
+        drop(f);
+        let hit = last_api_error_from_jsonl(&path, 40, 0);
+        let _ = std::fs::remove_file(&path);
+        let (pattern, _) = hit.expect("should find an error in the JSONL tail");
+        assert_eq!(pattern, "rate_limited");
+    }
+
+    #[test]
+    fn jsonl_err_fallback_clean_returns_none() {
+        use std::io::Write;
+        let path =
+            std::env::temp_dir().join(format!("ainb-jsonl-clean-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"all good"}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        let hit = last_api_error_from_jsonl(&path, 40, 0);
+        let _ = std::fs::remove_file(&path);
+        assert!(hit.is_none());
     }
 }

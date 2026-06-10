@@ -8,8 +8,9 @@ pub mod tmux_pane;
 
 pub use errors::{API_ERROR_PATTERNS, detect_error_signals};
 pub use jsonl_tail::{
-    AskUserQuestionData, LastAssistantInfo, cwd_to_project_slug, last_ask_user_question,
-    last_assistant_info, last_narrative_snapshot, latest_transcript_for_cwd, wait_for_turn_end,
+    AskUserQuestionData, LastAssistantInfo, cwd_to_project_slug, last_api_error_from_jsonl,
+    last_ask_user_question, last_assistant_info, last_narrative_snapshot, latest_transcript_for_cwd,
+    wait_for_turn_end,
 };
 pub use needs::{
     ClassifyInput, ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint, WaitContext,
