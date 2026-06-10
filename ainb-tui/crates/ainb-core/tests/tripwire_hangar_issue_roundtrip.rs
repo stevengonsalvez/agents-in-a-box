@@ -69,9 +69,12 @@ fn hangar_issue_create_then_list_round_trip_in_tmux() {
     assert!(status.success(), "tmux new-session failed");
 
     // Isolate the hangar db under the tempdir so the real ~/.ainb is untouched.
+    // Create with priority + due + label so the round-trip proves those persist
+    // through the real binary, not just the title.
     let title = "TmuxRoundtripIssue";
     let create = format!(
-        "AINB_HANGAR_HOME={home} HOME={home} {bin} hangar issue create --title {title}",
+        "AINB_HANGAR_HOME={home} HOME={home} {bin} hangar issue create \
+         --title {title} --priority 3 --due 2026-06-30 --label bug",
         home = home.path().display(),
         bin = ainb_bin().display(),
         title = title,
@@ -101,8 +104,10 @@ fn hangar_issue_create_then_list_round_trip_in_tmux() {
         .status()
         .expect("send list");
 
+    // The text list line carries `priority=<n>` next to the title; wait for the
+    // priority marker so the assertions below see the fully-rendered row.
     let post = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
-        c.contains(title)
+        c.contains(title) && c.contains("priority=3")
     })
     .unwrap_or_else(|| capture_pane(&session));
 
@@ -111,5 +116,14 @@ fn hangar_issue_create_then_list_round_trip_in_tmux() {
     assert!(
         post.contains(title),
         "created issue '{title}' never appeared in `hangar issue list` output:\n{post}"
+    );
+    // The create-flow attributes round-tripped through the real binary + db.
+    assert!(
+        post.contains("priority=3"),
+        "issue priority did not round-trip into `hangar issue list`:\n{post}"
+    );
+    assert!(
+        post.contains("labels=bug"),
+        "issue label did not round-trip into `hangar issue list`:\n{post}"
     );
 }

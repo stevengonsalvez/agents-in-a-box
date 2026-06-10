@@ -440,15 +440,43 @@ pub struct IssueCreateArgs {
     /// provider. The created task id is printed alongside the issue id.
     #[arg(long)]
     pub assign: Option<String>,
-    /// Task urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (default 0).
+    /// Urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (default 0).
     ///
-    /// Stamped onto the task enqueued via `--assign`: the daemon's claim loop
-    /// drains `priority DESC, created_at, id` (Multica ordering parity), so a
-    /// higher value jumps the queue while equal priorities stay FIFO. Without
-    /// `--assign` no task is enqueued and the value is inert (the issue model
-    /// itself carries no priority yet).
+    /// Stamped onto BOTH the created issue and (when `--assign` enqueues one) the
+    /// task: the daemon's claim loop drains `priority DESC, created_at, id`
+    /// (Multica ordering parity), so a higher value jumps the queue while equal
+    /// priorities stay FIFO.
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..=3))]
     pub priority: i64,
+    /// Optional due date as `YYYY-MM-DD` (interpreted at UTC midnight).
+    ///
+    /// Persisted onto the issue as an epoch-millisecond deadline; omitted leaves
+    /// the issue with no due date.
+    #[arg(long, value_parser = parse_due_date)]
+    pub due: Option<i64>,
+    /// A label to attach to the issue (repeatable: `--label bug --label p0`).
+    ///
+    /// Persisted as the issue's label list. The full labels table + attach/detach
+    /// is a separate concern; create just records the labels it is handed.
+    #[arg(long = "label", action = clap::ArgAction::Append)]
+    pub labels: Vec<String>,
+}
+
+/// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
+/// UTC midnight.
+///
+/// # Errors
+///
+/// Returns a human-readable message if the input is not a valid `YYYY-MM-DD`
+/// date (surfaced by clap as the flag's value error).
+fn parse_due_date(raw: &str) -> Result<i64, String> {
+    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map_err(|_| format!("expected a YYYY-MM-DD date, got {raw:?}"))?;
+    let dt = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| format!("invalid time-of-day for date {raw:?}"))?
+        .and_utc();
+    Ok(dt.timestamp_millis())
 }
 
 /// Arguments for `hangar issue list`.
@@ -1259,9 +1287,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
         creator,
         created_at: now,
-        priority: 0,
-        due_date: None,
-        labels: Vec::new(),
+        priority: args.priority,
+        due_date: args.due,
+        labels: args.labels.clone(),
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 
@@ -1673,23 +1701,37 @@ fn render_issue_list(issues: &[Issue], format: OutputFormat) {
     }
 }
 
-/// One-line text summary of an issue.
+/// One-line text summary of an issue. `priority` is 0..3 = P3..P0 (higher =
+/// more urgent); the due date and labels are shown only when set.
 fn issue_line(i: &Issue) -> String {
-    format!("{}  [{}]  {}", i.id, i.state, i.title)
+    let due = i.due_date.map_or_else(String::new, |d| format!("  due={d}"));
+    let labels = if i.labels.is_empty() {
+        String::new()
+    } else {
+        format!("  labels={}", i.labels.join(","))
+    };
+    format!(
+        "{}  [{}]  priority={}  {}{due}{labels}",
+        i.id, i.state, i.priority, i.title
+    )
 }
 
 /// Minimal stable JSON object for one issue (hand-rolled to avoid pulling a
 /// serde derive onto the store's `Issue` type from this crate).
 fn issue_to_json(i: &Issue) -> String {
     let desc = i.description.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let due = i.due_date.map_or_else(|| "null".to_string(), |d| d.to_string());
     format!(
-        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{}}}",
+        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
         json_string(&i.id),
         json_string(&i.workspace_id),
         json_string(&i.title),
         desc,
         json_string(&i.state),
         i.created_at,
+        i.priority,
+        due,
+        json_string_array(i.labels.iter().map(String::as_str)),
     )
 }
 
@@ -2017,28 +2059,37 @@ fn md_cell(s: &str) -> String {
 }
 
 const fn issue_csv_header() -> &'static str {
-    "id,state,title,description,created_at"
+    "id,state,title,description,created_at,priority,due_date,labels"
 }
 fn issue_csv_row(i: &Issue) -> String {
+    let due = i.due_date.map_or_else(String::new, |d| d.to_string());
     format!(
-        "{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{}",
         csv_field(&i.id),
         csv_field(&i.state),
         csv_field(&i.title),
         csv_field(i.description.as_deref().unwrap_or("")),
         i.created_at,
+        i.priority,
+        csv_field(&due),
+        csv_field(&i.labels.join(" ")),
     )
 }
 const fn issue_md_header() -> &'static str {
-    "| id | state | title | description |\n| --- | --- | --- | --- |\n"
+    "| id | state | title | description | priority | due_date | labels |\n\
+     | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn issue_md_row(i: &Issue) -> String {
+    let due = i.due_date.map_or_else(String::new, |d| d.to_string());
     format!(
-        "| {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} |",
         md_cell(&i.id),
         md_cell(&i.state),
         md_cell(&i.title),
         md_cell(i.description.as_deref().unwrap_or("")),
+        i.priority,
+        md_cell(&due),
+        md_cell(&i.labels.join(" ")),
     )
 }
 
@@ -2198,6 +2249,141 @@ mod tests {
             "4",
         ]);
         assert!(err.is_err(), "--priority is clamped to 0..=3 (P3..P0)");
+    }
+
+    #[test]
+    fn parses_issue_create_due_date_and_labels() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Urgent",
+            "--priority",
+            "2",
+            "--due",
+            "2026-06-30",
+            "--label",
+            "bug",
+            "--label",
+            "p0",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 2, "--priority 2 = P1");
+        // 2026-06-30 00:00:00 UTC in epoch millis.
+        assert_eq!(
+            args.due,
+            Some(1_782_777_600_000),
+            "--due parses YYYY-MM-DD to UTC-midnight epoch millis"
+        );
+        assert_eq!(
+            args.labels,
+            vec!["bug".to_string(), "p0".to_string()],
+            "--label is repeatable and order-preserving"
+        );
+
+        // Omitted -> no due date, no labels.
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Plain"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.due, None, "no --due means no due date");
+        assert!(args.labels.is_empty(), "no --label means no labels");
+    }
+
+    #[test]
+    fn issue_create_rejects_malformed_due_date() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app.try_get_matches_from([
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Bad",
+            "--due",
+            "next-tuesday",
+        ]);
+        assert!(err.is_err(), "--due must be a YYYY-MM-DD date");
+    }
+
+    /// User-visible proof: `hangar issue create --priority --due --label`
+    /// persists all three attributes onto the created issue, read back through
+    /// the store the way `issue list` / `issue show` would surface them.
+    #[tokio::test]
+    async fn issue_create_persists_priority_due_date_and_labels_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Ship it",
+            "--priority",
+            "3",
+            "--due",
+            "2026-06-30",
+            "--label",
+            "bug",
+            "--label",
+            "p0",
+        ]) else {
+            panic!("expected issue create");
+        };
+
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let workspace_id = find_default_workspace(&store)
+            .await
+            .expect("find workspace")
+            .expect("workspace bootstrapped by create");
+        let issues =
+            IssueRepo::list_by_workspace_state(store.pool(), &workspace_id, DEFAULT_ISSUE_STATE)
+                .await
+                .expect("list issues");
+        let issue = issues
+            .iter()
+            .find(|i| i.title == "Ship it")
+            .expect("created issue present in the open list");
+
+        assert_eq!(issue.priority, 3, "create persisted --priority 3 (P0)");
+        assert_eq!(
+            issue.due_date,
+            Some(1_782_777_600_000),
+            "create persisted --due as UTC-midnight epoch millis"
+        );
+        assert_eq!(
+            issue.labels,
+            vec!["bug".to_string(), "p0".to_string()],
+            "create persisted both --label values"
+        );
+
+        // And the CLI render surfaces them so `issue show` is not lossy.
+        let line = issue_line(issue);
+        assert!(
+            line.contains("priority=3"),
+            "text line shows priority: {line}"
+        );
+        assert!(
+            line.contains("labels=bug,p0"),
+            "text line shows labels: {line}"
+        );
+        let json = issue_to_json(issue);
+        assert!(
+            json.contains("\"priority\":3"),
+            "json shows priority: {json}"
+        );
+        assert!(
+            json.contains("\"labels\":[\"bug\",\"p0\"]"),
+            "json shows labels array: {json}"
+        );
     }
 
     #[test]
