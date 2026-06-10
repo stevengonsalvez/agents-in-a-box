@@ -11,8 +11,12 @@
 //! - an empty queue returns `Ok(None)` (the daemon sleeps + retries; not an
 //!   error),
 //! - a runtime never claims another runtime's tasks,
-//! - the partial unique index `idx_one_pending_task_per_issue` (migration 0004)
-//!   blocks a second pending task per issue,
+//! - the partial unique index `idx_one_pending_task_per_issue_agent`
+//!   (migration 0012) blocks a second pending task per (issue, agent) while
+//!   allowing different agents to queue on one issue,
+//! - the NOT EXISTS active-set guard blocks claiming a second active task for
+//!   the same (issue, agent) — but never for a different agent
+//!   (`pkg/db/queries/agent.sql` `ClaimAgentTask` parity),
 //! - `agent.max_concurrent_tasks` caps how many of an agent's tasks may run at
 //!   once (`task.go:761` `CountRunningTasks` parity),
 //! - concurrent claims are race-safe: at most one claimant wins any given row.
@@ -234,9 +238,9 @@ async fn claim_takes_oldest_queued_first() {
 
 #[tokio::test]
 async fn partial_unique_index_blocks_second_pending_per_issue() {
-    // Asserts the migration 0004 partial unique index is wired (Multica
-    // migration 022 invariant): a second *pending* task for the same issue
-    // raises `UNIQUE constraint failed: idx_one_pending_task_per_issue`.
+    // Asserts the partial unique index is wired (migration 0012, Multica
+    // parity): a second *pending* task for the same issue AND the same agent
+    // raises `UNIQUE constraint failed: idx_one_pending_task_per_issue_agent`.
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 1).await;
@@ -332,6 +336,124 @@ async fn claim_allows_when_under_max_concurrent() {
         .expect("claim ok")
         .expect("under max_concurrent, the queued task is claimable");
     assert_eq!(claimed.id, "task-queued");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_claims_two_agents_same_issue_both_succeed() {
+    // Multica per-(issue, agent) parity: two DIFFERENT agents each hold a
+    // pending task on the SAME issue and claim them concurrently — both claims
+    // must succeed (the per-(issue, agent) index and the claim guard scope to
+    // the agent, never to the issue globally).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store, "rt-1", "agent-1", 5).await;
+    seed_graph(&store, "rt-2", "agent-2", 5).await;
+    seed_issue(&store, "issue-1").await;
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-a", "rt-1", "agent-1", Some("issue-1"), 1),
+    )
+    .await
+    .expect("agent-1 pending task on issue-1 inserts");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-b", "rt-2", "agent-2", Some("issue-1"), 1),
+    )
+    .await
+    .expect("agent-2 pending task on the SAME issue inserts (per-(issue,agent) scope)");
+
+    let clock = FixedClock(NOW_MS);
+    let p1 = store.pool().clone();
+    let p2 = store.pool().clone();
+    let (r1, r2) = tokio::join!(
+        async move { ClaimTaskService::claim_for_runtime(&p1, "rt-1", &clock).await },
+        async move { ClaimTaskService::claim_for_runtime(&p2, "rt-2", &clock).await },
+    );
+    let a = r1.expect("claim rt-1 ok").expect("agent-1 claims its issue-1 task");
+    let b = r2.expect("claim rt-2 ok").expect("agent-2 claims its issue-1 task in parallel");
+
+    assert_eq!(a.id, "task-a");
+    assert_eq!(b.id, "task-b");
+    assert_eq!(a.issue_id.as_deref(), Some("issue-1"));
+    assert_eq!(b.issue_id.as_deref(), Some("issue-1"));
+}
+
+#[tokio::test]
+async fn claim_blocks_second_active_task_for_same_issue_same_agent() {
+    // The NOT EXISTS active-set guard (Multica ClaimAgentTask parity): while
+    // agent-1 has a RUNNING task on issue-1, a queued task for the SAME
+    // (issue, agent) must not be claimed — even though the agent is well under
+    // its max_concurrent_tasks cap (5), so only the issue guard can block here.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store, "rt-1", "agent-1", 5).await;
+    seed_issue(&store, "issue-1").await;
+
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-running", "rt-1", "agent-1", Some("issue-1"), 1),
+    )
+    .await
+    .expect("enqueue running");
+    sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = ?")
+        .bind("task-running")
+        .execute(store.pool())
+        .await
+        .expect("force running");
+    // The pending index only covers queued/dispatched, so this insert is legal
+    // while task-running is `running` — the claim guard is what must hold.
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-queued", "rt-1", "agent-1", Some("issue-1"), 2),
+    )
+    .await
+    .expect("enqueue second task for the same (issue, agent)");
+
+    let clock = FixedClock(NOW_MS);
+    let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
+        .await
+        .expect("claim ok");
+    assert!(
+        claimed.is_none(),
+        "agent with an active task on the issue must not claim a second one, got {claimed:?}"
+    );
+}
+
+#[tokio::test]
+async fn claim_allows_other_agent_while_same_issue_runs_elsewhere() {
+    // Counterpart to the same-agent block: agent-1 is RUNNING issue-1, but
+    // agent-2's queued task on the SAME issue is claimable — the active-set
+    // guard scopes to (issue, agent), not to the issue globally.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store, "rt-1", "agent-1", 5).await;
+    seed_graph(&store, "rt-2", "agent-2", 5).await;
+    seed_issue(&store, "issue-1").await;
+
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-running", "rt-1", "agent-1", Some("issue-1"), 1),
+    )
+    .await
+    .expect("enqueue running");
+    sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = ?")
+        .bind("task-running")
+        .execute(store.pool())
+        .await
+        .expect("force running");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-other-agent", "rt-2", "agent-2", Some("issue-1"), 2),
+    )
+    .await
+    .expect("enqueue agent-2 task on the same issue");
+
+    let clock = FixedClock(NOW_MS);
+    let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-2", &clock)
+        .await
+        .expect("claim ok")
+        .expect("a different agent claims the same issue in parallel");
+    assert_eq!(claimed.id, "task-other-agent");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -17,6 +17,19 @@
 //! concurrent work than its runtime can handle. The count and the claim happen
 //! in one statement, so the cap holds even under concurrent claims.
 //!
+//! # Per-(issue, agent) active-set guard
+//!
+//! The candidate `SELECT` also excludes any issue task whose agent already has
+//! another *active* (`queued` / `dispatched` / `running`) task for the same
+//! issue — the `NOT EXISTS` guard from Multica's `ClaimAgentTask`
+//! (`pkg/db/queries/agent.sql`). Work on one issue serialises per **agent**,
+//! not globally: a different agent's task on the same issue stays claimable, so
+//! several agents can work one issue in parallel. Pairs with the
+//! `idx_one_pending_task_per_issue_agent` partial unique index (migration
+//! 0012), which already forbids two *pending* rows per (issue, agent); the
+//! guard extends that exclusion to the `running` set at claim time. Tasks with
+//! `issue_id IS NULL` (chat / autopilot) bypass the guard entirely.
+//!
 //! Mirrors Multica's `task.go` claim path.
 
 use ainb_hangar_core::clock::HangarClock;
@@ -49,11 +62,14 @@ impl ClaimTaskService {
     /// Atomically claim the oldest claimable `queued` task for `runtime_id`,
     /// flipping it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
     ///
-    /// A task is *claimable* when it is `queued`, bound to `runtime_id`, and its
-    /// agent has fewer than `max_concurrent_tasks` rows currently `running`.
+    /// A task is *claimable* when it is `queued`, bound to `runtime_id`, its
+    /// agent has fewer than `max_concurrent_tasks` rows currently `running`,
+    /// and — for issue tasks — its agent has no other active (`queued` /
+    /// `dispatched` / `running`) task for the same issue (the per-(issue,
+    /// agent) guard; a *different* agent's task on the issue does not block).
     /// Returns the claimed projection, or `Ok(None)` when nothing is claimable
-    /// (empty queue, no work for this runtime, or every candidate agent is at
-    /// its concurrency cap).
+    /// (empty queue, no work for this runtime, or every candidate is excluded
+    /// by a guard).
     ///
     /// The select-and-update is a single statement, so concurrent callers never
     /// claim the same row: `SQLite` serialises the write and `RETURNING` yields
@@ -94,8 +110,12 @@ impl ClaimTaskService {
 ///
 /// The candidate sub-select picks the oldest `queued` task for the runtime
 /// whose agent is under its `max_concurrent_tasks` cap (a correlated COUNT of
-/// the agent's `running` rows). The outer `UPDATE ... RETURNING` then flips
-/// exactly that row and returns the projection [`claimed_from_row`] decodes.
+/// the agent's `running` rows) AND has no other active (`queued` /
+/// `dispatched` / `running`) task for the same issue (the `NOT EXISTS`
+/// per-(issue, agent) guard — Multica `ClaimAgentTask` parity; `NULL`
+/// `issue_id` candidates never match the correlated equality and so bypass
+/// it). The outer `UPDATE ... RETURNING` then flips exactly that row and
+/// returns the projection [`claimed_from_row`] decodes.
 /// `?1` = `dispatched_at` (now), `?2` = `runtime_id`.
 const CLAIM_SQL: &str = "\
 UPDATE agent_task_queue \
@@ -108,6 +128,13 @@ WHERE id = ( \
         SELECT COUNT(*) FROM agent_task_queue AS r \
         WHERE r.agent_id = q.agent_id AND r.status = 'running' \
       ) < a.max_concurrent_tasks \
+      AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS s \
+        WHERE s.issue_id = q.issue_id \
+          AND s.agent_id = q.agent_id \
+          AND s.id <> q.id \
+          AND s.status IN ('queued','dispatched','running') \
+      ) \
     ORDER BY q.created_at, q.id \
     LIMIT 1 \
 ) \
