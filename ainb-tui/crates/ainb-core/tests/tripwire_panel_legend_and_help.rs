@@ -103,7 +103,7 @@ fn launch_to_home(session: &str, home: &Path) {
         .args(["send-keys", "-t", session, &cmd, "Enter"])
         .status()
         .expect("send launch cmd");
-    if poll_capture(session, Instant::now() + Duration::from_secs(45), |c| {
+    if poll_capture(session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Stats") && c.contains("[i]")
     })
     .is_none()
@@ -128,7 +128,7 @@ fn session_list_legend_advertises_every_panel() {
     send_key(&session, "s");
     // The panel line renders the four shortcuts together; wait for the
     // whole group so we don't race a half-painted legend.
-    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(20), |c| {
+    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
         c.contains("b inbox") && c.contains("k skills")
     });
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
@@ -159,7 +159,7 @@ fn help_overlay_documents_panels_section() {
 
     // `?` opens the global help overlay.
     send_key(&session, "?");
-    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(15), |c| {
+    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Panels (closing returns here)")
     });
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));

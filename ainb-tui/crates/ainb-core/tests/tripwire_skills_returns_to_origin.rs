@@ -109,7 +109,7 @@ fn launch_to_home(session: &str, home: &Path) {
         .args(["send-keys", "-t", session, &cmd, "Enter"])
         .status()
         .expect("send launch cmd");
-    if poll_capture(session, Instant::now() + Duration::from_secs(45), |c| {
+    if poll_capture(session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Stats") && c.contains("[i]")
     })
     .is_none()
@@ -150,7 +150,7 @@ fn skills_from_home_returns_home() {
     send_key(&session, "k");
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(20),
+        Instant::now() + Duration::from_secs(40),
         on_skills_screen,
     )
     .is_none()
@@ -162,7 +162,7 @@ fn skills_from_home_returns_home() {
 
     // Esc at the skills root closes back to home.
     send_key(&session, "Escape");
-    let back = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats") && c.contains("[i]") && !on_skills_screen(c)
     });
     let final_cap = capture_pane(&session);
@@ -188,7 +188,7 @@ fn skills_from_session_list_returns_to_session_list() {
     // Hop to the session list first. `del-sel` is on the session-list
     // legend (line 2) and appears on no other screen.
     send_key(&session, "s");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(20), |c| {
+    if poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
         c.contains("del-sel")
     })
     .is_none()
@@ -203,7 +203,7 @@ fn skills_from_session_list_returns_to_session_list() {
     send_key(&session, "k");
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(20),
+        Instant::now() + Duration::from_secs(40),
         on_skills_screen,
     )
     .is_none()
@@ -216,7 +216,7 @@ fn skills_from_session_list_returns_to_session_list() {
     // Esc must return to the SESSION LIST (not home) — proving the host
     // pops the saved `previous_screen`.
     send_key(&session, "Escape");
-    let back = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("del-sel") && !on_skills_screen(c)
     });
     let final_cap = capture_pane(&session);

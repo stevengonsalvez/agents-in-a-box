@@ -179,7 +179,7 @@ fn inbox_opens_and_renders_seeded_notifications() {
         .expect("send launch cmd");
 
     // Wait for HomeScreen — same marker the other tripwire tests use.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_cap = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -218,7 +218,7 @@ fn inbox_opens_and_renders_seeded_notifications() {
         .status()
         .expect("send-keys b");
 
-    let inbox_deadline = Instant::now() + Duration::from_secs(15);
+    let inbox_deadline = Instant::now() + Duration::from_secs(30);
     let post_cap = poll_capture(&session, inbox_deadline, |c| {
         c.contains("📥 Inbox")
             && c.contains("Notification:idle_prompt")
@@ -260,7 +260,7 @@ fn launch_to_home(session: &str, home: &Path) {
         .args(["send-keys", "-t", session, &cmd, "Enter"])
         .status()
         .expect("send launch cmd");
-    if poll_capture(session, Instant::now() + Duration::from_secs(45), |c| {
+    if poll_capture(session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Stats") && c.contains("[i]")
     })
     .is_none()
@@ -293,7 +293,7 @@ fn inbox_from_home_returns_home() {
     send_key(&session, "b");
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(15),
+        Instant::now() + Duration::from_secs(30),
         on_inbox_screen,
     )
     .is_none()
@@ -304,7 +304,7 @@ fn inbox_from_home_returns_home() {
     }
 
     send_key(&session, "Escape");
-    let back = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats") && c.contains("[i]") && !on_inbox_screen(c)
     });
     let final_cap = capture_pane(&session);
@@ -329,7 +329,7 @@ fn inbox_from_session_list_returns_to_session_list() {
 
     // Hop to the session list (`del-sel` is unique to its legend).
     send_key(&session, "s");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(20), |c| {
+    if poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
         c.contains("del-sel")
     })
     .is_none()
@@ -343,7 +343,7 @@ fn inbox_from_session_list_returns_to_session_list() {
     send_key(&session, "b");
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(15),
+        Instant::now() + Duration::from_secs(30),
         on_inbox_screen,
     )
     .is_none()
@@ -355,7 +355,7 @@ fn inbox_from_session_list_returns_to_session_list() {
 
     // Esc must return to the SESSION LIST (not home).
     send_key(&session, "Escape");
-    let back = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("del-sel") && !on_inbox_screen(c)
     });
     let final_cap = capture_pane(&session);

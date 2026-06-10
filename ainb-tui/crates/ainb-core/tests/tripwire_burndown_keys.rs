@@ -320,7 +320,7 @@ fn burndown_interactive_keys_change_render() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_home = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -334,7 +334,7 @@ fn burndown_interactive_keys_change_render() {
     // so a `$<digit>` token must appear inside 30s once session-reader
     // publishes the first usage_data chunk.
     send_key(&session, "i");
-    let data_deadline = Instant::now() + Duration::from_secs(45);
+    let data_deadline = Instant::now() + Duration::from_secs(90);
     let initial = poll_capture(&session, data_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")

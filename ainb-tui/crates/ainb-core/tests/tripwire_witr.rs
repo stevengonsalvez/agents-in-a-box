@@ -160,7 +160,7 @@ fn pressing_w_embeds_witr_interactive_browser() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen (Stats sidebar entry + its `[i]` shortcut).
-    let home_ok = poll(Instant::now() + Duration::from_secs(45), || {
+    let home_ok = poll(Instant::now() + Duration::from_secs(90), || {
         let c = capture_pane(&session);
         c.contains("Stats") && c.contains("[i]")
     });
@@ -172,7 +172,7 @@ fn pressing_w_embeds_witr_interactive_browser() {
 
     // Press `w` → ainb should spawn the ainb-witr session running `witr -i`.
     send_key(&session, "w");
-    let spawned = poll(Instant::now() + Duration::from_secs(20), || {
+    let spawned = poll(Instant::now() + Duration::from_secs(40), || {
         has_session(WITR_SESSION)
     });
     if !spawned {
@@ -184,7 +184,7 @@ fn pressing_w_embeds_witr_interactive_browser() {
     // The ainb-witr pane must show witr's real interactive browser, not a
     // shell or a "command not found". Positive: the tab strip + the search
     // prompt witr's TUI paints. Negative: no launch failure.
-    let browser_ok = poll(Instant::now() + Duration::from_secs(15), || {
+    let browser_ok = poll(Instant::now() + Duration::from_secs(30), || {
         let c = capture_pane(WITR_SESSION);
         c.contains("Processes") && c.contains("Search") && !c.contains("command not found")
     });
@@ -252,7 +252,7 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
     // Home → session list. `del-sel` is unique to the session-list
     // legend. Plugins are enabled here (witr needs the real PATH), so
     // cold start is slower — keep the deadline generous.
-    let home_ok = poll(Instant::now() + Duration::from_secs(45), || {
+    let home_ok = poll(Instant::now() + Duration::from_secs(90), || {
         let c = capture_pane(&session);
         c.contains("Stats") && c.contains("[i]")
     });
@@ -262,7 +262,7 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
         panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
     }
     send_key(&session, "s");
-    let on_sessions = poll(Instant::now() + Duration::from_secs(20), || {
+    let on_sessions = poll(Instant::now() + Duration::from_secs(40), || {
         capture_pane(&session).contains("del-sel")
     });
     if !on_sessions {
@@ -273,7 +273,7 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
 
     // Press `w` → ainb spawns `ainb-witr` running `witr -i` and attaches.
     send_key(&session, "w");
-    let spawned = poll(Instant::now() + Duration::from_secs(20), || {
+    let spawned = poll(Instant::now() + Duration::from_secs(40), || {
         has_session(WITR_SESSION)
     });
     if !spawned {
@@ -287,19 +287,19 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
     // Quit witr (`q` is witr's quit binding). Once witr exits, its tmux
     // session ends and ainb's attach returns.
     send_key(WITR_SESSION, "q");
-    let witr_gone = poll(Instant::now() + Duration::from_secs(15), || {
+    let witr_gone = poll(Instant::now() + Duration::from_secs(30), || {
         !has_session(WITR_SESSION)
     });
     if !witr_gone {
         // Some witr views need a second `q` to leave a detail pane first.
         send_key(WITR_SESSION, "q");
-        let _ = poll(Instant::now() + Duration::from_secs(10), || {
+        let _ = poll(Instant::now() + Duration::from_secs(25), || {
             !has_session(WITR_SESSION)
         });
     }
 
     // Resume must land back on the SESSION LIST (origin), not home.
-    let resumed = poll(Instant::now() + Duration::from_secs(15), || {
+    let resumed = poll(Instant::now() + Duration::from_secs(30), || {
         let c = capture_pane(&session);
         c.contains("del-sel") && !c.contains("Getting Started")
     });

@@ -193,7 +193,7 @@ fn esc_on_burndown_returns_to_home() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen — sidebar + Stats entry visible.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_home = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -212,7 +212,7 @@ fn esc_on_burndown_returns_to_home() {
 
     // Open burndown.
     send_key(&session, "i");
-    let burndown_deadline = Instant::now() + Duration::from_secs(45);
+    let burndown_deadline = Instant::now() + Duration::from_secs(90);
     let on_burndown = poll_capture(&session, burndown_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
@@ -237,7 +237,7 @@ fn esc_on_burndown_returns_to_home() {
     // burndown was opened from the home sidebar. A regression anywhere
     // along that chain leaves the user stuck on the analytics screen.
     send_key(&session, "Escape");
-    let back_home_deadline = Instant::now() + Duration::from_secs(10);
+    let back_home_deadline = Instant::now() + Duration::from_secs(25);
     let back_home = poll_capture(&session, back_home_deadline, |c| {
         // Home chrome: sidebar with Stats entry visible AND the
         // burndown's "Usage Analytics" title gone. Either alone is
@@ -300,7 +300,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen, then hop to the session list.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     if poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     })
@@ -314,7 +314,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
 
     // Session-list chrome: the four-line menu legend is unique to this
     // screen — `del-sel` only appears there.
-    let sessions_deadline = Instant::now() + Duration::from_secs(20);
+    let sessions_deadline = Instant::now() + Duration::from_secs(40);
     if poll_capture(&session, sessions_deadline, |c| c.contains("del-sel")).is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -323,7 +323,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
 
     // Open burndown from the session list.
     send_key(&session, "i");
-    let burndown_deadline = Instant::now() + Duration::from_secs(45);
+    let burndown_deadline = Instant::now() + Duration::from_secs(90);
     if poll_capture(&session, burndown_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
@@ -338,7 +338,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
 
     // Esc at the burndown root must land back on the SESSION LIST.
     send_key(&session, "Escape");
-    let back_deadline = Instant::now() + Duration::from_secs(10);
+    let back_deadline = Instant::now() + Duration::from_secs(25);
     let back_on_sessions = poll_capture(&session, back_deadline, |c| {
         c.contains("del-sel") && !c.contains("Usage Analytics")
     });

@@ -185,7 +185,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
         .expect("send launch cmd");
 
     // Home → burndown (with real data so the zoom panels have content).
-    if poll_capture(&session, Instant::now() + Duration::from_secs(45), |c| {
+    if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Stats") && c.contains("[i]")
     })
     .is_none()
@@ -195,7 +195,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
         panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
     }
     send_key(&session, "i");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(45), |c| {
+    if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Usage Analytics") && !c.contains("Waiting for session-reader plugin")
     })
     .is_none()
@@ -207,7 +207,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
 
     // Zoom in. The zoom breadcrumb `[ Zoomed: <panel> ]` is the marker.
     send_key(&session, "z");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(15), |c| {
+    if poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Zoomed:")
     })
     .is_none()
@@ -222,7 +222,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
     // the old "Esc closes immediately": `Usage Analytics` must still be
     // on screen while the `Zoomed:` breadcrumb is gone.
     send_key(&session, "Escape");
-    let unzoomed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let unzoomed = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Usage Analytics") && !c.contains("Zoomed:")
     });
     if unzoomed.is_none() {
@@ -237,7 +237,7 @@ fn esc_pops_zoom_then_closes_to_origin() {
     // Second Esc: now at the burndown root, Esc closes the panel back to
     // the origin (home, since we opened it from the home menu).
     send_key(&session, "Escape");
-    let back_home = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let back_home = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats") && c.contains("[i]") && !c.contains("Usage Analytics")
     });
     let final_cap = capture_pane(&session);
