@@ -376,6 +376,47 @@ CREATE TABLE IF NOT EXISTS slots (
 );
 """
 
+# O1: consolidated observations — the persona/convention aggregate layer
+# (Hindsight memory_units fact_type=observation shape). Raw learnings are
+# correction-shaped (one specific rule/fix per row); observations are the
+# drain's SECOND output stream: aggregated "this team/codebase generally
+# prefers X" statements that accumulate evidence over time via proof_count +
+# source_correction_ids[] instead of piling up as near-identical siblings.
+# Distinct from skills (workflow-shaped: how to do X).
+OBSERVATION_STATUS_ACTIVE = "active"
+OBSERVATION_STATUS_RETIRED = "retired"
+OBSERVATION_STATUSES: tuple[str, ...] = (
+    OBSERVATION_STATUS_ACTIVE,
+    OBSERVATION_STATUS_RETIRED,
+)
+
+_OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS observations (
+    id                      TEXT PRIMARY KEY,
+    content                 TEXT NOT NULL,
+    category                TEXT NOT NULL DEFAULT 'Unknown',
+    scope                   TEXT NOT NULL DEFAULT 'project',
+    status                  TEXT NOT NULL DEFAULT '{OBSERVATION_STATUS_ACTIVE}'
+                            CHECK (status IN ({_quoted_csv(OBSERVATION_STATUSES)})),
+    proof_count             INTEGER NOT NULL DEFAULT 1,
+    source_correction_ids   TEXT NOT NULL DEFAULT '[]',
+    retired_reason          TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+"""
+
+_OBSERVATION_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS observation_history (
+    id              TEXT PRIMARY KEY,
+    observation_id  TEXT NOT NULL REFERENCES observations(id),
+    change_type     TEXT NOT NULL DEFAULT 'update',
+    snapshot_json   TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -395,6 +436,10 @@ CREATE INDEX IF NOT EXISTS idx_concept_index_learning_id
     ON concept_index(learning_id);
 CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 CREATE INDEX IF NOT EXISTS idx_slots_name ON slots(name);
+CREATE INDEX IF NOT EXISTS idx_observations_scope ON observations(scope);
+CREATE INDEX IF NOT EXISTS idx_observations_status ON observations(status);
+CREATE INDEX IF NOT EXISTS idx_observation_history_observation_id
+    ON observation_history(observation_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
@@ -414,6 +459,8 @@ _SCHEMA_DDL = (
     + _CONCEPT_INDEX_DDL
     + _SKILLS_DDL
     + _SLOTS_DDL
+    + _OBSERVATIONS_DDL
+    + _OBSERVATION_HISTORY_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -758,6 +805,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_CONCEPT_INDEX_DDL)
         conn.execute(_SKILLS_DDL)
         conn.execute(_SLOTS_DDL)
+        conn.execute(_OBSERVATIONS_DDL)
+        conn.execute(_OBSERVATION_HISTORY_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -1639,6 +1688,375 @@ def sweep_expired_learnings(
                 autocommit=False,
             )
     return expired
+
+
+# ---------------------------------------------------------------------------
+# Observations (O1: consolidated persona/convention aggregate layer)
+# ---------------------------------------------------------------------------
+# Hindsight maintains a separate semantic layer of fact_type=observation
+# memory units over the raw facts, kept current by consolidation-time
+# CREATE/UPDATE/DELETE actions. The reflect flavour: the drain's second pass
+# (reflect_cascade.execute_observation_actions) maintains the ``observations``
+# table — every mutation snapshots into ``observation_history`` first (the S6
+# non-destructive contract), evidence accumulates as proof_count +
+# source_correction_ids[] (the S4 provenance contract), and retrieval treats
+# active observations as their own tier (open-domain queries surface them
+# FIRST — see :func:`recall_observation_tier`).
+
+OBSERVATION_CREATED_EVENT = "observation_created"
+OBSERVATION_UPDATED_EVENT = "observation_updated"
+OBSERVATION_RETIRED_EVENT = "observation_retired"
+
+# O1: open-domain query shapes — aggregate "what do we generally do?"
+# questions, as opposed to closed-domain "how do I fix X?" lookups. A query
+# matching ANY pattern activates the observation tier. Deterministic and
+# stdlib-only on purpose (same philosophy as the SG1 contradiction detector):
+# no LLM call sits on the retrieval path.
+_OPEN_DOMAIN_PATTERNS: tuple[str, ...] = (
+    r"\bconventions?\b",
+    r"\bprefer(?:s|red|ence|ences)?\b",
+    r"\bgenerally\b",
+    r"\btypically\b",
+    r"\busually\b",
+    r"\bpersonas?\b",
+    r"\b(?:code|coding|house|team) style\b",
+    r"\bwhat (?:do|does) (?:we|the team|this team|the codebase|this codebase|the project|this project)\b",
+    r"\bhow (?:do|does) (?:we|the team|this team|the codebase|this codebase|the project|this project)\b",
+)
+_OPEN_DOMAIN_RE = re.compile("|".join(_OPEN_DOMAIN_PATTERNS))
+
+
+def add_observation(
+    content: str,
+    *,
+    category: str = "Unknown",
+    scope: str = "project",
+    source_correction_ids: Optional[list[str]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """O1 CREATE path: insert a new consolidated observation. Returns its id.
+
+    ``source_correction_ids`` are the learning (correction) rows this
+    aggregate is distilled from — stored as a unique, order-preserving JSON
+    list (the S4 shape). ``proof_count`` starts at the number of cited
+    corrections (floor 1), so a CREATE that already aggregates 3 corrections
+    is born with proof 3. The UPDATE half lives in
+    :func:`add_observation_evidence`.
+    """
+    conn = conn or get_conn()
+    oid = _new_id()
+    ids = _dedupe_source_ids(source_correction_ids)
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            """INSERT INTO observations
+               (id, content, category, scope, status, proof_count,
+                source_correction_ids, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                oid,
+                content,
+                category,
+                scope,
+                OBSERVATION_STATUS_ACTIVE,
+                max(1, len(ids)),
+                json.dumps(ids),
+                now,
+                now,
+            ),
+        )
+        add_event(
+            OBSERVATION_CREATED_EVENT,
+            None,
+            {
+                "observation_id": oid,
+                "content": content,
+                "scope": scope,
+                "proof_count": max(1, len(ids)),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return oid
+
+
+def get_observation(
+    observation_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single observation by id (``source_correction_ids`` stays the
+    raw JSON string, mirroring how learning rows carry ``source_memory_ids``)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM observations WHERE id = ?",
+        (observation_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_observations(
+    *,
+    scope: Optional[str] = None,
+    include_retired: bool = False,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O1 read path: observations strongest-evidence-first.
+
+    Ordered by ``proof_count`` DESC (then oldest first as the tiebreak) —
+    the most-corroborated conventions lead. With *scope* given, rows in that
+    scope plus ``global`` ones qualify (a global convention applies in every
+    project); ``scope=None`` returns all. Retired observations are excluded
+    unless ``include_retired=True``.
+    """
+    conn = conn or get_conn()
+    where: list[str] = []
+    params: list[Any] = []
+    if scope:
+        where.append("scope IN (?, 'global')")
+        params.append(scope)
+    if not include_retired:
+        where.append("status = ?")
+        params.append(OBSERVATION_STATUS_ACTIVE)
+    sql = "SELECT * FROM observations"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY proof_count DESC, created_at LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def snapshot_observation_history(
+    observation_id: str,
+    *,
+    change_type: str = "update",
+    reason: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+    autocommit: bool = True,
+) -> Optional[str]:
+    """O1/S6: snapshot the CURRENT form of an observation before mutating it.
+
+    Same contract as :func:`snapshot_learning_history`, applied to the
+    consolidated layer: called at the top of every UPDATE/retire path so
+    evidence accumulation never loses the prior wording or id list. Returns
+    the history row id, or None when the observation doesn't exist. Pass
+    ``autocommit=False`` from inside an open ``with conn:`` block.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None:
+        return None
+    hid = _new_id()
+    sql = """
+        INSERT INTO observation_history
+            (id, observation_id, change_type, snapshot_json, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        hid,
+        observation_id,
+        change_type,
+        json.dumps(row, sort_keys=True, default=str),
+        reason,
+        _now_iso(),
+    )
+    if autocommit:
+        with conn:
+            conn.execute(sql, params)
+    else:
+        conn.execute(sql, params)
+    return hid
+
+
+def get_observation_history(
+    observation_id: str,
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return history snapshots for an observation, newest first."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM observation_history
+           WHERE observation_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (observation_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_observation_evidence(
+    observation_id: str,
+    source_correction_ids: Optional[list[str]] = None,
+    *,
+    content: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """O1 UPDATE path: fold new correction evidence into an observation.
+
+    Semantics (the S4 provenance contract applied to the aggregate layer):
+
+    - new correction ids → appended to ``source_correction_ids`` (uniqueness
+      preserved) and ``proof_count`` bumped by the number of NEW ids — 50
+      'team prefers X' corrections folded in one at a time end at proof 50;
+    - already-recorded ids only (and no content change) → idempotent no-op
+      (returns False), so re-running the same drain can never inflate
+      evidence;
+    - no ids at all → anonymous evidence: ``proof_count`` += 1, list
+      untouched;
+    - optional ``content`` rewrite lets the aggregate wording evolve as
+      evidence accumulates — the prior wording survives in
+      ``observation_history`` (snapshot fires BEFORE the mutation, S6).
+
+    Returns True when the row was updated.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None:
+        return False
+
+    existing = _dedupe_source_ids(row.get("source_correction_ids"))
+    incoming = _dedupe_source_ids(source_correction_ids)
+    fresh = [cid for cid in incoming if cid not in existing]
+
+    new_content = (content or "").strip()
+    content_changed = bool(new_content) and new_content != row["content"]
+
+    if incoming and not fresh and not content_changed:
+        return False  # every cited correction already recorded — idempotent
+
+    old_proof = max(1, int(row.get("proof_count") or 1))
+    bump = len(fresh) if incoming else 1
+    new_proof = old_proof + bump
+    merged = existing + fresh
+    now = _now_iso()
+    with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_observation_history(
+            observation_id,
+            change_type="evidence_added",
+            reason=f"proof_count {old_proof} -> {new_proof}",
+            conn=conn,
+            autocommit=False,
+        )
+        conn.execute(
+            """UPDATE observations
+               SET content = ?, source_correction_ids = ?, proof_count = ?,
+                   updated_at = ?
+               WHERE id = ?""",
+            (
+                new_content if content_changed else row["content"],
+                json.dumps(merged),
+                new_proof,
+                now,
+                observation_id,
+            ),
+        )
+        add_event(
+            OBSERVATION_UPDATED_EVENT,
+            None,
+            {
+                "observation_id": observation_id,
+                "proof_count": new_proof,
+                "source_count": len(merged),
+                "content_changed": content_changed,
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return True
+
+
+def retire_observation(
+    observation_id: str,
+    *,
+    reason: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """O1 DELETE path: retire an observation non-destructively.
+
+    Hindsight hard-deletes observation units; our ledger keeps the row
+    (status → 'retired' + reason, history snapshot first) so 'why did this
+    convention stop holding?' stays answerable. Idempotent: an already
+    retired (or missing) observation returns False.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None or row["status"] == OBSERVATION_STATUS_RETIRED:
+        return False
+    now = _now_iso()
+    with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_observation_history(
+            observation_id,
+            change_type="retired",
+            reason=reason or "observation retired",
+            conn=conn,
+            autocommit=False,
+        )
+        conn.execute(
+            """UPDATE observations
+               SET status = ?, retired_reason = ?, updated_at = ?
+               WHERE id = ?""",
+            (OBSERVATION_STATUS_RETIRED, reason, now, observation_id),
+        )
+        add_event(
+            OBSERVATION_RETIRED_EVENT,
+            None,
+            {"observation_id": observation_id, "reason": reason},
+            conn=conn,
+            autocommit=False,
+        )
+    return True
+
+
+def is_open_domain_query(query: Any) -> bool:
+    """O1: True when *query* is aggregate-shaped (persona/convention ask).
+
+    Open-domain queries — 'what conventions does this codebase use?',
+    'what does this team prefer?' — want the pre-aggregated observation
+    tier, not 5 raw corrections the agent must fold in-context. Closed
+    lookups ('how do I fix X?') never match.
+    """
+    if not query:
+        return False
+    return _OPEN_DOMAIN_RE.search(str(query).lower()) is not None
+
+
+def recall_observation_tier(
+    query: str,
+    *,
+    scope: Optional[str] = None,
+    limit: int = 5,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O1 retrieval tier: active observations for an open-domain query.
+
+    Returns [] for closed-domain queries — the tier only activates when the
+    question is aggregate-shaped (see :func:`is_open_domain_query`). Entries
+    are proof-ranked (strongest evidence first) and tagged
+    ``tier='observation'`` so composers can place them ABOVE the raw
+    corrections tier.
+    """
+    if not is_open_domain_query(query):
+        return []
+    conn = conn or get_conn()
+    rows = get_observations(scope=scope, limit=limit, conn=conn)
+    return [
+        {
+            "id": row["id"],
+            "content": row["content"],
+            "category": row["category"],
+            "scope": row["scope"],
+            "proof_count": row["proof_count"],
+            "type": "observation",
+            "tier": "observation",
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -3338,6 +3756,8 @@ def main() -> None:
             "concept_index",
             "skills",
             "slots",
+            "observations",
+            "observation_history",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")

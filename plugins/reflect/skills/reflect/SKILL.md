@@ -231,7 +231,7 @@ fix: ""               # string — what resolved it, ONE sentence
 rule: ""              # string — imperative do/don't to apply next time
 category: ""          # string — one of the knowledge categories above
 entities: []          # list[string] — specific named tech/tools/errors
-causal_relations: []  # list[{source, target, type: caused_by}]
+causal_relations: []  # list[{source, target, type: caused_by | causes | enables | prevents}]
 ```
 
 Field rules:
@@ -246,8 +246,8 @@ Field rules:
 - **`entities`**: specific named identifiers only (proper nouns, error
   strings, tool names) — the same entities the Step 5 sidecar expands on.
 - **`causal_relations`**: cause→effect chains between entities
-  (`type: caused_by`, mirroring sidecar relationship types). `[]` when
-  the learning has no causal structure.
+  (`type: caused_by | causes | enables | prevents`, mirroring the sidecar's
+  typed causal link types). `[]` when the learning has no causal structure.
 - **`forget_after` (A3, optional)**: ISO-timestamp TTL for clearly
   time-bounded knowledge — incident workarounds ("avoid X service, it's
   down"), sprint/migration/quarter-scoped rules. The hourly forget sweep
@@ -292,7 +292,7 @@ entities:
 relationships:
   - source: "{entity A}"
     target: "{entity B}"
-    type: caused_by | solves | requires | relates_to
+    type: caused_by | causes | enables | prevents | contradicts | supersedes | part_of | uses | solves | requires | relates_to | implements | configures | triggers
     description: "{how they relate}"
     strength: 1-10
 ```
@@ -300,6 +300,11 @@ relationships:
 **Rules:**
 - Extract 3-8 entities per learning (focused, not exhaustive)
 - Always include at least one `solves` relationship for bug-fix type
+- **Emit typed causal edges (S2)**: when the direction of effect is known,
+  use `caused_by` / `causes` / `enables` / `prevents` / `contradicts` /
+  `supersedes` / `part_of` / `uses` instead of flat `relates_to` — graph
+  queries like "what enabled this fix?" depend on these. `relates_to` is
+  the fallback for genuinely undirected association only.
 - Strength: 9-10 direct/causal, 5-7 moderate, 1-4 weak
 - Entity names normalized to lowercase canonical form
 - Use the most specific entity type available
@@ -439,6 +444,63 @@ step in this skill is required:
 
 The `revise` summary reports the back-reaction as `skills_marked_stale` and
 `refreshes_queued`.
+
+## Consolidated Observations (O1, second drain pass)
+
+The drain emits TWO output streams: raw corrections (the belief-revision
+actions above) AND aggregated, persona/convention-shaped **observations**
+that accumulate evidence over time. Without this layer, open-domain queries
+("what conventions does this codebase use?", "what does this team prefer?")
+surface 5 raw corrections and force the agent to aggregate them in-context.
+
+| Layer | Shape | Frontmatter `type` | Example |
+|-------|-------|--------------------|---------|
+| correction (learning) | one specific rule/fix | `learning` | "Never use `var` in TypeScript" |
+| observation | persona/convention aggregate | `observation` | "This team prefers strict typing over `any`" |
+| skill | workflow (how to do X) | — | "How to publish to TestFlight" |
+
+When the cascade slice carries a `## Consolidated observations` section, run
+a SECOND pass after executing the revision actions: for every
+persona/convention-shaped finding, emit exactly one observation action
+against the listed existing observations:
+
+```json
+[{"action": "UPDATE", "target_id": "<obs id>",
+  "source_correction_ids": ["<learning ids>"], "reason": "more evidence"},
+ {"action": "CREATE", "content": "Team prefers conventional commits",
+  "source_correction_ids": ["<learning ids>"], "reason": "no existing aggregate"},
+ {"action": "DELETE", "target_id": "<obs id>", "reason": "convention dropped"}]
+```
+
+Execute via the cascade (stdlib-only, no engine deps):
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_cascade.py observe \
+    --actions '[{"action":"UPDATE","target_id":"<id>","source_correction_ids":["<lrn-id>"],"reason":"..."}]'
+```
+
+**Observation rules:**
+- **PREFER UPDATE OVER CREATE**: evidence accumulates — 50 "team prefers X"
+  corrections collapse into ONE observation with `proof_count: 50`, never
+  50 sibling aggregates.
+- `UPDATE` appends `source_correction_ids` uniquely and bumps `proof_count`
+  by the number of NEW ids; the pre-update form is snapshotted into
+  `observation_history` first, so history is never lost. Cite the learning
+  ids from the related-learnings block and the `created_ids` field of the
+  `revise` summary.
+- `UPDATE` may rewrite `content` as the aggregate wording evolves — the old
+  wording survives in `observation_history`.
+- `DELETE` retires non-destructively (`status: retired` + reason). Only when
+  the convention demonstrably no longer holds.
+- Observation notes written to disk use `assets/observation_template.md`
+  (frontmatter `type: observation`); raw correction learnings keep
+  `assets/learning_template.md`.
+
+**Retrieval tier**: observations are a separate tier in `reflect.db`
+(`observations` table). Open-domain queries surface the observation tier
+FIRST — proof-ranked aggregates before raw corrections — via
+`recall_observation_tier` / `recall_tiered`; closed-domain lookups ("how do
+I fix X?") skip the tier entirely.
 
 ## Toggle Auto-Reflect
 

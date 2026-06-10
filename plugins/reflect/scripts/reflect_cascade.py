@@ -57,14 +57,28 @@ change) clears the flag. This is the Hindsight
 ``_trigger_mental_model_refreshes`` shape: belief revision back-reacts on the
 curated layer instead of letting promoted skills drift.
 
+O1 consolidated observations: the drain emits a SECOND output stream beside
+raw corrections — aggregated persona/convention-shaped observations ("this
+team prefers X", "this codebase generally does Y") that accumulate evidence
+over time (proof_count + source_correction_ids, the Hindsight
+fact_type=observation shape). prepare() lists the scope's existing
+observations in the slice with their own CREATE/UPDATE/DELETE contract; the
+execution half is the ``observe`` subcommand (execute_observation_actions):
+UPDATE folds new correction ids into an existing observation (history
+snapshot first), DELETE retires it non-destructively. Retrieval treats
+observations as a separate tier — open-domain queries surface them FIRST
+(recall_tiered / reflect_db.recall_observation_tier).
+
 CLI:
     reflect_cascade.py prepare <transcript.jsonl> [--out SLICE] [--context N]
         -> JSON {action, reason, signal_count, slice_path, orig_tokens,
-                 slice_tokens, signal_hash, related_count}
+                 slice_tokens, signal_hash, related_count, observation_count}
     reflect_cascade.py revise [--actions JSON|FILE|-] [--source ID]
-        -> JSON {executed, created, updated, deleted, skipped,
+        -> JSON {executed, created, updated, deleted, skipped, created_ids,
                  needs_adjudication, adjudications, skills_marked_stale,
                  refreshes_queued, errors}
+    reflect_cascade.py observe [--actions JSON|FILE|-] [--scope SCOPE]
+        -> JSON {executed, created, updated, deleted, skipped, errors}
 """
 
 from __future__ import annotations
@@ -94,6 +108,10 @@ _MAX_SLICE_CHARS = 60_000  # ~15K tokens — the bounded input handed to /reflec
 _RELATED_LIMIT = 5            # max existing learnings surfaced per drain
 _RELATED_MIN_OVERLAP = 0.5    # token overlap-coefficient floor for "related"
 _RELATED_SCAN_CAP = 1000      # newest learnings scanned per recall (bounded)
+
+# O1: consolidated observations second pass
+_OBSERVATION_LIMIT = 10           # existing observations listed per drain slice
+_OBSERVATION_SCOPE_DEFAULT = "project"
 
 # Tiny stopword set so overlap scoring keys on content words, not glue.
 _STOPWORDS = frozenset({
@@ -134,6 +152,7 @@ class Prep:
     signal_hash: str = ""
     proof_bumped: int = 0          # S4: learnings whose proof_count we bumped
     related_count: int = 0         # S5: related learnings embedded for revision
+    observation_count: int = 0     # O1: existing observations embedded for the second pass
 
 
 def _est_tokens(text: str) -> int:
@@ -475,6 +494,210 @@ def _build_revision_block(related: list[dict], transcript_path: str) -> str:
     )
 
 
+def recall_scope_observations(scope: str = _OBSERVATION_SCOPE_DEFAULT, *,
+                              limit: int = _OBSERVATION_LIMIT) -> list[dict]:
+    """O1: existing observations in *scope*, strongest evidence first.
+
+    The candidates the drain's second pass revises against — listing them is
+    what makes UPDATE possible (one aggregate accumulating proofs) instead of
+    every drain creating a near-duplicate observation. Best-effort: returns
+    [] when the DB is unavailable (fail-open mirrors the rest of the cascade).
+    """
+    try:
+        from reflect_db import get_observations
+        rows = get_observations(scope=scope, limit=limit)
+    except Exception:
+        return []
+    return [
+        {
+            "id": row["id"],
+            "content": row["content"],
+            "category": row["category"],
+            "scope": row["scope"],
+            "proof_count": row["proof_count"],
+        }
+        for row in rows
+    ]
+
+
+def _build_observation_block(observations: list[dict], transcript_path: str) -> str:
+    """O1: the consolidated-observations section embedded in the drain slice.
+
+    The second-pass contract (Hindsight consolidation shape): after the raw
+    revision actions execute, the drain maintains the aggregate layer with
+    its own CREATE/UPDATE/DELETE pass. Always appended — even with zero
+    existing observations a persona/convention-shaped finding warrants a
+    CREATE, and the layer can never bootstrap if the contract is absent.
+    """
+    script = str(Path(__file__).resolve())
+    payload = json.dumps(observations, indent=2, sort_keys=True)
+    return (
+        "\n\n## Consolidated observations (persona/conventions — second pass)\n"
+        "Observations are the aggregate layer over raw corrections:\n"
+        "persona/convention-shaped statements ('this team prefers X', 'this\n"
+        "codebase generally does Y') that accumulate evidence as proof_count +\n"
+        "source_correction_ids. They are NOT corrections (one specific\n"
+        "rule/fix each) and NOT skills (workflow-shaped: how to do X).\n\n"
+        "AFTER executing the revision actions above, run one more pass: for\n"
+        "every persona/convention-shaped finding in this session, emit exactly\n"
+        "one observation action:\n\n"
+        '    {"action": "CREATE"|"UPDATE"|"DELETE", "target_id": "<obs id>",\n'
+        '     "content": "<aggregate statement>",\n'
+        '     "source_correction_ids": ["<learning ids>"],\n'
+        '     "reason": "<one sentence>"}\n\n'
+        "Rules:\n"
+        "- PREFER UPDATE OVER CREATE: if a finding restates a listed\n"
+        "  observation, emit UPDATE for that id — the evidence folds in\n"
+        "  (proof_count grows by the NEW correction ids, ids append uniquely,\n"
+        "  a history snapshot preserves the prior form) instead of a\n"
+        "  near-duplicate aggregate landing.\n"
+        "- source_correction_ids: cite the learning ids the evidence comes\n"
+        "  from — ids listed under related learnings above and the\n"
+        "  'created_ids' returned by the revise command.\n"
+        "- UPDATE may also rewrite 'content' when the aggregate wording should\n"
+        "  evolve; the old wording stays in observation_history.\n"
+        "- DELETE only when the convention demonstrably no longer holds\n"
+        "  (retires it non-destructively). Be very conservative.\n"
+        "- Workflow-shaped findings (how to do X) belong to skills, and\n"
+        "  one-off rules stay raw corrections — do NOT mirror every learning\n"
+        "  as an observation.\n\n"
+        "Execute observation actions with:\n"
+        f"    python3 {script} observe --actions '<json-array>'\n\n"
+        f"Existing observations in scope:\n{payload}\n"
+    )
+
+
+def execute_observation_actions(actions, *,
+                                scope: str = _OBSERVATION_SCOPE_DEFAULT) -> dict:
+    """O1: apply structured CREATE/UPDATE/DELETE actions to observations.
+
+    The second-pass executor (Hindsight consolidator action shape applied to
+    the aggregate layer):
+
+    - CREATE  -> new observation row; proof_count starts at the number of
+                 cited source_correction_ids (floor 1)
+    - UPDATE  -> evidence merge via add_observation_evidence: new correction
+                 ids append uniquely, proof_count grows by the NEW ids, an
+                 optional content rewrite lands, and a history snapshot
+                 fires first (S6) — re-citing known ids is an idempotent skip
+    - DELETE  -> non-destructive retire (status -> 'retired' + reason)
+
+    Per-action failures are collected in ``errors`` — one malformed action
+    never blocks the rest of the batch (same contract as
+    :func:`execute_revision_actions`).
+    """
+    summary = {"executed": 0, "created": 0, "updated": 0, "deleted": 0,
+               "skipped": 0, "errors": []}
+    try:
+        import reflect_db
+    except Exception as exc:  # pragma: no cover - import environment broken
+        summary["errors"].append(f"observations DB unavailable: {exc}")
+        return summary
+
+    for raw in actions or []:
+        if not isinstance(raw, dict):
+            summary["skipped"] += 1
+            summary["errors"].append(f"not an action object: {raw!r}")
+            continue
+        action = str(raw.get("action", "")).strip().upper()
+        target = str(raw.get("target_id", "") or "").strip()
+        content = str(raw.get("content", "") or "").strip()
+        reason = str(raw.get("reason", "") or "").strip()
+        correction_ids = raw.get("source_correction_ids")
+        try:
+            if action == "UPDATE":
+                if not target:
+                    summary["skipped"] += 1
+                    summary["errors"].append("UPDATE missing target_id")
+                    continue
+                if reflect_db.get_observation(target) is None:
+                    summary["skipped"] += 1
+                    summary["errors"].append(
+                        f"UPDATE {target}: observation not found")
+                    continue
+                if reflect_db.add_observation_evidence(
+                    target, correction_ids, content=content or None,
+                ):
+                    summary["updated"] += 1
+                else:
+                    # Idempotent: every cited correction already recorded.
+                    summary["skipped"] += 1
+            elif action == "DELETE":
+                if not target:
+                    summary["skipped"] += 1
+                    summary["errors"].append("DELETE missing target_id")
+                    continue
+                row = reflect_db.get_observation(target)
+                if row is None:
+                    summary["skipped"] += 1
+                    summary["errors"].append(
+                        f"DELETE {target}: observation not found")
+                    continue
+                if reflect_db.retire_observation(
+                    target,
+                    reason=reason or "observation no longer holds",
+                ):
+                    summary["deleted"] += 1
+                else:
+                    summary["skipped"] += 1  # already retired — idempotent
+            elif action == "CREATE":
+                if not content:
+                    summary["skipped"] += 1
+                    summary["errors"].append("CREATE missing content")
+                    continue
+                reflect_db.add_observation(
+                    content,
+                    category=str(raw.get("category", "") or "Unknown"),
+                    scope=str(raw.get("scope", "") or scope),
+                    source_correction_ids=correction_ids,
+                )
+                summary["created"] += 1
+            else:
+                summary["skipped"] += 1
+                summary["errors"].append(f"unknown action: {action or '<empty>'}")
+        except Exception as exc:
+            summary["errors"].append(f"{action} {target or content[:40]}: {exc}")
+    summary["executed"] = summary["created"] + summary["updated"] + summary["deleted"]
+    return summary
+
+
+class _QuerySignal:
+    """Free-text query shaped like a detector signal so the S5 overlap
+    scorer (:func:`recall_related_learnings`) can rank learnings against it."""
+
+    def __init__(self, text: str):
+        self.signal = text
+        self.source_quote = ""
+        self.line_number = 1
+
+
+def recall_tiered(query: str, *, scope: str = _OBSERVATION_SCOPE_DEFAULT,
+                  limit: int = _RELATED_LIMIT) -> list[dict]:
+    """O1 retrieval composition: observation tier FIRST, raw learnings after.
+
+    Open-domain queries ('what conventions does this codebase use?', 'what
+    does this team prefer?') get the pre-aggregated observation tier ahead
+    of correction-shaped learnings — the agent reads one proof-ranked
+    aggregate instead of folding 5 raw corrections in-context. Closed-domain
+    queries skip the tier entirely (it returns []) and behave exactly as
+    before. Entries carry ``tier`` ('observation' | 'learning'). Best-effort:
+    a missing DB yields [] for either tier, never an exception.
+    """
+    observations: list[dict] = []
+    try:
+        from reflect_db import recall_observation_tier
+        observations = recall_observation_tier(query, scope=scope, limit=limit)
+    except Exception:
+        observations = []
+    learnings = (
+        recall_related_learnings([_QuerySignal(query)], limit=limit)
+        if (query or "").strip() else []
+    )
+    for entry in learnings:
+        entry["tier"] = "learning"
+    return observations + learnings
+
+
 def skills_backing_learning(learning: dict) -> list[dict]:
     """R13: indexed skills whose tags overlap *learning*'s tags/category.
 
@@ -638,7 +861,8 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
     never blocks the rest of the batch.
     """
     summary = {"executed": 0, "created": 0, "updated": 0, "deleted": 0,
-               "skipped": 0, "needs_adjudication": 0, "adjudications": [],
+               "skipped": 0, "created_ids": [],
+               "needs_adjudication": 0, "adjudications": [],
                "skills_marked_stale": 0, "refreshes_queued": 0,
                "errors": []}
     try:
@@ -728,7 +952,7 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                 # optional forget_after ISO timestamp; the hourly forget
                 # sweep archives the row once it passes. Absent = permanent.
                 forget_after = str(raw.get("forget_after", "") or "").strip()
-                reflect_db.add_learning(
+                created_id = reflect_db.add_learning(
                     title=content[:200],
                     category=str(raw.get("category", "") or "Unknown"),
                     confidence=str(raw.get("confidence", "") or "MEDIUM"),
@@ -737,6 +961,9 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
                     forget_after=forget_after or None,
                 )
                 summary["created"] += 1
+                # O1: surface the new id so the drain's observation second
+                # pass can cite it in source_correction_ids.
+                summary["created_ids"].append(created_id)
             else:
                 summary["skipped"] += 1
                 summary["errors"].append(f"unknown action: {action or '<empty>'}")
@@ -843,6 +1070,12 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
         # Appended AFTER the privacy filter on purpose: titles come from the
         # learnings DB (already-vetted artefacts), not the raw transcript.
         body += _build_revision_block(related, str(p))
+    # O1: the consolidated-observations second pass rides every drain — the
+    # block carries the action contract plus the scope's existing
+    # observations (DB-vetted, like the revision block; safe post-filter).
+    observations = recall_scope_observations()
+    prep.observation_count = len(observations)
+    body += _build_observation_block(observations, str(p))
     Path(out_path).write_text(body, encoding="utf-8")
     prep.slice_path = str(out_path)
     return prep
@@ -866,6 +1099,15 @@ def main() -> None:
         "--source", default="",
         help="source memory id (transcript path) recorded as UPDATE evidence",
     )
+    ob = sub.add_parser("observe")
+    ob.add_argument(
+        "--actions", default="-",
+        help="JSON array of observation actions, a path to a JSON file, or '-' for stdin",
+    )
+    ob.add_argument(
+        "--scope", default=_OBSERVATION_SCOPE_DEFAULT,
+        help="scope new observations land in when the action omits one",
+    )
     args = ap.parse_args()
 
     if args.cmd == "prepare":
@@ -874,7 +1116,7 @@ def main() -> None:
         # exit 0 = reflect (slice ready), 1 = skip
         sys.exit(0 if prep.action == "reflect" else 1)
 
-    if args.cmd == "revise":
+    if args.cmd in ("revise", "observe"):
         raw = args.actions
         if raw == "-":
             raw = sys.stdin.read()
@@ -883,15 +1125,24 @@ def main() -> None:
         try:
             parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as exc:
-            print(json.dumps({"executed": 0, "created": 0, "updated": 0,
-                              "deleted": 0, "skipped": 0,
-                              "needs_adjudication": 0, "adjudications": [],
-                              "skills_marked_stale": 0, "refreshes_queued": 0,
-                              "errors": [f"invalid actions JSON: {exc}"]}))
+            error = f"invalid actions JSON: {exc}"
+            if args.cmd == "revise":
+                print(json.dumps({"executed": 0, "created": 0, "updated": 0,
+                                  "deleted": 0, "skipped": 0, "created_ids": [],
+                                  "needs_adjudication": 0, "adjudications": [],
+                                  "skills_marked_stale": 0, "refreshes_queued": 0,
+                                  "errors": [error]}))
+            else:
+                print(json.dumps({"executed": 0, "created": 0, "updated": 0,
+                                  "deleted": 0, "skipped": 0,
+                                  "errors": [error]}))
             sys.exit(1)
         if isinstance(parsed, dict):
             parsed = parsed.get("actions", [parsed] if parsed.get("action") else [])
-        summary = execute_revision_actions(parsed, source_memory_id=args.source)
+        if args.cmd == "revise":
+            summary = execute_revision_actions(parsed, source_memory_id=args.source)
+        else:
+            summary = execute_observation_actions(parsed, scope=args.scope)
         print(json.dumps(summary))
         # exit 0 = clean run, 1 = at least one action failed/was malformed
         sys.exit(0 if not summary["errors"] else 1)
