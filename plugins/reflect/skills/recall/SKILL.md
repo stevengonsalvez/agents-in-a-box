@@ -101,10 +101,17 @@ and hydrate only what survives.
   install via `uv tool install reflect-kb`) as a subprocess. Resolved via
   `shutil.which("reflect")`; falls back to the legacy
   `~/.learnings/cli/learnings` only if the canonical CLI is missing.
-- **Ranking**: `confidence × recency × (1 + tag_overlap_bonus)`.
-  - Confidence: HIGH=1.0, MEDIUM=0.7, LOW=0.4
-  - Recency: exp(-days_ago / 90), half-life ~60 days
-  - Tag bonus: 0.1 × count(query_tags ∩ learning_tags)
+- **Ranking**: `CE × confidence_boost × recency_boost × tag_boost × proof_boost`
+  — cross-encoder relevance is primary; each secondary signal is a
+  multiplicative boost `1 + α·(norm − 0.5)` bounded to ±α/2 (Hindsight
+  shape, port R8), so no single signal can dominate.
+  - Confidence (α=0.2, ±10%): HIGH=1.0, MEDIUM=0.5 (neutral), LOW=0.0
+  - Recency (α=0.2, ±10%): linear decay over 365 days → [0.1, 1.0],
+    neutral 0.5 when undated
+  - Tags (α=0.2, ±10%): query-tag coverage fraction, neutral without tags
+  - Proof count (α=0.1, ±5%): clamp(0.5 + ln(count)/10, 0, 1)
+  - Tune each α via `RECALL_CONFIDENCE_ALPHA` / `RECALL_RECENCY_ALPHA` /
+    `RECALL_TAG_ALPHA` / `RECALL_PROOF_ALPHA`
 - **Cache**: per-query SHA1 hash at `~/.reflect/recall_cache/`, 1h TTL.
 - **Log**: every recall is appended to `~/.reflect/recall_log.jsonl` for
   future helpfulness analysis (Phase 6 of the retrieval plan).

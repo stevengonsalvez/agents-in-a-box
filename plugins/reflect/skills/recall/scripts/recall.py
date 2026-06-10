@@ -61,11 +61,37 @@ DEFAULT_MAX_CHARS = 2000
 REFLECT_CLI_NAME = "reflect"
 LEGACY_LEARNINGS_CLI = Path.home() / ".learnings" / "cli" / "learnings"
 
-CONFIDENCE_WEIGHTS = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
-# S4: proof-count boost strength. With proof_norm clamped to [0, 1] the
-# multiplier stays within ±5% (1 ± alpha/2) — evidence nudges ordering
-# between near-ties without overpowering confidence/recency.
-PROOF_COUNT_ALPHA = 0.1
+# R8: multiplicative bounded boosts (Hindsight `apply_combined_scoring`
+# shape). Every secondary signal — confidence, recency, tag overlap, proof
+# count — is normalized to [0, 1] (0.5 = exactly neutral) and applied as
+#     boost = 1 + α·(norm − 0.5)        # in [1 − α/2, 1 + α/2]
+# so each signal adjusts the base relevance score by at most ±α/2. Bounded
+# modifiers stop any single signal dominating: a very recent low-quality
+# note can no longer out-rank an older high-quality one (the old
+# exp(-age/90) recency multiplier crushed year-old notes to ~2% of their
+# score; now recency is worth at most ±10%). Each α is tunable via env.
+def _env_alpha(name: str, default: float) -> float:
+    """R8: parse a boost α from env; clamp to [0, 2] so a typo can't flip
+    the boost negative or let one signal dwarf the base score."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return min(2.0, max(0.0, value))
+
+
+CONFIDENCE_ALPHA = _env_alpha("RECALL_CONFIDENCE_ALPHA", 0.2)  # ±10%
+RECENCY_ALPHA = _env_alpha("RECALL_RECENCY_ALPHA", 0.2)  # ±10% (Hindsight)
+TAG_ALPHA = _env_alpha("RECALL_TAG_ALPHA", 0.2)  # ±10%
+# S4: proof-count boost strength — conservative ±5% (Hindsight): evidence
+# nudges ordering between near-ties without overpowering quality/recency.
+PROOF_COUNT_ALPHA = _env_alpha("RECALL_PROOF_ALPHA", 0.1)
+# R8: recency normalization — linear decay over a year, floored at 0.1
+# (Hindsight reranking.py): even ancient notes keep a toehold.
+RECENCY_WINDOW_DAYS = 365.0
+# R8: confidence tier → [0, 1] norm. MEDIUM (and unknown) sit exactly at
+# the neutral 0.5 baseline so the boost collapses to 1.0 for them.
+CONFIDENCE_NORMS = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.0}
 CHUNK_SEPARATOR = "--New Chunk--"
 ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 
@@ -79,8 +105,9 @@ GRAPH_ARM_ENABLED = os.environ.get("RECALL_GRAPH_ARM", "1") != "0"
 # jointly with the query by a local cross-encoder (`reflect rerank`; model
 # cross-encoder/ms-marco-MiniLM-L-6-v2, auto-downloaded on first use and
 # cached under ~/.reflect/models/). The CE score becomes the PRIMARY sort
-# key; the legacy confidence × recency × tags formula degrades to a
-# multiplicative modifier on top of it. Slim reflect builds (no
+# key; the bounded-boost formula (R8: confidence × recency × tags × proof,
+# each clamped to ±α/2) is a multiplicative modifier on top of it. Slim
+# reflect builds (no
 # sentence-transformers) or legacy CLIs without the subcommand silently
 # degrade to formula-only ordering. Disable with RECALL_CROSS_ENCODER=0.
 CROSS_ENCODER_ENABLED = os.environ.get("RECALL_CROSS_ENCODER", "1") != "0"
@@ -724,17 +751,20 @@ def rerank(
     ce_scores: dict[str, float] | None = None,
 ) -> list[Learning]:
     """
-    D8 + S4: score = confidence × recency × (1 + tag_bonus) × proof_boost.
+    D8 + S4 + R8: score = CE × confidence_boost × recency_boost × tag_boost
+    × proof_count_boost — every boost multiplicative and bounded to ±α/2
+    (Hindsight ``apply_combined_scoring`` shape; see :func:`bounded_boost`).
 
     R2: when ``ce_scores`` (cross-encoder logits keyed by learning key) are
-    present, semantic relevance becomes the PRIMARY sort key and the legacy
-    formula degrades to a multiplicative modifier:
+    present, semantic relevance becomes the PRIMARY sort key and the
+    bounded-boost formula is a multiplicative modifier:
 
-        score = sigmoid(ce_logit) × legacy_formula
+        score = sigmoid(ce_logit) × boost_product
 
     Candidates without a CE score (beyond the CE_CANDIDATES batch) take the
     CE_UNSCORED epsilon — they sort below every scored candidate, ordered
-    by the legacy formula among themselves.
+    by the boost product among themselves. Without CE entirely (slim build,
+    legacy CLI) the boost product is the whole score.
 
     Sorts in-place and returns the same list.
     """
@@ -760,23 +790,14 @@ def rerank_with_scores(
     qt = set(t.lower() for t in (query_tags or []))
 
     def formula(lrn: Learning) -> float:
-        c = CONFIDENCE_WEIGHTS.get(lrn.confidence, 0.5)
-        # Recency: half-life 60d via exp(-age / 90)
-        recency = 1.0
-        if lrn.archived_at:
-            try:
-                ts = datetime.fromisoformat(lrn.archived_at.rstrip("Z"))
-                age_days = max(0.0, (now - ts).days)
-                recency = math.exp(-age_days / 90.0)
-            except (ValueError, TypeError):
-                # TypeError: aware-vs-naive datetime subtraction (one side
-                # has +00:00 offset). ValueError: malformed ISO string.
-                # Either way, fall back to neutral recency rather than
-                # crashing the entire rerank over one bad archive header.
-                pass
-        lt = set(t.lower() for t in lrn.tags)
-        bonus = 0.1 * len(qt & lt) if qt else 0.0
-        return c * recency * (1 + bonus) * proof_count_boost(lrn.proof_count)
+        # R8: product of bounded multiplicative boosts — each signal worth
+        # at most ±α/2, so no single one can dominate the ordering.
+        return (
+            bounded_boost(confidence_norm(lrn.confidence), CONFIDENCE_ALPHA)
+            * bounded_boost(recency_norm(lrn.archived_at, now), RECENCY_ALPHA)
+            * bounded_boost(tag_norm(qt, lrn.tags), TAG_ALPHA)
+            * proof_count_boost(lrn.proof_count)
+        )
 
     def score(lrn: Learning) -> float:
         if ce_scores is None:
@@ -792,18 +813,67 @@ def rerank_with_scores(
     return learnings, scores
 
 
+def bounded_boost(norm: float, alpha: float) -> float:
+    """R8: the Hindsight bounded-boost shape: ``1 + α·(norm − 0.5)``.
+
+    ``norm`` is clamped to [0, 1] first, so the multiplier is guaranteed to
+    stay within [1 − α/2, 1 + α/2] whatever the upstream normalizer emits.
+    norm = 0.5 is exactly neutral (multiplier 1.0).
+    """
+    norm = min(1.0, max(0.0, norm))
+    return 1.0 + alpha * (norm - 0.5)
+
+
+def confidence_norm(tier: str) -> float:
+    """R8: confidence tier → [0, 1]. HIGH=1.0, MEDIUM=0.5 (neutral),
+    LOW=0.0; unknown tiers sit at the neutral baseline."""
+    return CONFIDENCE_NORMS.get(tier, 0.5)
+
+
+def recency_norm(archived_at: str | None, now: datetime) -> float:
+    """R8: linear recency decay over RECENCY_WINDOW_DAYS → [0.1, 1.0];
+    neutral 0.5 when the date is missing or unparsable (Hindsight shape).
+
+    The 0.1 floor means even ancient notes keep a toehold; the old
+    exp(-age/90) multiplier crushed them to ~0 instead.
+    """
+    if not archived_at:
+        return 0.5
+    try:
+        ts = datetime.fromisoformat(archived_at.rstrip("Z"))
+        days_ago = (now - ts).total_seconds() / 86400.0
+    except (ValueError, TypeError):
+        # TypeError: aware-vs-naive datetime subtraction (one side has a
+        # +00:00 offset). ValueError: malformed ISO string. Either way,
+        # fall back to neutral rather than crashing the rerank over one
+        # bad archive header.
+        return 0.5
+    return max(0.1, min(1.0, 1.0 - days_ago / RECENCY_WINDOW_DAYS))
+
+
+def tag_norm(query_tags: set[str], learning_tags: list[str]) -> float:
+    """R8: query-tag coverage → [0, 1]. No query tags → neutral 0.5 (boost
+    collapses to 1.0, matching how Hindsight neutralizes absent signals).
+    With query tags, the norm is the overlap fraction — full coverage 1.0,
+    none 0.0."""
+    if not query_tags:
+        return 0.5
+    lt = set(t.lower() for t in learning_tags)
+    return len(query_tags & lt) / len(query_tags)
+
+
 def proof_count_boost(proof_count: int | None) -> float:
-    """S4: log-normalized evidence multiplier, bounded to ±5% (alpha=0.1).
+    """S4 + R8: log-normalized evidence multiplier, bounded to ±5% (α=0.1).
 
     proof_norm = clamp(0.5 + ln(proof_count)/10, 0, 1); missing or
     single-proof learnings sit exactly at the neutral 0.5 baseline so the
     multiplier is precisely 1.0 — legacy notes rank identically to before.
     """
     if proof_count is not None and proof_count >= 1:
-        proof_norm = min(1.0, max(0.0, 0.5 + math.log(proof_count) / 10.0))
+        proof_norm = 0.5 + math.log(proof_count) / 10.0
     else:
         proof_norm = 0.5
-    return 1.0 + PROOF_COUNT_ALPHA * (proof_norm - 0.5)
+    return bounded_boost(proof_norm, PROOF_COUNT_ALPHA)
 
 
 def filter_by_confidence(learnings: list[Learning], threshold: str) -> list[Learning]:
