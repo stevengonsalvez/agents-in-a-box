@@ -339,6 +339,13 @@ python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/metrics_updater.py \
     --knowledge-notes $COUNT --sidecars $COUNT
 ```
 
+Also rebuild the skills index (R20) so retrieval can match queries against
+installed skills without a filesystem scan:
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/skill_index.py rebuild
+```
+
 ### Step 10: Report
 
 ```markdown

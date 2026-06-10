@@ -299,6 +299,17 @@ CREATE TABLE IF NOT EXISTS concept_index (
 );
 """
 
+_SKILLS_DDL = """
+CREATE TABLE IF NOT EXISTS skills (
+    path                TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    tags                TEXT NOT NULL DEFAULT '[]',
+    summary             TEXT NOT NULL DEFAULT '',
+    mtime               REAL NOT NULL DEFAULT 0,
+    last_refreshed_at   TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -315,6 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
     ON learning_history(learning_id);
 CREATE INDEX IF NOT EXISTS idx_concept_index_learning_id
     ON concept_index(learning_id);
+CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
@@ -331,6 +343,7 @@ _SCHEMA_DDL = (
     + _ARTIFACTS_DDL
     + _LEARNING_HISTORY_DDL
     + _CONCEPT_INDEX_DDL
+    + _SKILLS_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -650,6 +663,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_ARTIFACTS_DDL)
         conn.execute(_LEARNING_HISTORY_DDL)
         conn.execute(_CONCEPT_INDEX_DDL)
+        conn.execute(_SKILLS_DDL)
 
     _backfill_concept_index(conn)
 
@@ -1813,6 +1827,101 @@ def add_artifact(
 
 
 # ---------------------------------------------------------------------------
+# Skills index (R20: hindsight mental_models shape)
+# ---------------------------------------------------------------------------
+
+
+def _decode_tags(raw: Any) -> list[str]:
+    """Decode a stored tags payload to a list of strings (never raises)."""
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    try:
+        parsed = json.loads(raw or "[]")
+        return [str(t) for t in parsed] if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def upsert_skill(
+    name: str,
+    path: str,
+    *,
+    tags: Optional[list[str]] = None,
+    summary: str = "",
+    mtime: float = 0.0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Insert or refresh a skills-index row. Returns the path (natural key).
+
+    R20: the skills table is the fast 'is there a skill for this query?'
+    structure (hindsight ``mental_models`` shape — name + tags + summary +
+    last_refreshed_at). ``path`` points at the skill's SKILL.md and is the
+    primary key (skill *names* can collide across plugin namespaces);
+    ``mtime`` is the file's modification time, which makes the staleness
+    check in ``skill_index.refresh_if_stale`` a pure stat() pass.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO skills (path, name, tags, summary, mtime, last_refreshed_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(path) DO UPDATE SET
+                   name = excluded.name,
+                   tags = excluded.tags,
+                   summary = excluded.summary,
+                   mtime = excluded.mtime,
+                   last_refreshed_at = excluded.last_refreshed_at""",
+            (path, name, json.dumps(tags or []), summary, float(mtime), _now_iso()),
+        )
+    return path
+
+
+def get_skills(*, conn: Optional[sqlite3.Connection] = None) -> list[dict[str, Any]]:
+    """Return every indexed skill (tags decoded to a list), name-ordered."""
+    conn = conn or get_conn()
+    rows = conn.execute("SELECT * FROM skills ORDER BY name, path").fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["tags"] = _decode_tags(record.get("tags"))
+        out.append(record)
+    return out
+
+
+def get_skill_by_name(
+    name: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single skill by name (first match when namespaces collide)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM skills WHERE name = ? ORDER BY path LIMIT 1",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["tags"] = _decode_tags(record.get("tags"))
+    return record
+
+
+def remove_skills(
+    paths: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Delete skills rows for *paths* (uninstalled skills). Returns count."""
+    if not paths:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in paths)
+    with conn:
+        cur = conn.execute(f"DELETE FROM skills WHERE path IN ({marks})", paths)
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1846,6 +1955,7 @@ def main() -> None:
             "artifacts",
             "learning_history",
             "concept_index",
+            "skills",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
