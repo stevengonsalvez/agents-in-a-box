@@ -7,8 +7,8 @@
 //! live 200-col pane):
 //!
 //! 1. The session-list menu legend's panel line — `b inbox  i stats
-//!    w witr  k skills` — so every panel is reachable from the session
-//!    list, not just the home menu.
+//!    w witr  k skills  m memory` — so every panel is reachable from
+//!    the session list, not just the home menu.
 //! 2. The `?` help overlay's "Panels" section, which documents that
 //!    closing a panel returns to its origin.
 //!
@@ -126,10 +126,10 @@ fn session_list_legend_advertises_every_panel() {
     launch_to_home(&session, home_tmp.path());
 
     send_key(&session, "s");
-    // The panel line renders the four shortcuts together; wait for the
+    // The panel line renders the five shortcuts together; wait for the
     // whole group so we don't race a half-painted legend.
     let cap = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("b inbox") && c.contains("k skills")
+        c.contains("b inbox") && c.contains("m memory")
     });
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
     kill_session(&session);
@@ -138,7 +138,7 @@ fn session_list_legend_advertises_every_panel() {
     // pairs as the legend paints them (key span + description span are
     // adjacent in the capture). A missing token means a panel is
     // reachable but undiscoverable from the session list.
-    for token in ["b inbox", "i stats", "w witr", "k skills"] {
+    for token in ["b inbox", "i stats", "w witr", "k skills", "m memory"] {
         assert!(
             final_cap.contains(token),
             "session-list legend missing panel shortcut {token:?}:\n---\n{final_cap}\n---"
@@ -174,6 +174,7 @@ fn help_overlay_documents_panels_section() {
         "Stats / usage analytics (Esc closes)",
         "Witr process browser (quit witr to return)",
         "Skills browser (Esc closes)",
+        "Memory / learnings browser (Esc closes)",
     ] {
         assert!(
             final_cap.contains(token),

@@ -1314,14 +1314,16 @@ impl EventHandler {
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
-            // k skills — same set `handle_home_screen_keys` binds).
-            // GoToStats/GoToSkills save `previous_screen`, so closing the
-            // panel lands back on the session list, not home. GoToWitr is
-            // a tmux suspend/attach that never changes `current_screen`,
-            // so quitting witr resumes here automatically.
+            // k skills, m memory — same set `handle_home_screen_keys`
+            // binds). GoToStats/GoToSkills/GoToLearnings save
+            // `previous_screen`, so closing the panel lands back on the
+            // session list, not home. GoToWitr is a tmux suspend/attach
+            // that never changes `current_screen`, so quitting witr
+            // resumes here automatically.
             KeyCode::Char('i') => Some(AppEvent::GoToStats),
             KeyCode::Char('w') => Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => Some(AppEvent::GoToSkills),
+            KeyCode::Char('m') => Some(AppEvent::GoToLearnings),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -3722,7 +3724,13 @@ impl EventHandler {
                 tracing::info!("Navigating to Learnings (knowledge-base browser)");
                 // Generic plugin-rendered screen (same plumbing as
                 // analytics). The learnings plugin owns its own data load
-                // + render; the host only routes the screen.
+                // + render; the host only routes the screen. Save the
+                // origin like every other panel so Esc/PanelBack (and the
+                // plugin's `ui.close_request`) pops back to where the
+                // panel was opened from instead of falling back to home.
+                if state.current_screen != screen_ids::LEARNINGS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::LEARNINGS.to_string();
             }
             AppEvent::GoToAbtop => {
@@ -5338,6 +5346,53 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Learnings (memory) is a plugin screen — Esc on it resolves to
+    /// `PanelBack` (and to the plugin's `ui.close_request` at its root
+    /// view), so it must save its origin on entry like stats/skills/
+    /// hangar, or closing it would fall back to home instead of the
+    /// screen it was opened from.
+    #[test]
+    fn go_to_learnings_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.current_screen, ids::LEARNINGS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Same self-loop guard as stats: re-firing GoToLearnings while
+    /// already on the learnings screen must not clobber the saved
+    /// origin with the panel's own id.
+    #[test]
+    fn reopening_learnings_does_not_overwrite_origin_with_itself() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+    }
+
+    /// The session list advertises `m memory` on its menu legend — the
+    /// key must actually dispatch there, not only on the home screen.
+    #[test]
+    fn session_list_m_key_dispatches_go_to_learnings() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(key, &mut state)
+            .expect("`m` on the session list must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must map to GoToLearnings, got {evt:?}"
+        );
     }
 
     /// Re-firing the open event while already on the panel must not
