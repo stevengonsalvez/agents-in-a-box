@@ -40,6 +40,7 @@ pub enum SidebarItem {
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
     Witr,      // Process causality (witr plugin)
+    Abtop,     // top-for-agents — live agent monitor (abtop plugin)
     Skills,    // Browse per-agent skills
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
@@ -59,6 +60,7 @@ impl SidebarItem {
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Witr => "🌳",
+            Self::Abtop => "📡",
             Self::Skills => "🧠",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
@@ -78,6 +80,7 @@ impl SidebarItem {
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Witr => "Witr",
+            Self::Abtop => "abtop",
             Self::Skills => "Skills",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
@@ -97,6 +100,7 @@ impl SidebarItem {
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
+            Self::Abtop => "top-for-agents",
             Self::Skills => "Per-Agent Skills",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
@@ -116,6 +120,7 @@ impl SidebarItem {
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Witr => "w",
+            Self::Abtop => "t",
             Self::Skills => "k",
             Self::Changelog => "v",
             Self::Setup => "S",
@@ -135,6 +140,7 @@ impl SidebarItem {
             Self::Logs,
             Self::Stats,
             Self::Witr,
+            Self::Abtop,
             Self::Skills,
             Self::Changelog,
             Self::Setup,

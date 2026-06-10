@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 700">
+  <defs>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}</style>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#5a4a3a"/></marker>
+    <marker id="arrBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#2563eb"/></marker>
+    <marker id="arrClay" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#D97757"/></marker>
+    <marker id="arrOlive" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#788C5D"/></marker>
+    <marker id="arrRed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#b91c1c"/></marker>
+  </defs>
+  <rect width="1100" height="700" fill="#f8f6f3"/>
+  <text x="550" y="32" text-anchor="middle" font-size="20" font-weight="700" fill="#141413">Multica task lifecycle — state machine</text>
+  <text x="550" y="52" text-anchor="middle" font-size="12" fill="#5a4a3a">queued to dispatched to running to terminal · with TTL sweepers and bounded retry</text>
+  <circle cx="80" cy="200" r="14" fill="#141413"/>
+  <text x="80" y="240" text-anchor="middle" font-size="11" fill="#5a4a3a">enqueue</text>
+  <rect x="130" y="170" width="150" height="60" rx="14" fill="#fdf4e3" stroke="#788C5D" stroke-width="2"/>
+  <text x="205.0" y="205.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">queued</text>
+  <rect x="360" y="170" width="170" height="60" rx="14" fill="#fdf4e3" stroke="#D97757" stroke-width="2"/>
+  <text x="445.0" y="205.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">dispatched</text>
+  <rect x="610" y="170" width="150" height="60" rx="14" fill="#fdf4e3" stroke="#D97757" stroke-width="2"/>
+  <text x="685.0" y="205.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">running</text>
+  <rect x="830" y="80" width="170" height="50" rx="14" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <text x="915.0" y="110.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">completed</text>
+  <rect x="830" y="175" width="170" height="50" rx="14" fill="#fee2e2" stroke="#b91c1c" stroke-width="2"/>
+  <text x="915.0" y="205.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">failed</text>
+  <rect x="830" y="270" width="170" height="50" rx="14" fill="#e5e7eb" stroke="#5a4a3a" stroke-width="2"/>
+  <text x="915.0" y="300.0" text-anchor="middle" font-size="14" font-weight="700" fill="#141413">cancelled</text>
+  <path d="M94,200 L130,200" stroke="#5a4a3a" stroke-width="2" fill="none" marker-end="url(#arr)"/>
+  <path d="M280,200 L360,200" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrBlue)"/>
+  <rect x="275.0" y="183" width="90" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="320" y="196" text-anchor="middle" font-size="11" fill="#2563eb">ClaimTask</text>
+  <path d="M530,200 L610,200" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrBlue)"/>
+  <rect x="530.0" y="183" width="80" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="570" y="196" text-anchor="middle" font-size="11" fill="#2563eb">StartTask</text>
+  <path d="M760,185 C800,180 800,140 830,105" stroke="#15803d" stroke-width="2" fill="none" marker-end="url(#arr)"/>
+  <rect x="750.0" y="131" width="100" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="800" y="144" text-anchor="middle" font-size="11" fill="#15803d">Complete</text>
+  <path d="M760,200 L830,200" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#arrRed)"/>
+  <rect x="765.0" y="183" width="60" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="795" y="196" text-anchor="middle" font-size="11" fill="#b91c1c">Fail</text>
+  <path d="M760,215 C800,220 800,260 830,295" stroke="#5a4a3a" stroke-width="2" fill="none" marker-end="url(#arr)"/>
+  <rect x="750.0" y="251" width="100" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="800" y="264" text-anchor="middle" font-size="11" fill="#5a4a3a">Cancel</text>
+  <path d="M445,170 C440,90 280,90 235,170" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5,3" fill="none" marker-end="url(#arr)"/>
+  <rect x="240.0" y="81" width="220" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="350" y="94" text-anchor="middle" font-size="11" fill="#7c3aed">ReclaimStaleDispatchedTask (90s)</text>
+  <path d="M205,230 C205,360 700,360 830,200" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="6,4" fill="none" marker-end="url(#arrRed)"/>
+  <rect x="285.0" y="351" width="230" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="400" y="364" text-anchor="middle" font-size="11" fill="#b91c1c">queued 2h TTL → failed(timeout)</text>
+  <path d="M445,230 C445,400 800,400 845,225" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="6,4" fill="none" marker-end="url(#arrRed)"/>
+  <rect x="480.0" y="391" width="240" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="600" y="404" text-anchor="middle" font-size="11" fill="#b91c1c">dispatched 5m TTL → failed(timeout)</text>
+  <path d="M685,230 C685,450 820,450 855,225" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="6,4" fill="none" marker-end="url(#arrRed)"/>
+  <rect x="650.0" y="441" width="240" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="770" y="454" text-anchor="middle" font-size="11" fill="#b91c1c">running 2.5h TTL → failed(timeout)</text>
+  <path d="M830,210 C600,560 200,560 205,230" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5,3" fill="none" marker-end="url(#arr)"/>
+  <rect x="340.0" y="551" width="360" height="18" fill="#f8f6f3" opacity="0.95"/>
+  <text x="520" y="564" text-anchor="middle" font-size="11" fill="#7c3aed">auto-rerun if attempt &lt; max + retryable failure_reason</text>
+  <text x="60" y="615" font-size="12" font-weight="600" fill="#788C5D">INVARIANTS &amp; SOURCE</text>
+  <rect x="60" y="623" width="980" height="62" rx="6" fill="#fdf4e3" stroke="#E3DACC" stroke-width="1"/>
+  <text x="76" y="643" font-size="11" fill="#141413">• Partial unique index idx_one_pending_task_per_issue WHERE status IN (queued,dispatched) — at most one pending per issue (migration 022)</text>
+  <text x="76" y="660" font-size="11" fill="#141413">• Idempotent finalize: if UPDATE matches 0 rows but row already in terminal state, return success (task.go:1010) — defeats WS-vs-HTTP race</text>
+  <text x="76" y="677" font-size="11" fill="#141413">• Retry creates new row with parent_task_id pointing at old; only failure_reason in (runtime_offline, runtime_recovery) is retryable (migration 055)</text>
+</svg>

@@ -16,11 +16,123 @@
 use ainb_plugin_sdk::{
     HandleEventParams, HostClient, InitContext, Plugin, RenderParams, Result, SdkError, WireBuffer,
 };
-use ainb_plugin_types_sessions::{ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION};
+use ainb_plugin_types_sessions::{
+    RefreshRequest, ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION,
+};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::scanner::{self, ProviderRoots};
+
+/// Nanoseconds per day, for the incremental watermark arithmetic.
+#[cfg(not(target_arch = "wasm32"))]
+const NANOS_PER_DAY: u64 = 86_400_000_000_000;
+
+/// Decode the `sessions.refresh_request` payload. The topic was
+/// historically a bare ping, so an empty payload — what the host FS
+/// watcher and burndown's `r` key still send — decodes to the default
+/// (incremental). A malformed payload also degrades to incremental
+/// with a warn: a bad publisher must never block refreshes, and
+/// incremental is the safe (cheap) direction to fail in.
+fn decode_refresh_request(payload: &[u8]) -> RefreshRequest {
+    if payload.is_empty() {
+        return RefreshRequest::default();
+    }
+    match rmp_serde::from_slice(payload) {
+        Ok(req) => req,
+        Err(err) => {
+            tracing::warn!(
+                "session-reader: refresh_request payload undecodable ({err}); \
+                treating as incremental"
+            );
+            RefreshRequest::default()
+        }
+    }
+}
+
+/// Everything one refresh's blocking scan produced — the glue between
+/// the async plugin and the scanner, factored out so the "cache
+/// present → incremental, else legacy full scan" decision is directly
+/// testable without a `HostClient`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct BlockingScanOutcome {
+    pub(crate) data: ainb_plugin_types_sessions::UsageData,
+    /// The (reused or rebuilt) stable rollup to keep in memory for the
+    /// next refresh. `None` on the cache-less full-scan path.
+    pub(crate) stable: Option<scanner::StableAggregate>,
+    /// Cache handle returned to the plugin for reuse.
+    pub(crate) cache: Option<crate::cache::UsageCache>,
+    /// Scan instrumentation — `Some` iff the incremental path ran.
+    pub(crate) counters: Option<scanner::ScanCounters>,
+    pub(crate) stable_rebuilt: bool,
+    /// `true` when no stable rollup existed in memory or on disk —
+    /// this refresh was the one-time seeding scan.
+    pub(crate) cold_start: bool,
+}
+
+/// The blocking half of a refresh: decide incremental-vs-full, run the
+/// scan, persist the rollup on rebuild.
+///
+/// - `stored` is the caller's in-memory rollup; when `None` (process
+///   restart, first refresh) the persisted rollup is hydrated from the
+///   cache before deciding cold start.
+/// - With a cache: run [`scanner::scan_incremental`] against
+///   `now - window_days` and persist the rollup whenever it was
+///   rebuilt.
+/// - Without a cache (path unresolved / open failed): nowhere to
+///   persist a rollup, so run the legacy full scan.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_blocking_scan(
+    roots: &ProviderRoots,
+    cache: Option<crate::cache::UsageCache>,
+    stored: Option<scanner::StableAggregate>,
+    window_days: u32,
+    reporter: &mut scanner::ProgressReporter,
+) -> BlockingScanOutcome {
+    let mut cache_opt = cache;
+
+    // Hydrate from the persisted rollup when memory is empty — this is
+    // what makes a plugin restart skip the seeding scan.
+    let stored = match stored {
+        Some(s) => Some(s),
+        None => cache_opt.as_ref().and_then(|c| c.load_stable().unwrap_or_default()),
+    };
+    let cold_start = stored.is_none();
+
+    if cache_opt.is_some() {
+        let watermark =
+            now_ns().saturating_sub(u64::from(window_days).saturating_mul(NANOS_PER_DAY));
+        let outcome = scanner::scan_incremental(roots, &mut cache_opt, stored, watermark, reporter);
+        if outcome.stable_rebuilt {
+            if let Some(cache) = cache_opt.as_mut() {
+                if let Err(err) = cache.store_stable(&outcome.stable) {
+                    tracing::warn!(
+                        "session-reader: stable rollup persist failed ({err}); \
+                        next refresh rebuilds again"
+                    );
+                }
+            }
+        }
+        BlockingScanOutcome {
+            data: outcome.data,
+            stable: Some(outcome.stable),
+            cache: cache_opt,
+            counters: Some(outcome.counters),
+            stable_rebuilt: outcome.stable_rebuilt,
+            cold_start,
+        }
+    } else {
+        let data = scanner::scan_with_cache_and_progress(roots, &mut cache_opt, reporter);
+        BlockingScanOutcome {
+            data,
+            stable: None,
+            cache: cache_opt,
+            counters: None,
+            stable_rebuilt: false,
+            cold_start,
+        }
+    }
+}
 
 /// Per-chunk msgpack byte budget. Each chunk's encoded msgpack stays
 /// below this size so the post-base64 + JSON-envelope frame fits
@@ -75,6 +187,15 @@ mod manifest_text {
 pub struct SessionReader {
     last_event: Option<UsageDataEvent>,
     roots: ProviderRoots,
+    /// Trailing recent-window size (days) from `[session_reader]`
+    /// config; bounds the incremental watermark.
+    #[cfg(not(target_arch = "wasm32"))]
+    window_days: u32,
+    /// In-memory copy of the persisted stable rollup so steady-state
+    /// refreshes don't re-deserialize the blob; loaded from the cache
+    /// on the first refresh, replaced whenever a rebuild runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    stable: Option<scanner::StableAggregate>,
     #[cfg(not(target_arch = "wasm32"))]
     cache: Option<crate::cache::UsageCache>,
     /// Set to `true` once we've attempted (and possibly failed) to open
@@ -91,6 +212,10 @@ impl SessionReader {
             last_event: None,
             roots: ProviderRoots::defaults(),
             #[cfg(not(target_arch = "wasm32"))]
+            window_days: crate::config::load().window_days(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stable: None,
+            #[cfg(not(target_arch = "wasm32"))]
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache_init: false,
@@ -104,6 +229,10 @@ impl SessionReader {
         Self {
             last_event: None,
             roots,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_days: crate::config::DEFAULT_INCREMENTAL_WINDOW_DAYS,
+            #[cfg(not(target_arch = "wasm32"))]
+            stable: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -125,6 +254,10 @@ impl SessionReader {
     /// regardless of how broken the previous cache was.
     #[cfg(not(target_arch = "wasm32"))]
     async fn flush_cache(&mut self, host: &HostClient) {
+        // The persisted stable rollup dies with the cache (clear()
+        // wipes both tables); the in-memory copy must die with it or
+        // the next refresh would resurrect stale history.
+        self.stable = None;
         self.ensure_cache();
         if let Some(cache) = self.cache.as_mut() {
             match cache.clear() {
@@ -147,6 +280,15 @@ impl SessionReader {
         self.cache = None;
         self.cache_init = false;
         if let Some(path) = crate::cache::default_db_path() {
+            // Take the WAL/SHM siblings with the db: SQLite can
+            // recover a leftover -wal into a freshly created database,
+            // silently resurrecting rows this flush just promised were
+            // gone.
+            for suffix in ["-wal", "-shm"] {
+                let mut sibling = path.as_os_str().to_owned();
+                sibling.push(suffix);
+                let _ = std::fs::remove_file(std::path::Path::new(&sibling));
+            }
             match std::fs::remove_file(&path) {
                 Ok(()) => {
                     let _ = host
@@ -253,19 +395,19 @@ impl SessionReader {
         self.ensure_cache();
         let roots = self.roots.clone();
         let cache = self.cache.take();
+        let stored = self.stable.take();
+        let window_days = self.window_days;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
 
         let scan_handle = tokio::task::spawn_blocking(move || {
-            let mut cache_opt = cache;
             let mut reporter = scanner::ProgressReporter::new(move |evt| {
                 // Send is unbounded + non-blocking; failures only happen
                 // when the receiver has been dropped (impossible here —
                 // we hold `rx` until `scan_handle` resolves).
                 let _ = tx.send(evt);
             });
-            let data = scanner::scan_with_cache_and_progress(&roots, &mut cache_opt, &mut reporter);
-            (data, cache_opt)
+            run_blocking_scan(&roots, cache, stored, window_days, &mut reporter)
         });
 
         // Drain progress events. `rx.recv()` returns `None` once the
@@ -293,14 +435,52 @@ impl SessionReader {
         }
 
         match scan_handle.await {
-            Ok((data, cache_opt)) => {
-                self.cache = cache_opt;
-                data
+            Ok(outcome) => {
+                self.cache = outcome.cache;
+                self.stable = outcome.stable;
+                if outcome.cold_start {
+                    let _ = host
+                        .log_info(
+                            "session-reader: no stable rollup found — built full usage \
+                            history (one-time, heavier than a normal refresh)",
+                        )
+                        .await;
+                }
+                // Host-visible counter line — the soak/observability
+                // contract. The plugin subprocess has no tracing
+                // subscriber of its own, so host.log() is the only
+                // sink that reliably lands in the host JSONL
+                // (~/.agents-in-a-box/logs/). scripts/soak-session-reader.sh
+                // greps for exactly this shape.
+                if let Some(c) = outcome.counters {
+                    let _ = host
+                        .log_info(format!(
+                            "session-reader: incremental refresh statted={} parsed={} \
+                            cache_hits={} stable_skipped={} stable_reused={} rebuilt={}",
+                            c.files_statted,
+                            c.parsed,
+                            c.cache_hits,
+                            c.stable_skipped,
+                            c.stable_reused,
+                            outcome.stable_rebuilt,
+                        ))
+                        .await;
+                }
+                outcome.data
             }
             Err(err) => {
+                // The panicked closure took ownership of the cache and
+                // stable rollup with it — both are gone. Re-arm
+                // ensure_cache (cache_init is already true, so without
+                // this reset it would no-op forever and every future
+                // refresh would silently take the cache-less FULL-scan
+                // path — the exact CPU regression this plugin exists
+                // to prevent).
+                self.cache_init = false;
                 let _ = host
                     .log_info(format!(
                         "session-reader: scan task join error: {err}; \
+                        cache handle lost with the panicked task — reopening, \
                         falling back to in-line scan"
                     ))
                     .await;
@@ -617,11 +797,25 @@ impl Plugin for SessionReader {
 
     async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         if params.topic == TOPIC_REFRESH_REQUEST {
-            tracing::info!("session-reader: refresh requested — rescanning");
+            let req = decode_refresh_request(&params.payload);
+            if req.hard {
+                // Hard refresh: distrust every cache layer. Wipe the
+                // parse cache + stable rollup, then rescan — the cold
+                // incremental path re-parses everything from source
+                // and seeds a fresh rollup.
+                tracing::info!(
+                    "session-reader: HARD refresh requested — wiping caches, rebuilding from source"
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                self.flush_cache(host).await;
+            } else {
+                tracing::info!("session-reader: refresh requested — incremental rescan");
+            }
             return self.publish(host).await;
         }
         if params.topic == TOPIC_FLUSH_CACHE_REQUEST {
             tracing::info!("session-reader: flush_cache requested — wiping cache + rescanning");
+            #[cfg(not(target_arch = "wasm32"))]
             self.flush_cache(host).await;
             return self.publish(host).await;
         }
@@ -640,6 +834,143 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── run_blocking_scan glue (plugin-level counter assertions) ────
+    //
+    // The scanner-level tests prove scan_incremental's behavior; these
+    // prove the PLUGIN's decision layer: cache present → incremental
+    // (counters populated, rollup persisted, restart rehydrates),
+    // cache absent → legacy full scan. Same oracle: byte-identity with
+    // a cache-less full scan of the same tree.
+
+    fn glue_claude_line(ts: &str, session: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"{session}","cwd":"/tmp/proj","gitBranch":"main","message":{{"model":"claude-3-5-sonnet","content":[{{"type":"text","text":"hi"}}],"usage":{{"input_tokens":10,"output_tokens":20}}}}}}"#
+        )
+    }
+
+    fn glue_fixture() -> (tempfile::TempDir, ProviderRoots, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tree tempdir");
+        let claude_root = tmp.path().join("claude/projects/proj-a");
+        std::fs::create_dir_all(&claude_root).expect("mkdir");
+        std::fs::write(
+            claude_root.join("one.jsonl"),
+            glue_claude_line("2026-05-01T10:00:00Z", "s1"),
+        )
+        .expect("write");
+        std::fs::write(
+            claude_root.join("two.jsonl"),
+            glue_claude_line("2026-06-01T10:00:00Z", "s2"),
+        )
+        .expect("write");
+        let roots = ProviderRoots {
+            claude_projects: Some(tmp.path().join("claude/projects")),
+            ..ProviderRoots::default()
+        };
+        let cache_dir = tempfile::tempdir().expect("cache tempdir");
+        // Let the filesystem clock tick past the writes so a
+        // `window_days = 0` watermark (now) puts both files on the
+        // stable side.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        (tmp, roots, cache_dir)
+    }
+
+    fn open_cache(dir: &tempfile::TempDir) -> Option<crate::cache::UsageCache> {
+        Some(crate::cache::UsageCache::open(&dir.path().join("usage.sqlite")).expect("cache"))
+    }
+
+    fn encode(data: &UsageData) -> Vec<u8> {
+        rmp_serde::to_vec_named(data).expect("encode")
+    }
+
+    #[test]
+    fn glue_runs_incremental_persists_rollup_and_rehydrates_on_restart() {
+        let (_tree, roots, cache_dir) = glue_fixture();
+        let oracle = encode(&scanner::scan(&roots));
+        let mut reporter = scanner::ProgressReporter::noop();
+
+        // First refresh: cold start seeds + persists the rollup.
+        let first = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        assert!(first.cold_start, "no rollup anywhere yet");
+        assert!(first.stable_rebuilt);
+        let c = first.counters.expect("incremental path ran");
+        assert_eq!(c.parsed, 2, "seed scan parses both files");
+        assert_eq!(encode(&first.data), oracle, "matches full-scan oracle");
+        assert!(
+            first.cache.expect("cache returned").load_stable().expect("load").is_some(),
+            "rollup persisted for the next process"
+        );
+
+        // Simulated plugin restart: in-memory rollup gone (stored =
+        // None), fresh cache handle on the same file. The glue must
+        // rehydrate from disk and reuse — zero parses.
+        let second = run_blocking_scan(&roots, open_cache(&cache_dir), None, 0, &mut reporter);
+        assert!(!second.cold_start, "rollup rehydrated from the cache");
+        assert!(!second.stable_rebuilt);
+        let c = second.counters.expect("incremental path ran");
+        assert_eq!(
+            c.parsed, 0,
+            "no-change refresh after restart parses ZERO files"
+        );
+        assert!(c.stable_reused);
+        assert_eq!(c.stable_skipped, 2, "both stable files skipped outright");
+        assert_eq!(
+            encode(&second.data),
+            oracle,
+            "still byte-identical to the oracle"
+        );
+    }
+
+    #[test]
+    fn glue_falls_back_to_full_scan_without_cache() {
+        let (_tree, roots, _cache_dir) = glue_fixture();
+        let oracle = encode(&scanner::scan(&roots));
+        let mut reporter = scanner::ProgressReporter::noop();
+
+        let out = run_blocking_scan(&roots, None, None, 0, &mut reporter);
+        assert!(
+            out.counters.is_none(),
+            "cache-less refresh takes the legacy full path"
+        );
+        assert!(out.stable.is_none(), "nothing to persist a rollup into");
+        assert!(!out.stable_rebuilt);
+        assert_eq!(
+            encode(&out.data),
+            oracle,
+            "full path matches the oracle trivially"
+        );
+    }
+
+    #[test]
+    fn refresh_request_empty_payload_is_incremental() {
+        // The host FS watcher and burndown's `r` key publish bare
+        // pings (empty payload) — back-compat demands incremental.
+        let req = decode_refresh_request(&[]);
+        assert!(!req.hard);
+    }
+
+    #[test]
+    fn refresh_request_empty_map_is_incremental() {
+        // msgpack fixmap-0 (a publisher encoding `{}`) — `hard`
+        // defaults off via #[serde(default)].
+        let req = decode_refresh_request(&[0x80]);
+        assert!(!req.hard);
+    }
+
+    #[test]
+    fn refresh_request_hard_roundtrips() {
+        let bytes = rmp_serde::to_vec_named(&RefreshRequest { hard: true }).expect("encode");
+        let req = decode_refresh_request(&bytes);
+        assert!(req.hard);
+    }
+
+    #[test]
+    fn refresh_request_garbage_degrades_to_incremental() {
+        // A broken publisher must never block refreshes; failing in
+        // the cheap (incremental) direction is the safe default.
+        let req = decode_refresh_request(&[0xC1, 0xFF, 0x00]);
+        assert!(!req.hard);
+    }
 
     #[test]
     fn manifest_toml_parses_as_abi_v2() {

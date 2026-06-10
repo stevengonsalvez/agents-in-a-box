@@ -1071,4 +1071,140 @@ mod tests {
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
     }
+
+    // ---- bulk-resume selection (Enter/r on multi-selected sessions) ----
+
+    fn resumable_session(
+        name: &str,
+        mode: SessionMode,
+        agent: SessionAgentType,
+        status: crate::models::SessionStatus,
+    ) -> crate::models::Session {
+        let mut s = crate::models::Session::new(name.to_string(), "/tmp/ws".to_string());
+        s.mode = mode;
+        s.agent_type = agent;
+        s.status = status;
+        s
+    }
+
+    /// Bulk resume must start every selected *stopped interactive* session and
+    /// exclude everything else — Running interactive (would kill+recreate a live
+    /// tmux), Boss-mode, and non-agent (Shell) sessions. Regression for the bug
+    /// where Enter only resumed the highlighted row.
+    #[test]
+    fn selected_resumable_session_ids_keeps_only_stopped_interactive() {
+        use crate::models::SessionStatus;
+
+        let stopped_claude = resumable_session(
+            "stopped-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let stopped_codex = resumable_session(
+            "stopped-codex",
+            SessionMode::Interactive,
+            SessionAgentType::Codex,
+            SessionStatus::Stopped,
+        );
+        let running_claude = resumable_session(
+            "running-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Running,
+        );
+        let boss_stopped = resumable_session(
+            "boss-stopped",
+            SessionMode::Boss,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let shell_stopped = resumable_session(
+            "shell-stopped",
+            SessionMode::Interactive,
+            SessionAgentType::Shell,
+            SessionStatus::Stopped,
+        );
+
+        let resumable_ids = [stopped_claude.id, stopped_codex.id];
+        let all_ids = [
+            stopped_claude.id,
+            stopped_codex.id,
+            running_claude.id,
+            boss_stopped.id,
+            shell_stopped.id,
+        ];
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        ws.add_session(stopped_claude);
+        ws.add_session(stopped_codex);
+        ws.add_session(running_claude);
+        ws.add_session(boss_stopped);
+        ws.add_session(shell_stopped);
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        // Mark all five as multi-selected.
+        for id in all_ids {
+            state.selected_sessions.insert(id);
+        }
+
+        let mut got = state.selected_resumable_session_ids();
+        got.sort();
+        let mut want = resumable_ids.to_vec();
+        want.sort();
+        assert_eq!(got, want, "only stopped interactive agent sessions resume");
+    }
+
+    #[test]
+    fn selected_resumable_session_ids_empty_when_nothing_selected() {
+        let state = AppState::new();
+        assert!(state.selected_resumable_session_ids().is_empty());
+    }
+
+    // ========================================================================
+    // Startup discovery: the fast loader must hand off to a full refresh so
+    // stopped sessions (which `load_workspaces_async` does not surface) appear
+    // without the user having to manually refresh.
+    // ========================================================================
+
+    #[test]
+    fn initial_background_load_enqueues_full_refresh_for_stopped_sessions() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        state.pending_async_action = None;
+
+        // Simulate the startup background load completing.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+
+        let updated = state.check_workspace_loading_complete();
+
+        assert!(updated, "applying the background result reports an update");
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::RefreshWorkspaces),
+            "fast startup load must enqueue a full refresh so stopped sessions surface"
+        );
+    }
+
+    #[test]
+    fn initial_background_load_does_not_clobber_a_queued_action() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A user-queued action is already pending when the load completes.
+        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        state.check_workspace_loading_complete();
+
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::CleanupOrphaned),
+            "an already-queued action must not be overwritten by the refresh hand-off"
+        );
+    }
 }

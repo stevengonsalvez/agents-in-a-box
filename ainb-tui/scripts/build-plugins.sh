@@ -20,11 +20,17 @@ cd "$(dirname "$0")/.."
 
 PROFILE="dev"
 PROFILE_DIR="debug"
+TARGET=""
 for arg in "$@"; do
     case "$arg" in
         --release)
             PROFILE="release"
             PROFILE_DIR="release"
+            ;;
+        --target=*)
+            # Cross-compile triple (e.g. x86_64-apple-darwin). Cargo
+            # writes to target/<triple>/<profile> when set.
+            TARGET="${arg#*=}"
             ;;
         *)
             printf 'unknown arg: %s\n' "$arg" >&2
@@ -50,20 +56,36 @@ build_plugin() {
     local crate="$1"
     local plugin_id="$2"
 
-    cargo build -p "$crate" --profile "$PROFILE"
+    cargo build -p "$crate" --profile "$PROFILE" ${TARGET:+--target "$TARGET"}
 
     local out_dir="dist/plugins/$plugin_id"
     mkdir -p "$out_dir"
 
     # Cargo binary name == crate name. Staged binary name == plugin id
-    # (the runtime probes <root>/<id>/<id>).
-    cp "target/$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
+    # (the runtime probes <root>/<id>/<id>). Cross-compiles land under
+    # target/<triple>/<profile>.
+    cp "target/${TARGET:+$TARGET/}$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
     resign_macos "$out_dir/$plugin_id"
 
-    if [[ -f "crates/$crate/manifest.toml" ]]; then
-        cp "crates/$crate/manifest.toml" "$out_dir/manifest.toml"
-    elif [[ -f "crates/$crate/plugin.toml" ]]; then
-        cp "crates/$crate/plugin.toml" "$out_dir/manifest.toml"
+    # The manifest lives next to the crate. Most plugin crates are under
+    # `crates/<crate>/`, but the Hangar plugin lives outside the workspace root
+    # at `../plugins/<plugin_id>/` (its crate dir is named by plugin id, not
+    # crate name). Search every known layout for a `manifest.toml`/`plugin.toml`.
+    local manifest_src=""
+    for cand in \
+        "crates/$crate/manifest.toml" \
+        "crates/$crate/plugin.toml" \
+        "../plugins/$plugin_id/manifest.toml" \
+        "../plugins/$plugin_id/plugin.toml"; do
+        if [[ -f "$cand" ]]; then
+            manifest_src="$cand"
+            break
+        fi
+    done
+    if [[ -n "$manifest_src" ]]; then
+        cp "$manifest_src" "$out_dir/manifest.toml"
+    else
+        printf 'WARN: no manifest found for %s (plugin id %s)\n' "$crate" "$plugin_id" >&2
     fi
 
     local size
@@ -75,3 +97,9 @@ build_plugin ainb-plugin-burndown burndown
 build_plugin ainb-plugin-session-reader session-reader
 build_plugin ainb-plugin-witr witr
 build_plugin ainb-plugin-learnings learnings
+build_plugin ainb-plugin-abtop abtop
+# The Hangar control-plane plugin (P4.10). The crate is `ainb-plugin-hangar`
+# but its manifest `[plugin].name` — and therefore the discovered plugin id and
+# the host `PLUGIN_SCREENS` routing entry — is `hangar-tui`, so it stages under
+# `dist/plugins/hangar-tui/`.
+build_plugin ainb-plugin-hangar hangar-tui

@@ -682,6 +682,9 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
+    OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
+    DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
@@ -2488,6 +2491,13 @@ pub struct AppState {
     pub git_view_state: Option<crate::components::GitViewState>,
     // Previous view for navigation (e.g., to return from GitView)
     pub previous_screen: Option<ScreenId>,
+    /// Last `ui.close_request` snapshot version consumed by
+    /// `tick_panel_close_requests`. The poll acts at most once per
+    /// plugin publish: a version is consumed (recorded here) on first
+    /// sight whether or not it triggered a navigation, so a close
+    /// request that arrives while the user is on a different screen is
+    /// absorbed instead of firing later.
+    pub last_panel_close_version: Option<u64>,
     // Notification system
     pub notifications: Vec<Notification>,
     // Pending event to be processed in next loop iteration
@@ -2914,22 +2924,27 @@ pub enum AsyncAction {
     /// the dispatcher so the async path doesn't re-derive it from
     /// `configure_state` (finding #7).
     CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
-    DeleteSession(Uuid),           // New - delete session with container cleanup
-    StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
+    /// Pre-check GitHub auth via `gh auth status` before allowing remote clone.
+    CheckGitAuth,
+    DeleteSession(Uuid),         // New - delete session with container cleanup
+    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
-    BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,           // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),    // Fetch container logs for a session
-    AttachToContainer(Uuid),     // Attach to a container session
-    AttachToTmuxSession(Uuid),   // Attach to a tmux session
-    KillContainer(Uuid),         // Kill container for a session
-    AuthSetupOAuth,              // Run OAuth authentication setup
-    AuthSetupApiKey,             // Save API key authentication
-    ReauthenticateCredentials,   // Re-authenticate Claude credentials
-    RestartSession(Uuid),        // Restart a stopped session with new container
-    CleanupOrphaned,             // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
+    BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
+    BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    RefreshWorkspaces,                     // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),              // Fetch container logs for a session
+    AttachToContainer(Uuid),               // Attach to a container session
+    AttachToTmuxSession(Uuid),             // Attach to a tmux session
+    KillContainer(Uuid),                   // Kill container for a session
+    AuthSetupOAuth,                        // Run OAuth authentication setup
+    AuthSetupApiKey,                       // Save API key authentication
+    ReauthenticateCredentials,             // Re-authenticate Claude credentials
+    RestartSession(Uuid),                  // Restart a stopped session with new container
+    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -2995,6 +3010,7 @@ impl Default for AppState {
             log_sender: None,
             git_view_state: None,
             previous_screen: None,
+            last_panel_close_version: None,
             notifications: Vec::new(),
             pending_event: None,
 
@@ -3910,6 +3926,26 @@ impl AppState {
                             }
 
                             self.add_success_notification("Workspaces loaded".to_string());
+
+                            // The fast startup loader (`load_workspaces_async`)
+                            // only surfaces LIVE boss/interactive sessions — it
+                            // skips the stopped-session second-pass that
+                            // `load_real_workspaces` runs (reading sessions.json
+                            // for dead-tmux entries whose worktree still exists).
+                            // Without this, stopped sessions stay hidden until
+                            // the user happens to trigger a full refresh (stop a
+                            // session, delete one, press `f`). Enqueue exactly one
+                            // full refresh so the complete picture (stopped
+                            // sessions included) appears right after first paint.
+                            // Fires once per launch: this branch runs a single
+                            // time (the receiver is cleared above), and
+                            // `load_real_workspaces` doesn't re-arm it — no loop.
+                            // Guard on `None` so a user-queued action is never
+                            // clobbered.
+                            if self.pending_async_action.is_none() {
+                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            }
+
                             return true;
                         }
                         WorkspaceLoadResult::Error(err) => {
@@ -4036,19 +4072,11 @@ impl AppState {
         let source = cfg.repo_source.clone();
         let list_path: Option<std::path::PathBuf> = match &source {
             RepoSource::LocalPath(p) => Some(p.clone()),
-            RepoSource::HttpsUrl(_)
-            | RepoSource::SshUrl(_)
-            | RepoSource::GithubShorthand { .. } => {
-                crate::git::RemoteRepoManager::new().ok().and_then(|m| {
-                    source
-                        .parse_components()
-                        .ok()
-                        .filter(|parsed| m.is_cached(parsed))
-                        .map(|parsed| m.get_cache_path(&parsed))
-                })
-            }
-            // SshSession / Filter never show the Branch row.
-            _ => None,
+            // Remote sources resolve to their clone cache when already cloned;
+            // SshSession / Filter never show the Branch row (resolver → None).
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
         };
 
         let existing = cfg.existing_branches.clone();
@@ -4063,6 +4091,12 @@ impl AppState {
         };
 
         let cached = list_path.as_deref().map(branch_list::list_repo_branches).unwrap_or_default();
+        // Feed the base-off "⚠ exists" guard: every branch the picker knows
+        // about (empty for a not-yet-cached remote — the refresh below fills
+        // it via ls-remote).
+        if !cached.is_empty() {
+            cfg.repo_branch_names = cached.iter().map(|e| e.short_name.clone()).collect();
+        }
         cfg.branch_picker = Some(BranchPickerState::new(mark_in_use(cached), true));
 
         // Background refresh — generation-guarded so a stale result can't
@@ -4131,6 +4165,13 @@ impl AppState {
             self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
         {
             let existing = cfg.existing_branches.clone();
+            // Capture the fresh branch names for the base-off "⚠ exists" guard
+            // before `result` is consumed below. Only on success — a failed
+            // refresh keeps whatever the guard already had.
+            let refreshed_names: Option<Vec<String>> = match &result {
+                Ok(entries) => Some(entries.iter().map(|e| e.short_name.clone()).collect()),
+                Err(_) => None,
+            };
             if let Some(picker) = cfg.branch_picker.as_mut() {
                 picker.loading = false;
                 match result {
@@ -4149,6 +4190,9 @@ impl AppState {
                         warn_msg = Some(msg);
                     }
                 }
+            }
+            if let Some(names) = refreshed_names {
+                cfg.repo_branch_names = names;
             }
         }
         if let Some(msg) = warn_msg {
@@ -4729,6 +4773,33 @@ impl AppState {
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
         }
+    }
+
+    /// Of the multi-selected managed sessions, return the IDs that can actually
+    /// be resumed: interactive agent sessions that are currently Stopped.
+    /// Running sessions are excluded so a bulk resume never kills+recreates a
+    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
+        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+        self.selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.find_session(*id)
+                    .map(|s| {
+                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
+                            && matches!(
+                                s.agent_type,
+                                SessionAgentType::Claude
+                                    | SessionAgentType::Codex
+                                    | SessionAgentType::Gemini
+                                    | SessionAgentType::Copilot
+                            );
+                        is_interactive && matches!(s.status, SessionStatus::Stopped)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -5651,6 +5722,62 @@ impl AppState {
         }
     }
 
+    /// `true` if ainb should offer to run `abtop --setup` (the Claude
+    /// rate-limit StatusLine hook) before opening abtop for the first time.
+    /// Offered until the hook has run (its `~/.claude/abtop-rate-limits.json`
+    /// exists) or the user chose "don't ask again".
+    #[must_use]
+    pub fn should_offer_abtop_setup(&self) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let already_done = home.join(".claude").join("abtop-rate-limits.json").exists();
+        let dismissed = home.join(".agents-in-a-box").join("abtop-setup-dismissed").exists();
+        !already_done && !dismissed
+    }
+
+    /// Persist the user's "don't ask again" choice for the abtop setup offer.
+    pub fn dismiss_abtop_setup(&self) {
+        if let Some(home) = dirs::home_dir() {
+            let dir = home.join(".agents-in-a-box");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("abtop-setup-dismissed"), b"1");
+        }
+    }
+
+    /// One-time consent dialog offering `abtop --setup` (Claude rate-limit
+    /// tracking) the first time the user opens abtop. Every option proceeds to
+    /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
+    /// suppresses the offer permanently.
+    pub fn show_abtop_setup_prompt(&mut self) {
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Enable abtop rate-limit tracking?".to_string(),
+            message: "abtop can show Claude rate-limit usage (5-hour + weekly \
+                      windows). This installs a StatusLine hook into \
+                      ~/.claude/settings.json via `abtop --setup`. abtop works \
+                      without it — the rate-limit panel just stays empty."
+                .to_string(),
+            confirm_action: ConfirmAction::SetupAbtopRateLimits,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: "Enable".to_string(),
+                    action: ConfirmAction::SetupAbtopRateLimits,
+                },
+                DialogOption {
+                    label: "Just open abtop".to_string(),
+                    action: ConfirmAction::OpenAbtopSkipSetup,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissAbtopSetup,
+                },
+            ]),
+            selected_index: 0,
+        });
+    }
+
     /// Show confirmation dialog for killing an "other" tmux session
     pub fn show_kill_other_tmux_confirmation(&mut self, session_name: String) {
         info!(
@@ -6058,6 +6185,11 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
+        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // toast immediately before cancelling (e.g. the worktree-create failure
+        // arm in `create_session_from_configure`) and rely on it surviving the
+        // teardown — clearing here would re-introduce the silent-flash bug
+        // (Stevie 2026-06-06).
         self.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
@@ -6297,6 +6429,13 @@ impl AppState {
             }
             Err(e) => {
                 error!("Failed to create session via configure flow: {}", e);
+                // Surface the real failure (e.g. "branch already used by
+                // worktree", "worktree already exists", invalid name) BEFORE
+                // tearing down the modal. Without this the error only hit the
+                // log and the modal closed silently — the user saw a flash and
+                // never learned why (Stevie 2026-06-06). cancel_new_session()
+                // leaves self.notifications intact, so the 5s toast survives.
+                self.add_error_notification(format!("Could not create session: {e}"));
                 self.cancel_new_session();
             }
         }
@@ -6407,6 +6546,131 @@ impl AppState {
     /// terminal errors. On failure: notifies the user, calls
     /// `cancel_new_session()` so the picker reopens, returns `Err(())`.
     ///
+    /// Transition from PickRepo → Configure for a given source. Extracted so
+    /// both the events.rs dispatcher and the async auth-check handler can call it.
+    pub fn advance_pick_repo_to_configure(&mut self, source: crate::git::repo_source::RepoSource) {
+        use crate::components::new_session::configure::ConfigureState;
+        use crate::config::session_defaults::SessionDefaults;
+        use crate::git::repo_source::head_branch;
+
+        if let Some(pick) =
+            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+        {
+            let path = SessionDefaults::default_path();
+            if let Err(err) = pick.defaults.save_to(&path) {
+                tracing::warn!(error = %err, "advance_pick_repo_to_configure: persist session-defaults failed");
+            }
+        }
+        let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
+        let label = crate::app::events::derive_repo_label(&source);
+        let branch_source = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
+            _ => None,
+        };
+        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        // Every branch already checked out in any worktree (ainb's by-session
+        // worktrees + the repo's own checkout + manual worktrees). Single
+        // source of truth so the collision guard matches what `git worktree
+        // add` will accept — the legacy `list_worktrees()` alone missed by-name
+        // worktrees (Stevie 2026-05-27: feat/blog re-launch slipped through;
+        // review P1, PR #211 added the repo's own checkout; deduped in #232).
+        let repo_path: Option<std::path::PathBuf> = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.clone()),
+            // Remote/star picks: when the clone cache already exists, its refs
+            // ARE the repo — seed both guards from it so typing an existing
+            // branch warns inline BEFORE launch instead of dying at
+            // `git worktree add -b` (Stevie 2026-06-09: feat/ota on the cached
+            // shotclubhouse pick slipped through and failed only after Launch).
+            // A not-yet-cached remote still starts empty; the base-picker
+            // ls-remote refresh backfills `repo_branch_names` later.
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
+        };
+        let repo_path = repo_path.as_deref();
+        let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
+        // All existing branch names (local heads + remote-tracking) for the
+        // base-off "⚠ exists" guard. Cheap for a local repo or a cached
+        // remote; a not-yet-cached remote pick fills this in later when the
+        // base picker lists/fetches branches.
+        let repo_branch_names: Vec<String> = repo_path
+            .map(|p| {
+                crate::git::branch_list::list_repo_branches(p)
+                    .into_iter()
+                    .map(|e| e.short_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = ConfigureState::from_pick_repo(
+            source.clone(),
+            label,
+            &defaults,
+            branch_source,
+            &branch_prefix,
+            existing_branches,
+            repo_branch_names,
+        );
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.configure_state = Some(cfg);
+            ns.step = NewSessionStep::Configure;
+        }
+        tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+        self.ui_needs_refresh = true;
+    }
+
+    /// Pre-check GitHub authentication via `gh auth status`. Updates the
+    /// `git_auth_status` field on PickRepoState. If authenticated and a
+    /// `pending_clone_source` is waiting, automatically advances to Configure.
+    async fn check_git_auth(&mut self) {
+        use crate::components::new_session::pick_repo::GitAuthStatus;
+
+        // Bound the probe: a hung `gh` (network stall, credential helper
+        // wedged) must not leave the picker stuck in `Checking` forever.
+        // Timeout and task-panic both fail closed → NotAuthenticated, with a
+        // warning so the cause is visible in the logs.
+        let auth_check = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "status", "--hostname", "github.com"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(join_err)) => {
+                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("GitHub auth check timed out after 5s");
+                false
+            }
+        };
+
+        if let Some(pick) =
+            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
+        {
+            if auth_ok {
+                tracing::info!("GitHub auth check passed");
+                pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                // Auto-advance: take the pending source and emit StartClone
+                // via the advance-to-configure path. We replicate the
+                // AdvanceTo → Configure transition inline here.
+                if let Some(source) = pick.pending_clone_source.take() {
+                    pick.git_auth_status = None;
+                    self.advance_pick_repo_to_configure(source);
+                }
+            } else {
+                tracing::warn!("GitHub auth check failed");
+                pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+            }
+        }
+        self.ui_needs_refresh = true;
+    }
+
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
     /// are synchronous and would otherwise block the async runtime.
     async fn clone_remote_for_configure(
@@ -7784,6 +8048,9 @@ impl AppState {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
                 }
+                AsyncAction::CheckGitAuth => {
+                    self.check_git_auth().await;
+                }
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {
                         error!("Failed to delete session {}: {}", session_id, e);
@@ -7800,6 +8067,31 @@ impl AppState {
                         error!("Failed to resume session {}: {}", session_id, e);
                         self.add_error_notification(format!("Resume failed: {}", e));
                     }
+                }
+                AsyncAction::BulkResumeSessions(session_ids, trigger) => {
+                    let total = session_ids.len();
+                    let mut resumed = 0;
+                    let mut failed = 0;
+                    for id in session_ids {
+                        if let Err(e) = self.resume_interactive_session(id, trigger.clone()).await {
+                            error!("Failed to resume session {}: {}", id, e);
+                            failed += 1;
+                        } else {
+                            resumed += 1;
+                        }
+                    }
+                    // resume_interactive_session refreshes per-session on success;
+                    // refresh once more so a final all-failed batch still repaints.
+                    self.load_real_workspaces().await;
+                    if failed > 0 {
+                        self.add_warning_notification(format!(
+                            "Resumed {}/{} sessions ({} failed)",
+                            resumed, total, failed
+                        ));
+                    } else {
+                        self.add_success_notification(format!("Resumed {} session(s)", resumed));
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
@@ -7915,6 +8207,14 @@ impl AppState {
                 }
                 action @ AsyncAction::AttachWitr => {
                     debug!("AttachWitr action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::AttachAbtop => {
+                    debug!("AttachAbtop action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::SetupAbtopRateLimits => {
+                    debug!("SetupAbtopRateLimits action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
@@ -8389,12 +8689,21 @@ impl AppState {
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
                     let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
-                    let existing_branches: Vec<String> =
-                        crate::git::worktree_manager::WorktreeManager::new()
-                            .ok()
-                            .and_then(|m| m.list_worktrees().ok())
-                            .map(|infos| infos.into_iter().map(|i| i.branch_name).collect())
-                            .unwrap_or_default();
+                    // Same complete in-use list the repo-picker path uses. The
+                    // legacy `list_worktrees()` here only saw legacy UUID dirs
+                    // and missed every by-name worktree, so a re-launch onto an
+                    // already-checked-out branch slipped the collision guard and
+                    // died at `git worktree add` (Stevie 2026-06-06: feat/ota).
+                    let existing_branches = crate::git::branch_list::in_use_branch_names(Some(
+                        workspace.path.as_path(),
+                    ));
+                    // All existing branch names for the base-off "⚠ exists"
+                    // guard (restart is always a local repo path).
+                    let repo_branch_names =
+                        crate::git::branch_list::list_repo_branches(&workspace.path)
+                            .into_iter()
+                            .map(|e| e.short_name)
+                            .collect();
                     let configure_state = ConfigureState::from_pick_repo(
                         repo_source,
                         repo_label,
@@ -8402,6 +8711,7 @@ impl AppState {
                         branch_source,
                         &branch_prefix,
                         existing_branches,
+                        repo_branch_names,
                     );
 
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
@@ -9086,6 +9396,76 @@ impl AppState {
         }
         None
     }
+
+    /// Consume pending `ui.close_request` publishes from plugins.
+    ///
+    /// A plugin publishes this topic when it receives an `Esc` with no
+    /// internal state left to pop (its root view — see the burndown
+    /// plugin's Esc handler). The snapshot store stamps every publish
+    /// with a monotonic version, so polling by version honours each
+    /// request at most once; the version is consumed on sight whether
+    /// or not it triggers navigation, so a request observed while the
+    /// user is on a different screen is absorbed instead of firing
+    /// later. A matching request navigates back to the screen the
+    /// panel was opened from (same pop as `AppEvent::PanelBack`).
+    ///
+    /// Called from `App::tick_plugin_renders`, which already holds a
+    /// cloned runtime `handle`, so it's passed in rather than re-cloned
+    /// per render tick.
+    pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
+        let Some((payload, version, publisher)) =
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
+        else {
+            return;
+        };
+        if self.last_panel_close_version == Some(version) {
+            return;
+        }
+        self.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
+            return;
+        }
+        let target = self
+            .previous_screen
+            .take()
+            .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
+        tracing::info!(
+            from = %self.current_screen,
+            to = %target,
+            "ui.close_request: closing plugin panel"
+        );
+        self.current_screen = target;
+        self.ui_needs_refresh = true;
+    }
+}
+
+/// `true` when a `ui.close_request` payload names the currently-focused
+/// plugin screen AND was published by the plugin that owns it. Rejects:
+/// requests while a non-plugin screen is focused (a plugin can't close
+/// the session list out from under the user), publishes from any plugin
+/// other than the focused screen's owner (the publisher stamp comes
+/// from the wire connection, not the payload, so it can't be forged),
+/// and malformed payloads.
+fn panel_close_matches(current_screen: &str, payload: &[u8], publisher: &str) -> bool {
+    let Some(owner) = crate::app::screens::builtin::plugin_id_for_screen(current_screen) else {
+        return false;
+    };
+    if publisher != owner {
+        tracing::warn!(
+            publisher,
+            owner,
+            screen = %current_screen,
+            "ui.close_request: publisher does not own the focused screen — ignoring"
+        );
+        return false;
+    }
+    match serde_json::from_slice::<ainb_plugin_runtime::topics::UiCloseRequest>(payload) {
+        Ok(req) => req.screen_id == current_screen,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui.close_request: malformed payload — ignoring");
+            false
+        }
+    }
 }
 
 pub struct App {
@@ -9145,6 +9525,10 @@ impl App {
             return;
         };
 
+        // Honour any pending plugin close request (root-view Esc) before
+        // kicking renders — a closed screen shouldn't get another paint.
+        self.state.tick_panel_close_requests(&handle);
+
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
@@ -9152,6 +9536,8 @@ impl App {
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
             (crate::app::screens::ids::LEARNINGS, "learnings"),
+            (crate::app::screens::ids::ABTOP, "abtop"),
+            (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
@@ -9250,6 +9636,12 @@ impl App {
                     .config_screen_state
                     .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
 
+                // A fresh runtime means a fresh snapshot store whose
+                // version counter restarts at 0 — drop any version
+                // watermark from a previous runtime so an equal-valued
+                // version can't mask a new close request. Init runs once
+                // today; this keeps any future runtime-restart path safe.
+                self.state.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -9632,3 +10024,74 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod panel_close_tests {
+    use super::panel_close_matches;
+    use crate::app::screens::ids;
+
+    /// Plugin id owning the analytics screen (see `PLUGIN_SCREENS`).
+    const BURNDOWN: &str = "burndown";
+
+    fn payload(screen: &str) -> Vec<u8> {
+        serde_json::to_vec(&ainb_plugin_runtime::topics::UiCloseRequest {
+            screen_id: screen.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn matches_when_owning_plugin_names_focused_screen() {
+        assert!(panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_request_for_a_different_screen() {
+        // A stale close request for analytics must not close the witr
+        // screen the user has since navigated to.
+        assert!(!panel_close_matches(
+            ids::WITR,
+            &payload(ids::ANALYTICS),
+            "witr"
+        ));
+    }
+
+    #[test]
+    fn rejects_when_focused_screen_is_not_plugin_owned() {
+        // A plugin can't close the session list (or any host screen)
+        // out from under the user, even if it names it.
+        assert!(!panel_close_matches(
+            ids::SESSION_LIST,
+            &payload(ids::SESSION_LIST),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_publish_from_plugin_that_does_not_own_screen() {
+        // The payload alone is forgeable — any plugin can serialize
+        // {"screen_id":"analytics"}. The publisher stamp (taken from
+        // the wire connection, not the payload) is not: a publish from
+        // session-reader naming burndown's screen must be ignored.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "session-reader"
+        ));
+        // The reserved host id doesn't own plugin screens either.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "host"
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_payload() {
+        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}

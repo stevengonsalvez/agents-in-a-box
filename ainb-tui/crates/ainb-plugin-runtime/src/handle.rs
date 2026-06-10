@@ -21,13 +21,17 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
 use crate::error::RuntimeError;
+use crate::event_stream::{EventStreamRegistry, stream_topic};
+use crate::managed_subprocess::ManagedSubprocessRegistry;
 use crate::plugin_task::{Command, InboxMap};
 use crate::registry::{ChannelRegistry, RegisteredPlugin};
 use crate::runtime::PluginHandle;
 use crate::snapshot::SnapshotStore;
 use crate::types::{
-    ActionOutcome, CliOutcome, LifecycleState, PluginId, RenderOutcome, RuntimeConfig, Topic,
+    ActionOutcome, CliOutcome, LifecycleState, LogTap, LogTapFn, PluginId, RenderOutcome,
+    RuntimeConfig, Topic,
 };
+use crate::unix_socket::UnixSocketRegistry;
 
 /// Internal wiring shared between [`crate::Runtime`] and every clone
 /// of [`RuntimeHandle`].
@@ -48,6 +52,25 @@ pub(crate) struct HandleInner {
     /// `Arc<AtomicBool>` lives in both maps — flipping one is visible
     /// from the other.
     pub(crate) dirty: crate::plugin_task::DirtyMap,
+    /// Cap-gated event-stream registry shared with every plugin task.
+    /// `publish_stream_event` reads it to fan out to subscribed streams.
+    pub(crate) event_streams: EventStreamRegistry,
+    /// Cap-gated managed-subprocess registry shared with every plugin
+    /// task. Held here so the `reload` path can re-spawn plugin tasks
+    /// with the same registry the `Runtime` owns.
+    pub(crate) managed_subprocess: ManagedSubprocessRegistry,
+    /// Cap-gated unix-socket dial registry shared with every plugin task.
+    /// Held here so the `reload` path re-spawns plugin tasks with the same
+    /// registry the `Runtime` owns.
+    pub(crate) unix_sockets: UnixSocketRegistry,
+    /// Optional host-side log tap (sentinel capture for tests).
+    pub(crate) log_tap: LogTap,
+    /// Shared platform secret backend (DI). Held here so the `reload` path
+    /// re-spawns plugin tasks with the same backend the `Runtime` owns.
+    pub(crate) secret_backend: crate::secret_store::SharedSecretBackend,
+    /// Shared host workspace store (DI). Held here so the `reload` path
+    /// re-spawns plugin tasks with the same store the `Runtime` owns.
+    pub(crate) workspace_store: crate::workspace_store::SharedWorkspaceStore,
     pub(crate) config: RuntimeConfig,
     /// Monotonic counter the host bumps once per `send_key` call.
     /// Stamped into `HandleKeyParams.generation`; the plugin echoes it
@@ -234,6 +257,21 @@ impl RuntimeHandle {
         self.inner.snapshots.payload(&Topic::from(topic))
     }
 
+    /// Read a snapshot payload plus its monotonic store version and the
+    /// publisher's plugin id.
+    ///
+    /// The version lets pollers act once per publish — track the last
+    /// version seen and only react when it advances. The publisher is
+    /// the id the per-plugin task stamped at publish time (never
+    /// payload-self-reported), so consumers of host-semantic topics can
+    /// reject publishes from plugins that don't own the resource named
+    /// in the payload. Used by the host's event loop to consume
+    /// `ui.close_request` publishes without a subscriber channel.
+    #[must_use]
+    pub fn snapshot_get_versioned(&self, topic: &str) -> Option<(Bytes, u64, PluginId)> {
+        self.inner.snapshots.get(&Topic::from(topic))
+    }
+
     /// Forward a single normalized key event to the plugin owning the
     /// focused screen. Non-blocking — the per-plugin tokio task picks
     /// the command up off its mpsc inbox and writes the
@@ -307,10 +345,17 @@ impl RuntimeHandle {
     }
 
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
-    /// fan-out happens on the tokio runtime.
+    /// fan-out happens on the tokio runtime. Stamped with the reserved
+    /// [`crate::snapshot::HOST_PUBLISHER`] id — both discovery and
+    /// `Runtime::register` refuse a plugin named `host`, so the stamp is
+    /// unforgeable on every registration path.
     pub fn publish_snapshot(&self, topic: &str, payload: Bytes) -> u64 {
         let topic_owned = Topic::from(topic);
-        let v = self.inner.snapshots.publish(topic_owned.clone(), payload.clone());
+        let v = self.inner.snapshots.publish(
+            topic_owned.clone(),
+            payload.clone(),
+            PluginId::from(crate::snapshot::HOST_PUBLISHER),
+        );
         let subs = self.inner.snapshots.subscribers(&topic_owned);
         if subs.is_empty() {
             return v;
@@ -332,6 +377,57 @@ impl RuntimeHandle {
             }
         });
         v
+    }
+
+    /// Publish an event to every plugin holding an
+    /// [`event_stream`](crate::event_stream) subscription on `topic`.
+    ///
+    /// Each matching stream receives a `plugin/handle_event`
+    /// notification under the stream's own delivery topic
+    /// `stream:<stream_id>` (NOT the raw `topic`), so a plugin holding
+    /// several streams can demux. Streams dropped on plugin teardown are
+    /// not delivered to (no leak to dead processes). Non-blocking — the
+    /// fan-out runs on the tokio runtime.
+    ///
+    /// Returns the number of streams the event was dispatched to.
+    pub fn publish_stream_event(&self, topic: &str, payload: Bytes) -> usize {
+        let topic_owned = Topic::from(topic);
+        let streams = self.inner.event_streams.streams_for_topic(&topic_owned);
+        if streams.is_empty() {
+            return 0;
+        }
+        let n = streams.len();
+        let plugins = self.inner.plugins.clone();
+        self.inner.tokio.spawn(async move {
+            let map = plugins.read();
+            for (plugin, stream_id) in streams {
+                if let Some(handle) = map.get(&plugin) {
+                    handle.render_dirty.store(true, Ordering::Release);
+                    let _ = handle.inbox.send(Command::HandleEvent {
+                        topic: Topic::from(stream_topic(&stream_id)),
+                        payload: payload.clone(),
+                    });
+                }
+            }
+        });
+        n
+    }
+
+    /// Install a host-side log tap that observes every `host/log` line
+    /// emitted by any plugin. Returns a shared buffer the caller drains.
+    ///
+    /// Test/diagnostic aid: the CTS anti-cheat axes read sentinel log
+    /// lines through this to prove a cap-allowed handler actually ran.
+    /// Replaces any previously installed tap.
+    #[must_use]
+    pub fn install_log_tap(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink_for_fn = sink.clone();
+        let tap: LogTapFn = std::sync::Arc::new(move |p| {
+            sink_for_fn.lock().unwrap().push(p.message.clone());
+        });
+        *self.inner.log_tap.write() = Some(tap);
+        sink
     }
 
     /// Lifecycle state of a plugin.
@@ -422,6 +518,12 @@ impl RuntimeHandle {
             self.inner.snapshots.clone(),
             self.inner.inboxes.clone(),
             self.inner.dirty.clone(),
+            self.inner.event_streams.clone(),
+            self.inner.managed_subprocess.clone(),
+            self.inner.unix_sockets.clone(),
+            self.inner.secret_backend.clone(),
+            self.inner.workspace_store.clone(),
+            self.inner.log_tap.clone(),
             self.inner.config,
             &self.inner.tokio,
         );

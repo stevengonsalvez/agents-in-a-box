@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-monospace, monospace">
+<defs>
+<style>.title{font-size:18px;fill:#e2e8f0;font-weight:bold}.lbl{font-size:13px;fill:#e2e8f0;font-weight:bold}.sub{font-size:11px;fill:#94a3b8}.albl{font-size:11px;fill:#e2e8f0}.cap{font-size:12px;fill:#e2e8f0;font-weight:bold}</style>
+<marker id="aBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#38bdf8"/></marker>
+<marker id="aOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker>
+<marker id="aRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#f87171"/></marker>
+<marker id="aTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2dd4bf"/></marker>
+</defs>
+<rect width="1200" height="760" fill="#0a1628"/>
+<text x="40" y="40" class="title">Hangar — Plugin Host Capability / Security Model</text>
+<rect x="40" y="80" width="250" height="76" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="165.0" y="100" text-anchor="middle" class="lbl">manifest.toml [capabilities]</text>
+<text x="165.0" y="118" text-anchor="middle" class="sub">CapabilityGrant = Bool | List</text>
+<text x="165.0" y="132" text-anchor="middle" class="sub"></text>
+<rect x="360" y="80" width="260" height="76" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="490.0" y="100" text-anchor="middle" class="lbl">host plugin-runtime gate</text>
+<text x="490.0" y="118" text-anchor="middle" class="sub">validates each request</text>
+<text x="490.0" y="132" text-anchor="middle" class="sub">against granted caps</text>
+<path d="M290,118 L360,118" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="296.2" y="96" width="57.6" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="325" y="108" text-anchor="middle" class="albl">declares</text>
+<rect x="40" y="210" width="350" height="72" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="215.0" y="230" text-anchor="middle" class="cap">event_stream_subscribe</text>
+<text x="215.0" y="248" text-anchor="middle" class="sub">topic allow-list</text>
+<rect x="410" y="210" width="350" height="72" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="585.0" y="230" text-anchor="middle" class="cap">spawn_managed_subprocess</text>
+<text x="585.0" y="248" text-anchor="middle" class="sub">list-form mandatory</text>
+<text x="585.0" y="262" text-anchor="middle" class="sub">bool-true rejected -32003</text>
+<rect x="780" y="210" width="350" height="72" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="955.0" y="230" text-anchor="middle" class="cap">unix_socket_dial</text>
+<text x="955.0" y="248" text-anchor="middle" class="sub">path allow-list · canonicalized</text>
+<text x="955.0" y="262" text-anchor="middle" class="sub">bool-true -32003</text>
+<rect x="40" y="310" width="350" height="72" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="215.0" y="330" text-anchor="middle" class="cap">secrets:read</text>
+<text x="215.0" y="348" text-anchor="middle" class="sub">key allow-list -> host/secret_store_get</text>
+<text x="215.0" y="362" text-anchor="middle" class="sub">OS keychain · scope/key</text>
+<rect x="410" y="310" width="350" height="72" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="585.0" y="330" text-anchor="middle" class="cap">workspace:write</text>
+<text x="585.0" y="348" text-anchor="middle" class="sub">bool-only</text>
+<text x="585.0" y="362" text-anchor="middle" class="sub">list-form rejected -32003</text>
+<path d="M490,156 L490,200" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="464.3" y="168" width="51.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="490" y="180" text-anchor="middle" class="albl">enforce</text>
+<rect x="780" y="310" width="350" height="72" rx="6" fill="#1f1417" stroke="#f87171" stroke-width="1.5"/>
+<text x="955.0" y="330" text-anchor="middle" class="lbl">Ungranted capability</text>
+<text x="955.0" y="348" text-anchor="middle" class="sub">-32001  CAPABILITY_DENIED</text>
+<path d="M665,250 L780,330" stroke="#f87171" stroke-width="2" fill="none" marker-end="url(#aRed)"/>
+<rect x="685.7" y="266" width="88.60000000000001" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="730" y="278" text-anchor="middle" class="albl">missing grant</text>
+<rect x="360" y="440" width="540" height="90" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="630.0" y="460" text-anchor="middle" class="lbl">daemon-side: resolve_workspace_id (slug-or-id)</text>
+<text x="630.0" y="478" text-anchor="middle" class="sub">guards every RPC entry</text>
+<text x="630.0" y="492" text-anchor="middle" class="sub">workspace-scoped repo queries (IDOR fix)</text>
+<text x="630.0" y="506" text-anchor="middle" class="sub">no cross-tenant row access</text>
+<path d="M630,382 L630,440" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="557.8" y="403" width="144.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="630" y="415" text-anchor="middle" class="albl">dialed via unix_socket</text>
+<rect x="360" y="560" width="540" height="60" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="630.0" y="580" text-anchor="middle" class="lbl">ainb-hangar-store</text>
+<text x="630.0" y="598" text-anchor="middle" class="sub">queries always filtered by workspace_id</text>
+<path d="M630,530 L630,560" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="573.3" y="536" width="113.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="630" y="548" text-anchor="middle" class="albl">scoped read/write</text>
+<rect x="40" y="650" width="1090" height="92" rx="6" fill="#0f2942" stroke="#334155" stroke-width="1"/>
+<text x="56" y="672" class="lbl" style="font-size:12px">Error codes</text>
+<text x="56" y="694" class="sub">-32001  CAPABILITY_DENIED   — capability not granted in manifest at all</text>
+<text x="56" y="712" class="sub">-32003  INVALID_GRANT_SHAPE — wrong grant form (bool where list required, or list where bool required)</text>
+<line x1="640" y1="688" x2="676" y2="688" stroke="#38bdf8" stroke-width="2"/><text x="686" y="692" class="sub">request / data</text>
+<line x1="640" y1="706" x2="676" y2="706" stroke="#fb923c" stroke-width="2"/><text x="686" y="710" class="sub">control / trigger</text>
+<line x1="840" y1="688" x2="876" y2="688" stroke="#f87171" stroke-width="2"/><text x="886" y="692" class="sub">denied</text>
+<line x1="840" y1="706" x2="876" y2="706" stroke="#2dd4bf" stroke-width="2"/><text x="886" y="710" class="sub">persistence / read</text>
+</svg>

@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightImageZoom from 'starlight-image-zoom';
 
 // https://astro.build/config
 export default defineConfig({
@@ -19,6 +20,7 @@ export default defineConfig({
           href: 'https://github.com/stevengonsalvez/agents-in-a-box',
         },
       ],
+      plugins: [starlightImageZoom()],
       customCss: ['./src/styles/tokens.css', './src/styles/crt.css'],
       editLink: {
         baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
@@ -93,6 +95,7 @@ export default defineConfig({
                 { label: 'session-reader', slug: 'plugins/session-reader' },
                 { label: 'witr', slug: 'plugins/witr' },
                 { label: 'learnings', slug: 'plugins/learnings' },
+                { label: 'abtop', slug: 'plugins/abtop' },
               ],
             },
             { label: 'Changelog', slug: 'plugins/changelog' },
@@ -112,6 +115,12 @@ export default defineConfig({
             { label: 'Building', slug: 'contributing/building' },
             { label: 'CI / CD', slug: 'contributing/ci-cd' },
             { label: 'Release process', slug: 'contributing/release-process' },
+          ],
+        },
+        {
+          label: 'Hangar',
+          items: [
+            { label: 'Architecture & features', slug: 'hangar/architecture' },
           ],
         },
         {

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-monospace, monospace">
+<defs>
+<style>.title{font-size:18px;fill:#e2e8f0;font-weight:bold}.lbl{font-size:13px;fill:#e2e8f0}.sub{font-size:11px;fill:#94a3b8}.albl{font-size:11px;fill:#e2e8f0}.flow{font-size:13px;fill:#94a3b8;font-weight:bold}</style>
+<marker id="aBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#38bdf8"/></marker>
+<marker id="aOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker>
+<marker id="aGray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/></marker>
+<marker id="aTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2dd4bf"/></marker>
+</defs>
+<rect width="1200" height="760" fill="#0a1628"/>
+<text x="40" y="40" class="title">Hangar — Control + Data Flow (dispatch + render loops)</text>
+<text x="40" y="78" class="flow">Dispatch  (control / trigger)</text>
+<rect x="40" y="92" width="180" height="58" rx="6" fill="#0f2942" stroke="#fb923c" stroke-width="1.5"/>
+<text x="130.0" y="114" text-anchor="middle" class="lbl">ainb hangar issue</text>
+<text x="130.0" y="132" text-anchor="middle" class="sub">create --assign &lt;agent&gt;</text>
+<rect x="260" y="92" width="170" height="58" rx="6" fill="#0f2942" stroke="#fb923c" stroke-width="1.5"/>
+<text x="345.0" y="114" text-anchor="middle" class="lbl">store enqueues</text>
+<text x="345.0" y="132" text-anchor="middle" class="sub">agent_task_queue row</text>
+<text x="345.0" y="146" text-anchor="middle" class="sub">issue_id + autopilot_run_id</text>
+<rect x="470" y="92" width="150" height="58" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="545.0" y="114" text-anchor="middle" class="lbl">daemon claim loop</text>
+<text x="545.0" y="132" text-anchor="middle" class="sub">queued &#8594; dispatched</text>
+<rect x="660" y="92" width="170" height="58" rx="6" fill="#0f2942" stroke="#fb923c" stroke-width="1.5"/>
+<text x="745.0" y="114" text-anchor="middle" class="lbl">materialise skills</text>
+<text x="745.0" y="132" text-anchor="middle" class="sub">per-task .claude/skills/</text>
+<text x="745.0" y="146" text-anchor="middle" class="sub">provider-native paths</text>
+<rect x="870" y="92" width="140" height="58" rx="6" fill="#0f2942" stroke="#fb923c" stroke-width="1.5"/>
+<text x="940.0" y="114" text-anchor="middle" class="lbl">spawn provider</text>
+<text x="940.0" y="132" text-anchor="middle" class="sub">run_claude</text>
+<rect x="420" y="200" width="200" height="58" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="520.0" y="222" text-anchor="middle" class="lbl">FSM finalize</text>
+<text x="520.0" y="240" text-anchor="middle" class="sub">done / failed / cancelled</text>
+<rect x="700" y="200" width="300" height="58" rx="6" fill="#0f2942" stroke="#fb923c" stroke-width="1.5"/>
+<text x="850.0" y="222" text-anchor="middle" class="lbl">cascade</text>
+<text x="850.0" y="240" text-anchor="middle" class="sub">stamp autopilot_run.completed_at</text>
+<text x="850.0" y="254" text-anchor="middle" class="sub">capture gh pr create &#8594; result.pr_url</text>
+<path d="M220,121 L260,121" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M430,121 L470,121" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M620,121 L660,121" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M830,121 L870,121" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M940,150 L620,200" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="720.8" y="168" width="78.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="760" y="180" text-anchor="middle" class="albl">on terminal</text>
+<path d="M620,229 L700,229" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<text x="40" y="320" class="flow">Render  (data + async event)</text>
+<rect x="40" y="340" width="160" height="58" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="120.0" y="362" text-anchor="middle" class="lbl">plugin</text>
+<text x="120.0" y="380" text-anchor="middle" class="sub">workspace/subscribe</text>
+<rect x="250" y="340" width="160" height="58" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="330.0" y="362" text-anchor="middle" class="lbl">daemon</text>
+<text x="330.0" y="380" text-anchor="middle" class="sub">subscription</text>
+<rect x="250" y="440" width="400" height="120" rx="6" fill="#0f2942" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="450.0" y="462" text-anchor="middle" class="lbl">plugin fires snapshot RPCs</text>
+<text x="450.0" y="480" text-anchor="middle" class="sub">hangar/issues_list · tasks_list</text>
+<text x="450.0" y="494" text-anchor="middle" class="sub">agents_list · skills_list</text>
+<text x="450.0" y="508" text-anchor="middle" class="sub">daemon_health · autopilots_list</text>
+<rect x="720" y="440" width="300" height="90" rx="6" fill="#13243f" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="870.0" y="462" text-anchor="middle" class="lbl">daemon reads store</text>
+<text x="870.0" y="480" text-anchor="middle" class="sub">resolve workspace slug &#8594; id</text>
+<text x="870.0" y="494" text-anchor="middle" class="sub">wire rows</text>
+<rect x="720" y="580" width="300" height="70" rx="6" fill="#0f2942" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="870.0" y="602" text-anchor="middle" class="lbl">ainb-hangar-store</text>
+<text x="870.0" y="620" text-anchor="middle" class="sub">SQLite read</text>
+<rect x="40" y="440" width="160" height="120" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="120.0" y="462" text-anchor="middle" class="lbl">plugin screen</text>
+<text x="120.0" y="480" text-anchor="middle" class="sub">folds rows into</text>
+<text x="120.0" y="494" text-anchor="middle" class="sub">screen state</text>
+<text x="120.0" y="508" text-anchor="middle" class="sub">renders</text>
+<path d="M200,369 L250,369" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="192.2" y="348" width="65.6" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="225" y="360" text-anchor="middle" class="albl">subscribe</text>
+<path d="M330,398 L360,440" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="325.0" y="413" width="40.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="345" y="425" text-anchor="middle" class="albl">fires</text>
+<path d="M650,490 L720,485" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="642.6" y="463" width="84.80000000000001" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="685" y="475" text-anchor="middle" class="albl">snapshot RPC</text>
+<path d="M870,530 L870,580" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="853.2" y="548" width="33.6" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="870" y="560" text-anchor="middle" class="albl">read</text>
+<path d="M720,540 L650,540" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="652.2" y="518" width="65.6" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="685" y="530" text-anchor="middle" class="albl">wire rows</text>
+<path d="M250,540 L200,520" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="208.2" y="503" width="33.6" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="225" y="515" text-anchor="middle" class="albl">rows</text>
+<path d="M720,460 L200,460" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<rect x="417.6" y="440" width="84.80000000000001" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="460" y="452" text-anchor="middle" class="albl">event stream</text>
+<text x="460" y="468" text-anchor="middle" class="sub">autopilot.tick_skipped · TaskStarted/Finished</text>
+<rect x="40" y="680" width="1000" height="62" rx="6" fill="#0f2942" stroke="#334155" stroke-width="1"/>
+<text x="56" y="702" class="sub">Legend</text>
+<line x1="120" y1="697" x2="160" y2="697" stroke="#38bdf8" stroke-width="2"/><text x="170" y="701" class="sub">request / data</text>
+<line x1="320" y1="697" x2="360" y2="697" stroke="#fb923c" stroke-width="2"/><text x="370" y="701" class="sub">control / trigger</text>
+<line x1="520" y1="697" x2="560" y2="697" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,2"/><text x="570" y="701" class="sub">async / event</text>
+<line x1="720" y1="697" x2="760" y2="697" stroke="#2dd4bf" stroke-width="2"/><text x="770" y="701" class="sub">persistence / read</text>
+</svg>

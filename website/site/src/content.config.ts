@@ -9,7 +9,20 @@ export const collections = {
   docs: defineCollection({
     loader: glob({
       base: '../../docs',
-      pattern: ['**/*.{md,mdx}', '!assets/**'],
+      pattern: [
+        '**/*.{md,mdx}',
+        '!assets/**',
+        // Internal Hangar build artifacts (no Starlight frontmatter) — keep
+        // them in-repo but out of the published docsite. Only hangar/architecture.md
+        // is a real site page.
+        '!hangar/research/**',
+        '!hangar/phases/**',
+        '!hangar/build-plan.md',
+        '!hangar/README.md',
+        '!hangar/tui-keybindings.md',
+        '!hangar/verify-hangar-goal.md',
+        '!hangar/execute-hangar-parity-goal.md',
+      ],
     }),
     schema: docsSchema(),
   }),

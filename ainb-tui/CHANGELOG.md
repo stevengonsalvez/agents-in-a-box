@@ -7,6 +7,279 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-10
+### Added
+- Merge pull request #179 from stevengonsalvez/feat/multica
+- Merge pull request #240 from stevengonsalvez/feat/abtop
+- Merge pull request #244 from stevengonsalvez/docsite-image-zoom
+- Merge pull request #249 from stevengonsalvez/f/overlay-panels
+- Merge pull request #251 from stevengonsalvez/feat/session-reader-refresh-modes
+- Merge pull request #252 from stevengonsalvez/feat/release-bundle-plugins
+- docs(hangar): add hangar-parity epic execution goal-file
+- **burndown**: gate hard refresh behind a confirm overlay on R
+- **cli**: add 'ainb abtop' snapshot command
+- **cli**: add --hard to ainb usage for a full source rebuild
+- **hangar**: P0.1 — ainb-hangar-store crate + workspace/user/member migrations
+- **hangar**: P0.2-P0.5 — ainb-hangar-store schema, pool, repos
+- **hangar**: P0.6-P0.7 — core + proto scaffolds + daemon binary stub
+- **hangar**: P1.1 — task lifecycle state enum + transition invariants
+- **hangar**: P1.2-P1.5 — store task FSM services (claim/start/complete/fail/cancel/finalize/retry)
+- **hangar**: P1.4/P1.6/P1.7 — daemon runtime: sweepers, per-task env, worktree, claude runner
+- **hangar**: P2.1 — beads_mapping repo + sync schema (migration 0007)
+- **hangar**: P2.2-P2.5 — beads sync engine (adapter, outbound, inbound, reconcile)
+- **hangar**: P2.3 — polymorphic assignee crosswalk (hangar (actor_type,id) <-> bd string)
+- **hangar**: P3.1 — host/event_stream_subscribe protocol + capability
+- **hangar**: P3.2-P3.4 protocol — spawn_managed_subprocess + unix_socket_dial methods/params/caps
+- **hangar**: P3.2-P3.4 runtime — event_stream / spawn_managed / unix_socket handlers
+- **hangar**: P3.2-P3.4 sdk — host_client helpers for the 3 new caps
+- **hangar**: P3.5 — host/secret_store_get cap (mac Keychain; linux stub)
+- **hangar**: P3.6-P3.8 — hangar-tui plugin scaffold, daemon dial, connect tripwire
+- **hangar**: P4.1-P4.3 — TUI routing/chrome, event-stream client, issue list screen
+- **hangar**: P4.10 — daemon unix-socket JSON-RPC server + snapshot RPCs + seed
+- **hangar**: P4.10 — host wiring: HANGAR plugin screen + 'g' nav
+- **hangar**: P4.10 — plugin render dispatch + key routing + snapshot fetch
+- **hangar**: P4.10 — proto snapshot RPC wire types
+- **hangar**: P4.2 — HangarEvent wire types (proto) for TUI event stream
+- **hangar**: P4.4-P4.7 — proto wire types for TUI screens
+- **hangar**: P4.4-P4.8 — TUI screens (task detail, agent picker, skill manager, settings, banner state)
+- **hangar**: P4.4-P4.8 — TUI widgets (transcript, sidebar, actor row, file tree, editor, key entry, banner, presence dot)
+- **hangar**: P5.2 propagate secrets:read cap rename to SDK + discovery test
+- **hangar**: P5.2 secret_store_get protocol — {scope,key} params + secrets:read cap
+- **hangar**: P5.2 secret_store_get runtime handler wired to SecretBackend
+- **hangar**: P5.3 'hangar config env.allow' CLI verbs
+- **hangar**: P5.3 env.allow.toml loader + build_task_env seam
+- **hangar**: P5.3 env_policy module — allowlist with hardcoded deny override
+- **hangar**: P5.3 wire env policy into the daemon claim loop
+- **hangar**: P5.6 'hangar config warnings reset' CLI verb
+- **hangar**: P6.1 — SkillRepo typed CRUD + workspace scoping
+- **hangar**: P6.1 — skill domain types (SkillName, SkillWithFiles, SkillId)
+- **hangar**: P6.1 — unique index on skill(workspace_id, name)
+- **hangar**: P6.2 — `ainb hangar skills sync|list` CLI
+- **hangar**: P6.2 — toolkit-directory skills sync importer
+- **hangar**: P6.3 — TemplateRegistry over embedded curated templates
+- **hangar**: P6.3 — add 10 curated agent_template JSONs
+- **hangar**: P6.3 — ainb hangar templates list|show|use CLI verbs
+- **hangar**: P6.3 — build.rs guard for template skill refs
+- **hangar**: P6.3 — transactional templates_use in daemon
+- **hangar**: P6.4 — materialise agent skills into per-task provider layout
+- **hangar**: P6.5 IO-free SkillService over a SkillBackend trait
+- **hangar**: P6.5 daemon RPC handlers for skill get/sync/attach/detach
+- **hangar**: P6.5 skill RPC method consts + wire envelopes
+- **hangar**: P7.1 — cron parser + next-tick calculator
+- **hangar**: P7.2 — AutopilotRepo sqlx queries (workspace-scoped)
+- **hangar**: P7.2 — IO-free AutopilotService + workspace-scoped backend
+- **hangar**: P7.2 — autopilot + autopilot_run schema (migration 0009)
+- **hangar**: P7.3 — autopilot scheduler thread + cron tick loop
+- **hangar**: P7.3 — spawn the autopilot scheduler in the daemon boot path
+- **hangar**: P7.5 autopilot RPC method consts + wire shapes
+- **hangar**: P7.5 autopilot manager screen + tab strip + keybindings
+- **hangar**: P7.5 daemon RPC handlers for autopilot list/runs/fire/toggle
+- **hangar**: P7.5 wire autopilot screen to live daemon RPCs
+- **hangar**: P7.6 ainb hangar autopilot CLI verbs
+- **hangar**: P7.6 scheduler wake hook + advanceable test clock
+- **hangar**: P8.1 — install tracing subscriber + rolling JSONL sink in daemon main
+- **hangar**: P8.2 — env-driven OTLP exporter behind optional `otlp` feature
+- **hangar**: P8.4 Kanban board screen — 4 columns + card widget
+- **hangar**: P8.4 daemon RPC — hangar/tasks_list + hangar/task_transition
+- **hangar**: P8.4 proto — tasks_list + task_transition wire surface
+- **hangar**: P8.4 store — TaskRepo list_by_workspace + transition_status
+- **hangar**: P8.5 daemon-health screen + D hotkey wiring
+- **hangar**: P8.5 daemon-health wire types + hangar/daemon_health method
+- **hangar**: P8.5 dual-dim throughput sparkline widget
+- **hangar**: P8.5 hangar/daemon_health RPC handler
+- **hangar**: P8.5 in-memory health stats collector + finalize feed
+- **hangar**: P9.1 — capture gh pr create URL into task result
+- **hangar**: P9.1 — gh pr create URL parser + TaskResult shape
+- **hangar**: SecretBackend trait, SecretError, SecretBytes, Scope
+- **hangar**: add agent_task_queue.autopilot_run_id link column
+- **hangar**: add autopilot_run_id to NewTask/Task + TaskRepo::insert_in_tx
+- **hangar**: ainb hangar auth token + daemon-token CLI verbs
+- **hangar**: ainb hangar logs tail CLI verb
+- **hangar**: cascade autopilot run completion on task finalize
+- **hangar**: fire_autopilot_tick single-tx run + task enqueue path
+- **hangar**: instrument autopilot tick fire with a tracing span
+- **hangar**: instrument beads sync push/pull with tracing spans
+- **hangar**: instrument task FSM transitions with tracing spans
+- **hangar**: issue create --assign enqueues a task for the agent
+- **hangar**: mac keychain, linux stub, and in-memory secret backends
+- **hangar**: pat + daemon_token repos with mint/verify/revoke
+- **hangar**: scaffold ainb-hangar-secrets crate + workspace membership
+- **hangar**: shared structured-log reader for daemon.<date> files
+- **hangar**: token mint + verify primitives (sha256, constant-time)
+- **hangar**: wire 'ainb hangar <verb>' CLI namespace into ainb binary
+- **hangar**: wire skill materialisation into the dispatch path
+- **hangar**: wire skill-manager screen to live daemon RPCs
+- **hangar-core**: P5.6 danger-full-access warning ack keys + decision
+- **hangar-daemon**: P5.6 warn danger-full-access at provider invocation
+- **hangar-daemon**: surface latest completed-task pr_url in issues_list RPC
+- **hangar-proto**: WorkspaceChanged event + WorkspaceRow slug/default fields
+- **hangar-proto**: add additive pr_url field to IssueRow wire type
+- **hangar-tui**: P5.6 danger-full-access modal widget
+- **hangar-tui**: P5.6 first-run danger-full-access flow
+- **hangar-tui**: PR badge on task detail + 'o' open-in-browser keybinding
+- **hangar-tui**: Settings Workspace pane — s/d/n/r keys + active indicator
+- **hangar-tui**: logs tail screen with level-filter chips (L hotkey)
+- **hangar-tui**: wire Workspace switch intents to host/workspace_* caps
+- **plugin**: add ainb-plugin-abtop crate
+- **plugin-burndown**: Esc pops one level, asks host to close at root
+- **plugin-protocol**: reserved ui.close_request topic + versioned snapshot read
+- **plugin-protocol**: workspace:write cap + host/workspace_* methods + params
+- **plugin-runtime**: P5.6 host-side warnings_ack state.toml IO
+- **plugin-runtime**: host/workspace_* handlers + state.toml-backed store
+- **plugin-sdk**: HostClient workspace_list/get_active/set_active/set_default
+- **plugins**: seed host workspace store catalogue from hangar.db
+- **release**: bundle first-party plugins into release artifacts
+- **session-reader**: dispatch incremental vs hard refresh by payload
+- **session-reader**: incremental scan path with watermark partition
+- **session-reader**: persist the stable aggregate (cache schema v2)
+- **session-reader**: read incremental_window_days from config
+- **session-reader**: split aggregate into mergeable fold/emit stages
+- **site**: click-to-zoom lightbox on all docsite images
+- **tui**: add abtop (top-for-agents) menu item + full-screen embed
+- **tui**: advertise panel keys on the session-list legend and help overlay
+- **tui**: panels return to their origin screen; forward Esc to plugins
+- **tui**: redesign session-page menu legend into three lines
+- **xtask**: add ci-lint subcommand asserting hangar-e2e CI contract
+
+### Fixed
+- Merge pull request #237 from stevengonsalvez/worktree-legend-fixes
+- Merge pull request #238 from stevengonsalvez/worktree-fix-startup-session-discovery
+- Merge pull request #246 from stevengonsalvez/fix/remote-pick-branch-guard
+- docs(tui): correct Inbox keybinding to b in keyboard-shortcuts
+- **abtop**: canonical graykode install hints + reuse setup tmux session
+- **abtop**: drop unused serde dep, move serde_json to dev-deps
+- **ci**: ignore SDK false positive in hangar-tui machete scan
+- **docs**: remove duplicate jump-over arc at line crossing in ecosystem diagram
+- **hangar**: daemon resolves workspace slug->id for snapshot RPCs
+- **hangar**: de-alias issue-list tripwire's settings-detection from tab strip
+- **hangar**: implement csv + markdown output formats for hangar CLI
+- **hangar**: reject list-form workspace:write at the cap gate (-32003)
+- **hangar**: workspace-scope SkillRepo by-id methods (IDOR)
+- **hangar-tests**: seed notifyd install.json in the tripwire harness
+- **plugin-sdk**: add macOS parent-death watcher to prevent orphaned plugins
+- **plugins**: honour ui.close_request only from the screen-owning plugin
+- **plugins**: reject a plugin named 'host' on the register path too
+- **session-reader**: harden refresh edges from code review
+- **session-reader**: serialize concurrent cache writers with busy_timeout
+- **test**: await the spawn render before send_key in fixture_e2e
+- **test**: make tripwire_burndown_keys period/provider captures deterministic
+- **test**: seed install.json so tripwires aren't blocked by the hooks popup
+- **tui**: Hangar panel saves its origin so Esc doesn't pop a stale screen
+- **tui**: align session-list keybindings with the menu legend
+- **tui**: seed branch-collision guards from clone cache for remote picks
+- **tui**: surface stopped sessions on startup without a manual refresh
+- **tui**: undelivered Esc/q falls through on the plugin placeholder screen
+- test(hangar): cover P9.2 PR badge render, 'o' keybinding, and e2e tripwire
+
+### Documentation
+- Merge pull request #242 from stevengonsalvez/fleet-readme-only
+- Merge pull request #243 from stevengonsalvez/docs-ecosystem-architecture-svg
+- Merge pull request #245 from stevengonsalvez/chore/standup-skill-restructure
+- **abtop**: correct CLI dispatch, detection, and consent claims
+- **abtop**: correct live-monitor keybindings to verified v0.4.7 keys
+- **abtop**: goal tracker for the abtop plugin work
+- **fleet**: add ainb-fleet plugin README
+- **hangar**: 6 full-detail architecture diagrams (system, dataflow, FSM, schema ER, capabilities, scheduler)
+- **hangar**: P4 Hangar TUI asciinema proof + capture script
+- **hangar**: Starlight architecture & features page (full detail, SVG diagrams, coverage table)
+- **hangar**: add P0 TDD plan — Schema + crates skeleton
+- **hangar**: add P1 TDD plan — Daemon + task FSM
+- **hangar**: add P2 TDD plan — Beads sync adapter
+- **hangar**: add P3 TDD plan — Plugin host caps + hangar-tui scaffold
+- **hangar**: add P4 TDD plan — Core 5 TUI screens
+- **hangar**: add P5 TDD plan — Auth + workspace + secret store
+- **hangar**: add P6 TDD plan — Skills + curated templates
+- **hangar**: add P7 TDD plan — Autopilots + cron scheduler
+- **hangar**: add P8 TDD plan — Kanban + Daemon health + observability
+- **hangar**: add P9 TDD plan — gh integration + e2e pass + release
+- **hangar**: add architecture explainer, diagrams, and index
+- **hangar**: add hangar-parity epic execution goal-file
+- **hangar**: add multica feature-parity review explainer
+- **hangar**: add multica research findings
+- **hangar**: add verify-hangar autonomous verification goal-file
+- **hangar**: architecture + feature/test-coverage explainer (HTML)
+- **hangar**: asciinema proof of ainb hangar CLI round-trip (174.11)
+- **hangar**: document TUI keybindings incl. P6.5 skill actions
+- **hangar**: lock build-plan via interview — 20 decisions across 5 rounds
+- **hangar**: mark P0 + P1 done in phase tracker
+- **hangar**: mark P2 done + flag CLI-wiring gap (174.11)
+- **hangar**: mark P3 done — plugin host caps + hangar-tui scaffold
+- **hangar**: mark P4 complete in build-plan
+- **hangar**: mark P5 complete in build-plan
+- **hangar**: mark P6 complete in build-plan
+- **hangar**: mark P7 complete in build-plan
+- **hangar**: mark P8 complete in build-plan
+- **plugins**: document abtop (top-for-agents) plugin with recordings
+- **plugins**: wire abtop into plugin index and Astro nav
+- **screenshots**: add overlay-panels return-to-origin demo GIFs
+- **site**: add Hangar sidebar group + exclude internal hangar build docs from the Starlight glob
+- **standup**: restructure skill onto reader-facts + Bad/Good rules
+- **tui**: correct Inbox keybinding to b in keyboard-shortcuts
+- **tui**: sync help overlay with actual session-list keybindings
+- add ecosystem architecture diagram to whole-system page
+- embed ecosystem architecture diagram in README
+
+### Other
+- **hangar-scripts**: surface SKIPs in run_all_tripwires output
+- **scripts**: add soak watch for the incremental-refresh contract
+- drop abtop goal-tracker from the PR (work complete)
+- drop nightly-only .rustfmt.toml
+- ignore local here.now publish state
+- **hangar**: adopt typed attach_to_agent in P4 seed fixture
+- **hangar**: extract seed_runtime_and_agent from P4 seed fixture
+- **hangar**: thread workspace through SkillRepo callers
+- **tui**: build cache path once in cached_source_path
+- **tui**: pass the runtime handle into tick_panel_close_requests
+- **tui**: route sidebar panel selects through canonical GoTo events
+
+
+## [1.5.0] - 2026-06-08
+### Added
+- Merge pull request #230 from stevengonsalvez/feat/statusline-quota-reset-time
+- **statusline**: show quota reset times on the Claude Code statusline
+- **tui**: add GitHub auth pre-check for remote URLs in pick-repo
+
+### Fixed
+- Merge pull request #155 from stevengonsalvez/worktree-fix-github-auth-tui
+- Merge pull request #232 from stevengonsalvez/worktree-fix-worktree-create-error
+- Merge pull request #233 from stevengonsalvez/worktree-fix-bulk-resume-sessions
+- Merge pull request #234 from stevengonsalvez/fix/branch-exists-selection-guard
+- **tui**: block base-off onto an existing branch at selection
+- **tui**: bound the GitHub auth pre-check with a 5s timeout
+- **tui**: handle new-session onto an already-checked-out branch
+- **tui**: push ahead commits when there is nothing new to commit
+- **tui**: remove the partial clone directory on clone failure
+- **tui**: start all selected sessions on Enter/r, not just the highlighted one
+- **tui**: suppress git credential prompts on all network-facing commands
+
+### Documentation
+- Merge pull request #231 from stevengonsalvez/reflect-sync-learnings-fixes
+- **sync-learnings**: harden classification + diff guidance
+
+### Other
+- **tui**: dedup in_use_branch_names via HashSet
+
+
+## [1.4.4] - 2026-06-07
+### Added
+- Merge pull request #224 from stevengonsalvez/worktree-codex-quota-reset
+- **tui**: show per-window quota reset date/time in top bar
+
+### Fixed
+- Merge pull request #228 from stevengonsalvez/fix/statusline-resets-at-epoch
+- **compress**: harden scripts against missing CLI and interrupts
+- **tui**: parse Claude Code rate-limit resets_at as Unix epoch
+
+### Other
+- Merge pull request #225 from stevengonsalvez/chore/skills-root-and-scratch-cleanup
+- Merge pull request #226 from stevengonsalvez/worktree-skills-into-dotclaude
+- consolidate skills under repo-root .claude/skills
+- drop caveman skill family
+- drop committed scratch and ignore output dirs
+- move skills to repo root and symlink tool dirs
+- symlink ainb-tui/AGENTS.md to root AGENTS.md
+
+
 ## [1.4.3] - 2026-06-05
 ### Added
 - **skills**: add agentmail disposable-inbox skill

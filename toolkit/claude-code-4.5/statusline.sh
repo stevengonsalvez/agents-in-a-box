@@ -73,6 +73,14 @@ _bar() {
   printf "${col}[${bar}] ${pct}%%${RESET}"
 }
 
+# ── Format a Unix epoch as local time ─────────────────────────────────────────
+# Usage: _fmt_epoch <epoch-seconds> <strftime-fmt>. Empty on bad input.
+# Handles BSD `date -r` (macOS) and GNU `date -d @` (Linux).
+_fmt_epoch() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return
+  date -r "$1" +"$2" 2>/dev/null || date -d "@$1" +"$2" 2>/dev/null || true
+}
+
 # ── timeout wrapper ───────────────────────────────────────────────────────────
 # Prefer `timeout`, fall back to coreutils' `gtimeout`, else run with no limit.
 # macOS Homebrew installs coreutils' timeout as `gtimeout` and doesn't symlink
@@ -360,6 +368,11 @@ WEEK_JSON=$(_jq '.rate_limits.seven_day.used_percentage')
 [[ -n "$FIVE_HR_JSON" ]] && FIVE_HR_PCT=$(printf "%.0f" "$FIVE_HR_JSON" 2>/dev/null || true)
 [[ -n "$WEEK_JSON"    ]] && WEEK_PCT=$(printf "%.0f" "$WEEK_JSON"    2>/dev/null || true)
 
+# Quota reset instants — Claude Code sends resets_at as a Unix epoch.
+# 5h → HH:MM (always same/next day); weekly → "Mon D HH:MM" (days out).
+FIVE_HR_RESET_FMT=$(_fmt_epoch "$(_jq '.rate_limits.five_hour.resets_at')" '%H:%M')
+WEEK_RESET_FMT=$(_fmt_epoch "$(_jq '.rate_limits.seven_day.resets_at')" '%b %e %H:%M' | tr -s ' ')
+
 # Fallback: ccusage, cached separately as "five_hr" and "wk" keys
 if [[ -z "$FIVE_HR_PCT" ]]; then
   if (( CACHE_AGE < CACHE_TTL )); then
@@ -541,8 +554,14 @@ L2="${BOLD}${FG_MAGENTA}${MODEL_SHORT}${RESET}"
 [[ -n "$EFFORT_DISPLAY" ]] && L2+=" ${SEP} ${EFFORT_DISPLAY}"
 L2+=" ${SEP} ${HEALTH_FG}${HEALTH_EMOJI} ${MSG_COUNT}/50${RESET}"
 L2+=" ${SEP} ctx ${CTX_BAR}"
-[[ -n "$FIVE_HR_BAR" ]] && L2+=" ${SEP} 5h ${FIVE_HR_BAR}"
-[[ -n "$WEEK_BAR"    ]] && L2+=" ${SEP} wk ${WEEK_BAR}"
+if [[ -n "$FIVE_HR_BAR" ]]; then
+  L2+=" ${SEP} 5h ${FIVE_HR_BAR}"
+  [[ -n "$FIVE_HR_RESET_FMT" ]] && L2+=" ${FG_GREY}↻ ${FIVE_HR_RESET_FMT}${RESET}"
+fi
+if [[ -n "$WEEK_BAR" ]]; then
+  L2+=" ${SEP} wk ${WEEK_BAR}"
+  [[ -n "$WEEK_RESET_FMT" ]] && L2+=" ${FG_GREY}↻ ${WEEK_RESET_FMT}${RESET}"
+fi
 [[ -n "$COST_DISPLAY" ]] && L2+=" ${SEP} ${FG_GREEN}${COST_DISPLAY}${RESET}"
 
 # ── Output ────────────────────────────────────────────────────────────────────

@@ -6,6 +6,8 @@ on:
     paths:
       - "ainb-tui/**"
       - "plugins/ainb-hooks/**"
+      - "plugins/hangar-tui/**"
+      - "scripts/hangar/**"
       - "Cargo.*"
       - ".github/workflows/ci.yml"
   pull_request:
@@ -13,6 +15,8 @@ on:
     paths:
       - "ainb-tui/**"
       - "plugins/ainb-hooks/**"
+      - "plugins/hangar-tui/**"
+      - "scripts/hangar/**"
       - "Cargo.*"
       - ".github/workflows/ci.yml"
 
@@ -85,6 +89,54 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
       - name: Tripwire — Inbox screen open + render
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Hangar control-plane end-to-end tripwires (P0-P9)
+  #
+  # Mirrors the `ainb-hooks` per-feature pattern: install tmux on Linux, build
+  # the daemon binary + stage the bundled plugins, then run every hangar
+  # `tripwire_*` via scripts/hangar/run_all_tripwires.sh on BOTH target OSes.
+  # No `cargo clippy -D warnings` gate here — the workspace carries pre-existing
+  # clippy debt and CI gates on `cargo fmt --check` only (see `fmt` job).
+  # ────────────────────────────────────────────────────────────────────────────
+  hangar-e2e:
+    name: hangar-e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      # macOS runner images do NOT ship tmux (actions/runner-images macos-15
+      # README) — without installing it here the macOS leg is vacuously green:
+      # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
+      - name: Install tmux (apt-get on Linux, brew on macOS)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
+      - name: Build hangar daemon binary
+        run: cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Build ainb binary
+        run: cargo build -p ainb --bin ainb
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Stage bundled plugins (incl. hangar-tui)
+        run: bash scripts/build-plugins.sh
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: CI-lint — assert ci.yml hangar-e2e contract
+        run: cargo xtask ci-lint
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Run all hangar tripwires
+        run: bash ../scripts/hangar/run_all_tripwires.sh
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────

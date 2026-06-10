@@ -48,7 +48,7 @@ pub fn spawn_plugin(binary_path: &PathBuf) -> Result<TokioChild, RuntimeError> {
 
 /// Install the OS-specific pre-exec hook used by the leak guard.
 #[cfg(target_os = "linux")]
-fn install_leak_guard(cmd: &mut Command) {
+pub(crate) fn install_leak_guard(cmd: &mut Command) {
     // tokio::process::Command exposes `pre_exec` directly on Unix —
     // no `CommandExt` import needed.
     // PR_SET_PDEATHSIG = 1 (sys/prctl.h). SIGTERM = 15.
@@ -72,7 +72,7 @@ fn install_leak_guard(cmd: &mut Command) {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn install_leak_guard(cmd: &mut Command) {
+pub(crate) fn install_leak_guard(cmd: &mut Command) {
     // SAFETY: setpgid is async-signal-safe.
     unsafe {
         cmd.pre_exec(|| {
@@ -85,7 +85,7 @@ fn install_leak_guard(cmd: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn install_leak_guard(_cmd: &mut Command) {
+pub(crate) fn install_leak_guard(_cmd: &mut Command) {
     // Windows: `kill_on_drop(true)` is the strongest guarantee tokio
     // gives. We don't ship a Windows host today, so stop short of a
     // jobobject implementation.
