@@ -80,6 +80,53 @@ pub async fn issues_list(
     Ok(out)
 }
 
+/// Ranked title + description + comment search within `workspace_id`, mapped to
+/// wire [`IssueRow`]s in rank order (`hangar/issues_search`, e38.12).
+///
+/// Delegates the ranking to [`IssueRepo::search_ranked`] (a row matches when the
+/// case-insensitive `query` substring appears in the issue title, description, OR
+/// any comment body; title hits outrank description hits outrank comment-only
+/// hits) and re-wraps each matched [`Issue`] into the same [`IssueRow`] shape
+/// `issues_list` emits — including the P9 `pr_url` derivation — so a search hit is
+/// byte-identical to the same issue in a list snapshot. Workspace-scoped: a
+/// sibling tenant's matching issue is never returned, and an unknown workspace
+/// yields an empty result.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the search query fails.
+pub async fn issues_search(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    query: &str,
+) -> Result<Vec<IssueRow>, sqlx::Error> {
+    let mut out = Vec::new();
+    // `search_ranked` already returns rows in rank order (title > desc > comment,
+    // then created_at, id), so the wire order is preserved one-for-one.
+    for issue in IssueRepo::search_ranked(pool, workspace_id, query).await? {
+        let id = IssueId::from_str(&issue.id).map_err(|e| sqlx::Error::ColumnDecode {
+            index: "id".to_string(),
+            source: format!("malformed issue id {:?}: {e}", issue.id).into(),
+        })?;
+        let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+        out.push(IssueRow {
+            id,
+            workspace_id: issue.workspace_id,
+            title: issue.title,
+            description: issue.description,
+            state: issue.state,
+            assignee: issue.assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
+            creator: format!("{}:{}", issue.creator.kind().as_str(), issue.creator.id()),
+            created_at: issue.created_at,
+            priority: issue.priority,
+            due_date: issue.due_date,
+            labels: issue.labels,
+            pr_url,
+        });
+    }
+    Ok(out)
+}
+
 /// The PR URL captured into the latest completed task's `result.pr_url` for
 /// `issue_id` in `workspace_id`, or `None` when no task on the issue produced a
 /// PR (P9.2).

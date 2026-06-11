@@ -385,6 +385,7 @@ async fn handle(
             };
             to_value(&ainb_hangar_proto::snapshots::IssuesListResult { issues })
         }
+        methods::HANGAR_ISSUES_SEARCH => handle_issues_search(pool, req).await,
         methods::HANGAR_AGENTS_LIST => {
             let actors = match resolve(pool, req).await? {
                 Some(ws) => snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?,
@@ -626,6 +627,32 @@ fn parse_task_status(raw: &str) -> Result<ainb_hangar_core::task_status::TaskSta
             "to_status must be one of queued/dispatched/running/done/failed/cancelled, got `{raw}`"
         ))
     })
+}
+
+/// Dispatch `hangar/issues_search` (e38.12): ranked title + description +
+/// comment substring search within a workspace, answering with the matching
+/// [`IssueRow`]s in rank order (reusing the `issues_list` result envelope).
+///
+/// A read like `hangar/issues_list`: an unknown workspace yields an empty result
+/// rather than an `INVALID_PARAMS` rejection (search is non-mutating, so a
+/// mistyped workspace is "no matches", not a client error). Split out of
+/// [`handle`] to keep that dispatcher within the line cap.
+async fn handle_issues_search(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::IssueSearchParams =
+        parse_params(req, "{ workspace_id, query }")?;
+    let issues = match resolve_workspace_id(pool, &params.workspace_id)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        Some(ws) => snapshots::issues_search(pool, &ws, &params.query)
+            .await
+            .map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::IssuesListResult { issues })
 }
 
 /// Dispatch `hangar/issue_create` (e38.29): create one new issue, push the
