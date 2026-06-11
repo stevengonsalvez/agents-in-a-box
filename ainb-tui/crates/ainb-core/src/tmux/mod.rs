@@ -248,10 +248,10 @@ async fn bind_clipboard_for_copy_modes(_session_name: &str, copy_cmd: &str) -> R
 
 #[allow(unused_imports)]
 pub use capture::CaptureOptions;
-pub use process_detection::ClaudeProcessDetector;
 #[allow(unused_imports)]
 pub use embed_client::EmbedClient;
-pub use embed_input::encode_key_event;
+pub use embed_input::{encode_key_event, encode_mouse_event};
+pub use process_detection::ClaudeProcessDetector;
 pub use pty_wrapper::PtyWrapper;
 #[allow(unused_imports)]
 pub use session::{AttachState, TmuxSession};

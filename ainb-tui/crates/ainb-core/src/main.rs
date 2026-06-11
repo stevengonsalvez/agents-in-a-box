@@ -583,8 +583,22 @@ async fn run_tui_loop(
                     // Mode boundary: while the interactive embed owns input,
                     // host mouse handlers must NEVER run — a click/scroll
                     // changing focus or selection under a live embed splits
-                    // the mode invariants. Swallow everything.
+                    // the mode invariants. Events inside the embed's interior
+                    // are translated + forwarded to the PTY as SGR sequences
+                    // (ainb-created sessions run with tmux `mouse on`, so the
+                    // wheel scrolls and drag selects inside tmux; sessions
+                    // without it ignore the sequences). Everything else is
+                    // swallowed.
                     if app.state.is_interactive_pane() {
+                        if let (Some(inner), Some(client)) =
+                            (app.state.embed_pane_area, app.state.embed.as_ref())
+                        {
+                            if let Some(bytes) =
+                                crate::tmux::encode_mouse_event(&mouse_event, inner)
+                            {
+                                let _ = client.write_input(&bytes);
+                            }
+                        }
                         continue;
                     }
 

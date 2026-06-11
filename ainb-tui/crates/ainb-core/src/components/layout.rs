@@ -136,11 +136,16 @@ impl LayoutComponent {
             // the pane interior (minus the border) so the inner program reflows,
             // then render the live terminal in place of the read-only preview.
             let area = content_chunks[1];
-            let rows = area.height.saturating_sub(2);
-            let cols = area.width.saturating_sub(2);
+            let inner = area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
             if let Some(e) = state.embed.as_mut() {
-                let _ = e.resize(rows, cols);
+                let _ = e.resize(inner.height, inner.width);
             }
+            // Publish the interior so mouse events can be translated into
+            // 1-based pane-local SGR coordinates (see encode_mouse_event).
+            state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
         } else if selected_has_tmux {
             // Render tmux preview pane (read-only capture)

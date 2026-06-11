@@ -468,6 +468,7 @@ impl AppState {
         if let Some(mut client) = self.embed.take() {
             client.shutdown();
         }
+        self.embed_pane_area = None;
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
         }
@@ -2552,6 +2553,11 @@ pub struct AppState {
     //    never forwarded to an invisible PTY.
     // Dropping it kills the ephemeral tmux client (never the session).
     pub embed: Option<crate::tmux::EmbedClient>,
+    // Interior screen rect (inside the border) the embed's PseudoTerminal
+    // occupies, published by the interactive render branch each frame. Drives
+    // mouse-coordinate translation into 1-based pane-local SGR sequences.
+    // None whenever the embed is not rendering.
+    pub embed_pane_area: Option<Rect>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -3087,6 +3093,7 @@ impl Default for AppState {
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
             embed: None,
+            embed_pane_area: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
