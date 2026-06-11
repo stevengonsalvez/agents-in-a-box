@@ -15,5 +15,6 @@ pub mod issue;
 pub mod label;
 pub mod member;
 pub mod skill;
+pub mod squad;
 pub mod task;
 pub mod token;
