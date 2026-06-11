@@ -12,6 +12,7 @@ pub mod autopilot_run;
 pub mod beads_mapping;
 pub mod comment;
 pub mod issue;
+pub mod label;
 pub mod skill;
 pub mod task;
 pub mod token;
