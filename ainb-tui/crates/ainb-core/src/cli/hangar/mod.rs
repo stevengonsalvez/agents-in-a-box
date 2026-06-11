@@ -539,6 +539,8 @@ pub enum IssueCommand {
     Create(IssueCreateArgs),
     /// List issues in the default workspace.
     List(IssueListArgs),
+    /// Search issues by title, description, or comment body (ranked).
+    Search(IssueSearchArgs),
     /// Show one issue by id.
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
@@ -690,6 +692,24 @@ pub struct IssueListArgs {
     /// Restrict to issues in this lifecycle state.
     #[arg(long, default_value = DEFAULT_ISSUE_STATE)]
     pub state: String,
+}
+
+/// Arguments for `hangar issue search`.
+///
+/// `query` is the case-insensitive substring to match across the issue title,
+/// description, and comment bodies; results are ranked title > description >
+/// comment. Unlike the plugin's client-side `/` title-only filter, this reaches
+/// into description + comment bodies and across the whole workspace (not just a
+/// loaded page). A `--workspace` selects the tenant (default: the bootstrapped
+/// `default` workspace); a blank query matches nothing.
+#[derive(Args, Debug)]
+pub struct IssueSearchArgs {
+    /// The text to search for (matched across title / description / comments).
+    pub query: String,
+    /// Workspace slug to search within. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue show`.
@@ -1579,6 +1599,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
     match cmd {
         IssueCommand::Create(args) => run_issue_create(&store, args).await,
         IssueCommand::List(args) => run_issue_list(&store, args, format).await,
+        IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
@@ -1784,6 +1805,49 @@ async fn run_issue_list(store: &Store, args: IssueListArgs, format: OutputFormat
     let issues = IssueRepo::list_by_workspace_state(pool, &workspace_id, &args.state)
         .await
         .context("list issues")?;
+    render_issue_list(&issues, format);
+    Ok(())
+}
+
+/// `hangar issue search`: ranked title + description + comment substring search,
+/// workspace-scoped.
+///
+/// Mirrors the `hangar/issues_search` daemon RPC over the CLI: a row matches when
+/// the case-insensitive `query` substring appears in the issue title,
+/// description, OR any comment body, ranked title > description > comment. A read
+/// only — when no `--workspace` is given and no workspace exists yet, the result
+/// is empty (no bootstrap side effect, unlike the create/update verbs). Results
+/// are rendered in rank order through the same `render_issue_list` formatter the
+/// `list` verb uses, so every output format is consistent.
+async fn run_issue_search(
+    store: &Store,
+    args: IssueSearchArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let pool = store.pool();
+    // Read-only workspace resolution: an explicit `--workspace` resolves by slug
+    // (a typo is an error); without it, fall back to the default workspace if one
+    // exists. Searching must never bootstrap a workspace, so the no-workspace case
+    // is an empty result, not a side effect.
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(pool)
+                .await
+                .context("look up workspace by slug")?;
+            Some(id.with_context(|| format!("no workspace with slug `{slug}`"))?)
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        // No workspace yet -> no issues. Empty result, not an error.
+        render_issue_list(&[], format);
+        return Ok(());
+    };
+    let issues = IssueRepo::search_ranked(pool, &workspace_id, &args.query)
+        .await
+        .context("search issues")?;
     render_issue_list(&issues, format);
     Ok(())
 }

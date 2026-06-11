@@ -659,3 +659,94 @@ fn issue_label_attach_unknown_id_is_an_error() {
         "missing not-found message:\n{out}"
     );
 }
+
+/// Insert one comment on an issue by opening the same hangar db the binary uses,
+/// so the search CLI can be exercised against a comment-body hit (there is no
+/// `hangar comment` CLI verb to seed it through). Mirrors `seed_agent`'s
+/// open-the-same-file pattern.
+fn seed_comment(home: &std::path::Path, issue_id: &str, body: &str) {
+    use ainb_hangar_store::Store;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.expect("open hangar db");
+        sqlx::query(
+            "INSERT INTO comment (id, issue_id, author_type, author_id, body, created_at) \
+             VALUES (?, ?, 'member', 'user-1', ?, 1700000000000)",
+        )
+        .bind(format!("c-{issue_id}"))
+        .bind(issue_id)
+        .bind(body)
+        .execute(store.pool())
+        .await
+        .expect("insert comment");
+    });
+}
+
+/// The user-visible proof for e38.12: `ainb hangar issue search <query>` finds
+/// issues by a substring of their title, description, OR comment body — reaching
+/// beyond the plugin's client-side title-only filter — and ranks title hits
+/// above description hits above comment-only hits, excluding non-matching issues.
+#[test]
+fn issue_search_ranks_title_desc_comment_and_excludes_nonmatch() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A title hit.
+    create_issue(tmp.path(), "Improve telemetry pipeline");
+    // A description-only hit.
+    let (ok, _) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Routine cleanup",
+            "--description",
+            "the telemetry sink needs a flush",
+        ],
+    );
+    assert!(ok, "desc-issue create should exit 0");
+    // A comment-only hit (seeded directly — no comment CLI verb).
+    let cmt_id = create_issue(tmp.path(), "Backlog grooming");
+    seed_comment(tmp.path(), &cmt_id, "we lost telemetry yesterday");
+    // A non-matching issue.
+    create_issue(tmp.path(), "Quiet unrelated work");
+
+    // Text format: the three matching titles appear in rank order, the
+    // non-match is absent.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "search", "telemetry"]);
+    assert!(ok, "issue search should exit 0; out={out}");
+    let title_pos = out
+        .find("Improve telemetry pipeline")
+        .unwrap_or_else(|| panic!("title hit missing from search:\n{out}"));
+    let desc_pos = out
+        .find("Routine cleanup")
+        .unwrap_or_else(|| panic!("description hit missing from search:\n{out}"));
+    let cmt_pos = out
+        .find("Backlog grooming")
+        .unwrap_or_else(|| panic!("comment hit missing from search:\n{out}"));
+    assert!(
+        title_pos < desc_pos && desc_pos < cmt_pos,
+        "ranking must be title < description < comment in output order:\n{out}"
+    );
+    assert!(
+        !out.contains("Quiet unrelated work"),
+        "a non-matching issue must be excluded from search:\n{out}"
+    );
+}
+
+/// `ainb hangar issue search` with a blank query matches nothing — it must not
+/// dump the whole board.
+#[test]
+fn issue_search_blank_query_matches_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Some issue title");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "search", "   "]);
+    assert!(ok, "blank search should exit 0; out={out}");
+    assert!(
+        out.contains("no issues") && !out.contains("Some issue title"),
+        "a blank query must match nothing, not dump the board:\n{out}"
+    );
+}
