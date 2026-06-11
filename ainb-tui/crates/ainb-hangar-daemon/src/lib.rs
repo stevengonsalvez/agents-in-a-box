@@ -93,6 +93,13 @@ pub mod run_loop;
 /// first `session_id`, and enforces a runtime deadline. Returns a
 /// [`runner::RunOutcome`] the claim loop maps onto the FSM.
 pub mod runner;
+/// Self-registration of the daemon's own runtime on boot (e38.20).
+///
+/// [`runtime_register::register_runtime`] idempotently upserts an
+/// `agent_runtime` row keyed on `HANGAR_DAEMON_RUNTIME_ID` so a real (non-test)
+/// daemon advertises a runtime the moment it boots — closing the gap where every
+/// `agent_runtime` insert lived only in test fixtures.
+pub mod runtime_register;
 /// The autopilot scheduler thread + cron tick loop (P7.3).
 ///
 /// [`scheduler::AutopilotScheduler`] is a daemon-global tokio task that wakes at
@@ -211,6 +218,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     }
 
     let store: Store = Store::open_in(&dir).await?;
+
+    // e38.20: self-register this daemon's runtime so a real (non-test) boot
+    // advertises an `agent_runtime` row the claim loop, agent picker, and
+    // daemon-health pane all key off. A failure here is non-fatal (logged +
+    // swallowed inside the helper) — the daemon must still sweep + serve.
+    crate::runtime_register::self_register_from_env(store.pool()).await;
 
     // P8.5: the in-memory health stats collector — shared between the RPC server
     // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
