@@ -77,10 +77,18 @@ for pkg in ainb-hangar-store ainb-hangar-proto ainb-hangar-sandbox ainb-hangar-d
     done
 done
 
-# ── ainb crate: the two Hangar acceptance targets, by explicit name (avoid the
-#    pre-existing ui_tests/behavioral compile drift unrelated to Hangar).
-run_one ainb hangar_cli_integration
-run_one ainb tripwire_hangar_issue_roundtrip
+# ── ainb crate: every Hangar acceptance target. Globbed by the `hangar_*` /
+#    `tripwire_hangar_*` prefix (so new ones — daemon-lifecycle, webhook CLI, … —
+#    gate automatically) but NOT a blanket `--tests`: the ainb crate's other
+#    integration targets (tests/ui_tests.rs, tests/behavioral/, …) carry
+#    pre-existing NewSessionState drift that fails to compile and is unrelated to
+#    Hangar; naming the Hangar prefix avoids building them.
+for f in crates/ainb-core/tests/hangar_*.rs crates/ainb-core/tests/tripwire_hangar_*.rs; do
+    [ -e "$f" ] || continue
+    name="$(basename "$f" .rs)"
+    case "$name" in *_common) continue ;; esac
+    run_one ainb "$name"
+done
 
 echo "─────────────────────────────────────────"
 echo "hangar acceptance: ran=$ran failed=$failures skipped=$skips"
