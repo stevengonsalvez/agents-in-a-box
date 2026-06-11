@@ -9,6 +9,7 @@ pub mod agent;
 pub mod agent_runtime;
 pub mod autopilot;
 pub mod autopilot_run;
+pub mod autopilot_webhook;
 pub mod beads_mapping;
 pub mod comment;
 pub mod issue;
