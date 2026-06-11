@@ -25,6 +25,7 @@ use super::agent_picker::{
 };
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
 use super::daemon_health::DaemonHealthState;
+use super::inbox::InboxState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
 use super::logs::LogsState;
@@ -180,6 +181,9 @@ pub struct ScreenStates {
     /// Logs-tail screen cache (P8.6), filled by reading the newest `daemon.*`
     /// structured-log file directly from disk (no daemon RPC).
     pub logs: LogsState,
+    /// Inbox screen cache (e38.14), filled from the `hangar/inbox_list` snapshot
+    /// (the aggregated issue/comment/task entries + the unread count).
+    pub inbox: InboxState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -228,6 +232,10 @@ pub struct ScreenStates {
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
     pub pending_logs_refresh: bool,
+    /// Set when the inbox screen's `r` key asked to mark all read (e38.14),
+    /// awaiting the `render` pass to fire `hangar/inbox_mark_read` over the daemon
+    /// socket. Drained by the `render` pass. `false` when idle.
+    pub pending_inbox_mark_read: bool,
 }
 
 impl Default for SkillManagerState {
@@ -280,6 +288,22 @@ impl ScreenStates {
     pub const fn take_pending_logs_refresh(&mut self) -> bool {
         let pending = self.pending_logs_refresh;
         self.pending_logs_refresh = false;
+        pending
+    }
+
+    /// Replace the inbox cache from a `hangar/inbox_list` snapshot (e38.14).
+    pub fn set_inbox(
+        &mut self,
+        entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
+        unread: i64,
+    ) {
+        self.inbox = InboxState::from_snapshot(entries, unread);
+    }
+
+    /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
+    pub const fn take_pending_inbox_mark_read(&mut self) -> bool {
+        let pending = self.pending_inbox_mark_read;
+        self.pending_inbox_mark_read = false;
         pending
     }
 
@@ -441,6 +465,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::Logs => {
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
+        }
+        Screen::Inbox => {
+            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox);
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -636,6 +663,15 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                 if states.logs.handle_key(c) {
                     states.pending_logs_refresh = true;
                 }
+            }
+            None
+        }
+        Screen::Inbox => {
+            // The inbox owns the mark-all-read key (`r`): it flags a deferred
+            // `hangar/inbox_mark_read` request the `render` pass fires, after
+            // which the re-pulled snapshot drops the unread badge to zero.
+            if key_char(key) == Some('r') {
+                states.pending_inbox_mark_read = true;
             }
             None
         }

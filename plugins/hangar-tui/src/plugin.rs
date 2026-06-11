@@ -109,6 +109,12 @@ const ISSUE_CREATE_REQ_ID: i64 = 27;
 /// JSON-RPC id for the `hangar/members_list` snapshot request feeding the
 /// settings Members pane (e38.11).
 const MEMBERS_REQ_ID: i64 = 28;
+/// JSON-RPC id for the `hangar/inbox_list` snapshot request feeding the Inbox
+/// screen (e38.14).
+const INBOX_LIST_REQ_ID: i64 = 29;
+/// JSON-RPC id for a `hangar/inbox_mark_read` request raised by the Inbox `r`
+/// key (e38.14).
+const INBOX_MARK_READ_REQ_ID: i64 = 30;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -433,11 +439,12 @@ impl HangarPlugin {
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
+            RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
-            // kanban task transition, issue assign) answer with the changed row or
-            // `{}`; we re-fetch the relevant lists to refresh derived columns
-            // (`used`, next-tick, enabled, last-run, task status buckets, issue
-            // assignee).
+            // kanban task transition, issue assign, inbox mark-read) answer with
+            // the changed row or `{}`; we re-fetch the relevant lists to refresh
+            // derived columns (`used`, next-tick, enabled, last-run, task status
+            // buckets, issue assignee, inbox unread count).
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
@@ -446,7 +453,8 @@ impl HangarPlugin {
                 | AUTOPILOT_TOGGLE_REQ_ID
                 | TASK_TRANSITION_REQ_ID
                 | ISSUE_UPDATE_REQ_ID
-                | ISSUE_CREATE_REQ_ID,
+                | ISSUE_CREATE_REQ_ID
+                | INBOX_MARK_READ_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -486,6 +494,18 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_members(r.members);
+            }
+        }
+    }
+
+    /// Populate the Inbox screen from a `hangar/inbox_list` result (e38.14): the
+    /// aggregated issue/comment/task entries + the unread count for the badge.
+    fn apply_inbox(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::InboxListResult>(
+                result.clone(),
+            ) {
+                self.screens.set_inbox(r.entries, r.unread);
             }
         }
     }
@@ -550,6 +570,30 @@ impl HangarPlugin {
             ainb_hangar_core::logs::read_tail(&dir, LOGS_TAIL_LINES, filter)
         });
         self.screens.set_logs(lines);
+    }
+
+    /// Fire a deferred `hangar/inbox_mark_read` raised by the inbox `r` key
+    /// (e38.14): mark every unread entry read, framed over the socket cap. The
+    /// mutating-RPC reply re-fetches the snapshots so the unread badge drops to
+    /// zero. A send failure is logged but non-fatal — the badge simply stays.
+    async fn mark_inbox_read(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws });
+        let Ok(body) = encode_request(
+            INBOX_MARK_READ_REQ_ID,
+            daemon_methods::HANGAR_INBOX_MARK_READ,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: inbox mark-read send failed: {e}"))
+                .await;
+        }
     }
 
     /// Fold a `hangar/autopilot_runs` result onto the autopilot-manager screen
@@ -658,6 +702,11 @@ impl HangarPlugin {
             (
                 MEMBERS_REQ_ID,
                 daemon_methods::HANGAR_MEMBERS_LIST,
+                scoped.clone(),
+            ),
+            (
+                INBOX_LIST_REQ_ID,
+                daemon_methods::HANGAR_INBOX_LIST,
                 scoped.clone(),
             ),
             (
@@ -1247,6 +1296,12 @@ impl Plugin for HangarPlugin {
         let on_logs = matches!(self.app_state().screen, Screen::Logs);
         if on_logs || self.screens.take_pending_logs_refresh() {
             self.refresh_logs();
+        }
+        // e38.14: drain a deferred inbox mark-all-read (`r` on the inbox) and fire
+        // `hangar/inbox_mark_read` over the daemon socket. The mutating-RPC reply
+        // re-fetches the snapshots, so the unread badge drops to zero next render.
+        if self.screens.take_pending_inbox_mark_read() {
+            self.mark_inbox_read(host).await;
         }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch

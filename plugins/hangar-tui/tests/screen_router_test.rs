@@ -41,6 +41,19 @@ fn reduce_tab_key_2_only_valid_when_task_selected() {
     assert_eq!(out2.state.screen, Screen::TaskDetail(task));
 }
 
+/// Pressing `I` routes to the notification inbox from any screen (e38.14).
+#[test]
+fn reduce_tab_key_i_switches_to_inbox() {
+    // Start somewhere other than the inbox.
+    let mut s = issue_list_state();
+    s.screen = Screen::SkillManager;
+
+    let out = reduce(&s, AppEvent::Key('I'));
+
+    assert_eq!(out.state.screen, Screen::Inbox);
+    assert!(out.intent.is_none());
+}
+
 /// Esc from a modal overlay returns to the screen that opened it.
 ///
 /// The modal is opened from a **non-default** screen (`SkillManager`) so the

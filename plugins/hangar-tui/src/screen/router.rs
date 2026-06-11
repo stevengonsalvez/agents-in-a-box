@@ -48,6 +48,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'D' => switch_tab(state, Screen::DaemonHealth),
         // `L` (capital) opens the logs-tail pane from anywhere (P8.6).
         'L' => switch_tab(state, Screen::Logs),
+        // `I` (capital) opens the notification inbox from anywhere (e38.14).
+        'I' => switch_tab(state, Screen::Inbox),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.

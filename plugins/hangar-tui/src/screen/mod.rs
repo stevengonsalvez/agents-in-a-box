@@ -18,6 +18,7 @@ pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
 pub mod daemon_health;
+pub mod inbox;
 pub mod issue_list;
 pub mod kanban;
 pub mod logs;
@@ -61,6 +62,9 @@ pub enum Screen {
     /// Logs tail (hotkey `L`) — a read-only, level-filterable view over the
     /// daemon's structured JSON log file (P8.6).
     Logs,
+    /// Notification inbox (hotkey `I`) — the aggregated issue/comment/task
+    /// events with an unread badge, backed by `hangar/inbox_list` (e38.14).
+    Inbox,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -81,6 +85,7 @@ impl Screen {
             Self::Kanban => "Kanban",
             Self::DaemonHealth => "Daemon",
             Self::Logs => "Logs",
+            Self::Inbox => "Inbox",
             Self::Settings => "Settings",
             Self::Help => "Help",
         }

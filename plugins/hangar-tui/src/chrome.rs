@@ -31,7 +31,7 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// its switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip
 /// even though it is only reachable with a selection — it keeps the tab
 /// positions stable so the eye doesn't jump when a task is opened.
-const PRIMARY_TABS: [(char, &str); 8] = [
+const PRIMARY_TABS: [(char, &str); 9] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('4', "Skills"),
@@ -39,6 +39,7 @@ const PRIMARY_TABS: [(char, &str); 8] = [
     ('K', "Kanban"),
     ('D', "Daemon"),
     ('L', "Logs"),
+    ('I', "Inbox"),
     (',', "Settings"),
 ];
 
@@ -149,6 +150,8 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         // logs pane (its level-filter chips `a`/`i`/`w`/`e` carry their hints in
         // the body next to each chip, not in the footer).
         Screen::DaemonHealth | Screen::Logs => vec![],
+        // The inbox surfaces its mark-all-read key (e38.14).
+        Screen::Inbox => vec![("r", "mark read")],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -172,6 +175,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         'K' => matches!(active, Screen::Kanban),
         'D' => matches!(active, Screen::DaemonHealth),
         'L' => matches!(active, Screen::Logs),
+        'I' => matches!(active, Screen::Inbox),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }
@@ -291,6 +295,7 @@ mod tests {
             Screen::SkillManager,
             Screen::Autopilots,
             Screen::Kanban,
+            Screen::Inbox,
             Screen::Settings,
             Screen::Help,
         ] {
