@@ -190,6 +190,31 @@ impl AutopilotRepo {
         Ok(row)
     }
 
+    /// Fetch one autopilot by id alone (workspace-agnostic).
+    ///
+    /// This is the deliberate exception to the workspace-scoping rule, used only
+    /// by the webhook ingress: the webhook URL carries a ULID autopilot id (not a
+    /// workspace), and the row's owning workspace is intrinsic to it. Every other
+    /// by-id read MUST use [`AutopilotRepo::get`] with an explicit workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn get_by_id(
+        pool: &SqlitePool,
+        id: &AutopilotId,
+    ) -> Result<Option<Autopilot>, AutopilotRepoError> {
+        let row = sqlx::query_as::<_, Autopilot>(
+            "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
+                    max_concurrent_runs, next_tick_at, enabled, created_at \
+             FROM autopilot WHERE id = ?",
+        )
+        .bind(id.as_str())
+        .fetch_optional(pool)
+        .await?;
+        Ok(row)
+    }
+
     /// Disable an autopilot, scoped to `workspace`. Leaves `next_tick_at`
     /// untouched (it is ignored while disabled), preserving the cached value for
     /// re-enable inspection. A foreign id touches no row.

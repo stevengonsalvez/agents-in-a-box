@@ -147,6 +147,46 @@ impl AutopilotWebhookRepo {
         )
     }
 
+    /// Resolve a full autopilot row **plus** its webhook config by id alone — the
+    /// shape the HTTP ingress needs, since the webhook URL carries only the
+    /// autopilot id (a ULID, not workspace-qualified). The autopilot's owning
+    /// workspace is intrinsic to the row, so this is the deliberate one place
+    /// without a workspace argument: the id itself is the unguessable credential,
+    /// and the per-autopilot HMAC secret is what actually authorises a fire.
+    ///
+    /// Returns `None` for an unknown id (the ingress answers 404 and fires
+    /// nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sqlx::Error`] on a SQL failure.
+    pub async fn get_for_webhook(
+        pool: &SqlitePool,
+        id: &AutopilotId,
+    ) -> Result<Option<(super::autopilot::Autopilot, WebhookConfig)>, sqlx::Error> {
+        let autopilot =
+            super::autopilot::AutopilotRepo::get_by_id(pool, id)
+                .await
+                .map_err(|e| match e {
+                    super::autopilot::AutopilotRepoError::Db(db) => db,
+                    other => sqlx::Error::Protocol(other.to_string()),
+                })?;
+        let Some(autopilot) = autopilot else {
+            return Ok(None);
+        };
+        let config = WebhookConfig {
+            enabled: false,
+            secret_sha256: None,
+            event_filter: None,
+        };
+        // Re-read the webhook columns scoped to the row's own workspace — the
+        // single source of truth for the config flags.
+        let ws = WorkspaceId::from_str(autopilot.workspace_id.clone())
+            .map_err(|_| sqlx::Error::RowNotFound)?;
+        let config = Self::get_config(pool, &ws, id).await?.unwrap_or(config);
+        Ok(Some((autopilot, config)))
+    }
+
     /// Set (or clear) the webhook configuration for an autopilot, scoped to
     /// `workspace`. A foreign id touches no row.
     ///
