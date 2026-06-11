@@ -44,9 +44,33 @@ pub fn render_sidebar(
     row = put_field(buf, x, row, bottom, width, "Assignee", assignee);
     row = put_field(buf, x, row, bottom, width, "Project", &issue.workspace_id);
     // Progressive disclosure: only when present.
+    if !issue.labels.is_empty() {
+        row = put_labels(buf, x, row, bottom, width, &issue.labels);
+    }
     if let Some(desc) = issue.description.as_deref() {
         let _ = put_field(buf, x, row, bottom, width, "Notes", desc);
     }
+}
+
+/// Paint a `Labels: ‹bug› ‹p0›` row at `(x, row)`: the `Labels` label in
+/// cornflower-blue followed by the violet chip run, clipped at `x + width`.
+/// Returns the next free row (a no-op returning `row` when `row >= bottom`).
+fn put_labels(
+    buf: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    bottom: u16,
+    width: u16,
+    labels: &[String],
+) -> u16 {
+    if row >= bottom {
+        return row;
+    }
+    let right = x.saturating_add(width);
+    let mut cx = put_str(buf, x, row, "Labels", LABEL, right);
+    cx = put_str(buf, cx, row, ": ", LABEL, right);
+    let _ = crate::widgets::label_chip::render_label_chips(buf, cx, row, right, labels);
+    row.saturating_add(1)
 }
 
 /// Paint a `Label: value` row at `(x, row)` clipped at `x + width`, returning the
@@ -167,5 +191,28 @@ mod tests {
             &issue(Some("needs review"), Some("member:bob")),
         );
         assert!(row_text(&buf, 3, 40).contains("needs review"));
+    }
+
+    /// Progressive disclosure: a labelled issue renders a `Labels:` chip row
+    /// after Project, and a label-less issue omits it (e38.10).
+    #[test]
+    fn labels_row_renders_when_present_and_omits_when_empty() {
+        // Label-less: no Labels row at index 3 (it would be Notes / empty).
+        let mut buf = WireBuffer::new(40, 8);
+        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, Some("member:bob")));
+        assert!(
+            !row_text(&buf, 3, 40).contains("Labels"),
+            "label-less issue must omit the Labels row"
+        );
+
+        // Labelled: the Labels row renders with the chip after Project (row 3).
+        let mut labelled = issue(None, Some("member:bob"));
+        labelled.labels = vec!["bug".into(), "p0".into()];
+        let mut buf = WireBuffer::new(40, 8);
+        render_sidebar(&mut buf, 0, 0, 8, 40, &labelled);
+        let line = row_text(&buf, 3, 40);
+        assert!(line.contains("Labels"), "Labels row label: {line:?}");
+        assert!(line.contains("‹bug›"), "bug chip: {line:?}");
+        assert!(line.contains("‹p0›"), "p0 chip: {line:?}");
     }
 }

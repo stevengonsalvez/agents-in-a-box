@@ -653,7 +653,7 @@ pub fn render_issue_list(
 
             let ax = 2u16.saturating_add(title_w).saturating_add(1);
             let assignee = r.assignee.as_deref().unwrap_or("—");
-            put_str(
+            let next_x = put_str(
                 buf,
                 ax,
                 row,
@@ -661,6 +661,15 @@ pub fn render_issue_list(
                 MUTED_GRAY,
                 area_w,
             );
+
+            // Label chips trail the assignee in whatever width is left, clipped
+            // at the area edge (a row with no labels paints nothing here).
+            if !r.labels.is_empty() {
+                let chips_x = next_x.saturating_add(1);
+                crate::widgets::label_chip::render_label_chips(
+                    buf, chips_x, row, area_w, &r.labels,
+                );
+            }
 
             visible_index = visible_index.saturating_add(1);
             row = row.saturating_add(1);
@@ -799,6 +808,31 @@ mod tests {
         assert_eq!(s.query(), "i2");
         let visible: Vec<&str> = s.visible_rows().map(|r| r.id.as_str()).collect();
         assert_eq!(visible, vec!["i2"]);
+    }
+
+    /// A labelled issue renders its label chip on the row (e38.10).
+    #[test]
+    fn labelled_issue_renders_chip() {
+        let mut r = row("i1", "open", Some("agent:claude"));
+        r.labels = vec!["bug".into()];
+        let s = IssueListState::with_rows(vec![r]);
+
+        let mut buf = WireBuffer::new(80, 8);
+        render_issue_list(&mut buf, 80, 1, 7, &s, 0);
+
+        // Reconstruct every painted row and assert the chip glyphs appear.
+        let mut painted = String::new();
+        for y in 0..8u16 {
+            for (coord, cell) in &buf.cells {
+                if coord.y == y {
+                    painted.push_str(&cell.symbol);
+                }
+            }
+        }
+        assert!(
+            painted.contains("‹bug›"),
+            "labelled issue must render its chip: {painted:?}"
+        );
     }
 
     /// The renderer draws a 50-issue fixture at the 80×24 floor without writing
