@@ -73,6 +73,15 @@ pub mod mentions;
 /// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
 /// for the process lifetime, and exposes an `otlp` seam for P8.2.
 pub mod observability;
+/// Durable issue-comment emission at run-loop lifecycle checkpoints (e38.6).
+///
+/// At each FSM checkpoint the claim loop reaches — the task starts running, and
+/// the run finishes (success / failure / timeout) —
+/// [`progress_comment::emit_checkpoint`] writes one **agent-authored** comment to
+/// the task's issue so the agent's activity survives beyond the bounded
+/// transcript buffer. Scoped to tasks bound to an issue (a `NULL`-issue chat task
+/// is skipped); best-effort (a write fault is logged, never blocks the task FSM).
+pub mod progress_comment;
 /// The daemon's `UnixListener` JSON-RPC server (P4.10).
 ///
 /// Binds `{hangar_home}/hangar.sock`, serves `workspace/subscribe`, `ping`, and
