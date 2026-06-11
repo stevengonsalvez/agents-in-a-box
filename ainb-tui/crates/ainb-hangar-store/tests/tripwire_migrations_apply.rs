@@ -936,3 +936,34 @@ async fn all_migrations_create_exactly_twenty_two_tables() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn migration_0020_adds_workspace_config_columns() {
+    // The per-workspace config surface (parity-review gap: "per-workspace context
+    // prompt + repo whitelist + issue prefix") needs the `workspace` table to
+    // carry three nullable config columns:
+    //   - `context_prompt TEXT` — injected into a task's execenv as a `CLAUDE.md`;
+    //   - `repo_whitelist TEXT` — a JSON array of allowed repos (the checkout gate);
+    //   - `issue_prefix TEXT`   — prepended to a newly-created issue's title.
+    // All three default to NULL ("not configured"), so an upgrading workspace
+    // keeps the exact pre-0020 behaviour. ALTER TABLE ADD COLUMN rewrites the
+    // catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let ws = table_sql(&pool, "workspace").await;
+    assert!(
+        ws.contains("context_prompt TEXT"),
+        "workspace.context_prompt nullable TEXT: {ws}"
+    );
+    assert!(
+        ws.contains("repo_whitelist TEXT"),
+        "workspace.repo_whitelist nullable TEXT: {ws}"
+    );
+    assert!(
+        ws.contains("issue_prefix TEXT"),
+        "workspace.issue_prefix nullable TEXT: {ws}"
+    );
+
+    pool.close().await;
+}

@@ -399,6 +399,29 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "skip",
         "0019 autopilot.concurrency_policy default skip"
     );
+
+    let ws_row = sqlx::query(
+        "SELECT context_prompt, repo_whitelist, issue_prefix FROM workspace WHERE id = ?",
+    )
+    .bind("ws-1")
+    .fetch_one(pool)
+    .await
+    .expect("workspace 0020 columns");
+    assert_eq!(
+        ws_row.get::<Option<String>, _>("context_prompt"),
+        None,
+        "0020 workspace.context_prompt default NULL"
+    );
+    assert_eq!(
+        ws_row.get::<Option<String>, _>("repo_whitelist"),
+        None,
+        "0020 workspace.repo_whitelist default NULL"
+    );
+    assert_eq!(
+        ws_row.get::<Option<String>, _>("issue_prefix"),
+        None,
+        "0020 workspace.issue_prefix default NULL"
+    );
 }
 
 #[tokio::test]
@@ -423,7 +446,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 19, "head is migration 0019");
+    assert_eq!(head_version, 20, "head is migration 0020");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
