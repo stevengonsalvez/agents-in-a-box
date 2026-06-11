@@ -460,6 +460,10 @@ async fn handle(
         methods::HANGAR_MEMBERS_LIST => handle_members_list(pool, req).await,
         methods::HANGAR_MEMBER_SET_ROLE => handle_member_set_role(pool, req).await,
         methods::HANGAR_MEMBER_REMOVE => handle_member_remove(pool, req).await,
+        methods::HANGAR_SQUADS_LIST => handle_squads_list(pool, req).await,
+        methods::HANGAR_SQUAD_CREATE => handle_squad_create(pool, req).await,
+        methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
+        methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -1137,6 +1141,124 @@ fn member_repo_err(e: &ainb_hangar_store::repo::member::MemberRepoError) -> RpcE
         }
         MemberRepoError::InvalidRole => invalid_params("role must be one of owner/admin/member"),
         MemberRepoError::Db(db) => store_err(db),
+    }
+}
+
+/// Dispatch `hangar/squads_list` (e38.17): snapshot the workspace's squads (each
+/// with its leader + members) as a
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// A read, so an unknown / foreign workspace yields an empty list (never an
+/// error), mirroring [`handle_members_list`].
+async fn handle_squads_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let squads = match resolve(pool, req).await? {
+        Some(ws) => snapshots::squads_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
+/// Dispatch `hangar/squad_create` (e38.17): create one squad with a leader and
+/// answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_member_set_role`]'s contract: the mutating handler resolves
+/// the workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a
+/// silent no-op), parses the leader actor-ref, mints a fresh squad id, then drives
+/// the workspace-scoped insert. A name already used in the workspace is rejected
+/// (the resolve-or-reject guard). The leader actor-ref is how leader-routing takes
+/// effect — an `agent` leader's id becomes a squad-assigned task's `agent_id`.
+async fn handle_squad_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::squad::SquadRepo;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::SquadCreateParams =
+        parse_params(req, "{ workspace_id, name, leader }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.name.trim().is_empty() {
+        return Err(invalid_params("squad name must not be empty"));
+    }
+    let leader = ActorRef::from_str(&params.leader).map_err(|e| {
+        invalid_params(&format!(
+            "leader must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let id = SystemIdGen.new_ulid();
+    SquadRepo::create(pool, &ws, &id, &params.name, &leader, SystemClock.now_ms())
+        .await
+        .map_err(|e| squad_repo_err(&e))?;
+    squads_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/squad_member_add` (`add = true`) and
+/// `hangar/squad_member_remove` (`add = false`) (e38.17): mutate one squad's
+/// membership and answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_squad_create`]'s contract: resolve + reject a mistyped
+/// workspace, parse the member actor-ref, then drive the workspace-scoped
+/// mutation. A `(workspace, squad_id)` pair that matches no squad is rejected as a
+/// not-found error (never a cross-tenant edit). Add is idempotent; remove of an
+/// absent member is a no-op.
+async fn handle_squad_member(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::SquadMemberParams =
+        parse_params(req, "{ workspace_id, squad_id, member }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let member = ActorRef::from_str(&params.member).map_err(|e| {
+        invalid_params(&format!(
+            "member must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let outcome = if add {
+        SquadRepo::add_member(pool, &ws, &params.squad_id, &member).await
+    } else {
+        SquadRepo::remove_member(pool, &ws, &params.squad_id, &member).await
+    };
+    outcome.map_err(|e| squad_repo_err(&e))?;
+    squads_list_value(pool, &ws).await
+}
+
+/// Re-read `ws`'s squads and serialize them as a
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult) wire
+/// value. Shared by the three squad mutations so each answers with the same
+/// refreshed view the status view renders.
+async fn squads_list_value(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+) -> Result<serde_json::Value, RpcError> {
+    let squads = snapshots::squads_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
+/// Map a [`SquadRepoError`] onto an RPC error: a duplicate-name / not-found
+/// rejection is a client error (`INVALID_PARAMS`), every store fault an internal
+/// error. Mirrors [`member_repo_err`].
+///
+/// [`SquadRepoError`]: ainb_hangar_store::repo::squad::SquadRepoError
+fn squad_repo_err(e: &ainb_hangar_store::repo::squad::SquadRepoError) -> RpcError {
+    use ainb_hangar_store::repo::squad::SquadRepoError;
+    match e {
+        SquadRepoError::DuplicateName => {
+            invalid_params("a squad with that name already exists in this workspace")
+        }
+        SquadRepoError::NotFound => invalid_params("no squad with that id in this workspace"),
+        SquadRepoError::Db(db) => store_err(db),
     }
 }
 

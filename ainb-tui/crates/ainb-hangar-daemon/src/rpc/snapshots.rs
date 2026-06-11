@@ -231,6 +231,42 @@ pub async fn members_list(
         .collect())
 }
 
+/// Snapshot the squads of `workspace_id` as wire
+/// [`SquadWireRow`](ainb_hangar_proto::snapshots::SquadWireRow)s for the
+/// `ainb hangar squad list` status view (`hangar/squads_list`, e38.17).
+///
+/// Reuses the store's [`SquadRepo`](ainb_hangar_store::repo::squad::SquadRepo)
+/// (squads ordered by name, each with its leader + member actor-refs) and renders
+/// every actor-ref to its canonical `member:<id>` / `agent:<id>` string.
+/// Workspace-scoped: a foreign / unknown workspace yields an empty vec. Shared by
+/// the list RPC and the refreshed view the create / member mutations answer with.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the squad query fails.
+pub async fn squads_list(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::SquadWireRow>, sqlx::Error> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    // A malformed (empty) workspace id resolves to no squads, not an error.
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(Vec::new());
+    };
+    let squads = SquadRepo::list(pool, &ws).await?;
+    Ok(squads
+        .into_iter()
+        .map(|s| ainb_hangar_proto::snapshots::SquadWireRow {
+            id: s.id,
+            name: s.name,
+            leader: s.leader.to_string(),
+            members: s.members.iter().map(ToString::to_string).collect(),
+        })
+        .collect())
+}
+
 /// Snapshot the skills of `workspace_id`, mapped to wire [`SkillRow`]s.
 ///
 /// `used` reflects whether any agent references the skill (via the `agent_skill`
