@@ -160,21 +160,28 @@ impl Drop for PtyWrapper {
     }
 }
 
+/// Serializes every test that touches the process-global REGISTRY — this
+/// module's wrapper tests AND embed_client's e2e tests. Both spawn PTY
+/// children registered in the SAME registry, so two independent locks don't
+/// help: one test's `kill_all_embed_children()` murders the other's live
+/// child, and `registered_embed_child_count()` assertions see each other's
+/// slots. Poison-tolerant — the lock guards ordering, not shared invariants.
+#[cfg(test)]
+pub(crate) fn lock_registry_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static REGISTRY_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+    REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use portable_pty::CommandBuilder;
     use std::time::Duration;
 
-    /// The registry is process-global; cargo runs tests in this binary on
-    /// multiple threads. Serialize the wrapper tests so one test's
-    /// `kill_all_embed_children()` cannot kill another test's live child.
-    static PTY_TEST_LOCK: StdMutex<()> = StdMutex::new(());
-
-    /// Acquire the serialization lock, tolerating poisoning from a prior
-    /// test's panic (we only guard ordering, not shared invariants).
+    /// The registry is process-global; serialize against EVERY registry-
+    /// touching test (including embed_client's) via the shared lock.
     fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
-        PTY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        lock_registry_for_test()
     }
 
     fn sleeper() -> CommandBuilder {

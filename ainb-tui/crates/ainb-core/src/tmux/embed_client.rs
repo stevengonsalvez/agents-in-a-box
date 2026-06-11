@@ -249,15 +249,16 @@ impl EmbedClient {
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
 
-    // These e2e tests each spawn a tmux client + reader thread; running them
-    // concurrently contends for the tmux server and races the attach handshake.
-    // Serialize them (poison-tolerant — we guard ordering, not invariants).
-    static EMBED_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+    // These e2e tests spawn PTY children registered in the process-global
+    // REGISTRY shared with pty_wrapper's tests, and concurrent tmux clients
+    // race the attach handshake. Serialize against EVERY registry-touching
+    // test via the one shared lock — two independent locks reproduce real
+    // cross-contamination (a sibling's kill_all_embed_children() murdering a
+    // live child here, registry-count asserts seeing foreign slots).
     fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
-        EMBED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::tmux::pty_wrapper::lock_registry_for_test()
     }
 
     // REAL tmux — these e2e tests create + destroy their own named session.
