@@ -48,6 +48,15 @@ pub mod execenv;
 ///
 /// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
 pub mod health_stats;
+/// The inbox aggregator: the writer that turns the live event stream into the
+/// durable notification inbox (e38.14).
+///
+/// [`inbox_aggregator::spawn`] subscribes to the [`events::EventBroker`] like an
+/// RPC connection does, maps each issue / comment / task
+/// [`ainb_hangar_proto::events::HangarEvent`] to one inbox row, and writes it to
+/// the `inbox_entry` table (migration 0021). This is the take-effect seam that
+/// makes the inbox a real aggregate instead of a schema with no writer.
+pub mod inbox_aggregator;
 /// Dispatch-time materialisation of an agent's skills into its per-task env
 /// (P6.4).
 ///
@@ -247,6 +256,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // emissions are dropped silently, so the broker costs nothing when no TUI
     // is attached.
     let broker = crate::events::EventBroker::new();
+
+    // e38.14: spawn the inbox aggregator — the writer half of the durable
+    // notification inbox. It subscribes to the broker (exactly like an RPC
+    // connection) and folds every issue/comment/task event into the
+    // `inbox_entry` table, so live events that were once broadcast-only now land
+    // durably with an unread count. Subscribed BEFORE the RPC server and the
+    // claim loop come up, so the first mutation's event is already aggregated.
+    // The handle is dropped (process exit tears the task down, mirroring the
+    // sweepers); a failed write is logged inside the task, never fatal.
+    let _inbox = crate::inbox_aggregator::spawn(store.pool().clone(), broker.subscribe());
 
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the
