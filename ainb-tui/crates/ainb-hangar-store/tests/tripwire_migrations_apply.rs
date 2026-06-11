@@ -775,7 +775,83 @@ async fn migration_0016_creates_label_and_issue_label_tables() {
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_nineteen_tables() {
+async fn migration_0017_creates_squad_and_squad_member_tables() {
+    // The squads surface (parity-review gap: "no squad construct — ActorKind was
+    // only {Member, Agent}, no squad table") needs a first-class workspace-scoped
+    // squad entity with a designated leader plus a membership join. Two tables
+    // land:
+    //   - `squad` (id PK, workspace_id FK, name, polymorphic leader actor-ref
+    //     `leader_type`/`leader_id` with a `('member','agent')` CHECK, created_at)
+    //     with a `(workspace_id, name)` UNIQUE index (the resolve-or-reject guard);
+    //   - `squad_member` (squad_id FK, polymorphic member actor-ref) with a
+    //     `(squad_id, member_type, member_id)` composite PK (the dedupe guard).
+    // Leader routing reuses the leader actor-ref (no new ActorKind): a
+    // squad-assigned task resolves to the leader's `agent_id` and rides the
+    // existing claim/dispatch path. `CREATE TABLE`/`CREATE INDEX` are catalog-only,
+    // so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let squad = table_sql(&pool, "squad").await;
+    assert!(
+        squad.contains("id TEXT PRIMARY KEY"),
+        "squad.id is the PK: {squad}"
+    );
+    assert!(
+        squad.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "squad.workspace_id is a non-null workspace FK: {squad}"
+    );
+    assert!(
+        squad.contains("name TEXT NOT NULL"),
+        "squad.name is non-null: {squad}"
+    );
+    assert!(
+        squad.contains("leader_type TEXT NOT NULL CHECK (leader_type IN ('member','agent'))"),
+        "squad.leader_type CHECK: {squad}"
+    );
+    assert!(
+        squad.contains("leader_id TEXT NOT NULL"),
+        "squad.leader_id is non-null: {squad}"
+    );
+    assert!(
+        squad.contains("created_at INTEGER NOT NULL"),
+        "squad.created_at epoch millis: {squad}"
+    );
+
+    let name_idx = index_sql(&pool, "idx_squad_workspace_name").await;
+    assert!(
+        name_idx.contains("UNIQUE"),
+        "idx_squad_workspace_name is UNIQUE: {name_idx}"
+    );
+    assert!(
+        name_idx.contains("squad") && name_idx.contains("(workspace_id, name)"),
+        "idx_squad_workspace_name columns: {name_idx}"
+    );
+
+    let squad_member = table_sql(&pool, "squad_member").await;
+    assert!(
+        squad_member.contains("squad_id TEXT NOT NULL REFERENCES squad(id)"),
+        "squad_member.squad_id references squad: {squad_member}"
+    );
+    assert!(
+        squad_member
+            .contains("member_type TEXT NOT NULL CHECK (member_type IN ('member','agent'))"),
+        "squad_member.member_type CHECK: {squad_member}"
+    );
+    assert!(
+        squad_member.contains("member_id TEXT NOT NULL"),
+        "squad_member.member_id is non-null: {squad_member}"
+    );
+    assert!(
+        squad_member.contains("PRIMARY KEY (squad_id, member_type, member_id)"),
+        "squad_member has a composite PK: {squad_member}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn all_migrations_create_exactly_twenty_one_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -807,10 +883,12 @@ async fn all_migrations_create_exactly_nineteen_tables() {
         "pat",
         "skill",
         "skill_file",
+        "squad",
+        "squad_member",
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 19, "expected 19 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 21, "expected 21 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
