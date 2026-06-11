@@ -99,9 +99,7 @@ impl TmuxSession {
 
 impl Drop for TmuxSession {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.name])
-            .status();
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.name]).status();
     }
 }
 

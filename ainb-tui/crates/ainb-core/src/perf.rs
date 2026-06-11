@@ -10,9 +10,9 @@
 // This is a measurement aid retained behind a flag (not a product feature).
 // Run with `AINB_PERF_TRACE=1 ainb 2> perf.log` and read the summary at exit.
 
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Whether tracing is active for this process. Resolved once from the
@@ -167,11 +167,7 @@ fn summary_string() -> String {
     let git = m.git_resolves.load(Ordering::Relaxed);
     let keys = m.keys_seen.load(Ordering::Relaxed);
     let first_paint = m.first_paint_ns.get().copied().unwrap_or(0);
-    let mut samples = m
-        .key_to_render_ns
-        .lock()
-        .map(|v| v.clone())
-        .unwrap_or_default();
+    let mut samples = m.key_to_render_ns.lock().map(|v| v.clone()).unwrap_or_default();
     samples.sort_unstable();
 
     let ms = |ns: u64| ns as f64 / 1_000_000.0;
@@ -182,7 +178,12 @@ fn summary_string() -> String {
     let _ = writeln!(s, "cold start -> first paint : {:.2} ms", ms(first_paint));
     let _ = writeln!(s, "frames drawn             : {frames}");
     let _ = writeln!(s, "keys received            : {keys}");
-    let _ = writeln!(s, "draw avg / max           : {:.3} / {:.3} ms", ms(avg_draw), ms(draw_max));
+    let _ = writeln!(
+        s,
+        "draw avg / max           : {:.3} / {:.3} ms",
+        ms(avg_draw),
+        ms(draw_max)
+    );
     let _ = writeln!(s, "total time in draw()     : {:.1} ms", ms(draw_total));
     let _ = writeln!(s, "favorites store loads    : {fav}");
     let _ = writeln!(s, "git remote resolves      : {git}");
