@@ -93,6 +93,9 @@ pub enum HangarCommand {
     /// Edit, archive, and list workspace agents.
     #[command(subcommand)]
     Agent(AgentCommand),
+    /// List, re-role, and remove workspace members.
+    #[command(subcommand)]
+    Member(MemberCommand),
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
@@ -300,6 +303,87 @@ pub struct AgentArchiveArgs {
     /// `default` workspace.
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// `hangar member <verb>`.
+///
+/// The workspace-membership surface (e38.11): `list` shows the workspace's
+/// members with their roles; `set-role` changes one member's role
+/// (`owner`/`admin`/`member`); `remove` drops a member's membership (the `user`
+/// row survives). Every verb is workspace-scoped (`--workspace`, else the
+/// bootstrapped `default`). Both mutations guard the last-owner invariant — a
+/// workspace must always keep at least one owner, so demoting or removing the sole
+/// owner is rejected.
+#[derive(Subcommand, Debug)]
+pub enum MemberCommand {
+    /// List the workspace's members (email + role).
+    List(MemberListArgs),
+    /// Change a member's role (`owner` / `admin` / `member`).
+    #[command(name = "set-role")]
+    SetRole(MemberSetRoleArgs),
+    /// Remove a member from the workspace (the user row survives).
+    Remove(MemberRemoveArgs),
+}
+
+/// Arguments for `hangar member list`.
+#[derive(Args, Debug)]
+pub struct MemberListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member set-role`.
+#[derive(Args, Debug)]
+pub struct MemberSetRoleArgs {
+    /// The member's user id (`user.id`).
+    pub user_id: String,
+    /// The new role: `owner`, `admin`, or `member`.
+    #[arg(value_enum)]
+    pub role: MemberRoleArg,
+    /// Workspace slug the member belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member remove`.
+#[derive(Args, Debug)]
+pub struct MemberRemoveArgs {
+    /// The member's user id (`user.id`) to remove.
+    pub user_id: String,
+    /// Workspace slug the member belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// The closed role set for `hangar member set-role`, mirroring the store's
+/// [`MemberRole`](ainb_hangar_store::repo::member::MemberRole) and migration
+/// 0001's `CHECK`. Constraining it at the CLI surface rejects a junk role before
+/// it ever reaches the store.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberRoleArg {
+    /// Full administrative control; a workspace must always keep one.
+    Owner,
+    /// Elevated management, short of ownership.
+    Admin,
+    /// A regular member.
+    Member,
+}
+
+impl MemberRoleArg {
+    /// Map the CLI role onto the store's [`MemberRole`].
+    ///
+    /// [`MemberRole`]: ainb_hangar_store::repo::member::MemberRole
+    const fn to_repo(self) -> ainb_hangar_store::repo::member::MemberRole {
+        use ainb_hangar_store::repo::member::MemberRole;
+        match self {
+            Self::Owner => MemberRole::Owner,
+            Self::Admin => MemberRole::Admin,
+            Self::Member => MemberRole::Member,
+        }
+    }
 }
 
 /// Parse a `--env KEY=VALUE` argument into a `(key, value)` pair.
@@ -802,6 +886,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
         HangarCommand::Agent(c) => dispatch_agent(c, format).await,
+        HangarCommand::Member(c) => dispatch_member(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
@@ -1281,6 +1366,102 @@ async fn run_agent_set_archived(
 #[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
 fn clear_or_set(clear: bool, value: Option<String>) -> Option<Option<String>> {
     if clear { Some(None) } else { value.map(Some) }
+}
+
+/// Dispatch the `hangar member` verbs (e38.11).
+///
+/// Opens the store, resolves the workspace the same way the skills/agent verbs do,
+/// and drives the workspace-scoped [`MemberRepo`]. `list` shows the members;
+/// `set-role` changes a role; `remove` drops a membership. Both mutations surface
+/// the store's last-owner guard as a CLI error (a workspace must keep an owner).
+///
+/// [`MemberRepo`]: ainb_hangar_store::repo::member::MemberRepo
+async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        MemberCommand::List(args) => run_member_list(&store, args, format).await,
+        MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
+        MemberCommand::Remove(args) => run_member_remove(&store, args).await,
+    }
+}
+
+/// `hangar member list`: list the workspace's members (email + role).
+async fn run_member_list(store: &Store, args: MemberListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    // A missing/empty workspace lists as no members, not an error (mirrors agents).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_member_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let members = MemberRepo::list(store.pool(), &ws).await.context("list members")?;
+    render_member_list(&members, format);
+    Ok(())
+}
+
+/// `hangar member set-role`: change a member's role, workspace-scoped. The
+/// store's last-owner guard rejects demoting the workspace's sole owner; a member
+/// id outside the workspace is reported as a not-found error.
+async fn run_member_set_role(store: &Store, args: MemberSetRoleArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    MemberRepo::set_role(store.pool(), &ws, &args.user_id, args.role.to_repo())
+        .await
+        .map_err(member_cli_err)?;
+    println!(
+        "set role of member {} to {}",
+        args.user_id,
+        args.role.to_repo().as_str()
+    );
+    Ok(())
+}
+
+/// `hangar member remove`: drop a member's membership, workspace-scoped. The
+/// store's last-owner guard rejects removing the workspace's sole owner.
+async fn run_member_remove(store: &Store, args: MemberRemoveArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    MemberRepo::remove(store.pool(), &ws, &args.user_id)
+        .await
+        .map_err(member_cli_err)?;
+    println!("removed member {}", args.user_id);
+    Ok(())
+}
+
+/// Map a [`MemberRepoError`] onto a human CLI error, surfacing the not-found and
+/// last-owner rejections with their own clear messages.
+///
+/// [`MemberRepoError`]: ainb_hangar_store::repo::member::MemberRepoError
+fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::member::MemberRepoError;
+    match e {
+        MemberRepoError::NotFound => {
+            anyhow::anyhow!("no member with that user id in this workspace")
+        }
+        MemberRepoError::LastOwner => {
+            anyhow::anyhow!("a workspace must always keep at least one owner")
+        }
+        other => anyhow::Error::new(other).context("member mutation failed"),
+    }
 }
 
 /// Dispatch the `hangar skills` verbs.
@@ -2565,6 +2746,77 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         thinking,
         args,
         env,
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Member render helpers (pure, over the store's Member row — e38.11).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a slice of members as a list in the chosen format (user id, email, role).
+fn render_member_list(members: &[ainb_hangar_store::repo::member::Member], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = members.iter().map(member_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", member_csv_header());
+            for m in members {
+                println!("{}", member_csv_row(m));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", member_md_header());
+            for m in members {
+                println!("{}", member_md_row(m));
+            }
+        }
+        OutputFormat::Text => {
+            if members.is_empty() {
+                println!("no members");
+            } else {
+                for m in members {
+                    println!("{}", member_line(m));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a member (user id, email, role).
+fn member_line(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!("{}  {}  role={}", m.user_id, m.email, m.role)
+}
+const fn member_csv_header() -> &'static str {
+    "user_id,email,role"
+}
+fn member_csv_row(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "{},{},{}",
+        csv_field(&m.user_id),
+        csv_field(&m.email),
+        csv_field(&m.role),
+    )
+}
+const fn member_md_header() -> &'static str {
+    "| user_id | email | role |\n| --- | --- | --- |\n"
+}
+fn member_md_row(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "| {} | {} | {} |",
+        md_cell(&m.user_id),
+        md_cell(&m.email),
+        md_cell(&m.role),
+    )
+}
+/// Minimal stable JSON object for one member (user id, email, role).
+fn member_to_json(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "{{\"user_id\":{},\"email\":{},\"role\":{}}}",
+        json_string(&m.user_id),
+        json_string(&m.email),
+        json_string(&m.role),
     )
 }
 

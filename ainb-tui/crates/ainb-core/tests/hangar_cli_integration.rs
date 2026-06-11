@@ -750,3 +750,90 @@ fn issue_search_blank_query_matches_nothing() {
         "a blank query must match nothing, not dump the board:\n{out}"
     );
 }
+
+/// `ainb hangar member --help` lists the three e38.11 verbs.
+#[test]
+fn member_help_lists_verbs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, out) = run(tmp.path(), &["hangar", "member", "--help"]);
+    assert!(ok, "member --help should exit 0; out={out}");
+    for verb in ["list", "set-role", "remove"] {
+        assert!(out.contains(verb), "member --help missing '{verb}':\n{out}");
+    }
+}
+
+/// Pull the bootstrapped owner's user id from `member list --format json`.
+fn owner_user_id(home: &std::path::Path) -> String {
+    let (ok, out) = run(home, &["--format", "json", "hangar", "member", "list"]);
+    assert!(ok, "member list should exit 0; out={out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("member list is JSON");
+    v.as_array()
+        .and_then(|a| a.first())
+        .and_then(|m| m["user_id"].as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| panic!("member list carries a user id:\n{out}"))
+}
+
+/// `ainb hangar member list` shows the lazily-bootstrapped owner with their
+/// email + role (a real-binary round-trip through `MemberRepo`).
+#[test]
+fn member_list_shows_bootstrapped_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `issue create` lazily bootstraps the default workspace + owner member.
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "member", "list"]);
+    assert!(ok, "member list should exit 0; out={out}");
+    assert!(
+        out.contains("stevie@local") && out.contains("role=owner"),
+        "member list must show the bootstrapped owner:\n{out}"
+    );
+}
+
+/// The last-owner guard over the CLI: demoting the sole owner is rejected (a
+/// workspace must always keep an owner).
+#[test]
+fn member_set_role_rejects_demoting_the_only_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+    let owner = owner_user_id(tmp.path());
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "member", "set-role", &owner, "admin"],
+    );
+    assert!(!ok, "demoting the only owner must fail; out={out}");
+    assert!(
+        out.contains("at least one owner"),
+        "the last-owner guard message must surface:\n{out}"
+    );
+
+    // The owner is untouched.
+    let (_ok, list) = run(tmp.path(), &["hangar", "member", "list"]);
+    assert!(
+        list.contains("role=owner"),
+        "rejected demotion must leave the owner role:\n{list}"
+    );
+}
+
+/// The last-owner guard over the CLI: removing the sole owner is rejected.
+#[test]
+fn member_remove_rejects_removing_the_only_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+    let owner = owner_user_id(tmp.path());
+
+    let (ok, out) = run(tmp.path(), &["hangar", "member", "remove", &owner]);
+    assert!(!ok, "removing the only owner must fail; out={out}");
+    assert!(
+        out.contains("at least one owner"),
+        "the last-owner guard message must surface:\n{out}"
+    );
+
+    // The owner is still listed.
+    let (_ok, list) = run(tmp.path(), &["hangar", "member", "list"]);
+    assert!(
+        list.contains("stevie@local"),
+        "rejected removal must leave the owner:\n{list}"
+    );
+}
