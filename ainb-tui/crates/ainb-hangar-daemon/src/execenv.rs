@@ -36,7 +36,16 @@ use serde::{Deserialize, Serialize};
 
 /// Age (in milliseconds) past which an orphan dir (no `.gc_meta.json`) is
 /// removed by the orphan scanner. Matches Multica's 72h GC grace window.
-const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
+pub const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
+
+/// The name of the per-task GC marker file. A `{shortID}` root carrying this
+/// file is a *live* (tracked) task dir; one missing it is an orphan candidate.
+const GC_META_FILE: &str = ".gc_meta.json";
+
+/// The relative path from the Hangar home to the per-workspace task-dir tree:
+/// `{home}/.ainb/hangar/workspaces/`. The scheduled GC sweep
+/// ([`sweep_workspaces_gc`]) walks `<this>/{ws_slug}/{shortID}/`.
+const WORKSPACES_SUBPATH: [&str; 3] = [".ainb", "hangar", "workspaces"];
 
 /// The per-task context file written into [`ExecEnv::workdir`] from the
 /// workspace's `context_prompt` (e38.21).
@@ -262,6 +271,94 @@ pub fn cleanup(env: &ExecEnv, kind: CleanupKind) -> io::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The tally of one [`sweep_workspaces_gc`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcSweepReport {
+    /// Per-task `{shortID}` dirs reclaimed this pass (orphan: no marker, mtime
+    /// past the 72h grace).
+    pub reclaimed: u64,
+    /// Per-task `{shortID}` dirs left in place this pass (live/marked, or a young
+    /// orphan still inside the grace window).
+    pub retained: u64,
+}
+
+/// Walk the live workspace tree under `home` and reclaim every orphaned per-task
+/// dir, returning the reclaim/retain tally.
+///
+/// This is the **scheduled** counterpart to [`cleanup`] with
+/// [`CleanupKind::OrphanScan`]: rather than acting on a single known
+/// [`ExecEnv`], it enumerates `{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/`
+/// and applies the same orphan rule to each `{shortID}` root —
+///
+/// - **reclaim** (`rm -rf`) a root that has **no** `.gc_meta.json` marker AND
+///   whose mtime is older than [`ORPHAN_GRACE_MS`] (72h) relative to `now_ms`;
+/// - **retain** a live (marked) root, and a young orphan still inside the grace
+///   window (a freshly-leaked dir gets the grace before it is treated as a
+///   permanent leak).
+///
+/// `now_ms` is injected (epoch milliseconds) so the 72h comparison is
+/// deterministic under test; production passes the daemon clock's `now_ms()`.
+///
+/// The walk is tolerant of a missing tree (a daemon that never dispatched a task
+/// has no `workspaces/` dir → a clean no-op) and of non-directory or unreadable
+/// entries (skipped, never fatal): a GC pass must never down the daemon.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] only if a present, readable orphan root cannot be
+/// removed or its mtime cannot be read — the same failure surface as [`cleanup`].
+pub fn sweep_workspaces_gc(home: &Path, now_ms: i64) -> io::Result<GcSweepReport> {
+    let mut root = home.to_path_buf();
+    for seg in WORKSPACES_SUBPATH {
+        root.push(seg);
+    }
+
+    let mut report = GcSweepReport::default();
+    // `workspaces/{ws_slug}/{shortID}/` — two levels deep. A missing tree (no
+    // task ever dispatched) yields an empty report rather than an error.
+    for ws_dir in subdirs(&root)? {
+        for task_root in subdirs(&ws_dir)? {
+            if is_orphan_root(&task_root, now_ms)? {
+                remove_tree(&task_root)?;
+                report.reclaimed += 1;
+            } else {
+                report.retained += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Whether a per-task `{shortID}` root is a reclaimable orphan: it carries **no**
+/// `.gc_meta.json` marker AND its mtime is older than the 72h grace relative to
+/// `now_ms`. A marked (live) root or a young orphan returns `false`.
+fn is_orphan_root(task_root: &Path, now_ms: i64) -> io::Result<bool> {
+    if task_root.join(GC_META_FILE).exists() {
+        return Ok(false); // marked → live, leave it.
+    }
+    is_older_than(task_root, now_ms, ORPHAN_GRACE_MS)
+}
+
+/// List the immediate sub*directories* of `dir`, sorted for deterministic
+/// iteration. A missing `dir` yields an empty list (the caller treats an absent
+/// workspace tree as "nothing to sweep"); non-directory entries are skipped.
+fn subdirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// `rm -rf` a directory, treating "already gone" as success.
