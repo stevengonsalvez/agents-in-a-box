@@ -851,7 +851,7 @@ async fn migration_0017_creates_squad_and_squad_member_tables() {
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_twenty_one_tables() {
+async fn all_migrations_create_exactly_twenty_two_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -872,6 +872,7 @@ async fn all_migrations_create_exactly_twenty_one_tables() {
         "agent_task_queue",
         "autopilot",
         "autopilot_run",
+        "autopilot_webhook_delivery",
         "beads_mapping",
         "comment",
         "daemon_socket_token",
@@ -888,7 +889,7 @@ async fn all_migrations_create_exactly_twenty_one_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 21, "expected 21 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 22, "expected 22 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
