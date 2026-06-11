@@ -104,10 +104,10 @@ update_agent_skills() {
       for sub in "$aig_tmp/repo/skills"/*/; do
         local sub_name
         sub_name=$(basename "$sub")
-        if [ -f "$sub/SKILL.md" ]; then
+        if [ -n "$sub_name" ] && [ -f "$sub/SKILL.md" ]; then
           rm -rf "$AS_DIR/$sub_name"
           mkdir -p "$AS_DIR/$sub_name"
-          cp -R "$sub". "$AS_DIR/$sub_name/"
+          cp -R "$sub/." "$AS_DIR/$sub_name/"
           echo "    Installed/updated $sub_name"
         fi
       done
