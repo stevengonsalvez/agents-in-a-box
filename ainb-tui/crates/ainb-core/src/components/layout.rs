@@ -1468,6 +1468,48 @@ mod menu_bar_tests {
             );
         }
     }
+
+    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (100),
+    /// which is also where its columns are narrowest and clipping would first
+    /// bite. Render at the boundary and assert the longest token in each column
+    /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
+    /// content rows keep their edge padding — the centred Paragraphs would eat
+    /// both ends if a line overflowed its half.
+    #[test]
+    fn menu_bar_two_col_no_clip_at_threshold_width() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        // Took the split path, not the stacked fallback.
+        assert!(
+            rendered.contains('│'),
+            "no divider at threshold:\n{rendered}"
+        );
+        for token in ["re-auth", "recreate", "del-sel", "abtop", "home", "witr"] {
+            assert!(
+                rendered.contains(token),
+                "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
+            );
+        }
+        // Inner edges (cols 1 and 98) must stay blank on every content row.
+        for y in 1..=4u16 {
+            let left = buf.get(1, y).symbol().to_string();
+            let right = buf.get(98, y).symbol().to_string();
+            assert!(
+                left == " " && right == " ",
+                "menu row {y} clipped to the edge at width 100. left={left:?} right={right:?}"
+            );
+        }
+    }
 }
 
 /// Helper function to create a centered rectangle
