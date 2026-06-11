@@ -381,6 +381,33 @@ pub const HANGAR_HEALTH: &str = "hangar/health";
 /// view-layer snapshot, **not** a persisted aggregate.
 pub const HANGAR_DAEMON_HEALTH: &str = "hangar/daemon_health";
 
+/// `hangar/inbox_list` — snapshot the aggregated notification inbox of a
+/// workspace (e38.14).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::InboxListResult`] — the workspace's inbox entries
+/// (newest-first) plus the unread count. Drives the Inbox screen's list + unread
+/// badge. The entries are the durable aggregate the daemon's inbox writer folds
+/// live issue / comment / task events into (store migration 0021), so an event
+/// that fired while no plugin was attached is still here. Workspace-scoped like
+/// every snapshot: a foreign / unknown workspace yields an empty list + zero
+/// unread (a read, so no `INVALID_PARAMS` rejection — mirrors `issues_list`).
+pub const HANGAR_INBOX_LIST: &str = "hangar/inbox_list";
+
+/// `hangar/inbox_mark_read` — mark a workspace's inbox entries read (e38.14).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::InboxMarkReadResult`] — how many entries the sweep
+/// flipped + the unread count after (which is `0` for a whole-workspace sweep).
+/// This is the mark-read sweep: it stamps `read_at` on every currently-unread
+/// entry so the unread count drops to zero. Idempotent (a re-sweep flips nothing
+/// and leaves already-read entries on their original timestamp).
+///
+/// Mutating + workspace-scoped: the daemon resolves the workspace and rejects a
+/// mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
+/// `hangar/task_transition`); a sibling tenant's inbox is never touched.
+pub const HANGAR_INBOX_MARK_READ: &str = "hangar/inbox_mark_read";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -432,6 +459,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_ASSIGN,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
+    HANGAR_INBOX_LIST,
+    HANGAR_INBOX_MARK_READ,
     AUTH_HELLO,
     PING,
 ];
@@ -503,6 +532,8 @@ mod tests {
             HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
+            HANGAR_INBOX_LIST,
+            HANGAR_INBOX_MARK_READ,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -550,6 +581,8 @@ mod tests {
             HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
+            HANGAR_INBOX_LIST,
+            HANGAR_INBOX_MARK_READ,
             AUTH_HELLO,
             PING,
         ];

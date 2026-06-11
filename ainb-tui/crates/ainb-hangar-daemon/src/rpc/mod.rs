@@ -467,6 +467,8 @@ async fn handle(
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
+        methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
+        methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -1516,6 +1518,41 @@ async fn handle_daemon_health(
         .await
         .map_err(|e| store_err(&e))?;
     to_value(&snapshot)
+}
+
+/// Dispatch `hangar/inbox_list` (e38.14): snapshot the workspace's aggregated
+/// inbox + unread count. A read like `hangar/issues_list`: an unknown workspace
+/// yields an empty list + zero unread (no `INVALID_PARAMS` rejection). Split out
+/// of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_inbox_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let (entries, unread) = match resolve(pool, req).await? {
+        Some(ws) => snapshots::inbox_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => (Vec::new(), 0),
+    };
+    to_value(&ainb_hangar_proto::snapshots::InboxListResult { entries, unread })
+}
+
+/// Dispatch `hangar/inbox_mark_read` (e38.14): mark every currently-unread inbox
+/// entry in the workspace read, then answer with how many were flipped + the
+/// post-sweep unread count.
+///
+/// A mutating handler: it resolves the workspace and **rejects** a mistyped one
+/// with `INVALID_PARAMS` (never a silent no-op, mirroring [`handle_comment_add`]),
+/// so a typo'd workspace can never quietly "succeed" while marking nothing. The
+/// sweep is workspace-scoped, so a sibling tenant's inbox is never touched.
+async fn handle_inbox_mark_read(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let wire = workspace_id(req)?;
+    let ws = resolve_wire_or_reject(pool, &wire).await?;
+    let (marked, unread) = snapshots::inbox_mark_read(pool, &SystemClock, ws.as_str())
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::InboxMarkReadResult { marked, unread })
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).

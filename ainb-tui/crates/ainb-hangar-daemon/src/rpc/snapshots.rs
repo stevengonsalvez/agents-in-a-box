@@ -20,8 +20,8 @@ use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AutopilotRow, AutopilotRunRow, CommentRow, IssueRow, PresenceState, SkillFile,
-    SkillRow, TaskCardRow,
+    ActorRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow, PresenceState,
+    SkillFile, SkillRow, TaskCardRow,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
@@ -29,6 +29,7 @@ use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
+use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
@@ -693,6 +694,66 @@ pub async fn tasks_list(
         });
     }
     Ok(out)
+}
+
+/// Cap on the inbox entries one `hangar/inbox_list` snapshot returns. The inbox
+/// is a digest, not an archive — the newest two hundred notifications are ample
+/// for the screen, and the bound keeps a long-lived workspace's snapshot small.
+const INBOX_LIST_LIMIT: i64 = 200;
+
+/// Snapshot a workspace's aggregated inbox + its unread count
+/// (`hangar/inbox_list`, e38.14).
+///
+/// Reads the durable `inbox_entry` rows the daemon's aggregator folds live
+/// issue / comment / task events into, newest-first and capped at
+/// [`INBOX_LIST_LIMIT`], plus the count of unread (`read_at IS NULL`) entries.
+/// Workspace-scoped: a foreign / unknown workspace yields an empty list + zero
+/// unread.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if either store query fails.
+pub async fn inbox_list(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<(Vec<InboxEntryRow>, i64), sqlx::Error> {
+    let entries = InboxRepo::list(pool, workspace_id, INBOX_LIST_LIMIT).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    let rows = entries
+        .into_iter()
+        .map(|e| InboxEntryRow {
+            id: e.id,
+            kind: e.kind.as_str().to_string(),
+            event: e.event,
+            subject_id: e.subject_id,
+            summary: e.summary,
+            created_at: e.created_at,
+            read_at: e.read_at,
+        })
+        .collect();
+    Ok((rows, unread))
+}
+
+/// Mark every currently-unread inbox entry in `workspace` as read, returning
+/// `(marked, unread_after)` (`hangar/inbox_mark_read`, e38.14).
+///
+/// `marked` is how many rows the sweep flipped (the unread count before);
+/// `unread_after` is the unread count once the sweep commits, which is `0` for
+/// this whole-workspace sweep. Idempotent — a re-sweep flips nothing. The daemon
+/// resolves + rejects a mistyped workspace before this call, so a missing
+/// workspace never reaches here.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the sweep or the follow-up count fails.
+pub async fn inbox_mark_read(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+) -> Result<(i64, i64), sqlx::Error> {
+    let marked = InboxRepo::mark_all_read(pool, workspace_id, clock.now_ms()).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    Ok((i64::try_from(marked).unwrap_or(i64::MAX), unread))
 }
 
 /// Move one task to `to_status`, scoped to `workspace` (`hangar/task_transition`,

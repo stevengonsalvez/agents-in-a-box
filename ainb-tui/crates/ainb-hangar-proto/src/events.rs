@@ -371,6 +371,37 @@ pub struct TaskCardRow {
     pub created_at: i64,
 }
 
+/// A wire-side aggregated inbox row for the notification inbox
+/// (`hangar/inbox_list`, e38.14).
+///
+/// One `inbox_entry` row (store migration 0021) flattened for the inbox screen.
+/// The daemon's aggregator folds live issue / comment / task events into these
+/// durable rows; the plugin renders the list + an unread badge. `read_at` is the
+/// whole unread model: `None` = unread, `Some(ms)` = read. The plugin owns zero
+/// domain data — the daemon's `SQLite` store is the source of truth; this is only
+/// the render shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxEntryRow {
+    /// The inbox entry id (ULID string, the stable id the row carries).
+    pub id: String,
+    /// The entity family the entry is about (`issue` / `comment` / `task`).
+    pub kind: String,
+    /// The wire event discriminant that produced the entry (e.g. `issue_created`,
+    /// `comment_added`, `task_queued`).
+    pub event: String,
+    /// The id of the issue / comment / task the entry addresses (deep-link target).
+    pub subject_id: String,
+    /// A short pre-rendered human line for the list row.
+    pub summary: String,
+    /// Creation timestamp (epoch milliseconds) — drives ordering + age.
+    pub created_at: i64,
+    /// When the entry was marked read (epoch milliseconds), or `None` when UNREAD.
+    /// Omitted from the wire when unread (additive) so an unread entry is just an
+    /// absent key, not a `"read_at": null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<i64>,
+}
+
 /// A wire-side comment row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentRow {

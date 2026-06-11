@@ -15,7 +15,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, SkillFile, SkillRow, TaskCardRow,
+    ActorRow, AutopilotRow, AutopilotRunRow, InboxEntryRow, IssueRow, SkillFile, SkillRow,
+    TaskCardRow,
 };
 
 /// The `{ workspace_id }` params shared by every workspace-scoped snapshot RPC.
@@ -205,6 +206,35 @@ pub struct TasksListResult {
     /// The task card rows, in daemon order (`created_at` ascending). The plugin
     /// buckets them into the four board columns by their `status`.
     pub tasks: Vec<TaskCardRow>,
+}
+
+/// Result of [`crate::methods::HANGAR_INBOX_LIST`] (e38.14): the workspace's
+/// aggregated notification entries plus the unread count.
+///
+/// `entries` are newest-first (the daemon orders `created_at DESC`); `unread` is
+/// the count of entries whose `read_at` is NULL — the badge figure the inbox
+/// screen renders. Bundling the count avoids a second round-trip: one list call
+/// answers both "what's in my inbox" and "how many are unread".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxListResult {
+    /// The aggregated inbox rows, newest-first.
+    pub entries: Vec<InboxEntryRow>,
+    /// The number of unread entries (`read_at IS NULL`) in the workspace.
+    pub unread: i64,
+}
+
+/// Result of [`crate::methods::HANGAR_INBOX_MARK_READ`] (e38.14): the unread
+/// count AFTER the sweep (which is `0` when the whole workspace was marked).
+///
+/// Returning the post-sweep unread count lets the caller update the badge without
+/// re-listing. `marked` is how many rows the sweep flipped (the unread count
+/// before the sweep), so the client can show "marked N read" feedback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxMarkReadResult {
+    /// How many entries the sweep flipped from unread to read.
+    pub marked: i64,
+    /// The unread count after the sweep (`0` for a whole-workspace sweep).
+    pub unread: i64,
 }
 
 /// Params for [`crate::methods::HANGAR_TASK_TRANSITION`]: the workspace (tenant
