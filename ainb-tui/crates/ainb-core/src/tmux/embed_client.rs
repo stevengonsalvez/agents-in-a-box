@@ -16,6 +16,49 @@ use portable_pty::CommandBuilder;
 
 use crate::tmux::pty_wrapper::PtyWrapper;
 
+/// Enforce the environment the embed's `tmux attach` client depends on.
+///
+/// portable-pty 0.9's `CommandBuilder::new` seeds the child with the FULL
+/// parent environment (`get_base_env()` copies `std::env::vars_os()`), so most
+/// vars already pass through — earlier comments here claiming an empty child
+/// env were wrong. The vars the embed genuinely NEEDS are still set explicitly
+/// so the contract holds even if that upstream default changes or the parent
+/// env is unusual:
+///  - PATH — tmux won't resolve without it.
+///  - TERM — terminal capabilities; explicit xterm-256color fallback when the
+///    parent has none.
+///  - LANG + LC_* — locale; under POSIX/C tmux renders multi-byte (UTF-8)
+///    content as underscores.
+///  - TMUX_TMPDIR — a non-default socket dir must reach the client or the
+///    attach looks for the tmux server in the wrong place and finds nothing.
+fn apply_embed_env(cmd: &mut CommandBuilder) {
+    apply_embed_env_from(cmd, std::env::vars());
+}
+
+/// Testable core of [`apply_embed_env`] — applies the enforcement policy to an
+/// explicit set of variables instead of the (process-global, racy-to-mutate)
+/// real environment.
+fn apply_embed_env_from(
+    cmd: &mut CommandBuilder,
+    vars: impl IntoIterator<Item = (String, String)>,
+) {
+    let mut term_seen = false;
+    for (key, value) in vars {
+        let pass = key == "PATH"
+            || key == "TERM"
+            || key == "LANG"
+            || key == "TMUX_TMPDIR"
+            || key.starts_with("LC_");
+        if pass {
+            term_seen |= key == "TERM";
+            cmd.env(key, value);
+        }
+    }
+    if !term_seen {
+        cmd.env("TERM", "xterm-256color");
+    }
+}
+
 /// A live `tmux attach-session` client embedded in the preview pane.
 pub struct EmbedClient {
     pty: PtyWrapper,
@@ -48,18 +91,9 @@ impl EmbedClient {
         cmd.arg("attach-session");
         cmd.arg("-t");
         cmd.arg(session_name);
-        // portable-pty's CommandBuilder does NOT inherit the parent environment,
-        // so tmux won't resolve and TERM won't be set without this.
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        cmd.env(
-            "TERM",
-            std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
-        );
+        apply_embed_env(&mut cmd);
 
-        let pty =
-            PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
+        let pty = PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
 
         let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
         let dirty = Arc::new(AtomicBool::new(true));
@@ -197,7 +231,17 @@ mod tests {
         let name = format!("ainb-embed-test-{}-{}", tag, std::process::id());
         let _ = Command::new("tmux").args(["kill-session", "-t", &name]).output();
         let ok = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &name, "-x", "80", "-y", "24", "sh"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -222,6 +266,81 @@ mod tests {
         false
     }
 
+    // ── env enforcement policy (no tmux needed) ─────────────────────────────
+    // env_clear() first: CommandBuilder::new seeds the FULL parent env
+    // (portable-pty 0.9 get_base_env), so the helper's behaviour is only
+    // observable against an emptied builder.
+    #[test]
+    fn embed_env_enforces_locale_path_term_and_tmux_tmpdir() {
+        use std::ffi::OsStr;
+        let mut cmd = CommandBuilder::new("tmux");
+        cmd.env_clear();
+        apply_embed_env_from(
+            &mut cmd,
+            vec![
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                ("TERM".to_string(), "xterm-kitty".to_string()),
+                ("LANG".to_string(), "en_GB.UTF-8".to_string()),
+                ("LC_ALL".to_string(), "en_GB.UTF-8".to_string()),
+                ("LC_CTYPE".to_string(), "UTF-8".to_string()),
+                (
+                    "TMUX_TMPDIR".to_string(),
+                    "/custom/tmux-sockets".to_string(),
+                ),
+                // Not part of the enforced set — reaches the child only via
+                // portable-pty's own base-env inheritance.
+                ("HOME".to_string(), "/Users/someone".to_string()),
+            ],
+        );
+        assert_eq!(cmd.get_env("PATH"), Some(OsStr::new("/usr/bin:/bin")));
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-kitty")));
+        assert_eq!(cmd.get_env("LANG"), Some(OsStr::new("en_GB.UTF-8")));
+        assert_eq!(cmd.get_env("LC_ALL"), Some(OsStr::new("en_GB.UTF-8")));
+        assert_eq!(cmd.get_env("LC_CTYPE"), Some(OsStr::new("UTF-8")));
+        assert_eq!(
+            cmd.get_env("TMUX_TMPDIR"),
+            Some(OsStr::new("/custom/tmux-sockets"))
+        );
+        assert_eq!(
+            cmd.get_env("HOME"),
+            None,
+            "the helper only enforces its allowlisted keys"
+        );
+    }
+
+    #[test]
+    fn embed_env_defaults_term_when_parent_has_none() {
+        use std::ffi::OsStr;
+        let mut cmd = CommandBuilder::new("tmux");
+        cmd.env_clear();
+        apply_embed_env_from(&mut cmd, std::iter::empty());
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+    }
+
+    #[test]
+    fn attach_builder_inherits_the_parent_env_by_default() {
+        // Documents the portable-pty 0.9 reality the code relies on: a fresh
+        // CommandBuilder carries the full parent environment, so LANG/LC_*/
+        // TMUX_TMPDIR set in the parent reach the embed even without the
+        // explicit enforcement in apply_embed_env.
+        let cmd = CommandBuilder::new("tmux");
+        if let Ok(path) = std::env::var("PATH") {
+            assert_eq!(
+                cmd.get_env("PATH").and_then(|v| v.to_str()),
+                Some(path.as_str())
+            );
+        }
+        for (key, value) in std::env::vars() {
+            if key == "LANG" || key == "TMUX_TMPDIR" || key.starts_with("LC_") {
+                assert_eq!(
+                    cmd.get_env(&key).and_then(|v| v.to_str()),
+                    Some(value.as_str()),
+                    "{key} should be inherited from the parent env"
+                );
+            }
+        }
+    }
+
     // NOTE: server-side output streaming is covered by `write_input_reaches_the_session`
     // below — the shell's echo + printf result ARE server-produced output captured by
     // the reader thread. A dedicated external-`send-keys` streaming test proved flaky
@@ -240,7 +359,11 @@ mod tests {
 
         // Type into the embed; it should reach the shell and echo back.
         client.write_input(b"printf 'EMBED_INPUT_OK\\n'\n").expect("write input");
-        let found = screen_contains(&client, "EMBED_INPUT_OK", Instant::now() + Duration::from_secs(8));
+        let found = screen_contains(
+            &client,
+            "EMBED_INPUT_OK",
+            Instant::now() + Duration::from_secs(8),
+        );
 
         drop(client);
         kill_session(&session);
@@ -266,6 +389,9 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         kill_session(&session);
-        assert!(alive, "shutting down the embed client must NOT kill the tmux session");
+        assert!(
+            alive,
+            "shutting down the embed client must NOT kill the tmux session"
+        );
     }
 }

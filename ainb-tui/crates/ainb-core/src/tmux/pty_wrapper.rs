@@ -178,10 +178,10 @@ mod tests {
     }
 
     fn sleeper() -> CommandBuilder {
-        // portable-pty's CommandBuilder starts with an EMPTY environment, so a
-        // bare program name won't resolve and the child exec-fails into a
-        // zombie. Pass PATH through so `sleep` actually runs. (The real embed
-        // spawns `tmux attach` — it must set PATH the same way.)
+        // portable-pty 0.9's CommandBuilder seeds the FULL parent environment
+        // (get_base_env), so `sleep` resolves on its own; the explicit PATH is
+        // belt-and-braces against that default changing, mirroring the real
+        // embed's apply_embed_env enforcement.
         let mut cmd = CommandBuilder::new("sleep");
         cmd.arg("60");
         if let Ok(path) = std::env::var("PATH") {
@@ -255,9 +255,19 @@ mod tests {
 
         kill_all_embed_children();
 
-        assert!(wait_terminated(pid1), "registry drain should kill leaked child 1");
-        assert!(wait_terminated(pid2), "registry drain should kill leaked child 2");
-        assert_eq!(registered_embed_child_count(), 0, "registry cleared after drain");
+        assert!(
+            wait_terminated(pid1),
+            "registry drain should kill leaked child 1"
+        );
+        assert!(
+            wait_terminated(pid2),
+            "registry drain should kill leaked child 2"
+        );
+        assert_eq!(
+            registered_embed_child_count(),
+            0,
+            "registry cleared after drain"
+        );
     }
 
     #[test]
@@ -267,7 +277,11 @@ mod tests {
         let pty = PtyWrapper::start(sleeper()).unwrap();
         assert_eq!(registered_embed_child_count(), 1);
         drop(pty);
-        assert_eq!(registered_embed_child_count(), 0, "Drop removes the registry slot");
+        assert_eq!(
+            registered_embed_child_count(),
+            0,
+            "Drop removes the registry slot"
+        );
     }
 
     #[test]
