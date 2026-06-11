@@ -30,6 +30,7 @@ use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::issue::IssueRepo;
+use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
 use sqlx::{Row, SqlitePool};
@@ -625,6 +626,94 @@ pub async fn issue_update(
     }
     // Re-read the edited row and map it exactly as issues_list does, so the
     // response + event row match a list snapshot byte-for-byte.
+    let Some(issue) = IssueRepo::get_by_id(pool, issue_id).await? else {
+        return Ok(None);
+    };
+    let id = IssueId::from_str(&issue.id).map_err(|e| sqlx::Error::ColumnDecode {
+        index: "id".to_string(),
+        source: format!("malformed issue id {:?}: {e}", issue.id).into(),
+    })?;
+    let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    Ok(Some(IssueRow {
+        id,
+        workspace_id: issue.workspace_id,
+        title: issue.title,
+        description: issue.description,
+        state: issue.state,
+        assignee: issue.assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
+        creator: format!("{}:{}", issue.creator.kind().as_str(), issue.creator.id()),
+        created_at: issue.created_at,
+        priority: issue.priority,
+        due_date: issue.due_date,
+        labels: issue.labels,
+        pr_url,
+    }))
+}
+
+/// Attach a label to an issue, scoped to `workspace_id`, then re-read the issue
+/// as a wire [`IssueRow`] (`hangar/issue_label_attach`, e38.10).
+///
+/// Delegates to the secured [`LabelRepo::attach`], which verifies the issue
+/// belongs to `workspace_id` before touching the join (the tenant guard),
+/// resolve-or-creates the label by `(workspace, name)`, and keeps the
+/// `issue.labels` JSON cache in sync — so the re-read row carries the new label
+/// in its `labels` chip list. A foreign-tenant issue id surfaces as
+/// [`LabelRepoError::IssueNotFound`], which the caller maps to a not-found error.
+///
+/// Returns `Some(row)` with the refreshed issue (mirroring the `issues_list`
+/// shape so the response + pushed `IssueUpdated` event are byte-identical to a
+/// list snapshot), or `None` if the row vanished between mutation and re-read
+/// (a should-not-happen race the caller treats as not-found).
+///
+/// # Errors
+///
+/// Returns [`LabelRepoError::IssueNotFound`] when the issue is foreign, or
+/// [`LabelRepoError::Db`] on a store fault.
+pub async fn issue_label_attach(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    issue_id: &str,
+    name: &str,
+    color: Option<&str>,
+) -> Result<Option<IssueRow>, LabelRepoError> {
+    LabelRepo::attach(pool, workspace, issue_id, name, color).await?;
+    Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
+}
+
+/// Detach a label from an issue, scoped to `workspace_id`, then re-read the issue
+/// as a wire [`IssueRow`] (`hangar/issue_label_detach`, e38.10).
+///
+/// Idempotent + workspace-scoped, mirroring [`issue_label_attach`]: delegates to
+/// [`LabelRepo::detach`], which keeps the `issue.labels` JSON cache in sync so the
+/// re-read row drops the chip. Detaching an absent label is a no-op (the row
+/// re-reads unchanged), not an error.
+///
+/// # Errors
+///
+/// Returns [`LabelRepoError::IssueNotFound`] when the issue is foreign, or
+/// [`LabelRepoError::Db`] on a store fault.
+pub async fn issue_label_detach(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    issue_id: &str,
+    name: &str,
+) -> Result<Option<IssueRow>, LabelRepoError> {
+    LabelRepo::detach(pool, workspace, issue_id, name).await?;
+    Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
+}
+
+/// Re-read one issue as a wire [`IssueRow`], mapped exactly as `issues_list`
+/// emits it (including the P9 `pr_url` derivation) so a re-read row is
+/// byte-identical to a list snapshot of the same issue. `None` when the id
+/// resolves to no row.
+///
+/// Shared by the label attach/detach paths after they mutate the join — both
+/// answer with the refreshed row.
+async fn read_issue_row(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Option<IssueRow>, sqlx::Error> {
     let Some(issue) = IssueRepo::get_by_id(pool, issue_id).await? else {
         return Ok(None);
     };

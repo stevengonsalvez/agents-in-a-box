@@ -451,6 +451,8 @@ async fn handle(
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
+        methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
+        methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
         methods::HANGAR_AGENT_ARCHIVE => handle_agent_archive(pool, req).await,
@@ -755,6 +757,74 @@ fn issue_field_update_from_params(
         priority: params.priority,
         due_date,
     })
+}
+
+/// Dispatch `hangar/issue_label_attach` (`attach = true`) /
+/// `hangar/issue_label_detach` (`attach = false`) (e38.10): mutate one issue's
+/// labels, push the matching `IssueUpdated` event, and answer with the refreshed
+/// row.
+///
+/// Mirrors [`handle_issue_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), then drives the workspace-scoped store mutation. An `(issue_id,
+/// workspace)` pair that matches no row (an unknown id, or an issue owned by
+/// another tenant) is rejected as a not-found error — never a cross-tenant
+/// (de)label. Only a committed mutation pushes the event. Split out of
+/// [`handle`] to keep that dispatcher within the line cap.
+async fn handle_issue_label(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+    attach: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let params: ainb_hangar_proto::snapshots::IssueLabelParams =
+        parse_params(req, "{ workspace_id, issue_id, name, color? }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // A blank label name is a client error, not a no-op mutation.
+    if params.name.trim().is_empty() {
+        return Err(invalid_params("label name must not be empty"));
+    }
+    let row = if attach {
+        snapshots::issue_label_attach(
+            pool,
+            &ws,
+            &params.issue_id,
+            params.name.trim(),
+            params.color.as_deref(),
+        )
+        .await
+    } else {
+        snapshots::issue_label_detach(pool, &ws, &params.issue_id, params.name.trim()).await
+    }
+    .map_err(|e| label_repo_err(&e))?;
+    // No row matched the (id, workspace) pair: an unknown id or a cross-tenant
+    // issue. Reject rather than ack a write that never happened.
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    };
+    // A committed label change announces the refreshed row to subscribers so a
+    // subscribed issue list re-renders the chip.
+    events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+    to_value(&row)
+}
+
+/// Map a [`LabelRepoError`] onto an RPC error: the issue-not-found guard is a
+/// client error (`INVALID_PARAMS`, the caller used a foreign / unknown issue id),
+/// every other fault is an internal store error.
+///
+/// [`LabelRepoError`]: ainb_hangar_store::repo::label::LabelRepoError
+fn label_repo_err(e: &ainb_hangar_store::repo::label::LabelRepoError) -> RpcError {
+    use ainb_hangar_store::repo::label::LabelRepoError;
+    match e {
+        LabelRepoError::IssueNotFound => invalid_params("no issue in this workspace"),
+        LabelRepoError::Db(db) => internal(&format!("label store error: {db}")),
+    }
 }
 
 /// Dispatch `hangar/comment_add` (e38.5): append a comment to one issue, push the
