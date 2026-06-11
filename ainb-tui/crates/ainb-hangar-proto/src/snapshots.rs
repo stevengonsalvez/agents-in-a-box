@@ -416,6 +416,67 @@ pub struct CommentAddParams {
     pub body: String,
 }
 
+/// One workspace member for the settings Members pane
+/// ([`crate::methods::HANGAR_MEMBERS_LIST`], e38.11).
+///
+/// `user_id` is the stable member identity; `email` is the human display label;
+/// `role` is the `owner`/`admin`/`member` token. A pure wire row — the pane
+/// renders these read-only and the `member_set_role`/`member_remove` RPCs key off
+/// `user_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberWireRow {
+    /// The member's user id (`user.id`) — what set-role / remove key off.
+    pub user_id: String,
+    /// The member's email (`user.email`) — the display label.
+    pub email: String,
+    /// The member's role token (`owner` / `admin` / `member`).
+    pub role: String,
+}
+
+/// Result of [`crate::methods::HANGAR_MEMBERS_LIST`] and the refreshed view the
+/// `member_set_role` / `member_remove` mutations answer with (e38.11).
+///
+/// The workspace's members, ordered by email. The mutations re-read and return
+/// this same envelope so the pane re-renders from the response without a separate
+/// `members_list` round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembersListResult {
+    /// The member rows.
+    pub members: Vec<MemberWireRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_MEMBER_SET_ROLE`] (e38.11): change one
+/// member's role, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// rejects a foreign one, and scopes the edit by `(workspace_id, user_id)` so a
+/// cross-tenant member touches no row. `role` must be one of
+/// `owner`/`admin`/`member` (an illegal token is `INVALID_PARAMS`). Demoting the
+/// workspace's only owner is rejected (a workspace always keeps an owner).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MemberSetRoleParams {
+    /// The subscribed workspace the member must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The member to re-role (`user.id`).
+    pub user_id: String,
+    /// The new role token (`owner` / `admin` / `member`).
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_MEMBER_REMOVE`] (e38.11): remove one
+/// member from a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard, scoping the removal by
+/// `(workspace_id, user_id)`. Removing the workspace's only owner is rejected (a
+/// workspace always keeps an owner). The `user` row itself is left intact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MemberRemoveParams {
+    /// The subscribed workspace the member must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The member to remove (`user.id`).
+    pub user_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,6 +821,48 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AgentArchiveParams>(&s).unwrap(),
             params
+        );
+    }
+
+    /// The e38.11 member-management envelopes round-trip through JSON.
+    #[test]
+    fn e38_member_envelopes_roundtrip() {
+        let list = MembersListResult {
+            members: vec![
+                MemberWireRow {
+                    user_id: "u-amy".into(),
+                    email: "amy@x.io".into(),
+                    role: "owner".into(),
+                },
+                MemberWireRow {
+                    user_id: "u-bob".into(),
+                    email: "bob@x.io".into(),
+                    role: "admin".into(),
+                },
+            ],
+        };
+        let s = serde_json::to_string(&list).unwrap();
+        assert_eq!(serde_json::from_str::<MembersListResult>(&s).unwrap(), list);
+
+        let set_role = MemberSetRoleParams {
+            workspace_id: "ws-1".into(),
+            user_id: "u-bob".into(),
+            role: "member".into(),
+        };
+        let s = serde_json::to_string(&set_role).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MemberSetRoleParams>(&s).unwrap(),
+            set_role
+        );
+
+        let remove = MemberRemoveParams {
+            workspace_id: "ws-1".into(),
+            user_id: "u-bob".into(),
+        };
+        let s = serde_json::to_string(&remove).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MemberRemoveParams>(&s).unwrap(),
+            remove
         );
     }
 }

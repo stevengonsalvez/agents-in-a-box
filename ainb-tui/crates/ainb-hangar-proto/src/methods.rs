@@ -258,6 +258,42 @@ pub const HANGAR_AGENT_UPDATE: &str = "hangar/agent_update";
 /// agent id flips no row and is rejected as a not-found error.
 pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
 
+/// `hangar/members_list` — snapshot the human members of a workspace (e38.11).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::MembersListResult`] — the workspace's members
+/// (`user_id` + `email` + `role`), ordered by email. Drives the settings Members
+/// pane. Workspace-scoped like every snapshot: a foreign / unknown workspace
+/// yields an empty list (a read, so no `INVALID_PARAMS` rejection — mirrors
+/// `agents_list`), never another tenant's members.
+pub const HANGAR_MEMBERS_LIST: &str = "hangar/members_list";
+
+/// `hangar/member_set_role` — change one member's role within a workspace (e38.11).
+///
+/// Params: [`crate::snapshots::MemberSetRoleParams`]
+/// (`{ workspace_id, user_id, role }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`] for the workspace, or an error. `role`
+/// must be one of `owner`/`admin`/`member` (an illegal token is `INVALID_PARAMS`).
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_AGENT_UPDATE`]: the daemon
+/// resolves the workspace and **rejects** a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op), and the edit is scoped by `(workspace_id, user_id)` so
+/// a foreign-tenant member touches no row (a not-found error). Demoting the
+/// workspace's *only* owner is rejected so a workspace always keeps an owner.
+pub const HANGAR_MEMBER_SET_ROLE: &str = "hangar/member_set_role";
+
+/// `hangar/member_remove` — remove one member from a workspace (e38.11).
+///
+/// Params: [`crate::snapshots::MemberRemoveParams`] (`{ workspace_id, user_id }`).
+/// Result: the refreshed [`crate::snapshots::MembersListResult`] for the
+/// workspace, or an error. The `user` row itself is left intact (a user may
+/// belong to other workspaces); only the membership join is dropped.
+///
+/// Mutating + workspace-scoped like [`HANGAR_MEMBER_SET_ROLE`]: a foreign-tenant
+/// member touches no row (a not-found error). Removing the workspace's *only*
+/// owner is rejected so a workspace always keeps an owner.
+pub const HANGAR_MEMBER_REMOVE: &str = "hangar/member_remove";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -316,6 +352,9 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_COMMENT_ADD,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
+    HANGAR_MEMBERS_LIST,
+    HANGAR_MEMBER_SET_ROLE,
+    HANGAR_MEMBER_REMOVE,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -379,6 +418,9 @@ mod tests {
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
+            HANGAR_MEMBERS_LIST,
+            HANGAR_MEMBER_SET_ROLE,
+            HANGAR_MEMBER_REMOVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -418,6 +460,9 @@ mod tests {
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
+            HANGAR_MEMBERS_LIST,
+            HANGAR_MEMBER_SET_ROLE,
+            HANGAR_MEMBER_REMOVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,
