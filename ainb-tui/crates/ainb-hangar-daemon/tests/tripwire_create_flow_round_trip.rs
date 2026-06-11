@@ -163,7 +163,7 @@ fn issue_create_keystroke_lands_in_db() {
 
     // Press `c` to open the inline create flow. Re-send until the compose prompt
     // appears (the first frame can race), bounded by a deadline.
-    let compose_deadline = Instant::now() + Duration::from_secs(20);
+    let compose_deadline = Instant::now() + Duration::from_secs(20 * common::budget_scale());
     let opened = loop {
         sess.send_key("c");
         if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
@@ -193,9 +193,10 @@ fn issue_create_keystroke_lands_in_db() {
         sess.type_literal(&ch.to_string());
         typed.push(ch);
         let prefix = typed.clone();
-        sess.poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains(&prefix)
-        })
+        sess.poll_capture(
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains(&prefix),
+        )
         .unwrap_or_else(|| {
             panic!(
                 "create-input never echoed prefix `{prefix}`:\n{}",
@@ -215,7 +216,7 @@ fn issue_create_keystroke_lands_in_db() {
 
     // POSITIVE (the real proof): a row with that title actually LANDS in the
     // daemon DB. Poll the DB (the RPC is async) until the row appears.
-    let db_deadline = Instant::now() + Duration::from_secs(20);
+    let db_deadline = Instant::now() + Duration::from_secs(20 * common::budget_scale());
     let mut landed = 0;
     while Instant::now() < db_deadline {
         landed = count_issues_with_title(home, NEW_ISSUE_TITLE);
@@ -234,9 +235,11 @@ fn issue_create_keystroke_lands_in_db() {
     // IssueCreated push folds it into the cached rows). Re-press `1` to keep the
     // issue list focused while the snapshot reconciles.
     let rendered = sess
-        .switch_tab_until("1", Instant::now() + Duration::from_secs(20), |c| {
-            c.contains(NEW_ISSUE_TITLE)
-        })
+        .switch_tab_until(
+            "1",
+            Instant::now() + Duration::from_secs(20 * common::budget_scale()),
+            |c| c.contains(NEW_ISSUE_TITLE),
+        )
         .unwrap_or_else(|| {
             panic!(
                 "new issue `{NEW_ISSUE_TITLE}` landed in the DB but never re-rendered:\n{}",
@@ -280,9 +283,11 @@ fn kanban_move_keystroke_transitions_db() {
     // identifier is `#mvq001` (the task id's last 6 chars).
     let card_marker = format!("#{}", &MOVE_TASK_ID[MOVE_TASK_ID.len() - 6..]);
     let board = sess
-        .switch_tab_until("K", Instant::now() + Duration::from_secs(45), |c| {
-            hangar_chrome_visible(c) && c.contains("queued (") && c.contains(&card_marker)
-        })
+        .switch_tab_until(
+            "K",
+            Instant::now() + Duration::from_secs(45 * common::budget_scale()),
+            |c| hangar_chrome_visible(c) && c.contains("queued (") && c.contains(&card_marker),
+        )
         .unwrap_or_else(|| {
             panic!(
                 "Kanban board never rendered the seeded queued card `{card_marker}`:\n{}",
@@ -299,7 +304,7 @@ fn kanban_move_keystroke_transitions_db() {
     // may land on either column; drive focus to the `queued` column + our card.
     // Press `Left` (focus-left) a few times to reach the leftmost (queued) column,
     // then ensure the focus `▶` marker sits on our card's line.
-    let focus_deadline = Instant::now() + Duration::from_secs(15);
+    let focus_deadline = Instant::now() + Duration::from_secs(15 * common::budget_scale());
     let focused = loop {
         sess.send_key("Left");
         if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(800), |c| {
@@ -327,7 +332,7 @@ fn kanban_move_keystroke_transitions_db() {
 
     // POSITIVE (the real proof): the task's DB status transitioned to `running`.
     // Poll the DB (the RPC is async) until it flips.
-    let db_deadline = Instant::now() + Duration::from_secs(20);
+    let db_deadline = Instant::now() + Duration::from_secs(20 * common::budget_scale());
     let mut status = task_status(home, MOVE_TASK_ID);
     while Instant::now() < db_deadline {
         status = task_status(home, MOVE_TASK_ID);

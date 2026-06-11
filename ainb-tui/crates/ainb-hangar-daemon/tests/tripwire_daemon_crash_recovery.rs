@@ -131,7 +131,7 @@ fn daemon_kill9_mid_task_recovers_orphan_row_against_same_db() {
     let recovered = poll_status(
         &hangar_dir,
         TASK_ID,
-        Instant::now() + Duration::from_secs(60),
+        Instant::now() + Duration::from_secs(60 * common::budget_scale()),
         |status, _| status != "running",
     );
 

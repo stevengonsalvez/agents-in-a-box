@@ -519,6 +519,25 @@ pub fn set_agent_concurrency(home: &Path, cap: u32) {
     });
 }
 
+/// Multiplier applied to tmux render/interaction-wait budgets, read once from
+/// `HANGAR_TRIPWIRE_BUDGET_SCALE` (default `1`, floored at `1`).
+///
+/// Hosted CI runners render the TUI much slower than a dev box, and the full
+/// serial tripwire suite compounds it, so the dev-tuned poll budgets time out
+/// on CI even though the code is correct (observed: scattered ~60s render-wait
+/// timeouts on the macOS runner while the same suite is green locally). CI sets
+/// this >1 to widen every budget that routes through it; locally it stays `1`
+/// so the suite is fast. This is a deliberate budget bump (no retry), keeping
+/// single-run rigor: a real regression still fails at the scaled deadline.
+#[must_use]
+pub fn budget_scale() -> u64 {
+    std::env::var("HANGAR_TRIPWIRE_BUDGET_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
 /// Poll `{home}/.ainb/hangar.db` until at least `want` tasks with id prefix
 /// `seed-<prefix>-` have reached a terminal status (`done`/`failed`/`cancelled`),
 /// or `deadline` passes. Returns the terminal count actually observed.
@@ -819,11 +838,16 @@ impl TuiSession {
     /// Returns the landing capture once `READY_MARKER` is visible, or `None` if
     /// the pipeline never rendered it within budget.
     pub fn open_hangar_and_wait_ready(&self) -> Option<String> {
+        // Hosted CI runners render the TUI far slower than a dev box under the
+        // full serial tripwire suite, so the dev-tuned render-wait budgets below
+        // time out there (a runner-speed artifact, not a code fault). Scale them
+        // by `HANGAR_TRIPWIRE_BUDGET_SCALE` (default 1 locally; CI sets >1).
+        let scale = budget_scale();
         // 1. Wait for the home screen to be *interactive* — the home footer hint
         //    (`Enter select | Tab content | ↑↓ navigate`) only paints once the
         //    home screen owns the keyboard. Matching on a sidebar label alone
         //    races the initial tmux/session discovery and drops the `g` keystroke.
-        let home = self.poll_capture(Instant::now() + Duration::from_secs(45), |c| {
+        let home = self.poll_capture(Instant::now() + Duration::from_secs(45 * scale), |c| {
             c.contains("Tab content") && c.contains("navigate")
         })?;
         // Negative: we are NOT already on the hangar issue list before pressing g.
@@ -837,7 +861,7 @@ impl TuiSession {
         //    single `g` can be dropped. Re-send `g` every ~1.5s until the Hangar
         //    plugin chrome (its tab strip) replaces the host home screen, bounded
         //    by a deadline — then wait for the snapshot rows to fill in.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(60 * scale);
         loop {
             self.send_key("g");
             if let Some(c) = self.poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
