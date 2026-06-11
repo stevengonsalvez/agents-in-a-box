@@ -543,6 +543,46 @@ pub enum IssueCommand {
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
     Update(IssueUpdateArgs),
+    /// Attach or detach a label on an issue.
+    #[command(subcommand)]
+    Label(IssueLabelCommand),
+}
+
+/// `hangar issue label <verb>`.
+///
+/// Attach or detach a label on one issue, workspace-scoped. Mirrors the
+/// `hangar/issue_label_attach` / `hangar/issue_label_detach` daemon RPCs over the
+/// CLI: attach resolve-or-creates a label by `(workspace, name)`; detach removes
+/// the link (idempotent), leaving the label definition intact.
+#[derive(Subcommand, Debug)]
+pub enum IssueLabelCommand {
+    /// Attach a label to an issue (resolve-or-creates the label; idempotent).
+    Attach(IssueLabelArgs),
+    /// Detach a label from an issue (idempotent; the definition is kept).
+    Detach(IssueLabelArgs),
+}
+
+/// Arguments for `hangar issue label attach|detach`.
+///
+/// `id` is the issue; `name` is the label. `--color` is an optional presentation
+/// hint applied only when an attach mints a fresh label (ignored on detach and
+/// when an existing label is reused). The mutation is workspace-scoped: a
+/// `--workspace` selects the tenant (default: the bootstrapped `default`), and an
+/// issue id outside it touches no row.
+#[derive(Args, Debug)]
+pub struct IssueLabelArgs {
+    /// Issue id (ULID) to (de)label.
+    pub id: String,
+    /// Label name to attach / detach.
+    pub name: String,
+    /// Optional presentation colour (hex, e.g. `#ff0000`) for a freshly-created
+    /// label; ignored on detach / when an existing label is reused.
+    #[arg(long)]
+    pub color: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue update`.
@@ -1541,7 +1581,72 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::List(args) => run_issue_list(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
     }
+}
+
+/// `hangar issue label attach|detach`: mutate one issue's labels,
+/// workspace-scoped.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else
+/// the bootstrapped `default`), then drives the workspace-scoped
+/// [`LabelRepo`](ainb_hangar_store::repo::label::LabelRepo) mutation. An issue id
+/// that resolves to no row in the workspace (an unknown id or a foreign tenant's
+/// issue) is reported as an error — never a silent no-op, mirroring the daemon
+/// RPC. The label name is validated non-empty. The current label set is printed
+/// after the mutation so the caller sees the result.
+async fn run_issue_label(store: &Store, cmd: IssueLabelCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
+
+    let (args, attach) = match cmd {
+        IssueLabelCommand::Attach(args) => (args, true),
+        IssueLabelCommand::Detach(args) => (args, false),
+    };
+    if args.name.trim().is_empty() {
+        anyhow::bail!("label name must not be empty");
+    }
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    let result = if attach {
+        LabelRepo::attach(
+            store.pool(),
+            &ws,
+            &args.id,
+            args.name.trim(),
+            args.color.as_deref(),
+        )
+        .await
+    } else {
+        LabelRepo::detach(store.pool(), &ws, &args.id, args.name.trim()).await
+    };
+    // A foreign / unknown issue id is a not-found error, never a silent no-op.
+    match result {
+        Ok(()) => {}
+        Err(LabelRepoError::IssueNotFound) => {
+            anyhow::bail!("no issue with id {} in this workspace", args.id)
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("update labels on issue {}", args.id));
+        }
+    }
+
+    let labels = LabelRepo::labels_for_issue(store.pool(), &ws, &args.id)
+        .await
+        .with_context(|| format!("read labels for issue {}", args.id))?;
+    let verb = if attach { "attached" } else { "detached" };
+    println!(
+        "{verb} `{}` on issue {} (labels: {})",
+        args.name.trim(),
+        args.id,
+        if labels.is_empty() {
+            "none".to_string()
+        } else {
+            labels.join(", ")
+        }
+    );
+    Ok(())
 }
 
 /// `hangar issue update`: edit a subset of an issue's mutable fields,

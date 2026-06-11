@@ -581,3 +581,81 @@ fn agent_list_on_empty_db_is_clean_noop() {
     assert!(ok, "agent list on empty db should exit 0; out={out}");
     assert!(out.contains("no agents"), "expected empty marker:\n{out}");
 }
+
+/// Create an issue via the CLI and return its id (pulled from the create ack).
+fn create_issue(home: &std::path::Path, title: &str) -> String {
+    let (ok, out) = run(home, &["hangar", "issue", "create", "--title", title]);
+    assert!(ok, "issue create should exit 0; out={out}");
+    out.lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .map(|s| s.trim().to_string())
+        .expect("create output carries an id")
+}
+
+/// The user-visible proof for e38.10: `ainb hangar issue label attach` adds a
+/// label to an issue and `... detach` removes it, both observable via
+/// `issue show --format json` (a real-binary round-trip through `LabelRepo`).
+#[test]
+fn issue_label_attach_then_detach_persist_through_show() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = create_issue(tmp.path(), "Labelable");
+
+    // Attach `bug`: the ack reports it and a json show carries the chip.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "label", "attach", &id, "bug", "--color", "#ff0000",
+        ],
+    );
+    assert!(ok, "label attach should exit 0; out={out}");
+    assert!(out.contains("attached `bug`"), "missing attach ack:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[\"bug\"]"),
+        "attached label not in json show:\n{out}"
+    );
+
+    // Detach `bug`: the ack reports `none` and the json show drops the chip.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "label", "detach", &id, "bug"],
+    );
+    assert!(ok, "label detach should exit 0; out={out}");
+    assert!(out.contains("detached `bug`"), "missing detach ack:\n{out}");
+    assert!(out.contains("labels: none"), "detach left a label:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[]"),
+        "detach did not clear the label in json show:\n{out}"
+    );
+}
+
+/// `ainb hangar issue label attach` against an unknown issue id is an error
+/// (exit non-zero), never a silent no-op.
+#[test]
+fn issue_label_attach_unknown_id_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Bootstrap the default workspace so the failure is "no issue", not "no
+    // workspace".
+    let _ = create_issue(tmp.path(), "Bootstrap");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "label", "attach", "no-such-issue", "bug"],
+    );
+    assert!(!ok, "labelling an unknown id must fail:\n{out}");
+    assert!(
+        out.contains("no issue with id"),
+        "missing not-found message:\n{out}"
+    );
+}
