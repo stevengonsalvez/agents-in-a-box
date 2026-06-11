@@ -51,6 +51,7 @@ use sqlx::{Row, SqlitePool};
 use crate::events::EventSink;
 use crate::execenv::{prepare_env, write_context_prompt};
 use crate::health_stats::HealthStats;
+use crate::progress_comment;
 use crate::runner::{Backend, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
     SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
@@ -325,6 +326,18 @@ async fn execute_claimed(
     // e38.2: announce the start to subscribed plugins (best-effort push; the
     // next snapshot pull reconciles if no subscriber is connected).
     emit_task_started(events, &task, clock);
+    // e38.6: write a durable, agent-authored "started" comment to the task's
+    // issue so the agent's activity survives beyond the bounded transcript
+    // buffer. A NULL-issue chat task writes nothing; a write fault is logged,
+    // never blocks the FSM (the `running` transition has already committed).
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        &task,
+        progress_comment::Checkpoint::Started,
+    )
+    .await;
 
     // Snapshot the daemon's env into an owned map *before* the await: the
     // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
@@ -379,77 +392,139 @@ async fn execute_claimed(
 
     match outcome {
         RunOutcome::Success(result) => {
-            // P9.1: v1 gh-CLI-only PR capture. If the agent shelled out to
-            // `gh pr create` inside its worktree, its printed PR-URL line lands
-            // in the runner's bounded stdout tail (the per-task ring buffer,
-            // cap `TAIL_LINES`, oldest-line-evicting — read concurrently in the
-            // runner so it never blocks the claim loop). Scan it for the
-            // canonical PR URL (last one wins on a multi-PR run) and fold it
-            // into the structured result. A no-PR run yields `None`, which the
-            // `TaskResult` serializer omits entirely — so the `result` JSON is
-            // byte-identical to the pre-P9 shape and `pr_url` is NULL (no key),
-            // never `""`.
-            let pr_url = ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&result.stdout_tail);
-            if let Some(url) = pr_url.as_deref() {
-                tracing::info!(task_id = %task.id, pr_url = url, "captured gh pr url");
-            }
-            let task_result = ainb_hangar_core::result::TaskResult::new(
-                result.stdout_tail,
-                result.exit_code,
-                pr_url,
-            );
-            let result_json = serde_json::to_value(&task_result)
-                .unwrap_or_else(|_| serde_json::json!({"content": ""}));
-            CompleteTaskService::complete(
-                pool,
-                &task.id,
-                CompleteParams {
-                    result: result_json,
-                    session_id: result.session_id,
-                    work_dir: env.workdir.to_str().map(str::to_string),
-                },
-                clock,
-            )
-            .await?;
-            // P8.5: record the successful terminal outcome into the rolling
-            // throughput ring so the daemon-health pane's sparkline sees it.
-            stats.record_completed(clock.now_ms() / 1_000);
-            // e38.2: push the terminal transition to subscribed plugins.
-            emit_task_finished(
-                events,
-                &task,
-                ainb_hangar_proto::events::TaskResult::Success,
-                clock,
-            );
-            tracing::info!(task_id = %task.id, "task done");
+            finalize_success(pool, &task, &env, result, clock, stats, events).await?;
         }
         RunOutcome::Failed { reason, result } => {
-            // Persist the session id (if any) before failing so a retry can
-            // resume the provider conversation.
-            persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-            FailTaskService::fail(pool, &task.id, reason, clock).await?;
-            // P8.5: record the failed terminal outcome (drives the sparkline's
-            // red proportion for this second).
-            stats.record_failed(clock.now_ms() / 1_000);
-            // e38.2: push the terminal transition to subscribed plugins.
-            emit_task_finished(
-                events,
-                &task,
-                ainb_hangar_proto::events::TaskResult::Failure,
-                clock,
-            );
-            tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
-            // F06 retry chain: a retryable (infra) failure with attempts
-            // remaining spawns a fresh `queued` child carrying `parent_task_id`,
-            // which the next claim pass re-dispatches. A terminal reason
-            // (`agent_error` / `user_cancel` / `timeout`) or an exhausted
-            // `max_attempts` is a no-op. The retry insert can collide with the
-            // per-issue pending-unique index — that is a benign already-pending
-            // outcome (a sibling holds the slot), logged not propagated, so one
-            // failed retry never downs the claim loop.
-            maybe_spawn_retry(pool, &task.id, clock).await;
+            finalize_failure(pool, &task, reason, result, clock, stats, events).await?;
         }
     }
+    Ok(())
+}
+
+/// Finalise a successful run: capture any `gh pr create` URL, complete the row,
+/// record the throughput tick, push the terminal event, and post the durable
+/// "done" comment to the issue (e38.6).
+///
+/// Split out of [`execute_claimed`] so the claim-loop body stays readable; the
+/// ordering (complete → stats → event → comment) is unchanged.
+///
+/// # Errors
+///
+/// Propagates a [`CompleteTaskService`] FSM/DB fault (an unrecoverable finalize
+/// error). The progress comment is best-effort and never errors.
+async fn finalize_success(
+    pool: &SqlitePool,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+    result: crate::runner::RunnerResult,
+    clock: &dyn HangarClock,
+    stats: &HealthStats,
+    events: &EventSink,
+) -> anyhow::Result<()> {
+    // P9.1: v1 gh-CLI-only PR capture. If the agent shelled out to `gh pr
+    // create` inside its worktree, its printed PR-URL line lands in the runner's
+    // bounded stdout tail (the per-task ring buffer, cap `TAIL_LINES`,
+    // oldest-line-evicting — read concurrently in the runner so it never blocks
+    // the claim loop). Scan it for the canonical PR URL (last one wins on a
+    // multi-PR run) and fold it into the structured result. A no-PR run yields
+    // `None`, which the `TaskResult` serializer omits entirely — so the `result`
+    // JSON is byte-identical to the pre-P9 shape and `pr_url` is NULL (no key),
+    // never `""`.
+    let pr_url = ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&result.stdout_tail);
+    if let Some(url) = pr_url.as_deref() {
+        tracing::info!(task_id = %task.id, pr_url = url, "captured gh pr url");
+    }
+    let task_result =
+        ainb_hangar_core::result::TaskResult::new(result.stdout_tail, result.exit_code, pr_url);
+    let result_json =
+        serde_json::to_value(&task_result).unwrap_or_else(|_| serde_json::json!({"content": ""}));
+    CompleteTaskService::complete(
+        pool,
+        &task.id,
+        CompleteParams {
+            result: result_json,
+            session_id: result.session_id,
+            work_dir: env.workdir.to_str().map(str::to_string),
+        },
+        clock,
+    )
+    .await?;
+    // P8.5: record the successful terminal outcome into the rolling throughput
+    // ring so the daemon-health pane's sparkline sees it.
+    stats.record_completed(clock.now_ms() / 1_000);
+    // e38.2: push the terminal transition to subscribed plugins.
+    emit_task_finished(
+        events,
+        task,
+        ainb_hangar_proto::events::TaskResult::Success,
+        clock,
+    );
+    // e38.6: durable terminal comment on the issue thread (best-effort).
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        task,
+        progress_comment::Checkpoint::Succeeded,
+    )
+    .await;
+    tracing::info!(task_id = %task.id, "task done");
+    Ok(())
+}
+
+/// Finalise a failed run: persist the session id (for a resume), fail the row,
+/// record the throughput tick, push the terminal event, post the durable
+/// "blocker" comment carrying the reason (e38.6), then evaluate the retry chain.
+///
+/// Split out of [`execute_claimed`] alongside [`finalize_success`]; ordering
+/// (persist → fail → stats → event → comment → retry) is unchanged.
+///
+/// # Errors
+///
+/// Propagates a [`persist_session_id`] or [`FailTaskService`] FSM/DB fault. The
+/// progress comment and the retry evaluation are best-effort and never error.
+async fn finalize_failure(
+    pool: &SqlitePool,
+    task: &Task,
+    reason: ainb_hangar_store::service::fail::FailureReason,
+    result: crate::runner::RunnerResult,
+    clock: &dyn HangarClock,
+    stats: &HealthStats,
+    events: &EventSink,
+) -> anyhow::Result<()> {
+    // Persist the session id (if any) before failing so a retry can resume the
+    // provider conversation.
+    persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
+    FailTaskService::fail(pool, &task.id, reason, clock).await?;
+    // P8.5: record the failed terminal outcome (drives the sparkline's red
+    // proportion for this second).
+    stats.record_failed(clock.now_ms() / 1_000);
+    // e38.2: push the terminal transition to subscribed plugins.
+    emit_task_finished(
+        events,
+        task,
+        ainb_hangar_proto::events::TaskResult::Failure,
+        clock,
+    );
+    // e38.6: durable blocker comment carrying the failure reason, so the issue
+    // thread records WHY the run stopped (best-effort).
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        task,
+        progress_comment::Checkpoint::Failed { reason },
+    )
+    .await;
+    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
+    // F06 retry chain: a retryable (infra) failure with attempts remaining
+    // spawns a fresh `queued` child carrying `parent_task_id`, which the next
+    // claim pass re-dispatches. A terminal reason (`agent_error` / `user_cancel`
+    // / `timeout`) or an exhausted `max_attempts` is a no-op. The retry insert
+    // can collide with the per-issue pending-unique index — that is a benign
+    // already-pending outcome (a sibling holds the slot), logged not propagated,
+    // so one failed retry never downs the claim loop.
+    maybe_spawn_retry(pool, &task.id, clock).await;
     Ok(())
 }
 
