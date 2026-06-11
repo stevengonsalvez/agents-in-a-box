@@ -269,6 +269,28 @@ pub struct IssueUpdateParams {
     pub due_date: FieldUpdate<i64>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_CREATE`] (e38.29): create one new
+/// issue in a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// rejects a foreign one. `title` is the issue title (mandatory + non-blank).
+/// `description` is optional free-form body text. `creator` is the polymorphic
+/// actor-ref (`"agent:<id>"` / `"member:<id>"`) the daemon parses. The daemon
+/// mints the id, stamps `created_at`, and inserts the row in the `open` state —
+/// the client supplies none of those.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueCreateParams {
+    /// The subscribed workspace the new issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue title (mandatory, non-blank).
+    pub title: String,
+    /// Optional free-form description; omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The creating actor in canonical `member:<id>` / `agent:<id>` form.
+    pub creator: String,
+}
+
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
 /// config knobs, scoped to a workspace.
 ///

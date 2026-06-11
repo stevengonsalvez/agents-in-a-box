@@ -144,6 +144,23 @@ pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
 /// daemon pushes the matching [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 
+/// `hangar/issue_create` — create one new issue in a workspace (e38.29).
+///
+/// Params: [`crate::snapshots::IssueCreateParams`]
+/// (`{ workspace_id, title, description?, creator }`). Result: the persisted
+/// [`crate::events::IssueRow`], or an error. The daemon mints the issue id (a
+/// fresh ULID), stamps `created_at`, and inserts the row in the `open` lifecycle
+/// state. `creator` is a polymorphic actor-ref (`"agent:<id>"` / `"member:<id>"`);
+/// `title` is the issue title (a blank title is rejected with `INVALID_PARAMS`,
+/// never an empty row).
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_COMMENT_ADD`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op). After a committed insert the daemon pushes the
+/// matching [`crate::events::HangarEvent::IssueCreated`] so a subscribed issue
+/// list re-renders the new row without re-pulling the whole snapshot.
+pub const HANGAR_ISSUE_CREATE: &str = "hangar/issue_create";
+
 /// `hangar/comment_add` — append a comment to one issue (e38.5).
 ///
 /// Params: [`crate::snapshots::CommentAddParams`]
