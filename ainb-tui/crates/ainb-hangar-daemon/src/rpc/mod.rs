@@ -1853,6 +1853,60 @@ mod tests {
         assert_eq!(n, 1, "created issue not found in the DB");
     }
 
+    /// e38.21: a workspace's configured `issue_prefix` is applied to a created
+    /// issue's title — the prefix actually takes effect (the response row AND the
+    /// stored DB row both carry it), not just that the column stores a value.
+    #[tokio::test]
+    async fn issue_create_applies_workspace_issue_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // Configure the seeded workspace with an issue prefix.
+        sqlx::query("UPDATE workspace SET issue_prefix = ? WHERE id = ?")
+            .bind("[OPS] ")
+            .bind(crate::seed::WS_ID)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_CREATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "title": "fix the build",
+                    "creator": "member:me",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        // The response row carries the prefixed title (so does the IssueCreated
+        // event — it is built from the same row).
+        assert_eq!(
+            resp.result.unwrap()["title"],
+            "[OPS] fix the build",
+            "the created issue's title must carry the workspace prefix"
+        );
+        // The real proof: the stored row carries the prefixed title, not the bare
+        // input title.
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE title = ?")
+            .bind("[OPS] fix the build")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, 1, "the prefixed title must be persisted");
+        let bare: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE title = ?")
+            .bind("fix the build")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(bare, 0, "the bare (unprefixed) title must not be stored");
+    }
+
     /// A blank title is an `INVALID_PARAMS` client error, not an empty row.
     #[tokio::test]
     async fn issue_create_blank_title_is_invalid_params() {

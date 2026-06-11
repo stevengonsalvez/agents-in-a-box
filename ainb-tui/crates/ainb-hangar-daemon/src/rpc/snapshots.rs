@@ -33,6 +33,7 @@ use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
+use ainb_hangar_store::repo::workspace::apply_issue_prefix;
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -884,12 +885,18 @@ pub async fn issue_create(
 
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
+    // e38.21: apply the workspace's issue_prefix to the new title so the prefix
+    // actually takes effect on a created issue (the stored title, the response
+    // row, and the pushed IssueCreated event all carry it). An unconfigured
+    // workspace leaves the title verbatim (the v1 behaviour).
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
+    let title = apply_issue_prefix(prefix.as_deref(), title);
     IssueRepo::insert(
         pool,
         &NewIssue {
             id: id.clone(),
             workspace_id: workspace_id.to_string(),
-            title: title.to_string(),
+            title: title.clone(),
             description: description.map(ToString::to_string),
             state: "open".to_string(),
             assignee: None,
@@ -908,7 +915,7 @@ pub async fn issue_create(
     Ok(IssueRow {
         id: issue_id,
         workspace_id: workspace_id.to_string(),
-        title: title.to_string(),
+        title,
         description: description.map(ToString::to_string),
         state: "open".to_string(),
         assignee: None,
@@ -919,6 +926,25 @@ pub async fn issue_create(
         labels: Vec::new(),
         pr_url: None,
     })
+}
+
+/// Read a workspace's configured `issue_prefix` by id (e38.21).
+///
+/// `None` when the workspace has no prefix configured (the migration-0020 NULL
+/// default) or the workspace does not exist — the create flow then leaves the
+/// title verbatim. Read directly (not via `WorkspaceRepo::get_config`) so the
+/// create path pays for one column, not the full config decode.
+async fn workspace_issue_prefix(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let prefix: Option<String> =
+        sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    Ok(prefix)
 }
 
 /// Append one comment to an issue, scoped to `workspace_id`, then return it as a
