@@ -184,6 +184,27 @@ async fn esc_closes_detail_back_to_list() {
 }
 
 #[tokio::test]
+async fn esc_at_root_publishes_close_request() {
+    // At the Browse root there is no inner level (Detail / picker / focused
+    // graph) to pop, so Esc must ask the host to close the screen — otherwise
+    // the user is trapped on the panel with only Ctrl+C. The host forwards Esc
+    // to the plugin (it is no longer host-reserved), so the plugin owns this
+    // escape hatch via `ui.close_request`. Guards the regression where the
+    // learnings panel had no way out.
+    let mut h = init_over_fixture().await;
+
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Esc))
+        .await
+        .expect("send Esc at root");
+
+    h.assert_publishes_topic(ainb_plugin_protocol::topics::UI_CLOSE_REQUEST)
+        .await
+        .expect("root Esc must publish ui.close_request");
+
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
 async fn backspace_closes_detail_back_to_list() {
     // Backspace is the host-FORWARDED close key (Esc is host-reserved). This
     // is the path the real TUI + tmux tripwire exercise.
