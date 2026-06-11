@@ -174,17 +174,20 @@ impl EmbedClient {
         self.exited.load(Ordering::Relaxed)
     }
 
-    /// Resize both the vt100 screen model and the kernel PTY (sends SIGWINCH).
+    /// Resize both the kernel PTY (sends SIGWINCH) and the vt100 screen model.
+    /// PTY first: if the kernel resize fails, neither the vt100 model nor the
+    /// cached size change, so the next frame retries from a consistent state
+    /// instead of rendering a screen model that disagrees with the PTY.
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         let rows = rows.max(1);
         let cols = cols.max(1);
         if rows == self.rows && cols == self.cols {
             return Ok(());
         }
+        self.pty.resize(cols, rows)?;
         if let Ok(mut p) = self.parser.write() {
             p.screen_mut().set_size(rows, cols);
         }
-        self.pty.resize(cols, rows)?;
         self.rows = rows;
         self.cols = cols;
         self.dirty.store(true, Ordering::Relaxed);

@@ -27,6 +27,25 @@ use crate::app::{
     screens::{builtin::register_builtins, ids as screen_ids},
 };
 
+/// Cell size the embed gets under the interactive layout: the right pane's
+/// interior once the session list has collapsed to the thin rail. Used at
+/// entry (`EnterInteractivePane`) so the very first attach already matches
+/// what the first interactive frame will resize to — otherwise tmux reflows
+/// the session twice back-to-back (attach size → layout size).
+///
+/// Must mirror `render`'s split: vertical chrome is the status bar (3) +
+/// session info (3) + menu bar (6), and the pane border takes 2 more rows/
+/// cols off the interior.
+pub fn interactive_embed_size(width: u16, height: u16) -> (u16, u16) {
+    const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
+    const PANE_BORDERS: u16 = 2;
+    let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
+    let cols = width
+        .saturating_sub(crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH + PANE_BORDERS)
+        .max(1);
+    (rows, cols)
+}
+
 pub struct LayoutComponent {
     session_list: SessionListComponent,
     logs_viewer: LogsViewerComponent,
@@ -1558,4 +1577,25 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod interactive_embed_size_tests {
+    use super::interactive_embed_size;
+
+    #[test]
+    fn matches_the_interactive_layout_interior() {
+        // 120x30 terminal: chrome = 3+3+6 plus the pane border (2) → rows 16;
+        // collapsed rail (5) plus the border (2) → cols 113. Must equal what
+        // the first interactive frame resizes the embed to (the tripwire
+        // drives the real render path against this).
+        assert_eq!(interactive_embed_size(120, 30), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24), (10, 73));
+    }
+
+    #[test]
+    fn never_returns_zero_cells() {
+        assert_eq!(interactive_embed_size(0, 0), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14), (1, 1));
+    }
 }
