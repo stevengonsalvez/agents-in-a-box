@@ -942,3 +942,142 @@ fn squad_create_rejects_a_duplicate_name() {
         "the duplicate-name guard message must surface:\n{out}"
     );
 }
+
+/// Seed a real agent (`assign-agent` on `assign-runtime`) into the bootstrapped
+/// db at `$AINB_HANGAR_HOME` so a squad led by it has a leader to route work to.
+/// Runs synchronously on a fresh tokio runtime (the binary is invoked separately,
+/// so there is no concurrent writer on the WAL).
+fn seed_assignable_agent(home: &std::path::Path) {
+    use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+    use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.unwrap();
+        let pool = store.pool();
+        // The default workspace the CLI bootstrap created.
+        let ws_id: String =
+            sqlx::query_scalar("SELECT id FROM workspace WHERE slug = 'default' LIMIT 1")
+                .fetch_one(pool)
+                .await
+                .expect("default workspace exists after bootstrap");
+        // `agent.owner_id` FKs to `user(id)`; seed the owner.
+        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
+            .bind("assign-owner")
+            .bind("owner@example.com")
+            .bind(0_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+        AgentRuntimeRepo::insert(
+            pool,
+            &AgentRuntime {
+                id: "assign-runtime".into(),
+                workspace_id: ws_id.clone(),
+                daemon_id: "daemon-cli".into(),
+                provider: "codex".into(),
+                runtime_mode: "local".into(),
+                last_seen_at: Some(1),
+                status: "online".into(),
+            },
+        )
+        .await
+        .unwrap();
+        AgentRepo::insert(
+            pool,
+            &Agent {
+                id: "assign-agent".into(),
+                workspace_id: ws_id,
+                name: "lead".into(),
+                runtime_id: "assign-runtime".into(),
+                instructions: None,
+                visibility: "workspace".into(),
+                owner_id: "assign-owner".into(),
+                archived: false,
+                model: None,
+                cli_args: Vec::new(),
+                mcp_config: None,
+                thinking: None,
+                agent_env: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    });
+}
+
+/// The user-visible proof for e38.17 leader routing: `ainb hangar squad assign`
+/// routes a task to the squad's LEADER through the real binary. The squad is led
+/// by `assign-agent` (a real agent on `assign-runtime`); `squad assign` reports
+/// the leader agent + the runtime it DERIVED (never supplied on the CLI).
+#[test]
+fn squad_assign_routes_a_task_to_the_leader() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Bootstrap the workspace, then seed the leader agent so it is routable.
+    create_issue(tmp.path(), "Bootstrap the workspace");
+    seed_assignable_agent(tmp.path());
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:assign-agent",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    // Assign to the squad — naming ONLY the squad, never the agent/runtime.
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "assign", &squad_id]);
+    assert!(ok, "squad assign should exit 0; out={out}");
+    assert!(
+        out.contains("leader assign-agent"),
+        "assign ack must name the leader agent:\n{out}"
+    );
+    assert!(
+        out.contains("runtime assign-runtime"),
+        "assign ack must name the DERIVED leader runtime:\n{out}"
+    );
+}
+
+/// `ainb hangar squad assign` on a squad led by a HUMAN member is rejected: there
+/// is no agent to dispatch to, so the routing guard fires through the real binary.
+#[test]
+fn squad_assign_rejects_a_human_leader() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "humans",
+            "--leader",
+            "member:user-1",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "assign", &squad_id]);
+    assert!(!ok, "assigning to a human-led squad must fail; out={out}");
+    assert!(
+        out.contains("no agent leader"),
+        "the human-leader guard message must surface:\n{out}"
+    );
+}

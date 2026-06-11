@@ -415,6 +415,8 @@ pub enum SquadCommand {
     /// Remove a member actor from a squad (`agent:<id>` / `member:<id>`).
     #[command(name = "remove-member")]
     RemoveMember(SquadMemberArgs),
+    /// Route a task to the squad's LEADER (leader routing taking effect).
+    Assign(SquadAssignArgs),
 }
 
 /// Arguments for `hangar squad list`.
@@ -448,6 +450,26 @@ pub struct SquadMemberArgs {
     /// The member actor-ref (`agent:<id>` / `member:<id>`).
     #[arg(long)]
     pub member: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad assign`: route a task to the squad's leader.
+#[derive(Args, Debug)]
+pub struct SquadAssignArgs {
+    /// The squad id (`squad.id`) whose leader the task routes to.
+    pub squad_id: String,
+    /// The issue the routed task carries (`issue.id`), or omit for an ad-hoc task.
+    #[arg(long)]
+    pub issue: Option<String>,
+    /// The run's working directory, or omit.
+    #[arg(long)]
+    pub work_dir: Option<String>,
+    /// Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine).
+    #[arg(long, default_value_t = 0)]
+    pub priority: i64,
     /// Workspace slug the squad belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -1547,6 +1569,7 @@ async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
         SquadCommand::Create(args) => run_squad_create(&store, args).await,
         SquadCommand::AddMember(args) => run_squad_member(&store, args, true).await,
         SquadCommand::RemoveMember(args) => run_squad_member(&store, args, false).await,
+        SquadCommand::Assign(args) => run_squad_assign(&store, args).await,
     }
 }
 
@@ -1626,6 +1649,58 @@ async fn run_squad_member(store: &Store, args: SquadMemberArgs, add: bool) -> Re
         println!("removed {member} from squad {}", args.squad_id);
     }
     Ok(())
+}
+
+/// `hangar squad assign`: route a task to the squad's LEADER — leader routing
+/// taking effect. The daemon-free path the daemon RPC mirrors: resolve the
+/// squad's leader agent, derive the leader's runtime, and enqueue the task keyed
+/// to the leader so the claim path dispatches it to the leader. A human-member or
+/// unknown-squad leader (no agent to dispatch to) is rejected.
+async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let request = SquadAssignRequest {
+        issue_id: args.issue.as_deref(),
+        work_dir: args.work_dir.as_deref(),
+        priority: args.priority,
+    };
+    let assignment = SquadAssignService::assign_to_leader(
+        store.pool(),
+        &ws,
+        &args.squad_id,
+        &request,
+        &SystemIdGen,
+        &SystemClock,
+    )
+    .await
+    .map_err(squad_assign_cli_err)?;
+    println!(
+        "assigned task {} to squad {} leader {} (runtime {})",
+        assignment.task_id, args.squad_id, assignment.leader_agent_id, assignment.runtime_id
+    );
+    Ok(())
+}
+
+/// Map a [`SquadAssignError`] onto a human CLI error: a no-agent-leader /
+/// missing-leader rejection gets a clear message, a store fault is contextualised.
+///
+/// [`SquadAssignError`]: ainb_hangar_store::service::squad_assign::SquadAssignError
+fn squad_assign_cli_err(
+    e: ainb_hangar_store::service::squad_assign::SquadAssignError,
+) -> anyhow::Error {
+    use ainb_hangar_store::service::squad_assign::SquadAssignError;
+    match e {
+        SquadAssignError::NoAgentLeader => anyhow::anyhow!(
+            "squad has no agent leader to route to (unknown squad or a human leader)"
+        ),
+        SquadAssignError::LeaderAgentMissing(id) => {
+            anyhow::anyhow!("squad leader agent `{id}` not found")
+        }
+        db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
+    }
 }
 
 /// Map a [`SquadRepoError`] onto a human CLI error, surfacing the duplicate-name
