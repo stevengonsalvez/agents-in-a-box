@@ -9,12 +9,19 @@
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use portable_pty::CommandBuilder;
 
 use crate::tmux::pty_wrapper::PtyWrapper;
+
+/// Bounded depth of the input queue feeding the writer thread. Deep enough to
+/// absorb keystroke/paste/mouse bursts, shallow enough that a wedged PTY makes
+/// the queue fill (and inputs drop with a warning) instead of buffering
+/// unboundedly.
+const WRITER_QUEUE_CAPACITY: usize = 256;
 
 /// Enforce the environment the embed's `tmux attach` client depends on.
 ///
@@ -63,7 +70,9 @@ fn apply_embed_env_from(
 pub struct EmbedClient {
     pty: PtyWrapper,
     parser: Arc<RwLock<vt100::Parser>>,
-    writer: Arc<StdMutex<Box<dyn Write + Send>>>,
+    /// Input queue into the dedicated writer thread. Dropping the sender (i.e.
+    /// dropping this client) closes the channel and the thread exits.
+    input_tx: SyncSender<Vec<u8>>,
     dirty: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
     rows: u16,
@@ -140,10 +149,28 @@ impl EmbedClient {
             guard.take_writer().context("take pty writer")?
         };
 
+        // Writer thread: input queue -> master fd. PTY writes can block when
+        // the inner client wedges; doing them on the UI thread would freeze
+        // the whole event loop, including the Ctrl+Q escape hatch. The thread
+        // exits when the channel closes (client dropped) or a write fails
+        // (PTY gone).
+        let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(WRITER_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("embed-pty-writer".into())
+            .spawn(move || {
+                let mut writer = writer;
+                while let Ok(bytes) = input_rx.recv() {
+                    if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("spawn embed writer thread")?;
+
         Ok(Self {
             pty,
             parser,
-            writer: Arc::new(StdMutex::new(writer)),
+            input_tx,
             dirty,
             exited,
             rows,
@@ -156,12 +183,26 @@ impl EmbedClient {
         Arc::clone(&self.parser)
     }
 
-    /// Forward raw input bytes to the inner program (keystrokes, paste).
+    /// Forward raw input bytes to the inner program (keystrokes, paste,
+    /// mouse). Non-blocking: bytes are queued to the dedicated writer thread.
+    /// If the queue is full (wedged PTY) the input is DROPPED with a warning —
+    /// visible input loss in the logs beats a frozen event loop. Errors only
+    /// when the writer thread is gone (PTY closed).
     pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
-        let mut w = self.writer.lock().map_err(|e| anyhow::anyhow!("writer lock: {e}"))?;
-        w.write_all(bytes)?;
-        w.flush()?;
-        Ok(())
+        match self.input_tx.try_send(bytes.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(
+                    dropped_bytes = bytes.len(),
+                    capacity = WRITER_QUEUE_CAPACITY,
+                    "embed input queue full (wedged PTY?); dropping input"
+                );
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err(anyhow::anyhow!("embed writer thread gone (PTY closed)"))
+            }
+        }
     }
 
     /// Has new output arrived since the last call? Clears the flag.
@@ -208,6 +249,7 @@ impl EmbedClient {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
 
     // These e2e tests each spawn a tmux client + reader thread; running them
