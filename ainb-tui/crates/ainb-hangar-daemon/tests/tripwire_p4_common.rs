@@ -625,6 +625,9 @@ pub fn seed_autopilot(home: &Path) {
                 // future 09:00, so it never fires inside the test window.
                 cron_expr: "0 9 * * *".into(),
                 max_concurrent_runs: 1,
+                execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+                concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
+                ),
             },
         )
         .await

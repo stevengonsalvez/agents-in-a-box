@@ -91,6 +91,9 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         instructions: None,
         cron_expr: "*/5 * * * *".to_string(),
         max_concurrent_runs: 1,
+        execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+        // The default policy: a tick at the in-flight limit is dropped.
+        concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
     };
     let create_clock = FixedClock(T0);
     let autopilot_id = AutopilotRepo::create(&pool, &create_clock, &req)

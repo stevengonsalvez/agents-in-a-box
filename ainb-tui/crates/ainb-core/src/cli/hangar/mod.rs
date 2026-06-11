@@ -230,12 +230,67 @@ pub struct AutopilotCreateArgs {
     /// Optional instructions handed to the agent on every tick.
     #[arg(long)]
     pub instructions: Option<String>,
-    /// Maximum simultaneous in-flight runs before a tick is skipped.
+    /// Maximum simultaneous in-flight runs before the concurrency policy applies.
     #[arg(long = "max-concurrent-runs", default_value_t = 1)]
     pub max_concurrent_runs: i64,
+    /// What a fired tick materialises: `run-only` (a task with no issue, the
+    /// default) or `create-issue` (an issue plus a task against it).
+    #[arg(long = "execution-mode", value_enum, default_value_t = ExecutionModeArg::RunOnly)]
+    pub execution_mode: ExecutionModeArg,
+    /// What the scheduler does when a tick comes due at the in-flight limit:
+    /// `skip` (drop it, the default), `queue` (fire it anyway to run after the
+    /// in-flight one), or `replace` (supersede the in-flight run and fire fresh).
+    #[arg(long = "concurrency-policy", value_enum, default_value_t = ConcurrencyPolicyArg::Skip)]
+    pub concurrency_policy: ConcurrencyPolicyArg,
     /// Workspace slug to create in. Defaults to the bootstrapped `default`.
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// CLI surface of [`ExecutionMode`](ainb_hangar_store::repo::autopilot::ExecutionMode).
+///
+/// A thin clap [`ValueEnum`] mirror so the flag accepts the kebab-case
+/// `run-only` / `create-issue` values and maps onto the store enum at dispatch.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ExecutionModeArg {
+    /// Enqueue a task with no issue (the v1 default).
+    RunOnly,
+    /// Create an issue, then enqueue a task against it.
+    CreateIssue,
+}
+
+impl From<ExecutionModeArg> for ainb_hangar_store::repo::autopilot::ExecutionMode {
+    fn from(a: ExecutionModeArg) -> Self {
+        match a {
+            ExecutionModeArg::RunOnly => Self::RunOnly,
+            ExecutionModeArg::CreateIssue => Self::CreateIssue,
+        }
+    }
+}
+
+/// CLI surface of
+/// [`ConcurrencyPolicy`](ainb_hangar_store::repo::autopilot::ConcurrencyPolicy).
+///
+/// A thin clap [`ValueEnum`] mirror so the flag accepts the lower-case
+/// `skip` / `queue` / `replace` values and maps onto the store enum at dispatch.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConcurrencyPolicyArg {
+    /// Drop a tick that comes due at the in-flight limit (the v1 default).
+    Skip,
+    /// Fire the tick anyway; the queue runs it after the in-flight one.
+    Queue,
+    /// Supersede the in-flight run and fire fresh.
+    Replace,
+}
+
+impl From<ConcurrencyPolicyArg> for ainb_hangar_store::repo::autopilot::ConcurrencyPolicy {
+    fn from(a: ConcurrencyPolicyArg) -> Self {
+        match a {
+            ConcurrencyPolicyArg::Skip => Self::Skip,
+            ConcurrencyPolicyArg::Queue => Self::Queue,
+            ConcurrencyPolicyArg::Replace => Self::Replace,
+        }
+    }
 }
 
 /// Arguments for `hangar autopilot list`.
@@ -1205,6 +1260,8 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
         instructions: args.instructions,
         cron_expr: args.cron.clone(),
         max_concurrent_runs: args.max_concurrent_runs,
+        execution_mode: args.execution_mode.into(),
+        concurrency_policy: args.concurrency_policy.into(),
     };
 
     let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
@@ -2968,10 +3025,12 @@ fn webhook_delivery_to_json(
 /// One-line text summary of an autopilot.
 fn autopilot_line(a: &Autopilot, last_run: Option<&str>) -> String {
     format!(
-        "{}  {}  cron={}  next_tick={}  last_run={}  [{}]",
+        "{}  {}  cron={}  mode={}  policy={}  next_tick={}  last_run={}  [{}]",
         a.id,
         a.name,
         a.cron_expr,
+        a.execution_mode.as_str(),
+        a.concurrency_policy.as_str(),
         a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
         last_run.unwrap_or("-"),
         autopilot_badge(a.enabled),
@@ -3015,7 +3074,8 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
     let last = last_run.map_or_else(|| "null".to_string(), json_string);
     format!(
         "{{\"id\":{},\"workspace_id\":{},\"agent_id\":{},\"name\":{},\"instructions\":{},\
-          \"cron_expr\":{},\"max_concurrent_runs\":{},\"next_tick_at\":{},\"enabled\":{},\
+          \"cron_expr\":{},\"max_concurrent_runs\":{},\"execution_mode\":{},\
+          \"concurrency_policy\":{},\"next_tick_at\":{},\"enabled\":{},\
           \"last_run\":{}}}",
         json_string(&a.id),
         json_string(&a.workspace_id),
@@ -3024,6 +3084,8 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         instructions,
         json_string(&a.cron_expr),
         a.max_concurrent_runs,
+        json_string(a.execution_mode.as_str()),
+        json_string(a.concurrency_policy.as_str()),
         next_tick,
         a.enabled,
         last,
@@ -4359,6 +4421,8 @@ mod tests {
             instructions: Some("triage".into()),
             cron_expr: "0 9 * * *".into(),
             max_concurrent_runs: 1,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at: Some(1_767_258_000_000),
             enabled,
             created_at: 0,

@@ -353,7 +353,8 @@ impl AutopilotScheduler {
     async fn load_enabled(&self) -> Result<Vec<Autopilot>, sqlx::Error> {
         sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, \
+                    next_tick_at, enabled, created_at \
              FROM autopilot \
              WHERE enabled = 1 AND next_tick_at IS NOT NULL \
              ORDER BY next_tick_at ASC",
@@ -559,6 +560,8 @@ mod tests {
             instructions: None,
             cron_expr: cron.to_string(),
             max_concurrent_runs: max,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at,
             enabled: true,
             created_at: 0,

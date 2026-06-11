@@ -90,6 +90,8 @@ async fn seed_autopilot(store: &Store) -> ainb_hangar_store::repo::autopilot::Au
             instructions: Some("do the thing".to_string()),
             cron_expr: "0 9 * * *".to_string(),
             max_concurrent_runs: 1,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
         },
     )
     .await

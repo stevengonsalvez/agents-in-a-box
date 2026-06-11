@@ -2181,6 +2181,9 @@ mod tests {
                 instructions: Some("triage".into()),
                 cron_expr: "0 9 * * 1-5".into(),
                 max_concurrent_runs: 1,
+                execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+                concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
+                ),
             },
         )
         .await
@@ -2254,6 +2257,9 @@ mod tests {
                 instructions: None,
                 cron_expr: "0 2 * * *".into(),
                 max_concurrent_runs: 1,
+                execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+                concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
+                ),
             },
         )
         .await
@@ -2310,6 +2316,9 @@ mod tests {
                 instructions: Some("go".into()),
                 cron_expr: "0 0 * * *".into(),
                 max_concurrent_runs: 1,
+                execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+                concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
+                ),
             },
         )
         .await
@@ -2353,6 +2362,9 @@ mod tests {
                 instructions: None,
                 cron_expr: "0 9 * * MON".into(),
                 max_concurrent_runs: 1,
+                execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+                concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
+                ),
             },
         )
         .await
