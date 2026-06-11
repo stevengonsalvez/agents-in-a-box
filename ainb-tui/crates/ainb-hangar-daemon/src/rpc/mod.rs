@@ -457,6 +457,9 @@ async fn handle(
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
         methods::HANGAR_AGENT_ARCHIVE => handle_agent_archive(pool, req).await,
+        methods::HANGAR_MEMBERS_LIST => handle_members_list(pool, req).await,
+        methods::HANGAR_MEMBER_SET_ROLE => handle_member_set_role(pool, req).await,
+        methods::HANGAR_MEMBER_REMOVE => handle_member_remove(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -1036,6 +1039,105 @@ async fn handle_agent_archive(
         )));
     };
     to_value(&row)
+}
+
+/// Dispatch `hangar/members_list` (e38.11): snapshot the workspace's human
+/// members as a [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult).
+///
+/// A read, so an unknown / foreign workspace yields an empty list (never an
+/// error), mirroring [`HANGAR_AGENTS_LIST`](methods::HANGAR_AGENTS_LIST). Split
+/// out of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_members_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let members = match resolve(pool, req).await? {
+        Some(ws) => snapshots::members_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::MembersListResult { members })
+}
+
+/// Dispatch `hangar/member_set_role` (e38.11): change one member's role and
+/// answer with the refreshed
+/// [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult).
+///
+/// Mirrors [`handle_agent_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), validates the role token against the closed `owner`/`admin`/`member`
+/// set, then drives the workspace-scoped edit. A `(workspace, user_id)` pair that
+/// matches no member is rejected as a not-found error (never a cross-tenant edit),
+/// and demoting the workspace's only owner is rejected so a workspace always keeps
+/// an owner. The member list is not event-driven (the settings pane re-pulls), so
+/// no event is pushed.
+async fn handle_member_set_role(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+
+    let params: ainb_hangar_proto::snapshots::MemberSetRoleParams =
+        parse_params(req, "{ workspace_id, user_id, role }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let role = MemberRole::parse(&params.role)
+        .ok_or_else(|| invalid_params("role must be one of owner/admin/member"))?;
+    MemberRepo::set_role(pool, &ws, &params.user_id, role)
+        .await
+        .map_err(|e| member_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/member_remove` (e38.11): remove one member and answer with the
+/// refreshed [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult).
+///
+/// Mirrors [`handle_member_set_role`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the workspace-scoped removal. A `(workspace, user_id)`
+/// pair that matches no member is a not-found error (never a cross-tenant remove),
+/// and removing the workspace's only owner is rejected.
+async fn handle_member_remove(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let params: ainb_hangar_proto::snapshots::MemberRemoveParams =
+        parse_params(req, "{ workspace_id, user_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    MemberRepo::remove(pool, &ws, &params.user_id)
+        .await
+        .map_err(|e| member_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Re-read `ws`'s members and serialize them as a
+/// [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult) wire
+/// value. Shared by the two member mutations so each answers with the same
+/// refreshed view the settings pane renders.
+async fn members_list_value(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+) -> Result<serde_json::Value, RpcError> {
+    let members = snapshots::members_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::MembersListResult { members })
+}
+
+/// Map a [`MemberRepoError`] onto an RPC error: a not-found / last-owner /
+/// invalid-role rejection is a client error (`INVALID_PARAMS`), every store fault
+/// an internal error. Mirrors [`autopilot_repo_err`].
+///
+/// [`MemberRepoError`]: ainb_hangar_store::repo::member::MemberRepoError
+fn member_repo_err(e: &ainb_hangar_store::repo::member::MemberRepoError) -> RpcError {
+    use ainb_hangar_store::repo::member::MemberRepoError;
+    match e {
+        MemberRepoError::NotFound => {
+            invalid_params("no member with that user id in this workspace")
+        }
+        MemberRepoError::LastOwner => {
+            invalid_params("a workspace must always keep at least one owner")
+        }
+        MemberRepoError::InvalidRole => invalid_params("role must be one of owner/admin/member"),
+        MemberRepoError::Db(db) => store_err(db),
+    }
 }
 
 /// Resolve a workspace-scoped request's `{ workspace_id }` to a typed

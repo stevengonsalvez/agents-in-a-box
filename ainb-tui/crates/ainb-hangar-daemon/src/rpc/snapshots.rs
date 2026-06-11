@@ -196,6 +196,41 @@ pub async fn agents_list(
     Ok(out)
 }
 
+/// Snapshot the human members of `workspace_id` as wire
+/// [`MemberWireRow`](ainb_hangar_proto::snapshots::MemberWireRow)s for the
+/// settings Members pane (`hangar/members_list`, e38.11).
+///
+/// Reuses the store's [`MemberRepo`](ainb_hangar_store::repo::member::MemberRepo)
+/// (the `member` × `user` join, ordered by email) and maps each row onto its wire
+/// shape. Workspace-scoped: a foreign / unknown workspace yields an empty vec.
+/// Shared by the list RPC and the refreshed view the set-role / remove mutations
+/// answer with, so the pane re-renders identically either way.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the member query fails.
+pub async fn members_list(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::MemberWireRow>, sqlx::Error> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    // A malformed (empty) workspace id resolves to no members, not an error.
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(Vec::new());
+    };
+    let members = MemberRepo::list(pool, &ws).await?;
+    Ok(members
+        .into_iter()
+        .map(|m| ainb_hangar_proto::snapshots::MemberWireRow {
+            user_id: m.user_id,
+            email: m.email,
+            role: m.role,
+        })
+        .collect())
+}
+
 /// Snapshot the skills of `workspace_id`, mapped to wire [`SkillRow`]s.
 ///
 /// `used` reflects whether any agent references the skill (via the `agent_skill`
