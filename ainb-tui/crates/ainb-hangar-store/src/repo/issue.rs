@@ -293,6 +293,85 @@ impl IssueRepo {
         .await?;
         rows.iter().map(issue_from_row).collect()
     }
+
+    /// Full-text-ish search: every issue in `workspace_id` whose title,
+    /// description, OR any of its comment bodies contains `query`
+    /// (case-insensitive substring), ranked title > description > comment
+    /// (e38.12).
+    ///
+    /// A row matches if `query` appears in any of the three text surfaces; each
+    /// row's rank is its **strongest** hit (a title match outranks a
+    /// description-only match outranks a comment-only match), so an issue that
+    /// only mentions the term in a comment sorts below one that has it in the
+    /// title. The result is ordered `rank DESC, created_at, id` — strongest hits
+    /// first, then deterministic by age then id.
+    ///
+    /// The match is a true substring (the LIKE wildcards `%` / `_` and the
+    /// escape `\` in `query` are escaped via [`like_escape`] + `ESCAPE '\'`), so
+    /// a query containing `%` matches a literal `%`, mirroring the plugin's
+    /// client-side `contains` filter rather than turning into a wildcard. A blank
+    /// (all-whitespace) query matches nothing — searching for "" must not dump
+    /// the whole board.
+    ///
+    /// The search joins `comment` so a comment-body hit promotes its parent
+    /// issue; `GROUP BY i.id` collapses the per-comment fan-out back to one row
+    /// per issue carrying its best rank. Workspace-scoped through
+    /// `i.workspace_id = ?`, so a sibling tenant's matching issue is never
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails or a row's actor / labels
+    /// columns are malformed.
+    pub async fn search_ranked(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        query: &str,
+    ) -> Result<Vec<Issue>, sqlx::Error> {
+        // A blank query matches nothing — never dump the whole board.
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Lower-case both sides for ASCII-and-Unicode-safe case-insensitivity
+        // (SQLite's bare LIKE is only case-insensitive over ASCII), and escape
+        // the LIKE metacharacters so the term is a literal substring.
+        let pattern = format!("%{}%", like_escape(&trimmed.to_lowercase()));
+        // The CASE assigns a per-surface weight; MAX over the comment fan-out
+        // keeps the strongest surface per issue. HAVING rank > 0 drops the
+        // non-matching rows the LEFT JOIN would otherwise keep.
+        let rows = sqlx::query(
+            "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
+             i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
+             i.priority, i.due_date, i.labels, \
+             MAX(CASE \
+                 WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
+                 WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
+                 WHEN LOWER(c.body) LIKE ?2 ESCAPE '\\' THEN 1 \
+                 ELSE 0 END) AS rank \
+             FROM issue i \
+             LEFT JOIN comment c ON c.issue_id = i.id \
+             WHERE i.workspace_id = ?1 \
+             GROUP BY i.id \
+             HAVING rank > 0 \
+             ORDER BY rank DESC, i.created_at, i.id",
+        )
+        .bind(workspace_id)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(issue_from_row).collect()
+    }
+}
+
+/// Escape the SQL `LIKE` metacharacters (`\`, `%`, `_`) in `term` so the value
+/// is matched as a literal substring under an `ESCAPE '\'` clause.
+///
+/// Escaping `\` first is essential: were it escaped after `%`/`_`, the escape
+/// characters this function itself inserts would be double-escaped. The result
+/// is wrapped in `%...%` by the caller to form the substring pattern.
+fn like_escape(term: &str) -> String {
+    term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
 /// Split an optional [`ActorRef`] into the `(type, id)` column pair the schema
@@ -387,4 +466,193 @@ fn labels_to_json(labels: &[String]) -> String {
 /// [`labels_to_json`] ever write, so this surfaces external corruption).
 fn labels_from_json(raw: &str) -> Result<Vec<String>, sqlx::Error> {
     serde_json::from_str(raw).map_err(|e| decode_err("labels", &e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+    use ainb_hangar_core::actor::{ActorKind, ActorRef};
+
+    fn member() -> ActorRef {
+        ActorRef::new(ActorKind::Member, "user-1").unwrap()
+    }
+
+    async fn seed_ws(pool: &SqlitePool, ws: &str) {
+        sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+            .bind(ws)
+            .bind(ws)
+            .bind(ws)
+            .bind(1_000_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_issue(
+        pool: &SqlitePool,
+        ws: &str,
+        id: &str,
+        title: &str,
+        description: Option<&str>,
+        created_at: i64,
+    ) {
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.into(),
+                workspace_id: ws.into(),
+                title: title.into(),
+                description: description.map(ToString::to_string),
+                state: "open".into(),
+                assignee: None,
+                creator: member(),
+                created_at,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn seed_comment(pool: &SqlitePool, id: &str, issue_id: &str, body: &str) {
+        sqlx::query(
+            "INSERT INTO comment (id, issue_id, author_type, author_id, body, created_at) \
+             VALUES (?, ?, 'member', 'user-1', ?, 1000)",
+        )
+        .bind(id)
+        .bind(issue_id)
+        .bind(body)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A title hit outranks a description hit outranks a comment-only hit; a
+    /// non-matching issue is excluded entirely.
+    #[tokio::test]
+    async fn search_ranks_title_over_description_over_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+
+        // i-title: term in the title (rank 3).
+        seed_issue(pool, "ws-a", "i-title", "Fix the widget", None, 1).await;
+        // i-desc: term only in the description (rank 2).
+        seed_issue(
+            pool,
+            "ws-a",
+            "i-desc",
+            "Unrelated",
+            Some("the widget broke"),
+            2,
+        )
+        .await;
+        // i-comment: term only in a comment body (rank 1).
+        seed_issue(pool, "ws-a", "i-comment", "Other", Some("nothing here"), 3).await;
+        seed_comment(pool, "c1", "i-comment", "saw the widget fail").await;
+        // i-none: term nowhere — excluded.
+        seed_issue(pool, "ws-a", "i-none", "Calm", Some("no match"), 4).await;
+
+        let hits = IssueRepo::search_ranked(pool, "ws-a", "widget").await.unwrap();
+        let ids: Vec<&str> = hits.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["i-title", "i-desc", "i-comment"],
+            "title > description > comment ranking, non-match excluded"
+        );
+    }
+
+    /// Search is case-insensitive over both query and stored text.
+    #[tokio::test]
+    async fn search_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i1", "Refactor the API Layer", None, 1).await;
+
+        let hits = IssueRepo::search_ranked(pool, "ws-a", "api layer").await.unwrap();
+        assert_eq!(hits.len(), 1, "case-insensitive title match");
+        assert_eq!(hits[0].id, "i1");
+    }
+
+    /// A blank query matches nothing — never dump the whole board.
+    #[tokio::test]
+    async fn search_blank_query_matches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i1", "Anything", None, 1).await;
+
+        assert!(IssueRepo::search_ranked(pool, "ws-a", "   ").await.unwrap().is_empty());
+        assert!(IssueRepo::search_ranked(pool, "ws-a", "").await.unwrap().is_empty());
+    }
+
+    /// LIKE metacharacters in the query are matched literally (a `%` does not
+    /// become a wildcard).
+    #[tokio::test]
+    async fn search_escapes_like_metacharacters() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-pct", "Cut load by 50% today", None, 1).await;
+        seed_issue(pool, "ws-a", "i-plain", "no percent here", None, 2).await;
+
+        // "50%" must match only the literal-percent issue, not act as a wildcard
+        // that would also match "i-plain".
+        let hits = IssueRepo::search_ranked(pool, "ws-a", "50%").await.unwrap();
+        let ids: Vec<&str> = hits.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["i-pct"], "% is a literal, not a wildcard");
+    }
+
+    /// One issue with the term in BOTH title and a comment ranks by its title
+    /// (best surface), not its comment — the MAX-over-fan-out collapse.
+    #[tokio::test]
+    async fn search_collapses_fanout_to_best_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        // i-both: term in the title (rank 3) AND two comments (rank 1 each).
+        seed_issue(pool, "ws-a", "i-both", "deploy pipeline", None, 1).await;
+        seed_comment(pool, "c1", "i-both", "the deploy is flaky").await;
+        seed_comment(pool, "c2", "i-both", "deploy again please").await;
+        // i-cmt: term only in a comment (rank 1).
+        seed_issue(pool, "ws-a", "i-cmt", "Other work", None, 2).await;
+        seed_comment(pool, "c3", "i-cmt", "deploy notes").await;
+
+        let hits = IssueRepo::search_ranked(pool, "ws-a", "deploy").await.unwrap();
+        let ids: Vec<&str> = hits.iter().map(|i| i.id.as_str()).collect();
+        // i-both appears exactly once (no fan-out duplication) and ranks above
+        // the comment-only i-cmt because its title hit (3) beats a comment (1).
+        assert_eq!(
+            ids,
+            ["i-both", "i-cmt"],
+            "best surface per issue, no dup rows"
+        );
+    }
+
+    /// Search is workspace-scoped: a sibling tenant's matching issue is never
+    /// returned.
+    #[tokio::test]
+    async fn search_is_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_issue(pool, "ws-a", "i-a", "shared keyword", None, 1).await;
+        seed_issue(pool, "ws-b", "i-b", "shared keyword", None, 1).await;
+
+        let hits = IssueRepo::search_ranked(pool, "ws-a", "keyword").await.unwrap();
+        let ids: Vec<&str> = hits.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["i-a"], "only the owning tenant's issue is returned");
+    }
 }
