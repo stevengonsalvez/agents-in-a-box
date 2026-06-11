@@ -374,6 +374,37 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
+                    // Interactive embed escape hatch: Ctrl+Q releases focus and
+                    // kills the ephemeral tmux client. Keyed off the RESOURCE
+                    // (embed exists), never the mode flag, so the hatch works
+                    // even from a leaked state where the embed is alive but
+                    // focus drifted off the preview pane.
+                    {
+                        use crossterm::event::KeyModifiers;
+                        if app.state.embed.is_some()
+                            && key_event.code == KeyCode::Char('q')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            app.state.release_interactive_pane();
+                            continue;
+                        }
+                    }
+
+                    // Interactive embed has highest input precedence: while a
+                    // session is focused in-place, every key is forwarded to the
+                    // embedded tmux client (Ctrl+Q was already intercepted
+                    // above). This runs BEFORE the slash palette so typing ':'
+                    // inside the embed reaches the PTY instead of opening the
+                    // palette.
+                    if app.state.is_interactive_pane() {
+                        if let Some(client) = app.state.embed.as_ref() {
+                            if let Some(bytes) = crate::tmux::encode_key_event(&key_event) {
+                                let _ = client.write_input(&bytes);
+                            }
+                        }
+                        continue;
+                    }
+
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
                     // commands hook in here in Phase 4.
@@ -419,26 +450,6 @@ async fn run_tui_loop(
                                 }
                             }
                             SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
-                        }
-                        continue;
-                    }
-
-                    // Interactive embed has highest input precedence: while a
-                    // session is focused in-place, every key is forwarded to the
-                    // embedded tmux client EXCEPT Ctrl+Q, which ainb intercepts
-                    // to release focus (it never reaches the inner program).
-                    if app.state.is_interactive_pane() {
-                        use crossterm::event::KeyModifiers;
-                        if key_event.code == KeyCode::Char('q')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            app.state.release_interactive_pane();
-                            continue;
-                        }
-                        if let Some(client) = app.state.embed.as_ref() {
-                            if let Some(bytes) = crate::tmux::encode_key_event(&key_event) {
-                                let _ = client.write_input(&bytes);
-                            }
                         }
                         continue;
                     }
@@ -568,6 +579,14 @@ async fn run_tui_loop(
                 Event::Mouse(mouse_event) => {
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
+
+                    // Mode boundary: while the interactive embed owns input,
+                    // host mouse handlers must NEVER run — a click/scroll
+                    // changing focus or selection under a live embed splits
+                    // the mode invariants. Swallow everything.
+                    if app.state.is_interactive_pane() {
+                        continue;
+                    }
 
                     // A focused plugin screen owns the pointer (mirrors the
                     // key-forwarding contract). Forward + consume before the

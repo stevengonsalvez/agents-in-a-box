@@ -440,7 +440,11 @@ impl AppState {
     /// on the read-only preview.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
         if self.embed.is_some() {
-            return true; // already interactive
+            // Self-healing re-entry: a live embed with focus drifted off the
+            // preview pane is a leaked state — restore the mode invariant
+            // instead of silently no-opping.
+            self.focused_pane = FocusedPane::Preview;
+            return true;
         }
         let Some(name) = self.selected_tmux_name() else {
             return false;
@@ -494,9 +498,16 @@ impl AppState {
     }
 
     /// If the embed has ended (detach / session gone / EOF), auto-release so the
-    /// pane reverts to the read-only preview rather than a dead screen.
+    /// pane reverts to the read-only preview rather than a dead screen. Also
+    /// releases defensively when the current screen is no longer the session
+    /// list — keys must never be forwarded to an invisible PTY.
     pub fn poll_embed_exit(&mut self) {
-        if self.embed.as_ref().is_some_and(|e| e.has_exited()) {
+        if self.embed.is_none() {
+            return;
+        }
+        let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
+        let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        if exited || invisible {
             self.release_interactive_pane();
         }
     }
@@ -2531,9 +2542,15 @@ pub struct AppState {
 
     // Focus management for panes
     pub focused_pane: FocusedPane,
-    // Live interactive embedded tmux-attach client for the focused preview pane.
-    // Some(_) only while focused_pane == Preview. Dropping it kills the ephemeral
-    // tmux client (never the session). TODO(tmux-in-pane #P4): pane expansion.
+    // Live interactive embedded tmux-attach client for the preview pane.
+    // Enforced invariants (focus can drift, so none of these are assumed):
+    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
+    //    (embed Some AND focused_pane == Preview).
+    //  - Ctrl+Q releases whenever the embed exists, regardless of focus/mode.
+    //  - `poll_embed_exit` (run before every draw) releases on client death
+    //    or when the session-list screen is no longer current, so keys are
+    //    never forwarded to an invisible PTY.
+    // Dropping it kills the ephemeral tmux client (never the session).
     pub embed: Option<crate::tmux::EmbedClient>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
