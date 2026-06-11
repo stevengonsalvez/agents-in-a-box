@@ -8,7 +8,7 @@
 //!
 //! This module bridges the two. At each FSM checkpoint the run loop reaches —
 //! the task starts running, and the run finishes (success / failure / timeout) —
-//! it calls [`emit_checkpoint`], which writes one **system-authored** comment to
+//! it calls [`emit_checkpoint`], which writes one **agent-authored** comment to
 //! the task's issue so the activity is recorded permanently in the thread the
 //! UI already renders.
 //!
