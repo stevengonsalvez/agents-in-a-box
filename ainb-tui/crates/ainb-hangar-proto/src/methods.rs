@@ -30,6 +30,24 @@ pub const WORKSPACE_LIST: &str = "workspace/list";
 /// Done client-side). Drives the issue-list landing screen (P4.3).
 pub const HANGAR_ISSUES_LIST: &str = "hangar/issues_list";
 
+/// `hangar/issues_search` — ranked full-text-ish issue search (e38.12).
+///
+/// Params: [`crate::snapshots::IssueSearchParams`] (`{ workspace_id, query }`).
+/// Result: [`crate::snapshots::IssuesListResult`] — the matching [`IssueRow`]s in
+/// ranked order. A row matches when the case-insensitive `query` substring appears
+/// in the issue title, description, OR any of its comment bodies; rows are ranked
+/// title > description > comment (strongest surface per issue wins) and ordered
+/// strongest-first. Reaches beyond the loaded page and into description / comment
+/// bodies, which the plugin's client-side `/` title-only filter cannot. A blank
+/// query matches nothing.
+///
+/// Workspace-scoped like [`HANGAR_ISSUES_LIST`]: a sibling tenant's matching issue
+/// is never returned, and an unknown workspace yields an empty result (a read, so
+/// no `INVALID_PARAMS` rejection — mirrors the list snapshot).
+///
+/// [`IssueRow`]: crate::events::IssueRow
+pub const HANGAR_ISSUES_SEARCH: &str = "hangar/issues_search";
+
 /// `hangar/agents_list` — snapshot the assignable actors of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: `{ actors: [ActorRow, ...] }`
@@ -279,6 +297,7 @@ pub const ALL_METHODS: &[&str] = &[
     WORKSPACE_SUBSCRIBE,
     WORKSPACE_LIST,
     HANGAR_ISSUES_LIST,
+    HANGAR_ISSUES_SEARCH,
     HANGAR_AGENTS_LIST,
     HANGAR_SKILLS_LIST,
     HANGAR_SKILL_GET,
@@ -341,6 +360,7 @@ mod tests {
     fn snapshot_methods_namespaced() {
         for m in [
             HANGAR_ISSUES_LIST,
+            HANGAR_ISSUES_SEARCH,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
             HANGAR_SKILL_GET,
@@ -379,6 +399,7 @@ mod tests {
             WORKSPACE_SUBSCRIBE,
             WORKSPACE_LIST,
             HANGAR_ISSUES_LIST,
+            HANGAR_ISSUES_SEARCH,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
             HANGAR_SKILL_GET,

@@ -36,6 +36,23 @@ pub struct IssuesListResult {
     pub issues: Vec<IssueRow>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUES_SEARCH`] (e38.12): ranked
+/// title + description + comment search within a workspace.
+///
+/// `workspace_id` is the tenant scope (a sibling tenant's matching issue is never
+/// returned). `query` is the case-insensitive substring to match across the issue
+/// title, description, and comment bodies; a blank query matches nothing. The
+/// result reuses [`IssuesListResult`] — the matching [`IssueRow`]s in ranked order
+/// (title hits before description hits before comment-only hits).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSearchParams {
+    /// The workspace to search within (tenant scope).
+    pub workspace_id: String,
+    /// The case-insensitive substring to match across title / description /
+    /// comment bodies. Blank matches nothing.
+    pub query: String,
+}
+
 /// Result of [`crate::methods::HANGAR_AGENTS_LIST`]: the polymorphic actor list
 /// (members + agents) the agent-picker modal renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
