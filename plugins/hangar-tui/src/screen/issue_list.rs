@@ -144,13 +144,18 @@ fn assignee_kind(row: &IssueRow) -> Option<ActorKind> {
     }
 }
 
-/// Whether the screen is in normal navigation or filter-text-entry mode.
+/// Whether the screen is in normal navigation, filter-text-entry, or
+/// create-title-entry mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueListMode {
     /// Normal row navigation (`j`/`k`, `enter`, `c`, …).
     Normal,
     /// `/` filter-input mode: keystrokes append to the [`IssueListState::query`].
     FilterInput,
+    /// `c` create-input mode (e38.29): keystrokes append to the
+    /// [`IssueListState::create_title`]; Enter submits a non-blank title (raising
+    /// [`IssueListIntent::CreateIssue`]), Esc/empty-Enter abort.
+    CreateInput,
 }
 
 /// The render-state cache for the issue list.
@@ -171,8 +176,11 @@ pub struct IssueListState {
     /// The free-text query typed in filter-input mode (case-insensitive
     /// substring over the title).
     query: String,
-    /// Whether we are navigating or typing a filter.
+    /// Whether we are navigating, typing a filter, or typing a new-issue title.
     mode: IssueListMode,
+    /// The new-issue title typed in [`IssueListMode::CreateInput`] (e38.29).
+    /// Empty when not creating; cleared on submit / abort.
+    create_title: String,
     /// Maps a queued/running task to the issue it works on, so a `TaskStarted`
     /// event can promote the right issue to In Progress (the event carries only
     /// the task id, the queue carried the issue id).
@@ -188,6 +196,7 @@ impl Default for IssueListState {
             filter: FilterChip::All,
             query: String::new(),
             mode: IssueListMode::Normal,
+            create_title: String::new(),
             task_issue: HashMap::new(),
         }
     }
@@ -215,6 +224,26 @@ impl IssueListState {
         self.mode
     }
 
+    /// `true` when the screen is capturing free text (filter or create input), so
+    /// the plugin glue routes every key (including the global tab-switch chars)
+    /// into this screen's reducer rather than letting them switch tabs (e38.29).
+    #[must_use]
+    pub const fn is_capturing_text(&self) -> bool {
+        matches!(
+            self.mode,
+            IssueListMode::FilterInput | IssueListMode::CreateInput
+        )
+    }
+
+    /// Abort the create-input flow (Esc): drop the typed title and return to
+    /// normal navigation (e38.29). A no-op when not creating.
+    pub fn abort_create(&mut self) {
+        if self.mode == IssueListMode::CreateInput {
+            self.mode = IssueListMode::Normal;
+            self.create_title.clear();
+        }
+    }
+
     /// The active filter chip.
     #[must_use]
     pub const fn filter(&self) -> FilterChip {
@@ -225,6 +254,13 @@ impl IssueListState {
     #[must_use]
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// The new-issue title being typed in [`IssueListMode::CreateInput`] (e38.29),
+    /// or the empty string when not in create mode.
+    #[must_use]
+    pub fn create_title(&self) -> &str {
+        &self.create_title
     }
 
     /// Iterate the rows passing the active chip + query, in daemon order.
@@ -300,8 +336,13 @@ pub enum IssueListIntent {
     OpenTaskDetail(IssueId),
     /// Open the agent-picker modal for the issue under the selection.
     OpenAgentPicker(IssueId),
-    /// Start the create-issue flow.
-    CreateIssue,
+    /// Submit a new issue with the typed `title` (e38.29). Raised when Enter is
+    /// pressed on a non-blank title in [`IssueListMode::CreateInput`]; the plugin
+    /// glue lifts it into a `hangar/issue_create` RPC.
+    CreateIssue {
+        /// The non-blank title typed in the create input.
+        title: String,
+    },
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -328,6 +369,7 @@ pub fn reduce_issue_list(state: &IssueListState, ev: IssueListEvent) -> IssueLis
 fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
     match state.mode {
         IssueListMode::FilterInput => reduce_filter_input_key(state, c),
+        IssueListMode::CreateInput => reduce_create_input_key(state, c),
         IssueListMode::Normal => reduce_normal_key(state, c),
     }
 }
@@ -338,7 +380,7 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'j' => move_selection_down(state),
         'k' => move_selection_up(state),
         '/' => enter_filter_mode(state),
-        'c' => with_intent(state.clone(), IssueListIntent::CreateIssue),
+        'c' => enter_create_mode(state),
         'a' => state.selected_row().map_or_else(
             || unchanged(state),
             |row| {
@@ -402,6 +444,42 @@ fn move_selection_up(state: &IssueListState) -> IssueListReduction {
 fn enter_filter_mode(state: &IssueListState) -> IssueListReduction {
     let mut next = state.clone();
     next.mode = IssueListMode::FilterInput;
+    no_intent(next)
+}
+
+/// Enter create-input mode (`c`, e38.29): start typing a new-issue title with an
+/// empty buffer. No intent yet — the title is captured first, then Enter submits.
+fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::CreateInput;
+    next.create_title = String::new();
+    no_intent(next)
+}
+
+/// Create-input-mode key handling (e38.29): Enter submits a non-blank title
+/// (leaving the mode + emitting [`IssueListIntent::CreateIssue`]), Backspace
+/// deletes the last char, any other printable char appends. Enter on a
+/// blank/whitespace title is a no-op that keeps the mode open (never an empty
+/// issue). Esc is handled by the router (it clears the buffer via
+/// [`IssueListState::abort_create`]).
+fn reduce_create_input_key(state: &IssueListState, c: char) -> IssueListReduction {
+    let mut next = state.clone();
+    match c {
+        '\n' | '\r' => {
+            if next.create_title.trim().is_empty() {
+                // Blank title: keep the mode open, submit nothing.
+                return no_intent(next);
+            }
+            let title = next.create_title.trim().to_string();
+            next.mode = IssueListMode::Normal;
+            next.create_title = String::new();
+            return with_intent(next, IssueListIntent::CreateIssue { title });
+        }
+        '\u{8}' | '\u{7f}' => {
+            next.create_title.pop();
+        }
+        other => next.create_title.push(other),
+    }
     no_intent(next)
 }
 
@@ -524,6 +602,13 @@ pub fn render_issue_list(
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
 
+    // e38.29: the inline create-issue input bar, when active, takes the bottom row
+    // as a single-line text input (`New issue · Title: <typed>▏`). Drawn last so it
+    // overlays the list; the rows above keep rendering as context.
+    if state.mode == IssueListMode::CreateInput {
+        render_create_bar(buf, area_w, bottom.saturating_sub(1), &state.create_title);
+    }
+
     // Width split: status/assignee take fixed caps, the title absorbs the rest.
     let status_w: u16 = 13; // "In Progress" + padding
     let assignee_w: u16 = area_w.saturating_sub(status_w).min(20);
@@ -581,6 +666,23 @@ pub fn render_issue_list(
             row = row.saturating_add(1);
         }
     }
+}
+
+/// Accent for the create-issue input bar (a calm emerald, distinct from the
+/// gold headers + green selection so the create prompt reads as its own mode).
+const CREATE_ACCENT: Color = Color::rgb(120, 200, 160);
+
+/// Render the inline create-issue input bar at `(0, row)` (e38.29):
+/// `New issue · Title: <typed>▏` in the create accent followed by a muted
+/// keybinding hint. The caret `▏` sits after the typed text. Char-safe via
+/// [`put_str`].
+fn render_create_bar(buf: &mut WireBuffer, area_w: u16, row: u16, title: &str) {
+    // `New issue` + `Title:` are the prompt labels the tripwire detects to know
+    // the create input is active.
+    let prompt = format!("New issue · Title: {title}▏");
+    let next = put_str(buf, 0, row, &prompt, CREATE_ACCENT, area_w);
+    let hint = "  (Enter submit · Esc cancel)";
+    put_str(buf, next, row, hint, MUTED_GRAY, area_w);
 }
 
 /// Clip `s` to at most `w` display columns (char-based, multi-byte safe).

@@ -90,6 +90,31 @@ impl FrameDecoder {
         Ok(out)
     }
 
+    /// Append `chunk` and return every fully-framed **raw body** now available,
+    /// in receive order, WITHOUT decoding it into an [`RpcResponse`] (e38.29).
+    ///
+    /// The daemon multiplexes two kinds of frame over one connection on the same
+    /// Content-Length envelope: JSON-RPC *responses* (carry an `id`) and pushed
+    /// `hangar/event` *notifications* (carry a `method`, no `id`). Decoding every
+    /// body eagerly as an `RpcResponse` (as [`push`](Self::push) does) treats a
+    /// pushed event as a malformed response (`missing field id`) and tears the
+    /// link down. The live socket path uses this body-level split so the caller
+    /// can classify each frame by shape (response vs notification) and route it,
+    /// instead of failing the whole connection on the first event push.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] only on a malformed header / oversized
+    /// Content-Length — never on body content (the caller owns body parsing).
+    pub fn push_frames(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, DecodeError> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(body) = self.try_take_frame()? {
+            out.push(body);
+        }
+        Ok(out)
+    }
+
     /// Try to split one whole frame off the front of the buffer.
     ///
     /// Returns `Ok(Some(body))` and advances the buffer when a complete

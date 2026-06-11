@@ -20,6 +20,7 @@
 //! `unix_socket_send`. `spawn_managed_subprocess` (auto-starting the
 //! daemon) and `secret_store_get` land in later phases.
 
+use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::{methods as daemon_methods, RpcId, RpcResponse};
 use ainb_plugin_sdk::{
     CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
@@ -102,6 +103,9 @@ const ISSUE_UPDATE_REQ_ID: i64 = 25;
 /// JSON-RPC id for a `hangar/comment_add` request raised by the task-detail
 /// compose modal (e38.5).
 const COMMENT_ADD_REQ_ID: i64 = 26;
+/// JSON-RPC id for a `hangar/issue_create` request raised by the issue-list
+/// inline create flow (e38.29).
+const ISSUE_CREATE_REQ_ID: i64 = 27;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -294,20 +298,30 @@ impl HangarPlugin {
 
     /// Feed an inbound `socket:<stream_id>` event into the connection.
     ///
-    /// Decodes the [`UnixSocketEvent`] envelope: `Data` bytes are pushed
-    /// to the [`FrameDecoder`] and each complete daemon response is
-    /// matched against the subscribe id to ack the handshake; `Eof`
-    /// drops to `Disconnected`; `Error` lands in `Error`.
+    /// Decodes the [`UnixSocketEvent`] envelope: `Data` bytes are framed by the
+    /// [`FrameDecoder`], then each whole frame is classified by shape — a
+    /// JSON-RPC *response* (carries an `id`) drives [`Self::on_daemon_response`]
+    /// (subscribe ack + snapshot results), while a pushed `hangar/event`
+    /// *notification* (carries a `method`, no `id`) folds into the screen caches
+    /// via [`Self::on_daemon_event`]. `Eof` drops to `Disconnected`; `Error`
+    /// lands in `Error`.
+    ///
+    /// e38.29: the daemon multiplexes responses AND `hangar/event` notifications
+    /// over one connection. Decoding every frame as an `RpcResponse` tore the
+    /// link down on the first event push (`missing field id`), so a mutation that
+    /// emitted an event (`IssueCreated`, `IssueUpdated`, …) silently knocked the
+    /// plugin offline. Splitting at the body level keeps the link healthy and
+    /// lets pushed events re-render without a full re-pull.
     fn on_socket_event(&mut self, event: &UnixSocketEvent) {
         match event.kind {
             UnixSocketEventKind::Data => {
                 let Some(bytes) = event.bytes.as_ref() else {
                     return;
                 };
-                match self.decoder.push(bytes) {
-                    Ok(responses) => {
-                        for resp in responses {
-                            self.on_daemon_response(&resp);
+                match self.decoder.push_frames(bytes) {
+                    Ok(frames) => {
+                        for body in frames {
+                            self.route_daemon_frame(&body);
                         }
                     }
                     Err(e) => self.conn.on_error(format!("frame decode: {e}")),
@@ -319,6 +333,67 @@ impl HangarPlugin {
                 self.conn.on_error(msg);
             }
         }
+    }
+
+    /// Classify one whole daemon frame body and route it: a response (`id`
+    /// present) to [`Self::on_daemon_response`]; a `hangar/event` notification
+    /// (`method` present) to [`Self::on_daemon_event`]; anything else is ignored
+    /// (a forward-compatible notification the plugin doesn't model — never an
+    /// error, so an unknown push can't knock the link offline). A body that
+    /// parses as neither is a genuine protocol fault and errors the link.
+    fn route_daemon_frame(&mut self, body: &[u8]) {
+        let value: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                self.conn.on_error(format!("frame decode: {e}"));
+                return;
+            }
+        };
+        if value.get("id").is_some() {
+            match serde_json::from_value::<RpcResponse>(value) {
+                Ok(resp) => self.on_daemon_response(&resp),
+                Err(e) => self.conn.on_error(format!("response decode: {e}")),
+            }
+        } else if value.get("method").is_some() {
+            self.on_daemon_event(&value);
+        }
+        // Neither id nor method: ignore (defensive — never error the link).
+    }
+
+    /// Fold one pushed `hangar/event` notification into the screen caches
+    /// (e38.29). A non-`hangar/event` method is ignored; an undecodable event
+    /// payload is logged-by-silence (skipped) rather than erroring the link — the
+    /// next snapshot re-pull reconciles. Keeps the link `Connected`.
+    fn on_daemon_event(&mut self, value: &serde_json::Value) {
+        use ainb_hangar_proto::events::EVENT_METHOD;
+        if value.get("method").and_then(serde_json::Value::as_str) != Some(EVENT_METHOD) {
+            return;
+        }
+        let Some(params) = value.get("params") else {
+            return;
+        };
+        let Ok(event) = serde_json::from_value::<HangarEvent>(params.clone()) else {
+            return;
+        };
+        self.apply_hangar_event(event);
+        // A pushed event is the steady state — keep the link Connected and ask
+        // for a re-pull so every screen's derived columns reconcile.
+        self.conn.on_event();
+        self.fetch_pending = true;
+    }
+
+    /// Fold a typed [`HangarEvent`] into the issue-list + Kanban caches so a
+    /// pushed mutation (create / update / task lifecycle) re-renders within a
+    /// tick, ahead of the reconciling snapshot re-pull (e38.29).
+    fn apply_hangar_event(&mut self, event: HangarEvent) {
+        use crate::screen::issue_list::{reduce_issue_list, IssueListEvent};
+        use crate::screen::kanban::{reduce_kanban, KanbanEvent};
+        self.screens.issue_list = reduce_issue_list(
+            &self.screens.issue_list,
+            IssueListEvent::Event(event.clone()),
+        )
+        .state;
+        self.screens.kanban = reduce_kanban(&self.screens.kanban, KanbanEvent::Event(event)).state;
     }
 
     /// React to one fully-decoded daemon response.
@@ -366,7 +441,8 @@ impl HangarPlugin {
                 | AUTOPILOT_FIRE_REQ_ID
                 | AUTOPILOT_TOGGLE_REQ_ID
                 | TASK_TRANSITION_REQ_ID
-                | ISSUE_UPDATE_REQ_ID,
+                | ISSUE_UPDATE_REQ_ID
+                | ISSUE_CREATE_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -748,6 +824,43 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a deferred issue-create RPC raised by the issue-list inline create
+    /// flow (e38.29).
+    ///
+    /// Maps the [`IssueCreateAction::Create`] to `hangar/issue_create`, creating a
+    /// new issue with the typed title authored by the current member, framed over
+    /// the socket cap. The daemon's `IssueCreated` push re-renders the new row
+    /// (mirroring `apply_comment_action` — this fires the RPC only, no separate
+    /// re-pull). A send failure is logged but non-fatal — the issue simply isn't
+    /// created.
+    async fn apply_create_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::IssueCreateAction,
+    ) {
+        use crate::screen::IssueCreateAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let IssueCreateAction::Create { title } = action;
+        let params = serde_json::json!({
+            "workspace_id": ws, "title": title, "creator": SELF_AUTHOR_REF
+        });
+        let Ok(body) = encode_request(
+            ISSUE_CREATE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_CREATE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: issue create send failed: {e}"))
+                .await;
+        }
+    }
+
     /// Fire a deferred autopilot RPC raised by the autopilot-manager screen
     /// (P7.5).
     ///
@@ -912,6 +1025,22 @@ impl HangarPlugin {
         // Snapshot the routing state so the borrow on `self.app` is released
         // before we mutate `self.screens` and `self.app` below.
         let app = self.app_state().clone();
+
+        // e38.29: while the issue list is capturing free text (the `/` filter or
+        // the `c` create-title input), every key — including the global
+        // tab-switch chars (`1`/`K`/`,`/`q`/…) — is typed text, NOT a nav key.
+        // Route it straight to the screen reducer so a title like `q,K` types
+        // instead of quitting / switching tabs. Esc aborts the create flow.
+        if matches!(app.screen, Screen::IssueList) && self.screens.issue_list.is_capturing_text() {
+            if matches!(key.code, KeyCode::Esc) {
+                self.screens.issue_list.abort_create();
+                return;
+            }
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
 
         // Routing-layer keys: tab switches, `?` help, Esc-close-modal, `q` quit.
         if let Some(ev) = routing_event(key, &app) {
@@ -1084,6 +1213,12 @@ impl Plugin for HangarPlugin {
         // compose modal) and fire `hangar/comment_add` over the daemon socket.
         if let Some(action) = self.screens.take_pending_comment_action() {
             self.apply_comment_action(host, action).await;
+        }
+        // e38.29: drain any deferred issue-create (Enter on a non-blank title in
+        // the issue-list inline create flow) and fire `hangar/issue_create` over
+        // the daemon socket.
+        if let Some(action) = self.screens.take_pending_create_action() {
+            self.apply_create_action(host, action).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active

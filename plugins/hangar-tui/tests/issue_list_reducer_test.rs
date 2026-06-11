@@ -99,14 +99,56 @@ fn slash_enters_filter_input_mode() {
     assert!(out.intent.is_none());
 }
 
-/// `c` emits the create-issue intent (the router opens the create flow).
+/// `c` enters the create-input mode (the user types a title); it does not emit an
+/// intent yet — the intent is raised on Enter once a non-blank title is typed
+/// (e38.29).
 #[test]
-fn c_emits_create_issue_intent() {
+fn c_enters_create_input_mode() {
     let s = seeded_state();
+    assert_eq!(s.mode(), IssueListMode::Normal);
 
     let out = reduce_issue_list(&s, IssueListEvent::Key('c'));
 
-    assert_eq!(out.intent, Some(IssueListIntent::CreateIssue));
+    assert_eq!(out.state.mode(), IssueListMode::CreateInput);
+    assert!(out.intent.is_none());
+}
+
+/// Typing a title in create-input mode appends to the create buffer; Enter on a
+/// non-blank title emits the create-issue intent carrying the typed title and
+/// returns to normal navigation (e38.29).
+#[test]
+fn create_input_enter_emits_create_issue_with_title() {
+    let mut s = reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state;
+    for ch in "Fix login".chars() {
+        s = reduce_issue_list(&s, IssueListEvent::Key(ch)).state;
+    }
+    assert_eq!(s.create_title(), "Fix login");
+
+    let out = reduce_issue_list(&s, IssueListEvent::Key('\n'));
+
+    assert_eq!(
+        out.intent,
+        Some(IssueListIntent::CreateIssue {
+            title: "Fix login".to_string()
+        })
+    );
+    // Back to normal navigation with the buffer cleared.
+    assert_eq!(out.state.mode(), IssueListMode::Normal);
+    assert_eq!(out.state.create_title(), "");
+}
+
+/// Enter on a blank/whitespace title is a no-op that keeps create mode open and
+/// raises no intent — never an empty issue (e38.29).
+#[test]
+fn create_input_blank_enter_is_noop() {
+    let mut s = reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state;
+    // Type then erase, leaving the buffer empty (only whitespace remains).
+    s = reduce_issue_list(&s, IssueListEvent::Key(' ')).state;
+
+    let out = reduce_issue_list(&s, IssueListEvent::Key('\n'));
+
+    assert!(out.intent.is_none());
+    assert_eq!(out.state.mode(), IssueListMode::CreateInput);
 }
 
 /// An `IssueCreated` host event lands the new row in the Todo column.

@@ -142,6 +142,22 @@ pub enum IssueCommentAction {
     },
 }
 
+/// A deferred daemon RPC raised by the issue-list inline create flow (e38.29).
+///
+/// Like [`IssueCommentAction`], the sync key router can't `await`; the create
+/// input stashes the action on [`ScreenStates::pending_create_action`] and the
+/// plugin's `render` pass drains it and fires `hangar/issue_create` over the
+/// daemon socket cap. The daemon's `IssueCreated` push re-renders the new row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueCreateAction {
+    /// Create a new issue with the typed title (Enter on a non-blank create
+    /// input) — `hangar/issue_create`.
+    Create {
+        /// The new issue's title (non-blank).
+        title: String,
+    },
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -197,6 +213,10 @@ pub struct ScreenStates {
     /// non-empty buffer), awaiting the `render` pass to fire `hangar/comment_add`
     /// over the daemon socket (e38.5). `None` when idle.
     pub pending_comment_action: Option<IssueCommentAction>,
+    /// An issue-create RPC raised by the issue-list inline create flow (Enter on
+    /// a non-blank title), awaiting the `render` pass to fire `hangar/issue_create`
+    /// over the daemon socket (e38.29). `None` when idle.
+    pub pending_create_action: Option<IssueCreateAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -333,6 +353,12 @@ impl ScreenStates {
     /// modal, if any (e38.5).
     pub const fn take_pending_comment_action(&mut self) -> Option<IssueCommentAction> {
         self.pending_comment_action.take()
+    }
+
+    /// Take the pending issue-create RPC raised by the issue-list inline create
+    /// flow, if any (e38.29).
+    pub const fn take_pending_create_action(&mut self) -> Option<IssueCreateAction> {
+        self.pending_create_action.take()
     }
 }
 
@@ -612,8 +638,14 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
-        // CreateIssue is a P5 flow; ignored at P4.
-        _ => None,
+        // e38.29: a submitted create-title lifts into a deferred
+        // `hangar/issue_create` RPC the `render` pass drains + fires (the sync key
+        // router can't `await`).
+        Some(IssueListIntent::CreateIssue { title }) => {
+            states.pending_create_action = Some(IssueCreateAction::Create { title });
+            None
+        }
+        None => None,
     }
 }
 
