@@ -33,6 +33,7 @@
 //! `5` screen tripwires landed; 29 once the daemon crash-recovery tripwire
 //! landed; 31 once the migration-determinism tripwire and the daemon
 //! concurrent-cap tripwire landed; 32 once the retry-chain + timeout e2e
+//! tripwire landed; 33 once the create-flow keystroke→RPC→DB round-trip
 //! tripwire landed), per `feedback_dont_guess_test_constants`.
 //! When
 //! you ADD a tripwire, this test keeps passing (count rises) — but bump the
@@ -45,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 /// Hangar tripwire binaries present at the captured commit. See module docs for
 /// the capture procedure. Lower-bound assertion: adding tripwires is always fine.
-const BASELINE_TRIPWIRES: usize = 32;
+const BASELINE_TRIPWIRES: usize = 33;
 
 /// `tests/` directories that hold Hangar tripwires, relative to the cargo
 /// workspace root (`ainb-tui/`).

@@ -761,6 +761,19 @@ impl TuiSession {
             .expect("tmux send-keys Enter");
     }
 
+    /// Type `text` as a single literal keystroke run (`send-keys -l`), so the
+    /// whole string lands atomically rather than as separate per-char sends —
+    /// which tmux can coalesce or drop on a busy pane (a dropped char would make
+    /// a text-echo assertion flaky). `-l` tells tmux to treat every character
+    /// verbatim (never as a key name), so an alphanumeric / punctuation title is
+    /// typed exactly. No trailing Enter (the caller commits separately).
+    pub fn type_literal(&self, text: &str) {
+        Command::new("tmux")
+            .args(["send-keys", "-t", &self.name, "-l", text])
+            .status()
+            .expect("tmux send-keys -l");
+    }
+
     /// Capture the visible pane text (empty on error).
     pub fn capture(&self) -> String {
         Command::new("tmux")
