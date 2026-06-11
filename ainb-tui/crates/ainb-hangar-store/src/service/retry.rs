@@ -9,14 +9,27 @@
 //! max_attempts) is inherited verbatim; all per-run timestamps and outputs
 //! reset.
 //!
-//! # Retry eligibility (Multica migration 055)
+//! # Retry/resume taxonomy (Multica migration 055 + `GetLastTaskSession`)
 //!
-//! Only [`FailureReason::RuntimeOffline`] and [`FailureReason::RuntimeRecovery`]
-//! retry automatically — both mean the *infrastructure* failed, not the agent.
-//! [`FailureReason::AgentError`] (the LLM mis-tooled or gave up) and
-//! [`FailureReason::UserCancel`] are terminal-by-intent and never spawn a child,
-//! and [`FailureReason::Timeout`] / [`FailureReason::Unknown`] are likewise not
-//! retried. `attempt >= max_attempts` caps the chain regardless of reason.
+//! The terminal [`FailureReason`] classifies into one of three
+//! [`RetryDisposition`]s ([`RetryService::retry_disposition`]):
+//!
+//! - **[`RetryDisposition::ResumeRetry`]** —
+//!   [`FailureReason::RuntimeOffline`] / [`FailureReason::RuntimeRecovery`]: the
+//!   *infrastructure* failed, not the agent, so the retry **resumes** the
+//!   parent's provider session (`session_id` is carried onto the child).
+//! - **[`RetryDisposition::FreshRetry`]** — the conversation-poisoning terminals
+//!   [`FailureReason::IterationLimit`] / [`FailureReason::ApiInvalidRequest`] /
+//!   [`FailureReason::SemanticInactivity`]: the model wedged on its own context,
+//!   so the retry **starts fresh** — the child's `session_id` is cleared so a
+//!   *new* session begins instead of resuming the wedged one. This mirrors
+//!   Multica's `GetLastTaskSession`, which excludes poisoned terminal states
+//!   from the resume hint so an auto-retry never inherits a stuck conversation.
+//! - **[`RetryDisposition::NoRetry`]** — [`FailureReason::AgentError`] (the LLM
+//!   mis-tooled / gave up), [`FailureReason::UserCancel`] (terminal by intent),
+//!   and [`FailureReason::Timeout`] / [`FailureReason::Unknown`]: no child row.
+//!
+//! `attempt >= max_attempts` caps the chain regardless of disposition.
 //!
 //! The child is written in a **single** `INSERT` that sets `status='queued'`
 //! alongside `attempt`, `max_attempts`, and `parent_task_id` — mirroring the
@@ -37,14 +50,43 @@ use sqlx::SqlitePool;
 use super::fail::FailureReason;
 use crate::repo::task::Task;
 
-/// Failure reasons that warrant an automatic retry.
+/// How a failed task's terminal reason classifies for retry, and — when it
+/// retries — whether the child resumes or starts a fresh provider session.
 ///
-/// Both denote an infrastructure failure rather than an agent / user decision,
-/// so re-dispatching the same work is safe (Multica migration 055).
-const RETRYABLE_REASONS: &[FailureReason] = &[
-    FailureReason::RuntimeOffline,
-    FailureReason::RuntimeRecovery,
-];
+/// This is the poisoned-terminal taxonomy (e38.24): a reason maps to exactly
+/// one disposition, and that disposition decides both *whether* a child spawns
+/// and *whether the child inherits the parent's `session_id`*. See
+/// [`RetryService::retry_disposition`] for the per-reason mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryDisposition {
+    /// Retry **and resume** the parent's provider session: the failure was
+    /// infrastructure (the runtime went away), so the conversation is intact and
+    /// the child carries the parent's `session_id` to continue it.
+    ResumeRetry,
+    /// Retry but **start fresh**: the parent's conversation is poisoned (the
+    /// model wedged), so the child clears `session_id` and a *new* session
+    /// begins. Resuming the wedged conversation would only re-fail.
+    FreshRetry,
+    /// Do not retry: an agent-error / user-cancel / sweeper-timeout / unknown
+    /// terminal that another attempt cannot productively re-run.
+    NoRetry,
+}
+
+impl RetryDisposition {
+    /// Whether this disposition spawns a retry child at all (`ResumeRetry` or
+    /// `FreshRetry`, i.e. anything but [`Self::NoRetry`]).
+    #[must_use]
+    const fn retries(self) -> bool {
+        !matches!(self, Self::NoRetry)
+    }
+
+    /// Whether a spawned child carries the parent's `session_id` (resume) rather
+    /// than starting a fresh session. Only [`Self::ResumeRetry`] resumes.
+    #[must_use]
+    const fn resumes_session(self) -> bool {
+        matches!(self, Self::ResumeRetry)
+    }
+}
 
 /// The outcome of a retry evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,18 +105,21 @@ pub enum RetryDecision {
 /// Writes `status='queued'` together with the retry bookkeeping
 /// (`attempt`, `max_attempts`, `parent_task_id`) in one statement, so the child
 /// is correct-or-absent rather than transiently carrying the schema defaults.
-/// Every per-run column (`result`, `session_id`, `failure_reason`,
-/// `started_at`, `finished_at`, `dispatched_at`) resets by being omitted (NULL);
-/// `priority` is inherited from the parent so a retried urgent task stays
-/// urgent in the claim ordering.
+/// `session_id` is bound explicitly per the retry/resume taxonomy: the parent's
+/// session for a [`RetryDisposition::ResumeRetry`] (so the child *resumes* the
+/// conversation), or `NULL` for a [`RetryDisposition::FreshRetry`] (so a *new*
+/// session begins instead of resuming a poisoned conversation). The remaining
+/// per-run columns (`result`, `failure_reason`, `started_at`, `finished_at`,
+/// `dispatched_at`) reset by being omitted (NULL); `priority` is inherited from
+/// the parent so a retried urgent task stays urgent in the claim ordering.
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
 /// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
-/// `created_at`.
+/// `session_id`, `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
-  attempt, max_attempts, parent_task_id, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)";
+  attempt, max_attempts, parent_task_id, session_id, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -91,6 +136,12 @@ impl RetryService {
     /// inserted, or [`RetryDecision::DoNotRetry`] when the failure reason is not
     /// retryable or `attempt >= max_attempts`.
     ///
+    /// When a child *is* spawned, its `session_id` follows the taxonomy: a
+    /// [`RetryDisposition::ResumeRetry`] carries the parent's `session_id` (the
+    /// new attempt resumes the conversation); a [`RetryDisposition::FreshRetry`]
+    /// clears it (the new attempt starts a fresh session, not resuming the
+    /// poisoned one).
+    ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the child insert fails — notably the
@@ -102,16 +153,29 @@ impl RetryService {
         new_id: &str,
         clock: &dyn HangarClock,
     ) -> Result<RetryDecision, sqlx::Error> {
-        if !Self::is_retryable(failed_task) {
+        // Classify the terminal reason once. `attempt >= max_attempts` caps the
+        // chain regardless of disposition.
+        let Some(disposition) = Self::task_disposition(failed_task) else {
+            return Ok(RetryDecision::DoNotRetry);
+        };
+        if !disposition.retries() || failed_task.attempt >= failed_task.max_attempts {
             return Ok(RetryDecision::DoNotRetry);
         }
 
+        // Resume → carry the parent's session_id; fresh → clear it so a new
+        // session begins rather than resuming a poisoned conversation.
+        let child_session_id: Option<&str> = if disposition.resumes_session() {
+            failed_task.session_id.as_deref()
+        } else {
+            None
+        };
+
         let attempt = failed_task.attempt + 1;
         // One atomic INSERT: the child lands fully-formed (status='queued',
-        // attempt / max_attempts / parent_task_id all set) or not at all. There
-        // is no intermediate row with the schema defaults, so a crash here can
-        // never strand an orphan that resets the chain cap or loses its parent
-        // linkage. All per-run columns (result / session_id / failure_reason /
+        // attempt / max_attempts / parent_task_id / session_id all set) or not at
+        // all. There is no intermediate row with the schema defaults, so a crash
+        // here can never strand an orphan that resets the chain cap or loses its
+        // parent linkage. The remaining per-run columns (result / failure_reason /
         // started_at / finished_at / dispatched_at) reset by being omitted (NULL).
         sqlx::query(SPAWN_CHILD_SQL)
             .bind(new_id)
@@ -124,18 +188,19 @@ impl RetryService {
             .bind(attempt)
             .bind(failed_task.max_attempts)
             .bind(&failed_task.id)
+            .bind(child_session_id)
             .bind(clock.now_ms())
             .execute(pool)
             .await?;
 
-        // `is_retryable` already guaranteed `failure_reason` is `Some` (it
-        // early-returns `DoNotRetry` otherwise), so the parent always has a reason
-        // to log here.
+        // `task_disposition` already guaranteed `failure_reason` is `Some` (it
+        // returns `None` otherwise), so the parent always has a reason to log.
         tracing::info!(
             parent_task_id = %failed_task.id,
             new_task_id = new_id,
             attempt,
             reason = failed_task.failure_reason.as_deref().unwrap_or_default(),
+            resumed = disposition.resumes_session(),
             "task_retry_spawned",
         );
 
@@ -144,15 +209,118 @@ impl RetryService {
         })
     }
 
-    /// Whether `task` is eligible for an automatic retry: a retryable failure
-    /// reason AND attempts remaining (`attempt < max_attempts`).
-    fn is_retryable(task: &Task) -> bool {
-        if task.attempt >= task.max_attempts {
-            return false;
+    /// Classify a [`FailureReason`] into its [`RetryDisposition`] — the
+    /// poisoned-terminal taxonomy at the heart of e38.24.
+    ///
+    /// Exhaustive (no wildcard arm, per
+    /// `reference_gated_by_variant_propagation`): a newly-added `FailureReason`
+    /// variant must be deliberately placed into a disposition here, so a reason
+    /// can never silently default into resuming a wedged session.
+    #[must_use]
+    pub const fn retry_disposition(reason: FailureReason) -> RetryDisposition {
+        match reason {
+            // Infrastructure failed, not the agent — resume the conversation.
+            FailureReason::RuntimeOffline | FailureReason::RuntimeRecovery => {
+                RetryDisposition::ResumeRetry
+            }
+            // Conversation-poisoning terminals — retry, but in a fresh session.
+            FailureReason::IterationLimit
+            | FailureReason::ApiInvalidRequest
+            | FailureReason::SemanticInactivity => RetryDisposition::FreshRetry,
+            // Agent / user / sweeper / unclassified terminals — no retry.
+            FailureReason::AgentError
+            | FailureReason::UserCancel
+            | FailureReason::Timeout
+            | FailureReason::Unknown => RetryDisposition::NoRetry,
         }
-        let Some(reason) = task.failure_reason.as_deref() else {
-            return false;
-        };
-        RETRYABLE_REASONS.iter().any(|r| r.as_db_str() == reason)
+    }
+
+    /// Resolve a failed task's stored `failure_reason` string to its
+    /// [`RetryDisposition`], or `None` when the row carries no recognised reason
+    /// (no `failure_reason`, or a token outside the enum). `None` is treated as
+    /// non-retryable by the caller.
+    fn task_disposition(task: &Task) -> Option<RetryDisposition> {
+        let reason = task.failure_reason.as_deref()?;
+        FAILURE_REASONS
+            .iter()
+            .find(|r| r.as_db_str() == reason)
+            .map(|r| Self::retry_disposition(*r))
+    }
+}
+
+/// Every [`FailureReason`] variant, used to resolve a stored `failure_reason`
+/// token back to its typed reason (and thence its [`RetryDisposition`]). Kept in
+/// sync with the enum by the `failure_reasons_covers_all_variants` test below.
+const FAILURE_REASONS: &[FailureReason] = &[
+    FailureReason::Timeout,
+    FailureReason::AgentError,
+    FailureReason::RuntimeOffline,
+    FailureReason::RuntimeRecovery,
+    FailureReason::UserCancel,
+    FailureReason::IterationLimit,
+    FailureReason::ApiInvalidRequest,
+    FailureReason::SemanticInactivity,
+    FailureReason::Unknown,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::{FAILURE_REASONS, FailureReason, RetryDisposition, RetryService};
+
+    /// `FAILURE_REASONS` must list every enum variant, so `task_disposition`
+    /// can resolve any stored token. A new variant added without extending the
+    /// list would fail to round-trip and silently fall to non-retryable.
+    #[test]
+    fn failure_reasons_covers_all_variants() {
+        // Exhaustive match: adding a variant forces a compile error here until
+        // its token is asserted present in FAILURE_REASONS.
+        for reason in [
+            FailureReason::Timeout,
+            FailureReason::AgentError,
+            FailureReason::RuntimeOffline,
+            FailureReason::RuntimeRecovery,
+            FailureReason::UserCancel,
+            FailureReason::IterationLimit,
+            FailureReason::ApiInvalidRequest,
+            FailureReason::SemanticInactivity,
+            FailureReason::Unknown,
+        ] {
+            assert!(
+                FAILURE_REASONS.iter().any(|r| *r == reason),
+                "FAILURE_REASONS is missing {reason:?}",
+            );
+        }
+        assert_eq!(
+            FAILURE_REASONS.len(),
+            9,
+            "FAILURE_REASONS length drifted from the FailureReason variant count",
+        );
+    }
+
+    /// The poisoned terminals must classify as `FreshRetry`, the infra terminals
+    /// as `ResumeRetry`, and the rest as `NoRetry`. This pins the taxonomy that
+    /// `maybe_retry_failed` keys session inheritance off.
+    #[test]
+    fn retry_disposition_taxonomy() {
+        use FailureReason::*;
+        use RetryDisposition::*;
+        assert_eq!(RetryService::retry_disposition(RuntimeOffline), ResumeRetry);
+        assert_eq!(
+            RetryService::retry_disposition(RuntimeRecovery),
+            ResumeRetry
+        );
+        assert_eq!(RetryService::retry_disposition(IterationLimit), FreshRetry);
+        assert_eq!(
+            RetryService::retry_disposition(ApiInvalidRequest),
+            FreshRetry
+        );
+        assert_eq!(
+            RetryService::retry_disposition(SemanticInactivity),
+            FreshRetry
+        );
+        assert_eq!(RetryService::retry_disposition(AgentError), NoRetry);
+        assert_eq!(RetryService::retry_disposition(UserCancel), NoRetry);
+        assert_eq!(RetryService::retry_disposition(Timeout), NoRetry);
+        assert_eq!(RetryService::retry_disposition(Unknown), NoRetry);
     }
 }
