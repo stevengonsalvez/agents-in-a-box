@@ -38,6 +38,15 @@ use serde::{Deserialize, Serialize};
 /// removed by the orphan scanner. Matches Multica's 72h GC grace window.
 const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
 
+/// The per-task context file written into [`ExecEnv::workdir`] from the
+/// workspace's `context_prompt` (e38.21).
+///
+/// `claude` (and the home-style providers) read `CLAUDE.md` from their working
+/// directory, so a workspace's context prompt lands here — in the agent's CWD —
+/// rather than only living in the database. The file is the dispatch-time
+/// injection point that makes the per-workspace context actually reach the run.
+pub const CONTEXT_PROMPT_FILE: &str = "CLAUDE.md";
+
 /// The materialised per-task directory set.
 ///
 /// All paths are absolute and live under the task's `{shortID}` root; the root
@@ -157,6 +166,34 @@ pub fn prepare_env(
     write_marker(task, clock, &env.gc_meta)?;
 
     Ok(env)
+}
+
+/// Write the workspace `context_prompt` into the task's [`ExecEnv::workdir`] as a
+/// `CLAUDE.md`, so the agent run actually sees the per-workspace context (e38.21).
+///
+/// This is the dispatch-time injection that makes a workspace's stored context
+/// prompt *take effect*: the file lands in the provider's CWD (the agent reads
+/// `CLAUDE.md` from there), not just in the database. Returns the path written,
+/// or `None` when there is no prompt to inject (an unconfigured workspace —
+/// no file is written, the v1 behaviour).
+///
+/// A blank / whitespace-only prompt is treated as unset (no file): an operator
+/// who clears the prompt gets the v1 behaviour back, not an empty `CLAUDE.md`.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if the file cannot be written (the workdir is
+/// created by [`prepare_env`], so a missing parent is a caller-ordering bug).
+pub fn write_context_prompt(
+    env: &ExecEnv,
+    context_prompt: Option<&str>,
+) -> io::Result<Option<PathBuf>> {
+    let Some(prompt) = context_prompt.filter(|p| !p.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let path = env.workdir.join(CONTEXT_PROMPT_FILE);
+    fs::write(&path, prompt)?;
+    Ok(Some(path))
 }
 
 /// Write or refresh the `.gc_meta.json` marker.

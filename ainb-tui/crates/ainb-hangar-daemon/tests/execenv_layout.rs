@@ -17,7 +17,9 @@
 use std::path::Path;
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::execenv::{CleanupKind, GcMeta, cleanup, prepare_env, short_id};
+use ainb_hangar_daemon::execenv::{
+    CONTEXT_PROMPT_FILE, CleanupKind, GcMeta, cleanup, prepare_env, short_id, write_context_prompt,
+};
 use ainb_hangar_store::repo::task::Task;
 use tempfile::TempDir;
 
@@ -141,6 +143,55 @@ fn prepare_idempotent_on_existing_dir() {
         meta.last_seen_at,
         Some(later),
         "last_seen_at updated on re-prepare"
+    );
+}
+
+#[test]
+fn context_prompt_is_written_into_the_workdir_as_claude_md() {
+    // e38.21: the per-workspace context prompt must land in the agent's CWD (the
+    // execenv workdir) as a `CLAUDE.md`, so the agent run actually sees it — not
+    // just live in the database.
+    let home = TempDir::new().expect("tempdir home");
+    let task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
+    let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("prepare");
+
+    let written = write_context_prompt(&env, Some("Always run cargo fmt before committing."))
+        .expect("write context prompt");
+
+    let claude_md = env.workdir.join(CONTEXT_PROMPT_FILE);
+    assert_eq!(
+        written.as_deref(),
+        Some(claude_md.as_path()),
+        "returns the written path"
+    );
+    assert!(
+        claude_md.is_file(),
+        "CLAUDE.md must exist in the agent's workdir"
+    );
+    let body = std::fs::read_to_string(&claude_md).expect("read CLAUDE.md");
+    assert_eq!(
+        body, "Always run cargo fmt before committing.",
+        "the agent's CLAUDE.md carries the workspace context prompt verbatim"
+    );
+}
+
+#[test]
+fn no_context_prompt_writes_no_claude_md() {
+    // An unconfigured workspace (None / blank prompt) writes no file — the v1
+    // behaviour (the agent runs with no per-workspace context).
+    let home = TempDir::new().expect("tempdir home");
+    let task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
+    let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("prepare");
+
+    assert_eq!(write_context_prompt(&env, None).expect("none prompt"), None);
+    assert_eq!(
+        write_context_prompt(&env, Some("   \n  ")).expect("blank prompt"),
+        None,
+        "a whitespace-only prompt is treated as unset"
+    );
+    assert!(
+        !env.workdir.join(CONTEXT_PROMPT_FILE).exists(),
+        "no CLAUDE.md is written when there is no prompt"
     );
 }
 

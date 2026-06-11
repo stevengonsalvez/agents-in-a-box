@@ -49,7 +49,7 @@ use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
 
 use crate::events::EventSink;
-use crate::execenv::prepare_env;
+use crate::execenv::{prepare_env, write_context_prompt};
 use crate::health_stats::HealthStats;
 use crate::runner::{Backend, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
@@ -294,6 +294,22 @@ async fn execute_claimed(
     let ws_slug = workspace_slug(pool, &task.workspace_id).await?;
     let home = hangar_home();
     let env = prepare_env(&task, &ws_slug, &home, clock)?;
+
+    // e38.21: inject the workspace's context prompt into the task's execenv as a
+    // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
+    // provider reads `CLAUDE.md` from its CWD). An unconfigured workspace writes
+    // no file (the v1 behaviour); a config-read or write fault is non-fatal — a
+    // task must still dispatch even if its context cannot be materialised.
+    match workspace_context_prompt(pool, &task.workspace_id).await {
+        Ok(prompt) => {
+            if let Err(e) = write_context_prompt(&env, prompt.as_deref()) {
+                tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "context prompt read failed");
+        }
+    }
 
     // e38.16: resolve which provider exec path this task routes to (agent →
     // runtime → provider) and the per-agent config (model / cli_args / agent_env)
@@ -646,6 +662,26 @@ async fn workspace_slug(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result
         .await?
         .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} not found"))?;
     Ok(row.try_get::<String, _>("slug")?)
+}
+
+/// Look up a workspace's configured `context_prompt` by id (e38.21).
+///
+/// `None` when the workspace has no prompt configured (the migration-0020 NULL
+/// default) — the dispatch path then writes no `CLAUDE.md`. A missing workspace
+/// resolves to `None` here (the dispatch already validated the row via
+/// [`workspace_slug`]); the prompt injection is best-effort, never a dispatch
+/// blocker.
+async fn workspace_context_prompt(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let prompt: Option<String> =
+        sqlx::query_scalar("SELECT context_prompt FROM workspace WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    Ok(prompt)
 }
 
 /// Persist the provider `session_id` onto the task row (best-effort; only when a
