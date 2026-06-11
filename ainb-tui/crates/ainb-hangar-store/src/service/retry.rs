@@ -286,7 +286,7 @@ mod tests {
             FailureReason::Unknown,
         ] {
             assert!(
-                FAILURE_REASONS.iter().any(|r| *r == reason),
+                FAILURE_REASONS.contains(&reason),
                 "FAILURE_REASONS is missing {reason:?}",
             );
         }
