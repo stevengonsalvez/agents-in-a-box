@@ -11,11 +11,28 @@ use ratatui::layout::Rect;
 pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // xterm modifier parameter for CSI sequences: 1 + (shift=1, alt=2, ctrl=4).
+    let mod_param = xterm_mod_param(key.modifiers);
+    let has_mods = mod_param > 1;
 
     let bytes: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
             if ctrl {
-                ctrl_byte(c)?
+                let b = match ctrl_byte(c) {
+                    Some(b) => b,
+                    // Unmapped Ctrl chord (Ctrl+digit, Ctrl+'.', …): fall back
+                    // to the plain char bytes — a wrong-but-visible char beats
+                    // an invisible no-op for someone typing into the embed.
+                    None => c.to_string().into_bytes(),
+                };
+                if alt {
+                    // Alt+Ctrl: ESC-prefix the control byte.
+                    let mut out = vec![0x1b];
+                    out.extend_from_slice(&b);
+                    out
+                } else {
+                    b
+                }
             } else {
                 let mut b = c.to_string().into_bytes();
                 if alt {
@@ -30,43 +47,94 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f], // DEL, what xterm sends
         KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
+        KeyCode::BackTab => vec![0x1b, b'[', b'Z'], // crossterm's Shift+Tab
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Left => vec![0x1b, b'[', b'D'],
-        KeyCode::Right => vec![0x1b, b'[', b'C'],
-        KeyCode::Up => vec![0x1b, b'[', b'A'],
-        KeyCode::Down => vec![0x1b, b'[', b'B'],
-        KeyCode::Home => vec![0x1b, b'[', b'H'],
-        KeyCode::End => vec![0x1b, b'[', b'F'],
-        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
-        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
-        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
-        KeyCode::Insert => vec![0x1b, b'[', b'2', b'~'],
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
+            let dir = match key.code {
+                KeyCode::Up => b'A',
+                KeyCode::Down => b'B',
+                KeyCode::Right => b'C',
+                _ => b'D',
+            };
+            if has_mods {
+                // xterm modified arrows: CSI 1 ; m {A-D}.
+                format!("\x1b[1;{mod_param}{}", dir as char).into_bytes()
+            } else {
+                vec![0x1b, b'[', dir]
+            }
+        }
+        KeyCode::Home | KeyCode::End => {
+            let ch = if key.code == KeyCode::Home {
+                b'H'
+            } else {
+                b'F'
+            };
+            if has_mods {
+                format!("\x1b[1;{mod_param}{}", ch as char).into_bytes()
+            } else {
+                vec![0x1b, b'[', ch]
+            }
+        }
+        KeyCode::Insert | KeyCode::Delete | KeyCode::PageUp | KeyCode::PageDown => {
+            let code = match key.code {
+                KeyCode::Insert => 2,
+                KeyCode::Delete => 3,
+                KeyCode::PageUp => 5,
+                _ => 6,
+            };
+            csi_tilde(code, mod_param)
+        }
         KeyCode::F(n) if (1..=4).contains(&n) => {
-            // F1-F4: SS3 sequences (ESC O P/Q/R/S).
-            vec![0x1b, b'O', b'P' + (n - 1)]
+            if has_mods {
+                // Modified F1-F4: CSI 1 ; m {P/Q/R/S}.
+                format!("\x1b[1;{mod_param}{}", (b'P' + (n - 1)) as char).into_bytes()
+            } else {
+                // Unmodified F1-F4: SS3 sequences (ESC O P/Q/R/S).
+                vec![0x1b, b'O', b'P' + (n - 1)]
+            }
         }
         KeyCode::F(n) if (5..=12).contains(&n) => {
             // F5-F12: CSI ~ sequences with xterm's discontinuous codes.
-            let code: &[u8] = match n {
-                5 => b"15",
-                6 => b"17",
-                7 => b"18",
-                8 => b"19",
-                9 => b"20",
-                10 => b"21",
-                11 => b"23",
-                12 => b"24",
-                _ => unreachable!(),
+            let code = match n {
+                5 => 15,
+                6 => 17,
+                7 => 18,
+                8 => 19,
+                9 => 20,
+                10 => 21,
+                11 => 23,
+                _ => 24,
             };
-            let mut out = vec![0x1b, b'['];
-            out.extend_from_slice(code);
-            out.push(b'~');
-            out
+            csi_tilde(code, mod_param)
         }
         _ => return None,
     };
     Some(bytes)
+}
+
+/// xterm CSI modifier parameter: 1 + (shift=1, alt=2, ctrl=4).
+fn xterm_mod_param(mods: KeyModifiers) -> u8 {
+    let mut m = 0;
+    if mods.contains(KeyModifiers::SHIFT) {
+        m += 1;
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        m += 2;
+    }
+    if mods.contains(KeyModifiers::CONTROL) {
+        m += 4;
+    }
+    1 + m
+}
+
+/// CSI {code} ~ — with the xterm modifier parameter when any modifier is held
+/// (CSI {code} ; {m} ~).
+fn csi_tilde(code: u8, mod_param: u8) -> Vec<u8> {
+    if mod_param > 1 {
+        format!("\x1b[{code};{mod_param}~").into_bytes()
+    } else {
+        format!("\x1b[{code}~").into_bytes()
+    }
 }
 
 /// Encode a mouse event into SGR (mode 1006) bytes for the embed PTY, translating
@@ -140,7 +208,7 @@ fn ctrl_byte(c: char) -> Option<Vec<u8>> {
         '\\' => 0x1c,
         ']' => 0x1d,
         '^' => 0x1e,
-        '_' | '-' => 0x1f,
+        '_' | '-' | '/' => 0x1f, // Ctrl+/ is Ctrl+_ on real terminals
         '?' => 0x7f,
         _ => return None,
     };
@@ -241,6 +309,158 @@ mod tests {
     #[test]
     fn unencodable_keys_return_none() {
         assert_eq!(encode_key_event(&key(KeyCode::Null)), None);
+    }
+
+    // ── xterm modifier parameters on navigation/function keys ──────────────
+    fn enc_mod(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
+        encode_key_event(&key_mod(code, modifiers)).expect("encodable")
+    }
+
+    #[test]
+    fn modified_arrows_use_csi_modifier_parameters() {
+        // m = 1 + (shift=1, alt=2, ctrl=4)
+        assert_eq!(
+            enc_mod(KeyCode::Left, KeyModifiers::CONTROL),
+            b"\x1b[1;5D".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::Right, KeyModifiers::SHIFT),
+            b"\x1b[1;2C".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::Up, KeyModifiers::ALT),
+            b"\x1b[1;3A".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            b"\x1b[1;6B".to_vec()
+        );
+        assert_eq!(
+            enc_mod(
+                KeyCode::Left,
+                KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT
+            ),
+            b"\x1b[1;8D".to_vec()
+        );
+    }
+
+    #[test]
+    fn modified_home_end_use_csi_modifier_parameters() {
+        assert_eq!(
+            enc_mod(KeyCode::Home, KeyModifiers::CONTROL),
+            b"\x1b[1;5H".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::End, KeyModifiers::CONTROL),
+            b"\x1b[1;5F".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::Home, KeyModifiers::SHIFT),
+            b"\x1b[1;2H".to_vec()
+        );
+    }
+
+    #[test]
+    fn modified_tilde_keys_insert_the_modifier_parameter() {
+        assert_eq!(
+            enc_mod(KeyCode::Insert, KeyModifiers::ALT),
+            b"\x1b[2;3~".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::Delete, KeyModifiers::SHIFT),
+            b"\x1b[3;2~".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::PageUp, KeyModifiers::CONTROL),
+            b"\x1b[5;5~".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::PageDown, KeyModifiers::CONTROL),
+            b"\x1b[6;5~".to_vec()
+        );
+    }
+
+    #[test]
+    fn modified_function_keys_use_csi_forms() {
+        // F1-F4 switch from SS3 to CSI 1;m{P..S} when modified.
+        assert_eq!(enc(KeyCode::F(1)), vec![0x1b, b'O', b'P']);
+        assert_eq!(
+            enc_mod(KeyCode::F(1), KeyModifiers::CONTROL),
+            b"\x1b[1;5P".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::F(4), KeyModifiers::SHIFT),
+            b"\x1b[1;2S".to_vec()
+        );
+        // F5+ keep CSI ~ with the modifier inserted.
+        assert_eq!(
+            enc_mod(KeyCode::F(5), KeyModifiers::CONTROL),
+            b"\x1b[15;5~".to_vec()
+        );
+        assert_eq!(
+            enc_mod(KeyCode::F(12), KeyModifiers::CONTROL),
+            b"\x1b[24;5~".to_vec()
+        );
+    }
+
+    // ── Ctrl punctuation coverage ───────────────────────────────────────────
+    #[test]
+    fn ctrl_punctuation_maps_to_control_bytes() {
+        let cases: &[(char, u8)] = &[
+            ('/', 0x1f), // Ctrl+/ == Ctrl+_
+            (' ', 0x00),
+            ('@', 0x00),
+            ('[', 0x1b),
+            ('\\', 0x1c),
+            (']', 0x1d),
+            ('^', 0x1e),
+            ('_', 0x1f),
+            ('?', 0x7f),
+        ];
+        for &(c, b) in cases {
+            assert_eq!(
+                encode_key_event(&key_mod(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                Some(vec![b]),
+                "Ctrl+{c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmapped_ctrl_chords_fall_back_to_the_plain_char() {
+        // Ctrl+digit / Ctrl+. have no control byte; a wrong-but-visible char
+        // beats an invisible no-op.
+        assert_eq!(
+            encode_key_event(&key_mod(KeyCode::Char('1'), KeyModifiers::CONTROL)),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            encode_key_event(&key_mod(KeyCode::Char('.'), KeyModifiers::CONTROL)),
+            Some(b".".to_vec())
+        );
+        assert_eq!(
+            encode_key_event(&key_mod(KeyCode::Char(';'), KeyModifiers::CONTROL)),
+            Some(b";".to_vec())
+        );
+    }
+
+    #[test]
+    fn alt_ctrl_chords_are_esc_prefixed_control_bytes() {
+        assert_eq!(
+            encode_key_event(&key_mod(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(vec![0x1b, 0x01])
+        );
+        // Unmapped ctrl byte under Alt+Ctrl: ESC + the plain-char fallback.
+        assert_eq!(
+            encode_key_event(&key_mod(
+                KeyCode::Char('1'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(vec![0x1b, b'1'])
+        );
     }
 
     // ── SGR mouse encoding ─────────────────────────────────────────────────
@@ -438,6 +658,47 @@ mod tests {
             let out = encode_key_event(&key_mod(KeyCode::Char(ch), KeyModifiers::CONTROL)).unwrap();
             proptest::prop_assert_eq!(out.len(), 1);
             proptest::prop_assert!((0x01..=0x1a).contains(&out[0]));
+        }
+
+        #[test]
+        fn printable_chars_always_produce_bytes_under_any_modifiers(
+            c in 0x20u8..=0x7e,
+            mod_mask in 0u8..16,
+        ) {
+            let mut mods = KeyModifiers::NONE;
+            if mod_mask & 1 != 0 { mods |= KeyModifiers::SHIFT; }
+            if mod_mask & 2 != 0 { mods |= KeyModifiers::ALT; }
+            if mod_mask & 4 != 0 { mods |= KeyModifiers::CONTROL; }
+            if mod_mask & 8 != 0 { mods |= KeyModifiers::SUPER; }
+            let out = encode_key_event(&key_mod(KeyCode::Char(c as char), mods));
+            // No printable char may be swallowed, whatever the chord.
+            proptest::prop_assert!(out.is_some_and(|b| !b.is_empty()));
+        }
+
+        #[test]
+        fn encoder_never_panics(
+            code_idx in 0usize..40,
+            mod_mask in 0u8..16,
+            c in proptest::char::any(),
+            f in 0u8..=24,
+        ) {
+            let codes: Vec<KeyCode> = vec![
+                KeyCode::Char(c), KeyCode::F(f), KeyCode::Enter, KeyCode::Backspace,
+                KeyCode::Tab, KeyCode::BackTab, KeyCode::Esc, KeyCode::Left,
+                KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Home,
+                KeyCode::End, KeyCode::PageUp, KeyCode::PageDown, KeyCode::Delete,
+                KeyCode::Insert, KeyCode::Null, KeyCode::CapsLock, KeyCode::ScrollLock,
+                KeyCode::NumLock, KeyCode::PrintScreen, KeyCode::Pause, KeyCode::Menu,
+                KeyCode::KeypadBegin,
+            ];
+            let code = codes[code_idx % codes.len()];
+            let mut mods = KeyModifiers::NONE;
+            if mod_mask & 1 != 0 { mods |= KeyModifiers::SHIFT; }
+            if mod_mask & 2 != 0 { mods |= KeyModifiers::ALT; }
+            if mod_mask & 4 != 0 { mods |= KeyModifiers::CONTROL; }
+            if mod_mask & 8 != 0 { mods |= KeyModifiers::SUPER; }
+            // Must not panic for any code × modifier combination.
+            let _ = encode_key_event(&key_mod(code, mods));
         }
     }
 }
