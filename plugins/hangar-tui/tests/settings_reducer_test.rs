@@ -66,7 +66,7 @@ fn state() -> SettingsState {
     SettingsState::new(health(), providers(), keys(), workspaces())
 }
 
-/// j/k cycle through the four settings sections.
+/// j/k cycle through the five settings sections.
 #[test]
 fn j_k_navigates_settings_sections() {
     let s = state();
@@ -77,11 +77,13 @@ fn j_k_navigates_settings_sections() {
     assert_eq!(s.section(), SettingsSection::Keys);
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     assert_eq!(s.section(), SettingsSection::Workspaces);
-    // Clamps at the bottom.
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
-    assert_eq!(s.section(), SettingsSection::Workspaces);
+    assert_eq!(s.section(), SettingsSection::Members);
+    // Clamps at the bottom (Members, e38.11).
+    let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    assert_eq!(s.section(), SettingsSection::Members);
     let s = reduce_settings(&s, SettingsEvent::Key('k')).state;
-    assert_eq!(s.section(), SettingsSection::Keys);
+    assert_eq!(s.section(), SettingsSection::Workspaces);
 }
 
 /// `n` on the keys section opens the key-entry modal.

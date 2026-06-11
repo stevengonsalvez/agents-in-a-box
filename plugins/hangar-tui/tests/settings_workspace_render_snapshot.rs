@@ -92,6 +92,7 @@ fn tui_renders_active_indicator() {
     ▶ Workspaces
         ›▶ default · Default [default]
            acme · Acme
+      Members
     "###);
 
     // NON-VACUOUS COLOUR CHECK: the active workspace row's `▶` indicator is

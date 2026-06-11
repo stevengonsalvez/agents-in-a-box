@@ -17,6 +17,7 @@ use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, Task
 use ainb_hangar_proto::settings::{
     DaemonHealthSnapshot, HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow,
 };
+use ainb_hangar_proto::snapshots::MemberWireRow;
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{
@@ -220,6 +221,9 @@ pub struct ScreenStates {
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
+    /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
+    /// Settings Members pane regardless of which snapshot arrives first.
+    pub member_rows: Vec<MemberWireRow>,
     /// Set when the logs screen's level filter changed (P8.6), asking the glue
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
@@ -309,7 +313,11 @@ impl ScreenStates {
         } else {
             self.workspace_rows.clone()
         };
-        self.settings = Some(SettingsState::new(health, providers, keys, workspaces));
+        let mut state = SettingsState::new(health, providers, keys, workspaces);
+        // Carry any cached member roster into the rebuilt state so the Members
+        // pane survives a `set_health` rebuild (mirrors workspace_rows).
+        state.set_members(self.member_rows.clone());
+        self.settings = Some(state);
     }
 
     /// Refresh the Settings Workspace pane from a `host/workspace_list` result
@@ -319,6 +327,16 @@ impl ScreenStates {
         self.workspace_rows.clone_from(&workspaces);
         if let Some(s) = self.settings.as_mut() {
             s.set_workspaces(workspaces);
+        }
+    }
+
+    /// Refresh the Settings Members pane from a `hangar/members_list` result
+    /// (e38.11). Caches the rows so a later `set_health` rebuild keeps them, and
+    /// overlays the live settings state when it already exists.
+    pub fn set_members(&mut self, members: Vec<MemberWireRow>) {
+        self.member_rows.clone_from(&members);
+        if let Some(s) = self.settings.as_mut() {
+            s.set_members(members);
         }
     }
 

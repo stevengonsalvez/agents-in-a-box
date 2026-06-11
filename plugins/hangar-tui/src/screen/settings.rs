@@ -1,6 +1,6 @@
-//! P4.7 — Settings screen: the pure reducer + four-section width-aware render.
+//! P4.7 — Settings screen: the pure reducer + five-section width-aware render.
 //!
-//! The settings screen (hotkey `,`) has four j/k-navigable sections:
+//! The settings screen (hotkey `,`) has five j/k-navigable sections:
 //!
 //! 1. **Daemon connection** — socket path, PID, uptime, version, connection state
 //!    (from the `hangar/health` RPC snapshot).
@@ -12,6 +12,10 @@
 //!    active (emits a `SwitchWorkspace` intent → `host/workspace_set_active`),
 //!    `d` toggles default, `n` creates a new workspace, `r` renames the
 //!    selected one. `J`/`K` move the in-pane selection.
+//! 5. **Members** (e38.11) — a render-only `email · role` list (the `owner` role
+//!    in `SELECTION_GREEN`). The mutation surface is CLI-first
+//!    (`ainb hangar member set-role|remove`); the pane lets the operator see who
+//!    holds which role from the `hangar/members_list` snapshot.
 //!
 //! The reducer ([`reduce_settings`]) is **pure**. The crucial security property
 //! (P4.7 risk register, "keychain write leaks key into log"): entered key
@@ -21,6 +25,7 @@
 //! performs the actual keychain write.
 
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
+use ainb_hangar_proto::snapshots::MemberWireRow;
 use ainb_plugin_sdk::WireBuffer;
 
 use crate::widgets::key_entry::render_key_entry_modal;
@@ -56,7 +61,7 @@ impl std::fmt::Debug for KeyMaterial {
     }
 }
 
-/// The four settings sections, in j/k navigation order.
+/// The five settings sections, in j/k navigation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     /// Daemon connection (socket / pid / uptime / version).
@@ -67,16 +72,21 @@ pub enum SettingsSection {
     Keys,
     /// Workspace switcher.
     Workspaces,
+    /// Workspace members (render-only list; e38.11). The mutation surface is
+    /// CLI-first (`ainb hangar member set-role|remove`) — the pane lists each
+    /// member with their role so the operator can see who can do what.
+    Members,
 }
 
 impl SettingsSection {
-    /// The next section down (j), clamped at [`Self::Workspaces`].
+    /// The next section down (j), clamped at [`Self::Members`].
     #[must_use]
     const fn next(self) -> Self {
         match self {
             Self::Daemon => Self::Providers,
             Self::Providers => Self::Keys,
-            Self::Keys | Self::Workspaces => Self::Workspaces,
+            Self::Keys => Self::Workspaces,
+            Self::Workspaces | Self::Members => Self::Members,
         }
     }
 
@@ -87,6 +97,7 @@ impl SettingsSection {
             Self::Daemon | Self::Providers => Self::Daemon,
             Self::Keys => Self::Providers,
             Self::Workspaces => Self::Keys,
+            Self::Members => Self::Workspaces,
         }
     }
 
@@ -98,6 +109,7 @@ impl SettingsSection {
             Self::Providers => "Providers",
             Self::Keys => "LLM Keys",
             Self::Workspaces => "Workspaces",
+            Self::Members => "Members",
         }
     }
 }
@@ -123,6 +135,8 @@ pub struct SettingsState {
     providers: Vec<ProviderRow>,
     keys: Vec<KeyRow>,
     workspaces: Vec<WorkspaceRow>,
+    /// The current workspace's members (render-only; e38.11).
+    members: Vec<MemberWireRow>,
     section: SettingsSection,
     /// Selection within the active section's list (workspaces / keys).
     list_selected: usize,
@@ -151,6 +165,7 @@ impl SettingsState {
             providers,
             keys,
             workspaces,
+            members: Vec::new(),
             section: SettingsSection::Daemon,
             list_selected: 0,
             connection,
@@ -179,6 +194,18 @@ impl SettingsState {
     #[must_use]
     pub fn workspaces(&self) -> &[WorkspaceRow] {
         &self.workspaces
+    }
+
+    /// Replace the member rows (after a `hangar/members_list` fetch). The pane is
+    /// render-only, so this only swaps the cached rows; no selection to clamp.
+    pub fn set_members(&mut self, members: Vec<MemberWireRow>) {
+        self.members = members;
+    }
+
+    /// The member rows currently rendered (for the glue / tests).
+    #[must_use]
+    pub fn members(&self) -> &[MemberWireRow] {
+        &self.members
     }
 
     /// The daemon-connection status.
@@ -355,6 +382,7 @@ fn move_list(state: &SettingsState, delta: i32) -> SettingsReduction {
         SettingsSection::Workspaces => next.workspaces.len(),
         SettingsSection::Keys => next.keys.len(),
         SettingsSection::Providers => next.providers.len(),
+        SettingsSection::Members => next.members.len(),
         SettingsSection::Daemon => 0,
     };
     if delta < 0 {
@@ -411,9 +439,45 @@ fn unchanged(state: &SettingsState) -> SettingsReduction {
 // Width-aware render
 // ---------------------------------------------------------------------------
 
+/// Paint the Members section body (render-only; e38.11): each member as
+/// `email · role`, the `owner` role in `SELECTION_GREEN` so the administrator
+/// stands out, others in `TEXT`. Returns the next free row. Split out of
+/// [`render_settings`] to keep that function within the line cap; the mutation
+/// surface for members is CLI-first (`ainb hangar member set-role|remove`).
+fn render_member_rows(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    mut row: u16,
+    bottom: u16,
+    members: &[MemberWireRow],
+) -> u16 {
+    use ainb_plugin_sdk::{Cell, Color, Coord};
+    const TEXT: Color = Color::rgb(220, 220, 230);
+    const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+
+    for m in members {
+        if row >= bottom {
+            break;
+        }
+        let color = if m.role == "owner" {
+            SELECTION_GREEN
+        } else {
+            TEXT
+        };
+        let line = format!("{} · {}", m.email, m.role);
+        for (ch, cx) in line.chars().zip(4..area_w) {
+            let mut cell = Cell::new(ch.to_string());
+            cell.fg = Some(color);
+            buf.push(Coord::new(cx, row), cell);
+        }
+        row += 1;
+    }
+    row
+}
+
 /// Render the settings screen into `buf` between rows `top` and `bottom`.
 ///
-/// The four sections paint stacked top-down; the active one is accent-highlighted.
+/// The five sections paint stacked top-down; the active one is accent-highlighted.
 /// When the key-entry modal is open it overlays a centred password-style input
 /// (masked, never the raw value). Width-aware: each row's value column is clipped
 /// at `area_w`.
@@ -447,6 +511,7 @@ pub fn render_settings(
         SettingsSection::Providers,
         SettingsSection::Keys,
         SettingsSection::Workspaces,
+        SettingsSection::Members,
     ] {
         if row >= bottom {
             break;
@@ -514,6 +579,9 @@ pub fn render_settings(
                     put(buf, 4, row, &line, color);
                     row += 1;
                 }
+            }
+            SettingsSection::Members => {
+                row = render_member_rows(buf, area_w, row, bottom, &state.members);
             }
         }
     }
