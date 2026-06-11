@@ -447,18 +447,43 @@ impl AppState {
             return true;
         }
         let Some(name) = self.selected_tmux_name() else {
+            self.add_warning_notification("No tmux session on this row".to_string());
             return false;
         };
+        // tmux mirrors a session to every attached client, but all clients
+        // fight over its size — attaching alongside an existing client is the
+        // user's call, so allow it and warn (never block).
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
             Ok(client) => {
                 self.embed = Some(client);
                 self.focused_pane = FocusedPane::Preview;
+                if attached_elsewhere {
+                    self.add_warning_notification(
+                        "Note: session attached elsewhere — screen sizes may fight".to_string(),
+                    );
+                }
                 true
             }
             Err(e) => {
                 tracing::warn!("failed to attach interactive embed to {name}: {e}");
+                self.add_error_notification(format!("Live attach to '{name}' failed: {e}"));
                 false
             }
+        }
+    }
+
+    /// Whether the current selection's tmux session already has another client
+    /// attached. Only the kinds that track attachment report it (Claude
+    /// sessions via `is_attached`, other-tmux rows via tmux's attached flag);
+    /// SSH/shell selections have no liveness flag and report false.
+    fn selected_session_attached_elsewhere(&self) -> bool {
+        if self.is_ssh_session_selected() || self.shell_selected {
+            false
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
+        } else {
+            self.get_selected_session().map(|s| s.is_attached).unwrap_or(false)
         }
     }
 
@@ -510,6 +535,9 @@ impl AppState {
         let invisible = self.current_screen != screen_ids::SESSION_LIST;
         if exited || invisible {
             self.release_interactive_pane();
+            if exited {
+                self.add_info_notification("Live session ended — released".to_string());
+            }
         }
     }
 }

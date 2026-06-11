@@ -539,6 +539,10 @@ async fn run_tui_loop(
                                 let cols = (((sz.width as u32) * 60 / 100) as u16)
                                     .saturating_sub(2)
                                     .max(1);
+                                // Failure (no tmux session on the row / attach
+                                // error) surfaces as a notification from
+                                // enter_interactive_pane itself, which knows
+                                // which case it hit.
                                 if !app.state.enter_interactive_pane(rows, cols) {
                                     tracing::debug!(
                                         "EnterInteractivePane: no tmux session on selection / attach failed"
