@@ -10,23 +10,22 @@
 //! * a duplicate squad name is rejected (resolve-or-reject guard);
 //! * squad mutations are workspace-scoped (a sibling tenant cannot see / mutate
 //!   the squad);
-//! * LEADER ROUTING takes effect — a task assigned to the squad lands on the
-//!   leader's agent and is actually claimable by the leader's runtime via the
-//!   real `ClaimTaskService`, not merely stored. The leader's agent id is
-//!   resolved through the same `SquadRepo::leader_agent_id` seam the daemon uses,
-//!   and the claimed task's `agent_id` is the leader's, proving the routing path
-//!   reaches the leader.
+//! * LEADER ROUTING takes effect THROUGH A PRODUCT SURFACE — the
+//!   `hangar/squad_assign` RPC turns a squad assignment into a routed task: the
+//!   daemon resolves the squad's leader, derives the leader's runtime, and
+//!   enqueues the task, all server-side. The test asserts the RPC's response
+//!   names the leader and then proves the leader's runtime (and only it) claims
+//!   the enqueued task via the real `ClaimTaskService`. The test does NOT
+//!   hand-build the task or hand-resolve the leader — the routing happens inside
+//!   the daemon, not the test body.
 
 use std::time::{Duration, Instant};
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
 use ainb_hangar_daemon::seed::{self, WS_ID, WS_SLUG};
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
-use ainb_hangar_store::repo::squad::SquadRepo;
-use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::service::claim::ClaimTaskService;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -375,19 +374,21 @@ async fn squads_are_workspace_scoped() {
     );
 }
 
-/// LEADER ROUTING TAKES EFFECT: a task assigned to the squad lands on the
-/// LEADER's agent and is actually claimable by the leader's runtime — not merely
-/// stored.
+/// LEADER ROUTING TAKES EFFECT THROUGH THE `hangar/squad_assign` RPC: the daemon
+/// turns a squad assignment into a task routed to the squad's LEADER — the test
+/// drives the product surface, it does not route by hand.
 ///
 /// The squad's leader is `agent-2` on `runtime-2` (a fresh agent with no in-flight
-/// work), distinct from the busy default `agent-1`. The leader's agent id is
-/// resolved through the same `SquadRepo::leader_agent_id` seam the routing path
-/// uses; the task is enqueued with THAT agent id; then the real
-/// `ClaimTaskService` claims it for `runtime-2` and the claimed task's `agent_id`
-/// is the leader's. Claiming the SAME task for the non-leader runtime returns
-/// nothing — proving the task is routed to the leader, not anyone else.
+/// work), distinct from the busy default `agent-1`. The test calls the
+/// `hangar/squad_assign` RPC naming ONLY the squad — never the agent or runtime.
+/// The daemon resolves the leader, derives the leader's runtime, and enqueues the
+/// task server-side; the RPC response names the leader (`agent-2` on `runtime-2`).
+/// Then the real `ClaimTaskService` claims the enqueued task for `runtime-2` and
+/// the claimed `agent_id` is the leader's. Claiming for the non-leader runtime
+/// returns nothing — proving the daemon routed the work to the leader, not anyone
+/// else.
 #[tokio::test]
-async fn leader_routing_routes_a_squad_task_to_the_leader_agent() {
+async fn squad_assign_rpc_routes_a_task_to_the_leader_agent() {
     let dir = tempfile::tempdir().unwrap();
     let (socket_path, store) = start_server(dir.path()).await;
     seed_second_agent(&store).await;
@@ -405,34 +406,28 @@ async fn leader_routing_routes_a_squad_task_to_the_leader_agent() {
         .await;
     let squad_id = only_squad_id(&created);
 
-    // Resolve the squad to its LEADER's agent id — the routing seam the daemon /
-    // CLI use to turn a squad assignment into a concrete `agent_id`.
-    let ws = WorkspaceId::from_str(WS_ID.to_string()).unwrap();
-    let leader_agent = SquadRepo::leader_agent_id(pool, &ws, &squad_id)
-        .await
-        .unwrap()
-        .expect("an agent leader resolves to an agent id");
-    assert_eq!(leader_agent, "agent-2", "squad routes to its leader agent");
-
-    // Enqueue a task ASSIGNED TO THE SQUAD: it carries the leader's agent id +
-    // the leader's runtime, so the existing claim/dispatch path reaches the
-    // leader.
-    let task_id = TaskRepo::insert(
-        pool,
-        &NewTask {
-            id: "squad-task-1".into(),
-            workspace_id: WS_ID.into(),
-            runtime_id: "runtime-2".into(),
-            agent_id: leader_agent.clone(),
-            issue_id: None,
-            work_dir: None,
-            priority: 0,
-            created_at: 9_000,
-            autopilot_run_id: None,
-        },
-    )
-    .await
-    .unwrap();
+    // ASSIGN TO THE SQUAD through the product RPC — naming ONLY the squad. The
+    // daemon resolves the leader, derives its runtime, and enqueues the task; the
+    // response names the leader it routed to.
+    let assigned = c
+        .call(
+            methods::HANGAR_SQUAD_ASSIGN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id }),
+        )
+        .await;
+    assert!(
+        assigned["error"].is_null(),
+        "squad_assign must ack: {assigned}"
+    );
+    let task_id = assigned["result"]["task_id"].as_str().expect("task_id").to_string();
+    assert_eq!(
+        assigned["result"]["leader_agent_id"], "agent-2",
+        "the daemon routed the task to the LEADER agent: {assigned}"
+    );
+    assert_eq!(
+        assigned["result"]["runtime_id"], "runtime-2",
+        "the daemon DERIVED the leader's runtime (not supplied by the caller): {assigned}"
+    );
 
     // The leader's runtime CLAIMS the squad task — routing took effect.
     let clock = FixedClock(10_000);
@@ -452,5 +447,38 @@ async fn leader_routing_routes_a_squad_task_to_the_leader_agent() {
     assert!(
         other.is_none() || other.as_ref().map(|t| t.id.as_str()) != Some(task_id.as_str()),
         "the squad task must not be claimable by the non-leader runtime"
+    );
+}
+
+/// `hangar/squad_assign` REJECTS a squad with a human-member leader: there is no
+/// agent to dispatch to, so nothing is enqueued (a client error, not a silent
+/// no-op). Proves the routing path guards the human-leader case end-to-end.
+#[tokio::test]
+async fn squad_assign_rpc_rejects_a_human_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // A squad led by a HUMAN member carries no agent to route work to.
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "humans", "leader": "member:user-1" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    let assigned = c
+        .call(
+            methods::HANGAR_SQUAD_ASSIGN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id }),
+        )
+        .await;
+    assert!(
+        !assigned["error"].is_null(),
+        "assigning to a human-led squad must be rejected: {assigned}"
     );
 }

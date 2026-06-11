@@ -464,6 +464,7 @@ async fn handle(
         methods::HANGAR_SQUAD_CREATE => handle_squad_create(pool, req).await,
         methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
         methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
+        methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
@@ -1244,6 +1245,76 @@ async fn squads_list_value(
 ) -> Result<serde_json::Value, RpcError> {
     let squads = snapshots::squads_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
+/// Dispatch `hangar/squad_assign` (e38.17): route a task to the squad's LEADER,
+/// the product seam that makes leader routing TAKE EFFECT.
+///
+/// Mirrors [`handle_squad_create`]'s contract: resolve + reject a mistyped
+/// workspace, then call [`SquadAssignService::assign_to_leader`], which resolves
+/// the squad's leader agent, derives the leader's runtime, and enqueues a task
+/// keyed to the leader so the existing claim/dispatch path routes it there. A
+/// squad with a human-member leader (no agent to dispatch to) or an unknown squad
+/// is rejected (`INVALID_PARAMS`). Answers with the enqueued task id + the leader
+/// identity it routed to.
+///
+/// [`SquadAssignService::assign_to_leader`]: ainb_hangar_store::service::squad_assign::SquadAssignService::assign_to_leader
+async fn handle_squad_assign(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_store::service::squad_assign::{
+        SquadAssignRequest, SquadAssignService, SquadAssignment,
+    };
+
+    let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
+        req,
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let request = SquadAssignRequest {
+        issue_id: params.issue_id.as_deref(),
+        work_dir: params.work_dir.as_deref(),
+        priority: params.priority.unwrap_or(0),
+    };
+    let SquadAssignment {
+        task_id,
+        leader_agent_id,
+        runtime_id,
+    } = SquadAssignService::assign_to_leader(
+        pool,
+        &ws,
+        &params.squad_id,
+        &request,
+        &SystemIdGen,
+        &SystemClock,
+    )
+    .await
+    .map_err(|e| squad_assign_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::SquadAssignResult {
+        task_id,
+        leader_agent_id,
+        runtime_id,
+    })
+}
+
+/// Map a [`SquadAssignError`] onto an RPC error: a no-agent-leader / missing-leader
+/// rejection is a client error (`INVALID_PARAMS`), every store fault an internal
+/// error.
+///
+/// [`SquadAssignError`]: ainb_hangar_store::service::squad_assign::SquadAssignError
+fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignError) -> RpcError {
+    use ainb_hangar_store::service::squad_assign::SquadAssignError;
+    match e {
+        SquadAssignError::NoAgentLeader => invalid_params(
+            "squad has no agent leader to route to (unknown squad or a human leader)",
+        ),
+        SquadAssignError::LeaderAgentMissing(id) => {
+            invalid_params(&format!("squad leader agent `{id}` not found"))
+        }
+        SquadAssignError::Db(db) => store_err(db),
+    }
 }
 
 /// Map a [`SquadRepoError`] onto an RPC error: a duplicate-name / not-found
