@@ -449,6 +449,7 @@ async fn handle(
             to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
         }
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
+        methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
@@ -623,6 +624,54 @@ fn parse_task_status(raw: &str) -> Result<ainb_hangar_core::task_status::TaskSta
             "to_status must be one of queued/dispatched/running/done/failed/cancelled, got `{raw}`"
         ))
     })
+}
+
+/// Dispatch `hangar/issue_create` (e38.29): create one new issue, push the
+/// matching `IssueCreated` event, and answer with the persisted row.
+///
+/// Mirrors [`handle_comment_add`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), validates a non-blank title, parses the creator actor-ref, then drives
+/// the store insert with a daemon-minted id + timestamp. The new row is announced
+/// to subscribers so a subscribed issue list re-renders it without a full
+/// re-pull. Split out of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_issue_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::IssueCreateParams =
+        parse_params(req, "{ workspace_id, title, description?, creator }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // A blank title is a client error, not an empty row.
+    if params.title.trim().is_empty() {
+        return Err(invalid_params("issue title must not be empty"));
+    }
+    let creator = ActorRef::from_str(&params.creator).map_err(|e| {
+        invalid_params(&format!(
+            "creator must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let row = snapshots::issue_create(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        &params.title,
+        params.description.as_deref(),
+        &creator,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    // A committed insert announces the new issue to subscribers.
+    events.emit(ws.as_str(), HangarEvent::IssueCreated(row.clone()));
+    to_value(&row)
 }
 
 /// Dispatch `hangar/issue_update` (e38.8): edit one issue's fields, push the
@@ -1367,6 +1416,89 @@ mod tests {
                     "workspace_id": "default",
                     "issue_id": "no-such-issue",
                     "state": "done",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/issue_create` creates a new issue through the dispatcher, answers
+    /// with the persisted row, and the row actually lands in the `issue` table
+    /// (e38.29).
+    #[tokio::test]
+    async fn issue_create_lands_new_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_CREATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "title": "Ship the create flow",
+                    "creator": "member:me",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        assert_eq!(v["title"], "Ship the create flow");
+        assert_eq!(v["state"], "open");
+        assert_eq!(v["creator"], "member:me");
+        // The real proof: the row is in the DB, not just echoed in the response.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE title = ?")
+            .bind("Ship the create flow")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "created issue not found in the DB");
+    }
+
+    /// A blank title is an `INVALID_PARAMS` client error, not an empty row.
+    #[tokio::test]
+    async fn issue_create_blank_title_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_CREATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "title": "   ",
+                    "creator": "member:me",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// An unknown workspace is rejected (not a silent no-op), mirroring the
+    /// mutating workspace-reject contract.
+    #[tokio::test]
+    async fn issue_create_unknown_workspace_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_CREATE,
+                serde_json::json!({
+                    "workspace_id": "no-such-ws",
+                    "title": "orphan",
+                    "creator": "member:me",
                 }),
             ),
             &health(),

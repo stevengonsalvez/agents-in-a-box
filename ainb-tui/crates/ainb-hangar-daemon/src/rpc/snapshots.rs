@@ -649,6 +649,71 @@ pub async fn issue_update(
     }))
 }
 
+/// Create one new issue in `workspace_id`, then return it as a wire [`IssueRow`]
+/// (`hangar/issue_create`, e38.29).
+///
+/// Mints a fresh ULID via `idgen`, stamps `created_at` from `clock`, and inserts
+/// through [`IssueRepo::insert`] in the `open` lifecycle state. The new issue is
+/// unassigned (the create flow only captures title + description); `creator` is
+/// the already-parsed actor-ref. The re-wrapped [`IssueRow`] mirrors the
+/// `issues_list` shape (a freshly-created issue has no completed task, so
+/// `pr_url` is always `None`), so the response row and the pushed `IssueCreated`
+/// event are byte-identical to a list snapshot of the row.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault (e.g. a `workspace_id` FK
+/// violation), or a malformed minted id on the re-wrap (impossible for a ULID).
+pub async fn issue_create(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    title: &str,
+    description: Option<&str>,
+    creator: &ActorRef,
+) -> Result<IssueRow, sqlx::Error> {
+    use ainb_hangar_store::repo::issue::NewIssue;
+
+    let id = idgen.new_ulid();
+    let created_at = clock.now_ms();
+    IssueRepo::insert(
+        pool,
+        &NewIssue {
+            id: id.clone(),
+            workspace_id: workspace_id.to_string(),
+            title: title.to_string(),
+            description: description.map(ToString::to_string),
+            state: "open".to_string(),
+            assignee: None,
+            creator: creator.clone(),
+            created_at,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+        },
+    )
+    .await?;
+    let issue_id = IssueId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
+        index: "id".to_string(),
+        source: format!("malformed issue id {id:?}: {e}").into(),
+    })?;
+    Ok(IssueRow {
+        id: issue_id,
+        workspace_id: workspace_id.to_string(),
+        title: title.to_string(),
+        description: description.map(ToString::to_string),
+        state: "open".to_string(),
+        assignee: None,
+        creator: format!("{}:{}", creator.kind().as_str(), creator.id()),
+        created_at,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
+        pr_url: None,
+    })
+}
+
 /// Append one comment to an issue, scoped to `workspace_id`, then return it as a
 /// wire [`CommentRow`] (`hangar/comment_add`, e38.5).
 ///
