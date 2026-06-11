@@ -185,3 +185,68 @@ pub async fn fire_autopilot_tick(
         TaskId::from_str(task_id)?,
     ))
 }
+
+/// Supersede every in-flight run of an autopilot — the `replace` concurrency
+/// policy's "cancel the stale work before firing fresh" step (e38.19).
+///
+/// In one transaction it:
+///
+/// 1. cancels each in-flight task (`autopilot_run_id IN (open runs) AND status
+///    NOT terminal`): `status = 'cancelled'`, `finished_at = now`,
+/// 2. cancels each open run (`completed_at IS NULL`): `status = 'cancelled'`,
+///    `completed_at = now`.
+///
+/// The order matters only for clarity (both are correlated by `autopilot_id`).
+/// Returns the number of runs superseded. A no-op (returns `0`) when nothing is
+/// in flight.
+///
+/// This is NOT routed through the FSM finalize cascade: the cascade stamps a
+/// run from its task's terminal state, but here the SCHEDULER is the authority
+/// declaring the run abandoned, so it cancels the run directly. The result is
+/// the same terminal shape (run `cancelled` + `completed_at` set, task
+/// `cancelled` + `finished_at` set) the finalize path would have produced.
+///
+/// # Errors
+///
+/// Returns [`FireError::Db`] on any SQL failure; the transaction rolls back so a
+/// partial supersede never persists.
+pub async fn supersede_in_flight(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    autopilot_id: &str,
+) -> Result<u64, FireError> {
+    let now = clock.now_ms();
+    let mut tx = pool.begin().await?;
+
+    // 1. Cancel the tasks of the open runs (abandon the in-flight work). Scoped
+    //    to the autopilot's own open runs, so a foreign autopilot's tasks are
+    //    untouched.
+    sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'cancelled', finished_at = ? \
+         WHERE autopilot_run_id IN ( \
+                 SELECT id FROM autopilot_run \
+                 WHERE autopilot_id = ? AND completed_at IS NULL \
+             ) \
+           AND status NOT IN ('done', 'failed', 'cancelled')",
+    )
+    .bind(now)
+    .bind(autopilot_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2. Cancel the open runs themselves.
+    let runs = sqlx::query(
+        "UPDATE autopilot_run \
+         SET status = 'cancelled', completed_at = ? \
+         WHERE autopilot_id = ? AND completed_at IS NULL",
+    )
+    .bind(now)
+    .bind(autopilot_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(runs)
+}

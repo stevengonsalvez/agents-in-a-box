@@ -491,3 +491,93 @@ async fn run_fails_when_task_fails() {
     );
     assert_eq!(run_row.get::<String, _>("status"), "failed");
 }
+
+#[tokio::test]
+async fn supersede_cancels_open_runs_and_their_tasks() {
+    // The `replace` policy's supersede step: every in-flight run is cancelled
+    // (with completed_at stamped) and its task cancelled (with finished_at
+    // stamped); a no-op leaves zero affected.
+    use ainb_hangar_store::repo::autopilot_run::supersede_in_flight;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let autopilot = seed_autopilot(&store).await;
+    let fire_clock = FixedClock(T0);
+
+    // Fire two runs (raise max_concurrent so both land), leaving both in flight.
+    let mut ap2 = autopilot.clone();
+    ap2.max_concurrent_runs = 5;
+    let (run1, task1) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &fire_clock,
+        &ap2,
+    )
+    .await
+    .expect("fire tick #1");
+    let (run2, task2) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &fire_clock,
+        &ap2,
+    )
+    .await
+    .expect("fire tick #2");
+    assert_eq!(
+        count_runs_in_flight(&store).await,
+        2,
+        "both runs are in flight before supersede"
+    );
+
+    // Supersede: both open runs + their tasks are cancelled.
+    let supersede_clock = FixedClock(T0 + 90_000);
+    let n = supersede_in_flight(store.pool(), &supersede_clock, &autopilot.id)
+        .await
+        .expect("supersede");
+    assert_eq!(n, 2, "two in-flight runs were superseded");
+
+    for run in [run1.as_str(), run2.as_str()] {
+        let row = sqlx::query("SELECT status, completed_at FROM autopilot_run WHERE id = ?")
+            .bind(run)
+            .fetch_one(store.pool())
+            .await
+            .expect("run row");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
+        assert_eq!(
+            row.get::<Option<i64>, _>("completed_at"),
+            Some(T0 + 90_000),
+            "completed_at stamped at supersede time"
+        );
+    }
+    for task in [task1.as_str(), task2.as_str()] {
+        let row = sqlx::query("SELECT status, finished_at FROM agent_task_queue WHERE id = ?")
+            .bind(task)
+            .fetch_one(store.pool())
+            .await
+            .expect("task row");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
+        assert_eq!(
+            row.get::<Option<i64>, _>("finished_at"),
+            Some(T0 + 90_000),
+            "task finished_at stamped at supersede time"
+        );
+    }
+    assert_eq!(
+        count_runs_in_flight(&store).await,
+        0,
+        "no runs remain in flight after supersede"
+    );
+
+    // A second supersede is a no-op (nothing in flight).
+    let n2 = supersede_in_flight(store.pool(), &supersede_clock, &autopilot.id)
+        .await
+        .expect("second supersede");
+    assert_eq!(n2, 0, "supersede with nothing in flight affects zero runs");
+}
+
+/// Count an autopilot's in-flight (not-yet-completed) runs.
+async fn count_runs_in_flight(store: &Store) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM autopilot_run WHERE completed_at IS NULL")
+        .fetch_one(store.pool())
+        .await
+        .expect("count in-flight runs")
+}
