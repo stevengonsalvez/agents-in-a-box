@@ -1081,3 +1081,92 @@ fn squad_assign_rejects_a_human_leader() {
         "the human-leader guard message must surface:\n{out}"
     );
 }
+
+/// The user-visible proof for e38.21: `ainb hangar workspace config` sets the
+/// per-workspace config knobs, `... workspace show` round-trips them, and the
+/// `issue_prefix` actually TAKES EFFECT — an issue created afterward carries the
+/// prefix in its title (a real-binary round-trip through `WorkspaceRepo` + the
+/// CLI issue-create path).
+#[test]
+fn workspace_config_sets_knobs_and_issue_prefix_takes_effect() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Configure the default workspace (bootstraps it on first touch).
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "workspace",
+            "config",
+            "--context-prompt",
+            "Always run cargo fmt.",
+            "--issue-prefix",
+            "[OPS] ",
+            "--repo-whitelist",
+            "org/api,org/web",
+        ],
+    );
+    assert!(ok, "workspace config should exit 0; out={out}");
+    assert!(
+        out.contains("updated workspace config"),
+        "missing config ack:\n{out}"
+    );
+
+    // `workspace show` reflects every stored knob.
+    let (ok, out) = run(tmp.path(), &["hangar", "workspace", "show"]);
+    assert!(ok, "workspace show should exit 0; out={out}");
+    assert!(
+        out.contains("Always run cargo fmt."),
+        "context prompt not shown:\n{out}"
+    );
+    assert!(out.contains("[OPS] "), "issue prefix not shown:\n{out}");
+    assert!(
+        out.contains("org/api") && out.contains("org/web"),
+        "repo whitelist not shown:\n{out}"
+    );
+
+    // The takes-effect proof: an issue created in this configured workspace
+    // carries the prefix in its persisted title (observed via `issue show`).
+    let id = create_issue(tmp.path(), "fix the build");
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &id]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(
+        out.contains("[OPS] fix the build"),
+        "the created issue's title must carry the workspace prefix:\n{out}"
+    );
+}
+
+/// `--clear-…` flags unset a knob (back to the v1 "not configured" behaviour):
+/// an issue created after clearing the prefix uses the bare title verbatim.
+#[test]
+fn workspace_config_clear_flags_unset_knobs() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Set, then clear, the issue prefix.
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "workspace", "config", "--issue-prefix", "[OPS] "],
+    );
+    assert!(ok);
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "workspace", "config", "--clear-issue-prefix"],
+    );
+    assert!(ok, "clear should exit 0; out={out}");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "workspace", "show"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("issue_prefix:   (not set)"),
+        "cleared prefix should read (not set):\n{out}"
+    );
+
+    // A subsequently-created issue uses the bare title (no prefix).
+    let id = create_issue(tmp.path(), "no prefix here");
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &id]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("no prefix here") && !out.contains("[OPS] no prefix here"),
+        "a cleared prefix must leave the title verbatim:\n{out}"
+    );
+}

@@ -107,9 +107,76 @@ pub enum HangarCommand {
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
+    /// View + set per-workspace config (context prompt, issue prefix, repo
+    /// whitelist).
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Read the daemon's structured logs.
     #[command(subcommand)]
     Logs(LogsCommand),
+}
+
+/// `hangar workspace <verb>`.
+///
+/// The per-workspace config surface (e38.21): `config` sets one or more of the
+/// workspace's agent-run config knobs, `show` renders the current config. Every
+/// verb is workspace-scoped (`--workspace`, else the bootstrapped `default`).
+///
+/// The three knobs each take effect at dispatch / create time:
+/// - `context_prompt` is injected into every agent run in the workspace as a
+///   `CLAUDE.md` in the task's working dir,
+/// - `issue_prefix` is prepended to the title of every issue created in the
+///   workspace,
+/// - `repo_whitelist` gates which repositories a workspace task may check out
+///   (persisted + validated; the checkout flow that consumes it lands later).
+#[derive(Subcommand, Debug)]
+pub enum WorkspaceCommand {
+    /// Set one or more of the workspace's config knobs.
+    Config(WorkspaceConfigArgs),
+    /// Show the workspace's current config.
+    Show(WorkspaceShowArgs),
+}
+
+/// Arguments for `hangar workspace config`.
+///
+/// Each `--…` flag overwrites that knob; the matching `--clear-…` flag unsets it
+/// (writes NULL — back to the v1 "not configured" behaviour). A flag that is not
+/// given leaves the stored value untouched. `--clear-…` and the value flag for
+/// the same knob are mutually exclusive.
+#[derive(Args, Debug)]
+pub struct WorkspaceConfigArgs {
+    /// Set the context prompt injected into every agent run as a `CLAUDE.md`.
+    #[arg(long, conflicts_with = "clear_context_prompt")]
+    pub context_prompt: Option<String>,
+    /// Unset the context prompt (back to no per-workspace context).
+    #[arg(long)]
+    pub clear_context_prompt: bool,
+    /// Set the prefix prepended to a newly-created issue's title (e.g. `[OPS] `).
+    #[arg(long, conflicts_with = "clear_issue_prefix")]
+    pub issue_prefix: Option<String>,
+    /// Unset the issue prefix (titles used verbatim).
+    #[arg(long)]
+    pub clear_issue_prefix: bool,
+    /// Set the repo whitelist as a comma-separated list of `owner/name` slugs
+    /// (e.g. `org/api,org/web`). The empty string sets a configured-but-empty
+    /// whitelist (allows nothing); use `--clear-repo-whitelist` to remove the gate.
+    #[arg(long, conflicts_with = "clear_repo_whitelist", value_delimiter = ',')]
+    pub repo_whitelist: Option<Vec<String>>,
+    /// Unset the repo whitelist (no gate — every repo allowed).
+    #[arg(long)]
+    pub clear_repo_whitelist: bool,
+    /// Workspace slug to configure. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar workspace show`.
+#[derive(Args, Debug)]
+pub struct WorkspaceShowArgs {
+    /// Workspace slug to show. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar logs <verb>`.
@@ -1112,6 +1179,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Member(c) => dispatch_member(c, format).await,
         HangarCommand::Squad(c) => dispatch_squad(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
+        HangarCommand::Workspace(c) => dispatch_workspace(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
 }
@@ -1794,6 +1862,123 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
     }
 }
 
+/// Dispatch the `hangar workspace` verbs against a local store (e38.21).
+///
+/// `config` sets one or more of the workspace's agent-run config knobs (context
+/// prompt, issue prefix, repo whitelist); `show` renders the current config.
+/// Both resolve the workspace the same way the skills/member verbs do.
+async fn dispatch_workspace(cmd: WorkspaceCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        WorkspaceCommand::Config(args) => run_workspace_config(&store, args).await,
+        WorkspaceCommand::Show(args) => run_workspace_show(&store, args, format).await,
+    }
+}
+
+/// `hangar workspace config`: overwrite one or more of the workspace's config
+/// knobs. A value flag sets the knob; a `--clear-…` flag unsets it; a knob whose
+/// flags are both absent keeps its stored value (a read-modify-write merge).
+async fn run_workspace_config(store: &Store, args: WorkspaceConfigArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    // Read-modify-write: start from the stored config so an unspecified knob is
+    // preserved, then apply each flag.
+    let mut config = WorkspaceRepo::get_config(store.pool(), &ws)
+        .await
+        .map_err(workspace_cli_err)?
+        .context("workspace vanished")?;
+    if args.clear_context_prompt {
+        config.context_prompt = None;
+    } else if let Some(prompt) = args.context_prompt {
+        config.context_prompt = Some(prompt);
+    }
+    if args.clear_issue_prefix {
+        config.issue_prefix = None;
+    } else if let Some(prefix) = args.issue_prefix {
+        config.issue_prefix = Some(prefix);
+    }
+    if args.clear_repo_whitelist {
+        config.repo_whitelist = None;
+    } else if let Some(repos) = args.repo_whitelist {
+        config.repo_whitelist = Some(repos);
+    }
+
+    WorkspaceRepo::set_config(store.pool(), &ws, &config)
+        .await
+        .map_err(workspace_cli_err)?;
+    println!("updated workspace config");
+    Ok(())
+}
+
+/// `hangar workspace show`: render the workspace's current config. An
+/// unconfigured workspace shows `(not set)` for each knob.
+async fn run_workspace_show(
+    store: &Store,
+    args: WorkspaceShowArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let config = WorkspaceRepo::get_config(store.pool(), &ws)
+        .await
+        .map_err(workspace_cli_err)?
+        .context("workspace vanished")?;
+
+    match format {
+        OutputFormat::Json => {
+            let v = serde_json::json!({
+                "context_prompt": config.context_prompt,
+                "issue_prefix": config.issue_prefix,
+                "repo_whitelist": config.repo_whitelist,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).context("render config json")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            let not_set = "(not set)".to_string();
+            println!(
+                "context_prompt: {}",
+                config.context_prompt.as_deref().unwrap_or(&not_set)
+            );
+            println!(
+                "issue_prefix:   {}",
+                config.issue_prefix.as_deref().unwrap_or(&not_set)
+            );
+            let whitelist = config
+                .repo_whitelist
+                .as_ref()
+                .map_or_else(|| not_set.clone(), |list| list.join(", "));
+            println!("repo_whitelist: {whitelist}");
+        }
+    }
+    Ok(())
+}
+
+/// Map a [`WorkspaceRepoError`] onto a human CLI error.
+///
+/// [`WorkspaceRepoError`]: ainb_hangar_store::repo::workspace::WorkspaceRepoError
+fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::workspace::WorkspaceRepoError;
+    match e {
+        WorkspaceRepoError::NotFound => anyhow::anyhow!("no such workspace"),
+        WorkspaceRepoError::BadWhitelist { detail } => {
+            anyhow::anyhow!("invalid repo whitelist: {detail}")
+        }
+        db @ WorkspaceRepoError::Db(_) => {
+            anyhow::Error::new(db).context("workspace config mutation failed")
+        }
+    }
+}
+
 /// Dispatch the `hangar squad` verbs against a local store (e38.17).
 ///
 /// `list` renders the squad status view (each squad's leader + members); `create`
@@ -2425,10 +2610,20 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     };
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
 
+    // e38.21: apply the workspace's issue_prefix to the new title so the prefix
+    // actually takes effect on a created issue. An unconfigured workspace leaves
+    // the title verbatim (the v1 behaviour). Read after the assignee resolve so a
+    // bad agent id still fails first.
+    let issue_prefix = workspace_issue_prefix(pool, &workspace_id).await?;
+    let title = ainb_hangar_store::repo::workspace::apply_issue_prefix(
+        issue_prefix.as_deref(),
+        &args.title,
+    );
+
     let new = NewIssue {
         id: id.clone(),
         workspace_id: workspace_id.clone(),
-        title: args.title,
+        title,
         description: args.description,
         state: args.state,
         assignee: assignment
@@ -2950,6 +3145,25 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
         .await
         .context("bootstrap default member")?;
     Ok(workspace_id)
+}
+
+/// Read a workspace's configured `issue_prefix` by id (e38.21).
+///
+/// `None` when the workspace has no prefix configured (the migration-0020 NULL
+/// default) — the issue title is then used verbatim. Mirrors the daemon's
+/// RPC-side `workspace_issue_prefix` so the CLI and RPC create paths agree.
+async fn workspace_issue_prefix(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+) -> Result<Option<String>> {
+    let prefix: Option<String> =
+        sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .context("read workspace issue prefix")?
+            .flatten();
+    Ok(prefix)
 }
 
 /// Return the default owner user id (the first user, oldest first), or `None`
