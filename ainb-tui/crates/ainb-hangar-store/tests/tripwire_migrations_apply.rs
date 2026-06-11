@@ -708,7 +708,74 @@ async fn migration_0015_adds_agent_archive_and_config_columns() {
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_seventeen_tables() {
+async fn migration_0016_creates_label_and_issue_label_tables() {
+    // The issue-label surface (parity-review gap: "no label table or issue-label
+    // join") needs a first-class workspace-scoped label entity plus an attach
+    // join. Two tables land:
+    //   - `label` (id PK, workspace_id FK, name, nullable color) with a
+    //     `(workspace_id, name)` UNIQUE index (the resolve-or-reject guard);
+    //   - `issue_label` (issue_id, label_id) composite-PK join (the attach link),
+    //     with a reverse-lookup index on `label_id`.
+    // The `issue.labels` JSON column (migration 0014) is kept as a denormalized
+    // read-cache the attach/detach RPCs sync; the `label` table is the source of
+    // truth. `CREATE TABLE`/`CREATE INDEX` are catalog-only, so each shows up in
+    // `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let label = table_sql(&pool, "label").await;
+    assert!(
+        label.contains("id TEXT PRIMARY KEY"),
+        "label.id is the PK: {label}"
+    );
+    assert!(
+        label.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "label.workspace_id is a non-null workspace FK: {label}"
+    );
+    assert!(
+        label.contains("name TEXT NOT NULL"),
+        "label.name is non-null: {label}"
+    );
+    assert!(
+        label.contains("color TEXT"),
+        "label.color is a nullable hex color: {label}"
+    );
+
+    let issue_label = table_sql(&pool, "issue_label").await;
+    assert!(
+        issue_label.contains("issue_id TEXT NOT NULL REFERENCES issue(id)"),
+        "issue_label.issue_id references issue: {issue_label}"
+    );
+    assert!(
+        issue_label.contains("label_id TEXT NOT NULL REFERENCES label(id)"),
+        "issue_label.label_id references label: {issue_label}"
+    );
+    assert!(
+        issue_label.contains("PRIMARY KEY (issue_id, label_id)"),
+        "issue_label has a composite PK: {issue_label}"
+    );
+
+    // The resolve-or-reject UNIQUE index makes `(workspace_id, name)` map to one
+    // label per tenant.
+    let idx: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name = 'idx_label_workspace_name'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("query index")
+    .flatten();
+    let idx = idx.expect("idx_label_workspace_name present");
+    let idx = idx.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        idx.contains("UNIQUE INDEX idx_label_workspace_name ON label(workspace_id, name)"),
+        "label name is unique per workspace: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn all_migrations_create_exactly_nineteen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -734,6 +801,8 @@ async fn all_migrations_create_exactly_seventeen_tables() {
         "daemon_socket_token",
         "daemon_token",
         "issue",
+        "issue_label",
+        "label",
         "member",
         "pat",
         "skill",
@@ -741,7 +810,7 @@ async fn all_migrations_create_exactly_seventeen_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 17, "expected 17 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 19, "expected 19 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
