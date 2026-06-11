@@ -52,3 +52,9 @@ pub mod template;
 pub mod token;
 /// Danger-full-access warning ack keys + pure show/skip decision logic.
 pub mod warnings;
+/// Webhook signing primitives for webhook-triggered autopilots (e38.18).
+///
+/// HMAC-SHA256-of-body signature compute + constant-time verify, secret minting
+/// (digest stored, plaintext returned once), and the optional event filter — all
+/// IO-free. The HTTP ingress + secret-file storage live in the daemon / store.
+pub mod webhook;

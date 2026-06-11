@@ -34,6 +34,12 @@ ulid = "1"
 sha2 = "0.10"
 subtle = "2.5"
 rand = "0.8"
+# e38.18 webhook autopilots: HMAC-SHA256 of the request body is the webhook
+# signature scheme (the GitHub/Stripe model). `hmac` pairs with the `sha2`
+# above; `hex` encodes/decodes the lower-case-hex signature header. Both are
+# IO-free, preserving this crate's no-IO charter.
+hmac = "0.12"
+hex = "0.4"
 # P8.6: the structured-log reader (`logs` module) is the one deliberate IO
 # exception to this crate's no-IO charter — it globs + reads the daemon's
 # `daemon.<date>` log files so the `ainb hangar logs tail` CLI and the TUI
