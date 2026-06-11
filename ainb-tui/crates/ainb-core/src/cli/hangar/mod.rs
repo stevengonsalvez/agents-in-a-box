@@ -96,6 +96,9 @@ pub enum HangarCommand {
     /// List, re-role, and remove workspace members.
     #[command(subcommand)]
     Member(MemberCommand),
+    /// Create squads, manage membership, and view squad status + leader.
+    #[command(subcommand)]
+    Squad(SquadCommand),
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
@@ -384,6 +387,71 @@ impl MemberRoleArg {
             Self::Member => MemberRole::Member,
         }
     }
+}
+
+/// `hangar squad <verb>`.
+///
+/// The squads surface (e38.17): a squad is a workspace-scoped group of actors with
+/// a designated LEADER. `list` is the status view — each squad with its leader and
+/// members; `create` makes a squad with a leader actor-ref; `add-member` /
+/// `remove-member` mutate membership. Every verb is workspace-scoped (`--workspace`,
+/// else the bootstrapped `default`).
+///
+/// # Leader routing
+///
+/// A squad does NOT introduce a new actor kind. Work assigned to a squad routes
+/// through its LEADER actor-ref: when the leader is an `agent`, a squad-assigned
+/// task carries the leader's `agent_id` and the existing claim/dispatch path
+/// reaches the leader — so the leader is the actor a squad's work lands on.
+#[derive(Subcommand, Debug)]
+pub enum SquadCommand {
+    /// List the workspace's squads (name, leader, members) — the status view.
+    List(SquadListArgs),
+    /// Create a squad with a leader actor-ref (`agent:<id>` / `member:<id>`).
+    Create(SquadCreateArgs),
+    /// Add a member actor to a squad (`agent:<id>` / `member:<id>`).
+    #[command(name = "add-member")]
+    AddMember(SquadMemberArgs),
+    /// Remove a member actor from a squad (`agent:<id>` / `member:<id>`).
+    #[command(name = "remove-member")]
+    RemoveMember(SquadMemberArgs),
+}
+
+/// Arguments for `hangar squad list`.
+#[derive(Args, Debug)]
+pub struct SquadListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad create`.
+#[derive(Args, Debug)]
+pub struct SquadCreateArgs {
+    /// The squad name (unique within the workspace).
+    pub name: String,
+    /// The squad leader as an actor-ref (`agent:<id>` / `member:<id>`). An `agent`
+    /// leader is the actor a squad-assigned task is routed to.
+    #[arg(long)]
+    pub leader: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad add-member` / `hangar squad remove-member`.
+#[derive(Args, Debug)]
+pub struct SquadMemberArgs {
+    /// The squad id (`squad.id`) to mutate.
+    pub squad_id: String,
+    /// The member actor-ref (`agent:<id>` / `member:<id>`).
+    #[arg(long)]
+    pub member: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Parse a `--env KEY=VALUE` argument into a `(key, value)` pair.
@@ -887,6 +955,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
         HangarCommand::Agent(c) => dispatch_agent(c, format).await,
         HangarCommand::Member(c) => dispatch_member(c, format).await,
+        HangarCommand::Squad(c) => dispatch_squad(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
@@ -1461,6 +1530,118 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
             anyhow::anyhow!("a workspace must always keep at least one owner")
         }
         other => anyhow::Error::new(other).context("member mutation failed"),
+    }
+}
+
+/// Dispatch the `hangar squad` verbs against a local store (e38.17).
+///
+/// `list` renders the squad status view (each squad's leader + members); `create`
+/// makes a squad with a leader actor-ref (resolve-or-reject on a duplicate name);
+/// `add-member` / `remove-member` mutate membership, workspace-scoped. The leader
+/// actor-ref is how a squad's work routes to a concrete actor — an `agent` leader
+/// is the actor a squad-assigned task lands on.
+async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        SquadCommand::List(args) => run_squad_list(&store, args, format).await,
+        SquadCommand::Create(args) => run_squad_create(&store, args).await,
+        SquadCommand::AddMember(args) => run_squad_member(&store, args, true).await,
+        SquadCommand::RemoveMember(args) => run_squad_member(&store, args, false).await,
+    }
+}
+
+/// `hangar squad list`: render the workspace's squads (name, leader, members).
+async fn run_squad_list(store: &Store, args: SquadListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    // A missing/empty workspace lists as no squads, not an error (mirrors members).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => sqlx::query_scalar::<_, String>("SELECT id FROM workspace WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up workspace by slug")?,
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_squad_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let squads = SquadRepo::list(store.pool(), &ws).await.context("list squads")?;
+    render_squad_list(&squads, format);
+    Ok(())
+}
+
+/// `hangar squad create`: create a squad with a leader actor-ref, workspace-scoped.
+/// A duplicate squad name in the workspace is rejected (resolve-or-reject).
+async fn run_squad_create(store: &Store, args: SquadCreateArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::IdGen;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let leader: ActorRef = args.leader.parse().with_context(|| {
+        format!(
+            "leader must be `agent:<id>` or `member:<id>`: {}",
+            args.leader
+        )
+    })?;
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = SystemIdGen.new_ulid();
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    SquadRepo::create(store.pool(), &ws, &id, &args.name, &leader, now)
+        .await
+        .map_err(squad_cli_err)?;
+    println!("created squad {} ({}) led by {}", args.name, id, leader);
+    Ok(())
+}
+
+/// `hangar squad add-member` / `remove-member`: mutate one squad's membership,
+/// workspace-scoped. A squad id outside the workspace is a not-found error.
+async fn run_squad_member(store: &Store, args: SquadMemberArgs, add: bool) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let member: ActorRef = args.member.parse().with_context(|| {
+        format!(
+            "member must be `agent:<id>` or `member:<id>`: {}",
+            args.member
+        )
+    })?;
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    if add {
+        SquadRepo::add_member(store.pool(), &ws, &args.squad_id, &member)
+            .await
+            .map_err(squad_cli_err)?;
+        println!("added {member} to squad {}", args.squad_id);
+    } else {
+        SquadRepo::remove_member(store.pool(), &ws, &args.squad_id, &member)
+            .await
+            .map_err(squad_cli_err)?;
+        println!("removed {member} from squad {}", args.squad_id);
+    }
+    Ok(())
+}
+
+/// Map a [`SquadRepoError`] onto a human CLI error, surfacing the duplicate-name
+/// and not-found rejections with their own clear messages.
+///
+/// [`SquadRepoError`]: ainb_hangar_store::repo::squad::SquadRepoError
+fn squad_cli_err(e: ainb_hangar_store::repo::squad::SquadRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::squad::SquadRepoError;
+    match e {
+        SquadRepoError::DuplicateName => {
+            anyhow::anyhow!("a squad with that name already exists in this workspace")
+        }
+        SquadRepoError::NotFound => {
+            anyhow::anyhow!("no squad with that id in this workspace")
+        }
+        db @ SquadRepoError::Db(_) => anyhow::Error::new(db).context("squad mutation failed"),
     }
 }
 
@@ -2818,6 +2999,89 @@ fn member_to_json(m: &ainb_hangar_store::repo::member::Member) -> String {
         json_string(&m.email),
         json_string(&m.role),
     )
+}
+
+/// Render the squad status view in the chosen format (e38.17). Each row carries
+/// the squad's id, name, leader actor-ref, and its members (joined with `,` in the
+/// flat text/csv/markdown surfaces, a JSON array in the JSON surface).
+fn render_squad_list(squads: &[ainb_hangar_store::repo::squad::Squad], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = squads.iter().map(squad_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("id,name,leader,members");
+            for s in squads {
+                println!("{}", squad_csv_row(s));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("| id | name | leader | members |\n| --- | --- | --- | --- |\n");
+            for s in squads {
+                println!("{}", squad_md_row(s));
+            }
+        }
+        OutputFormat::Text => {
+            if squads.is_empty() {
+                println!("no squads");
+            } else {
+                for s in squads {
+                    println!("{}", squad_line(s));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a squad (id, name, leader, member actor-refs).
+fn squad_line(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{}  {}  leader={}  members=[{}]",
+        s.id,
+        s.name,
+        s.leader,
+        squad_members_joined(s)
+    )
+}
+fn squad_csv_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{},{},{},{}",
+        csv_field(&s.id),
+        csv_field(&s.name),
+        csv_field(&s.leader.to_string()),
+        csv_field(&squad_members_joined(s)),
+    )
+}
+fn squad_md_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "| {} | {} | {} | {} |",
+        md_cell(&s.id),
+        md_cell(&s.name),
+        md_cell(&s.leader.to_string()),
+        md_cell(&squad_members_joined(s)),
+    )
+}
+/// Minimal stable JSON object for one squad (id, name, leader, members array).
+fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{}}}",
+        json_string(&s.id),
+        json_string(&s.name),
+        json_string(&s.leader.to_string()),
+        json_string_array(
+            s.members
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+        ),
+    )
+}
+/// Join a squad's member actor-refs with `, ` for the flat text surfaces.
+fn squad_members_joined(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    s.members.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
 // ──────────────────────────────────────────────────────────────────────────

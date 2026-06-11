@@ -40,7 +40,7 @@ fn hangar_help_lists_wired_verbs() {
     let tmp = tempfile::tempdir().unwrap();
     let (ok, out) = run(tmp.path(), &["hangar", "--help"]);
     assert!(ok, "hangar --help should exit 0; out={out}");
-    for verb in ["issue", "task", "beads", "daemon"] {
+    for verb in ["issue", "task", "beads", "daemon", "squad"] {
         assert!(out.contains(verb), "hangar --help missing '{verb}':\n{out}");
     }
 }
@@ -835,5 +835,110 @@ fn member_remove_rejects_removing_the_only_owner() {
     assert!(
         list.contains("stevie@local"),
         "rejected removal must leave the owner:\n{list}"
+    );
+}
+
+/// The user-visible proof for e38.17: `ainb hangar squad create` + `... add-member`
+/// build a squad with a leader + members, and `ainb hangar squad list` renders the
+/// status view (squad name, leader, members) — a real-binary round-trip through
+/// `SquadRepo`.
+#[test]
+fn squad_create_add_member_then_list_shows_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Bootstrap the default workspace so the squad has somewhere to live.
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:lead-1",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    assert!(
+        out.contains("created squad shippers"),
+        "missing create ack:\n{out}"
+    );
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "add-member",
+            &squad_id,
+            "--member",
+            "member:user-1",
+        ],
+    );
+    assert!(ok, "add-member should exit 0; out={out}");
+
+    // The status view shows the squad with its leader + member.
+    let (ok, list) = run(tmp.path(), &["hangar", "squad", "list"]);
+    assert!(ok, "squad list should exit 0; out={list}");
+    assert!(list.contains("shippers"), "squad name not in list:\n{list}");
+    assert!(
+        list.contains("leader=agent:lead-1"),
+        "squad leader not in status view:\n{list}"
+    );
+    assert!(
+        list.contains("member:user-1"),
+        "squad member not in status view:\n{list}"
+    );
+
+    // The JSON surface carries the leader + members array (machine-readable).
+    let (ok, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(ok, "squad list --format json should exit 0; out={json}");
+    assert!(
+        json.contains("\"leader\":\"agent:lead-1\"")
+            && json.contains("\"members\":[\"member:user-1\"]"),
+        "json status view missing leader/members:\n{json}"
+    );
+}
+
+/// A duplicate squad name in the workspace is rejected (resolve-or-reject guard).
+#[test]
+fn squad_create_rejects_a_duplicate_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, _out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "alpha",
+            "--leader",
+            "agent:lead-1",
+        ],
+    );
+    assert!(ok, "first create should succeed");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "alpha",
+            "--leader",
+            "member:user-1",
+        ],
+    );
+    assert!(!ok, "a duplicate squad name must fail; out={out}");
+    assert!(
+        out.contains("already exists"),
+        "the duplicate-name guard message must surface:\n{out}"
     );
 }
