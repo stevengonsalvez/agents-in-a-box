@@ -851,6 +851,43 @@ async fn migration_0017_creates_squad_and_squad_member_tables() {
 }
 
 #[tokio::test]
+async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_columns() {
+    // The autopilot execution-mode + concurrency-policy surface (parity-review
+    // gap: "only skip-when-running implemented; queue/replace collapsed; fire path
+    // hardcodes issue_id=NULL") needs the `autopilot` table to carry two config
+    // discriminants:
+    //   - `execution_mode TEXT NOT NULL DEFAULT 'run_only'
+    //      CHECK (execution_mode IN ('create_issue', 'run_only'))` — what the fire
+    //     path materialises (run_only = the v1 issue_id=NULL task; create_issue =
+    //     an issue + a task against it);
+    //   - `concurrency_policy TEXT NOT NULL DEFAULT 'skip'
+    //      CHECK (concurrency_policy IN ('skip', 'queue', 'replace'))` — what the
+    //     scheduler does when a tick comes due at the in-flight limit.
+    // Both default to the v1 behaviour (run_only + skip). ALTER TABLE ADD COLUMN
+    // rewrites the catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let ap = table_sql(&pool, "autopilot").await;
+    assert!(
+        ap.contains(
+            "execution_mode TEXT NOT NULL DEFAULT 'run_only' CHECK (execution_mode IN \
+             ('create_issue', 'run_only'))"
+        ),
+        "autopilot.execution_mode default run_only + CHECK: {ap}"
+    );
+    assert!(
+        ap.contains(
+            "concurrency_policy TEXT NOT NULL DEFAULT 'skip' CHECK (concurrency_policy IN \
+             ('skip', 'queue', 'replace'))"
+        ),
+        "autopilot.concurrency_policy default skip + CHECK: {ap}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn all_migrations_create_exactly_twenty_two_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;

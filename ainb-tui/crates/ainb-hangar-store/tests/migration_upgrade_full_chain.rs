@@ -382,6 +382,23 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "{}",
         "0015 agent.agent_env '{{}}'"
     );
+
+    let ap_row =
+        sqlx::query("SELECT execution_mode, concurrency_policy FROM autopilot WHERE id = ?")
+            .bind("ap-1")
+            .fetch_one(pool)
+            .await
+            .expect("autopilot 0019 columns");
+    assert_eq!(
+        ap_row.get::<String, _>("execution_mode"),
+        "run_only",
+        "0019 autopilot.execution_mode default run_only"
+    );
+    assert_eq!(
+        ap_row.get::<String, _>("concurrency_policy"),
+        "skip",
+        "0019 autopilot.concurrency_policy default skip"
+    );
 }
 
 #[tokio::test]
@@ -406,7 +423,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 18, "head is migration 0018");
+    assert_eq!(head_version, 19, "head is migration 0019");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
