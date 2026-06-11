@@ -155,6 +155,120 @@ async fn fire_creates_run_and_task_atomically() {
 }
 
 #[tokio::test]
+async fn run_only_mode_fires_an_issueless_task() {
+    // The default execution mode: the fired tick enqueues a task with
+    // issue_id = NULL (no tracked work item) — the v1 hard-coded behaviour.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let autopilot = seed_autopilot(&store).await;
+    assert_eq!(
+        autopilot.execution_mode,
+        ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+        "the seed autopilot is run_only"
+    );
+    let clock = FixedClock(T0);
+
+    let (_run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    let task = TaskRepo::get_by_id(store.pool(), task_id.as_str())
+        .await
+        .expect("get task")
+        .expect("task present");
+    assert_eq!(
+        task.issue_id, None,
+        "run_only mode must enqueue an issue-less task"
+    );
+    // No issue row was created.
+    let issue_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count issues");
+    assert_eq!(issue_count, 0, "run_only mode creates no issue");
+}
+
+#[tokio::test]
+async fn create_issue_mode_fires_an_issue_then_a_task_against_it() {
+    // The create_issue execution mode: the fired tick first creates a fresh
+    // issue (authored by the autopilot's agent) and then enqueues the task
+    // AGAINST that issue, so the run has a tracked work item.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let mut autopilot = seed_autopilot(&store).await;
+    autopilot.execution_mode = ainb_hangar_store::repo::autopilot::ExecutionMode::CreateIssue;
+    let clock = FixedClock(T0);
+
+    let (run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    // Exactly one issue was created, in the autopilot's workspace, authored by
+    // the autopilot's agent.
+    let issue_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count issues");
+    assert_eq!(
+        issue_count, 1,
+        "create_issue mode creates exactly one issue"
+    );
+    let issue_row =
+        sqlx::query("SELECT workspace_id, creator_type, creator_id, state FROM issue LIMIT 1")
+            .fetch_one(store.pool())
+            .await
+            .expect("read created issue");
+    assert_eq!(
+        issue_row.get::<String, _>("workspace_id"),
+        autopilot.workspace_id
+    );
+    assert_eq!(
+        issue_row.get::<String, _>("creator_type"),
+        "agent",
+        "the issue is authored by the autopilot's agent"
+    );
+    assert_eq!(issue_row.get::<String, _>("creator_id"), autopilot.agent_id);
+    assert_eq!(issue_row.get::<String, _>("state"), "open");
+    let issue_id: String = sqlx::query_scalar("SELECT id FROM issue LIMIT 1")
+        .fetch_one(store.pool())
+        .await
+        .expect("read issue id");
+
+    // The task links to BOTH the new issue and the new run (a tracked autopilot
+    // run, vs run_only's issue_id = NULL).
+    let task = TaskRepo::get_by_id(store.pool(), task_id.as_str())
+        .await
+        .expect("get task")
+        .expect("task present");
+    assert_eq!(
+        task.issue_id.as_deref(),
+        Some(issue_id.as_str()),
+        "create_issue mode links the task to the new issue"
+    );
+    let link: Option<String> =
+        sqlx::query_scalar("SELECT autopilot_run_id FROM agent_task_queue WHERE id = ?")
+            .bind(task_id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("read run link");
+    assert_eq!(
+        link.as_deref(),
+        Some(run_id.as_str()),
+        "the task still links to the fired run"
+    );
+}
+
+#[tokio::test]
 async fn fire_rolls_back_on_task_insert_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
