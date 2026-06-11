@@ -106,6 +106,9 @@ const COMMENT_ADD_REQ_ID: i64 = 26;
 /// JSON-RPC id for a `hangar/issue_create` request raised by the issue-list
 /// inline create flow (e38.29).
 const ISSUE_CREATE_REQ_ID: i64 = 27;
+/// JSON-RPC id for the `hangar/members_list` snapshot request feeding the
+/// settings Members pane (e38.11).
+const MEMBERS_REQ_ID: i64 = 28;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -429,6 +432,7 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
+            RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition, issue assign) answer with the changed row or
             // `{}`; we re-fetch the relevant lists to refresh derived columns
@@ -470,6 +474,18 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_actors(r.actors);
+            }
+        }
+    }
+
+    /// Populate the settings Members pane from a `hangar/members_list` result
+    /// (e38.11). The pane is render-only, so the rows are simply cached.
+    fn apply_members(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::MembersListResult>(
+                result.clone(),
+            ) {
+                self.screens.set_members(r.members);
             }
         }
     }
@@ -637,6 +653,11 @@ impl HangarPlugin {
             (
                 DAEMON_HEALTH_REQ_ID,
                 daemon_methods::HANGAR_DAEMON_HEALTH,
+                scoped.clone(),
+            ),
+            (
+                MEMBERS_REQ_ID,
+                daemon_methods::HANGAR_MEMBERS_LIST,
                 scoped.clone(),
             ),
             (
