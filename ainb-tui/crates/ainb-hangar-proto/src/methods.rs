@@ -346,6 +346,24 @@ pub const HANGAR_SQUAD_MEMBER_ADD: &str = "hangar/squad_member_add";
 /// squad id touches no row (a not-found error).
 pub const HANGAR_SQUAD_MEMBER_REMOVE: &str = "hangar/squad_member_remove";
 
+/// `hangar/squad_assign` — route a task to a squad's LEADER, making leader
+/// routing actually take effect (e38.17).
+///
+/// Params: [`crate::snapshots::SquadAssignParams`]
+/// (`{ workspace_id, squad_id, issue_id?, work_dir?, priority? }`). Result: a
+/// [`crate::snapshots::SquadAssignResult`] carrying the enqueued task id and the
+/// leader identity it routed to, or an error.
+///
+/// This is the product seam that converts a squad assignment into a routed task:
+/// the daemon resolves the squad's leader agent id, derives that agent's runtime,
+/// and enqueues an `agent_task_queue` row keyed to the leader's
+/// `(agent_id, runtime_id)`, so the existing claim/dispatch path dispatches the
+/// work to the LEADER. Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]:
+/// the daemon resolves the workspace and rejects a mistyped one with
+/// `INVALID_PARAMS`. A squad with a human-member leader (no agent to dispatch to)
+/// or an unknown squad is rejected (`INVALID_PARAMS`).
+pub const HANGAR_SQUAD_ASSIGN: &str = "hangar/squad_assign";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -411,6 +429,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_CREATE,
     HANGAR_SQUAD_MEMBER_ADD,
     HANGAR_SQUAD_MEMBER_REMOVE,
+    HANGAR_SQUAD_ASSIGN,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -481,6 +500,7 @@ mod tests {
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
+            HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -527,6 +547,7 @@ mod tests {
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
+            HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,

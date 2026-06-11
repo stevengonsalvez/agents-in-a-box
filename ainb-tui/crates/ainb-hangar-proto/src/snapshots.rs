@@ -547,6 +547,46 @@ pub struct SquadMemberParams {
     pub member: String,
 }
 
+/// Params for [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): route a task to a
+/// squad's LEADER, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard, scoping the routing by
+/// `(workspace_id, squad_id)` so a cross-tenant squad routes nothing. `issue_id`
+/// is the issue the routed task carries (omit for a chat/ad-hoc squad task);
+/// `work_dir` is the run's working directory (or omit); `priority` is the claim
+/// urgency (0..3, default `0` = routine). The daemon resolves the squad's leader
+/// agent id, derives the leader's runtime, and enqueues the task keyed to the
+/// leader — leader routing taking effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadAssignParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad whose leader the task routes to (`squad.id`).
+    pub squad_id: String,
+    /// The issue the routed task carries (`issue.id`), or `None` for an ad-hoc task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// The run's working directory, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    /// Claim urgency (0..3, higher = more urgent); omitted defaults to `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+}
+
+/// Result of [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): the enqueued task
+/// id plus the leader identity it routed to, so a caller can report *who* the
+/// squad's work landed on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SquadAssignResult {
+    /// The enqueued `agent_task_queue` row id.
+    pub task_id: String,
+    /// The leader agent the task was routed to (`agent.id`).
+    pub leader_agent_id: String,
+    /// The runtime the task was keyed to (the leader agent's `runtime_id`).
+    pub runtime_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,5 +1011,43 @@ mod tests {
             serde_json::from_str::<SquadMemberParams>(&s).unwrap(),
             member
         );
+
+        let assign = SquadAssignParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            issue_id: Some("issue-1".into()),
+            work_dir: Some("/tmp/run".into()),
+            priority: Some(2),
+        };
+        let s = serde_json::to_string(&assign).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadAssignParams>(&s).unwrap(),
+            assign
+        );
+
+        let assigned = SquadAssignResult {
+            task_id: "task-1".into(),
+            leader_agent_id: "a-lead".into(),
+            runtime_id: "rt-lead".into(),
+        };
+        let s = serde_json::to_string(&assigned).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadAssignResult>(&s).unwrap(),
+            assigned
+        );
+    }
+
+    /// `SquadAssignParams` omits its optional fields on the wire and defaults
+    /// them to `None` when a caller leaves them out (only the required ids sent).
+    #[test]
+    fn squad_assign_params_optionals_default_to_none() {
+        let minimal: SquadAssignParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","squad_id":"s1"}"#).unwrap();
+        assert_eq!(minimal.issue_id, None);
+        assert_eq!(minimal.work_dir, None);
+        assert_eq!(minimal.priority, None);
+        // The serialized form drops the absent optionals entirely.
+        let s = serde_json::to_string(&minimal).unwrap();
+        assert_eq!(s, r#"{"workspace_id":"ws-1","squad_id":"s1"}"#);
     }
 }
