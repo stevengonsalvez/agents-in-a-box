@@ -165,14 +165,14 @@ pub enum AppEvent {
     GitReviewExpandAllFolders, // e — expand all folders
     GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
-    AttachTmuxSession,     // Attach to tmux session (full-screen)
-    EnterInteractivePane,  // Attach in-place: interactive embedded tmux pane
-    DetachTmuxSession,     // Detach from tmux session
-    EnterScrollMode,   // Enter scroll mode in tmux preview
-    ExitScrollMode,    // Exit scroll mode in tmux preview
-    ScrollPreviewUp,   // Scroll tmux preview up
-    ScrollPreviewDown, // Scroll tmux preview down
-    ToggleExpandAll,   // Toggle expand/collapse all workspaces
+    AttachTmuxSession,    // Attach to tmux session (full-screen)
+    EnterInteractivePane, // Attach in-place: interactive embedded tmux pane
+    DetachTmuxSession,    // Detach from tmux session
+    EnterScrollMode,      // Enter scroll mode in tmux preview
+    ExitScrollMode,       // Exit scroll mode in tmux preview
+    ScrollPreviewUp,      // Scroll tmux preview up
+    ScrollPreviewDown,    // Scroll tmux preview down
+    ToggleExpandAll,      // Toggle expand/collapse all workspaces
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -2900,7 +2900,7 @@ impl EventHandler {
                 let old_pane = state.focused_pane.clone();
                 state.focused_pane = match state.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
-                    // Preview is entered via 'i' / exited via Ctrl+Q, not Tab —
+                    // Preview is entered via 'l' / exited via Ctrl+Q, not Tab —
                     // Tab while focused is intercepted upstream, so this is only a
                     // safe fallback.
                     FocusedPane::LiveLogs | FocusedPane::Preview => FocusedPane::Sessions,

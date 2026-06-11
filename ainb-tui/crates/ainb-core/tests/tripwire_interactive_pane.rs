@@ -16,14 +16,28 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn new_session(tag: &str) -> String {
     let name = format!("ainb-itw-{}-{}", tag, std::process::id());
     let _ = Command::new("tmux").args(["kill-session", "-t", &name]).output();
     let ok = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &name, "-x", "100", "-y", "26", "sh"])
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &name,
+            "-x",
+            "100",
+            "-y",
+            "26",
+            "sh",
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -57,7 +71,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     let session = new_session("render");
 
     // Select the real tmux session as an "other tmux" row (the same resolution
-    // path `a`/`i` use). selected_tmux_name() must resolve to it.
+    // path `a`/`l` use). selected_tmux_name() must resolve to it.
     let mut state = AppState::new();
     state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.selected_other_tmux_index = Some(0);
@@ -67,9 +81,15 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
         "selection should resolve to the tmux session name"
     );
 
-    // ── B5: 'i' enters → the live render shows the INTERACTIVE focus badge ──
-    assert!(state.enter_interactive_pane(26, 100), "enter_interactive_pane should attach");
-    assert!(state.is_interactive_pane(), "should be interactive after enter");
+    // ── B5: 'l' enters → the live render shows the INTERACTIVE focus badge ──
+    assert!(
+        state.enter_interactive_pane(26, 100),
+        "enter_interactive_pane should attach"
+    );
+    assert!(
+        state.is_interactive_pane(),
+        "should be interactive after enter"
+    );
 
     let pane = TmuxPreviewPane::new();
     let mut term = Terminal::new(TestBackend::new(100, 26)).expect("test terminal");
@@ -107,9 +127,18 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
 
     kill_session(&session);
 
-    assert!(found, "typed input never rendered live in the embed pane:\n{last_frame}");
-    assert!(released, "release_interactive_pane should drop focus + the embed client");
-    assert!(alive, "releasing the embed must NOT kill the tmux session (it survives)");
+    assert!(
+        found,
+        "typed input never rendered live in the embed pane:\n{last_frame}"
+    );
+    assert!(
+        released,
+        "release_interactive_pane should drop focus + the embed client"
+    );
+    assert!(
+        alive,
+        "releasing the embed must NOT kill the tmux session (it survives)"
+    );
 }
 
 /// B7: while interactive, the session list collapses and the embed expands to
@@ -128,7 +157,10 @@ fn interactive_embed_expands_to_near_full_width() {
     state.current_screen = "session_list".to_string();
     state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.selected_other_tmux_index = Some(0);
-    assert!(state.enter_interactive_pane(28, 80), "enter_interactive_pane");
+    assert!(
+        state.enter_interactive_pane(28, 80),
+        "enter_interactive_pane"
+    );
 
     let mut layout = LayoutComponent::new();
     let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");

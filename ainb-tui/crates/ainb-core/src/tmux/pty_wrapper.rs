@@ -8,10 +8,8 @@
 // Killing the ephemeral tmux *client* never kills the tmux session — tmux owns
 // that — so session persistence across ainb restarts is preserved.
 
-#![allow(dead_code)] // TODO(tmux-in-pane #P2/#P3): master()/resize()/is_running() wired by the embed render + focus phases.
-
 use anyhow::Result;
-use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
@@ -43,6 +41,7 @@ pub fn kill_all_embed_children() {
 }
 
 /// Number of currently-registered embed children (test/diagnostic aid).
+#[allow(dead_code)] // exercised by the in-module tests; the bin target includes this module directly and has no caller
 pub fn registered_embed_child_count() -> usize {
     registry().lock().map(|r| r.len()).unwrap_or(0)
 }
@@ -66,6 +65,7 @@ impl std::fmt::Debug for PtyWrapper {
 
 impl PtyWrapper {
     /// Start a new PTY running `cmd` at the default 24×80 size.
+    #[allow(dead_code)] // exercised by the in-module tests; production uses start_with_size
     pub fn start(cmd: CommandBuilder) -> Result<Self> {
         Self::start_with_size(cmd, 24, 80)
     }
@@ -112,16 +112,13 @@ impl PtyWrapper {
     }
 
     /// True while the child is still running.
+    #[allow(dead_code)] // exercised by the in-module tests; the bin target includes this module directly and has no caller
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Reap the child if it has exited; returns its status when available.
-    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        Ok(self.child.try_wait()?)
-    }
-
     /// OS process id of the child, if known.
+    #[allow(dead_code)] // exercised by the in-module tests; the bin target includes this module directly and has no caller
     pub fn process_id(&self) -> Option<u32> {
         self.child.process_id()
     }

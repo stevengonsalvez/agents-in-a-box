@@ -69,13 +69,19 @@ impl TmuxPreviewPane {
     /// a placeholder if the embed/screen is momentarily unavailable.
     pub fn render_interactive(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         let title = Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ● ",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 "INTERACTIVE ",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled("— ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Ctrl+Q", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Ctrl+Q",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" release ", Style::default().fg(MUTED_GRAY)),
         ]);
         let block = Block::default()
@@ -365,6 +371,12 @@ impl TmuxPreviewPane {
             PreviewMode::Normal => Line::from(vec![
                 Span::styled("a", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" attach ", Style::default().fg(SOFT_WHITE)),
+                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                Span::styled(
+                    " l",
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" live ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
                     " Shift+↑↓",

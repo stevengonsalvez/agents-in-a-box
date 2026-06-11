@@ -5,8 +5,6 @@
 // The embed is an ephemeral tmux *client*; killing it (focus release, session switch,
 // quit, panic) never kills the tmux session — tmux owns that.
 
-#![allow(dead_code)] // TODO(tmux-in-pane #P3): write_input/resize/has_exited wired by the focus+input phase.
-
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -73,7 +71,6 @@ pub struct EmbedClient {
     /// Input queue into the dedicated writer thread. Dropping the sender (i.e.
     /// dropping this client) closes the channel and the thread exits.
     input_tx: SyncSender<Vec<u8>>,
-    dirty: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
     rows: u16,
     cols: u16,
@@ -105,12 +102,11 @@ impl EmbedClient {
         let pty = PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
 
         let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
-        let dirty = Arc::new(AtomicBool::new(true));
         let exited = Arc::new(AtomicBool::new(false));
 
-        // Reader thread: master fd -> vt100 parser. Blocking reads on a dedicated
-        // OS thread; sets the dirty flag so the render loop (33ms poll) repaints
-        // only when there's new output.
+        // Reader thread: master fd -> vt100 parser. Blocking reads on a
+        // dedicated OS thread; the render loop redraws every frame (~33ms)
+        // and reads the latest screen straight off the shared parser.
         let reader = {
             let master = pty.master();
             let guard = master.lock().map_err(|e| anyhow::anyhow!("master lock: {e}"))?;
@@ -118,7 +114,6 @@ impl EmbedClient {
         };
         {
             let parser = Arc::clone(&parser);
-            let dirty = Arc::clone(&dirty);
             let exited = Arc::clone(&exited);
             std::thread::Builder::new()
                 .name("embed-pty-reader".into())
@@ -132,13 +127,11 @@ impl EmbedClient {
                                 if let Ok(mut p) = parser.write() {
                                     p.process(&buf[..n]);
                                 }
-                                dirty.store(true, Ordering::Relaxed);
                             }
                             Err(_) => break,
                         }
                     }
                     exited.store(true, Ordering::Relaxed);
-                    dirty.store(true, Ordering::Relaxed);
                 })
                 .context("spawn embed reader thread")?;
         }
@@ -171,7 +164,6 @@ impl EmbedClient {
             pty,
             parser,
             input_tx,
-            dirty,
             exited,
             rows,
             cols,
@@ -205,11 +197,6 @@ impl EmbedClient {
         }
     }
 
-    /// Has new output arrived since the last call? Clears the flag.
-    pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
-    }
-
     /// True once the attach client has ended (detach / session gone / EOF).
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Relaxed)
@@ -231,7 +218,6 @@ impl EmbedClient {
         }
         self.rows = rows;
         self.cols = cols;
-        self.dirty.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -240,6 +226,8 @@ impl EmbedClient {
         let _ = self.pty.kill();
     }
 
+    /// Current cell size (rows, cols).
+    #[allow(dead_code)] // exercised via the lib target (tripwire integration tests); the bin has no caller
     pub fn size(&self) -> (u16, u16) {
         (self.rows, self.cols)
     }

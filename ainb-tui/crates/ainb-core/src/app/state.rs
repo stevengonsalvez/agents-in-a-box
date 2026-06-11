@@ -501,7 +501,7 @@ impl AppState {
 
     /// Resolve the tmux session name for whatever is currently selected, across
     /// session kinds (Claude session, other-tmux, SSH, workspace shell). Mirrors
-    /// the resolution in the `a` (AttachTmuxSession) handler so `i` attaches the
+    /// the resolution in the `a` (AttachTmuxSession) handler so `l` attaches the
     /// same target `a` would.
     pub fn selected_tmux_name(&self) -> Option<String> {
         if self.is_ssh_session_selected() {
@@ -9310,7 +9310,12 @@ impl AppState {
 
             let is_selected = selected_session_id == Some(*session_id);
 
-            if is_selected {
+            // While the interactive embed is live, the selected session's
+            // pane renders straight from the embed's vt100 screen — the full
+            // capture would be pure subprocess waste. Fall through to the
+            // cheap status-dot check instead (the collapsed rail still needs
+            // those for every session).
+            if is_selected && !self.is_interactive_pane() {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
