@@ -98,6 +98,18 @@ fn plugin_crash_host_recovers_and_host_death_leaves_no_orphan() {
         skip("plugin crash / host reconnect + parent-death watcher tripwire");
         return;
     }
+    // This tripwire validates the macOS parent-death watcher (commit 8494ad0f)
+    // and finds the plugin child by EXACT `argv[0]` path match in `ps`. On Linux
+    // the host reports a different `argv[0]` for the spawned plugin, so the
+    // exact-path probe finds nothing — and the watcher under test is macOS-only
+    // anyway. SKIP honestly on non-macOS rather than fail on a probe that does
+    // not apply here. (Portable Linux plugin-crash coverage is a follow-up.)
+    if !cfg!(target_os = "macos") {
+        skip(
+            "plugin crash / parent-death watcher tripwire (macOS-only: argv[0] probe + watcher are macOS-specific)",
+        );
+        return;
+    }
 
     let pipe = prepare_pipeline();
     let host_bin = ainb_bin().expect("gated by can_run_tripwire");
