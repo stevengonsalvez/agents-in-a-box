@@ -12,6 +12,7 @@ pub mod autopilot_run;
 pub mod autopilot_webhook;
 pub mod beads_mapping;
 pub mod comment;
+pub mod inbox;
 pub mod issue;
 pub mod label;
 pub mod member;
