@@ -159,6 +159,60 @@ pub enum AutopilotCommand {
     Enable(AutopilotIdArgs),
     /// Fire one tick immediately (manual run), bypassing the schedule.
     Run(AutopilotIdArgs),
+    /// Configure the HTTP webhook trigger (enable/disable, rotate secret, filter).
+    Webhook(AutopilotWebhookArgs),
+    /// List the autopilot's recent webhook deliveries (audit log).
+    Deliveries(AutopilotDeliveriesArgs),
+}
+
+/// Arguments for `hangar autopilot webhook <id>`.
+///
+/// Configures the per-autopilot HTTP webhook trigger. By default it ENABLES the
+/// webhook and mints a fresh HMAC signing secret, printing the webhook URL + the
+/// secret ONCE (the secret is never shown again). `--rotate` mints a new secret
+/// for an already-enabled webhook; `--disable` turns the webhook off (the secret
+/// is cleared). `--event` sets the optional exact-match event filter;
+/// `--clear-event` removes it. Workspace-scoped.
+#[derive(Args, Debug)]
+pub struct AutopilotWebhookArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Disable the webhook (clears the secret); mutually exclusive with
+    /// `--rotate`.
+    #[arg(long, conflicts_with = "rotate")]
+    pub disable: bool,
+    /// Mint a fresh signing secret for an already-enabled webhook (prints the new
+    /// secret once).
+    #[arg(long)]
+    pub rotate: bool,
+    /// Set the exact-match event filter (only this event name fires). Mutually
+    /// exclusive with `--clear-event`.
+    #[arg(long, conflicts_with = "clear_event")]
+    pub event: Option<String>,
+    /// Clear the event filter (fire on every signed request).
+    #[arg(long = "clear-event")]
+    pub clear_event: bool,
+    /// The host:port the webhook ingress listens on, used only to render the URL
+    /// hint (defaults to `127.0.0.1:8718`). The daemon's actual bind is set by
+    /// `AINB_HANGAR_WEBHOOK_PORT`.
+    #[arg(long = "url-host", default_value = "127.0.0.1:8718")]
+    pub url_host: String,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot deliveries <id>`.
+#[derive(Args, Debug)]
+pub struct AutopilotDeliveriesArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of deliveries to show (latest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar autopilot create`.
@@ -1129,6 +1183,8 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::Disable(args) => run_autopilot_set_enabled(&store, args, false).await,
         AutopilotCommand::Enable(args) => run_autopilot_set_enabled(&store, args, true).await,
         AutopilotCommand::Run(args) => run_autopilot_run_now(&store, args).await,
+        AutopilotCommand::Webhook(args) => run_autopilot_webhook(&store, args).await,
+        AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
     }
 }
 
@@ -1256,6 +1312,108 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<(
         .await
         .with_context(|| format!("fire autopilot `{}`", args.id))?;
     println!("fired autopilot {} → run {run_id} task {task_id}", args.id);
+    Ok(())
+}
+
+/// `hangar autopilot webhook <id>`: configure the HTTP webhook trigger.
+///
+/// Default (no `--disable`/`--rotate`) ENABLES the webhook and mints a fresh HMAC
+/// secret; `--rotate` mints a new secret for an already-enabled webhook;
+/// `--disable` turns it off and clears the secret. `--event`/`--clear-event` set
+/// the optional exact-match event filter. The secret plaintext is printed ONCE
+/// (it is never recoverable from the stored digest) and written to the daemon's
+/// 0600 secret file so the ingress can recompute the body HMAC.
+async fn run_autopilot_webhook(store: &Store, args: AutopilotWebhookArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot_webhook::{AutopilotWebhookRepo, WebhookSecretStore};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    // The autopilot must exist in this workspace.
+    let mut config = AutopilotWebhookRepo::get_config(store.pool(), &ws, &id)
+        .await
+        .context("read webhook config")?
+        .with_context(|| format!("no autopilot `{}` in this workspace", args.id))?;
+
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    let secrets = WebhookSecretStore::in_home(&home);
+
+    // Apply the event-filter edit (independent of enable/disable/rotate).
+    if args.clear_event {
+        config.event_filter = None;
+    } else if let Some(ev) = args.event.clone() {
+        config.event_filter = Some(ev);
+    }
+
+    if args.disable {
+        config.enabled = false;
+        config.secret_sha256 = None;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("disable webhook")?;
+        secrets.remove(&args.id).context("clear webhook secret")?;
+        println!("disabled webhook for autopilot {}", args.id);
+        return Ok(());
+    }
+
+    // Enable (default) or rotate: mint a fresh secret unless we are only editing
+    // the filter on an already-secret-bearing webhook (no `--rotate` and a secret
+    // already exists keeps the current secret).
+    let needs_new_secret = args.rotate || config.secret_sha256.is_none();
+    if needs_new_secret {
+        let minted = ainb_hangar_core::webhook::mint_secret(&mut rand::rngs::OsRng);
+        config.secret_sha256 = Some(minted.sha256_hex);
+        config.enabled = true;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("set webhook config")?;
+        // Persist the recoverable plaintext to the 0600 file the ingress reads.
+        secrets.set(&args.id, &minted.plaintext).context("write webhook secret")?;
+        println!("enabled webhook for autopilot {}", args.id);
+        println!(
+            "  url:    http://{}/hangar/webhook/{}",
+            args.url_host, args.id
+        );
+        // The secret is shown ONCE — it is unrecoverable from the stored digest.
+        println!("  secret: {} (shown once — store it now)", minted.plaintext);
+        println!("  sign requests: X-Hangar-Signature: <hex HMAC-SHA256(secret, body)>");
+    } else {
+        config.enabled = true;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("set webhook config")?;
+        println!(
+            "updated webhook for autopilot {} (secret unchanged)",
+            args.id
+        );
+        println!("  url: http://{}/hangar/webhook/{}", args.url_host, args.id);
+    }
+    if let Some(ev) = &config.event_filter {
+        println!("  event filter: {ev}");
+    }
+    Ok(())
+}
+
+/// `hangar autopilot deliveries <id>`: list the recent webhook deliveries (the
+/// audit log), latest-first, workspace-scoped.
+async fn run_autopilot_deliveries(
+    store: &Store,
+    args: AutopilotDeliveriesArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot_webhook::AutopilotWebhookRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let deliveries = AutopilotWebhookRepo::list_deliveries(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list webhook deliveries")?;
+    render_webhook_deliveries(&deliveries, format);
     Ok(())
 }
 
@@ -2732,6 +2890,79 @@ fn render_autopilot_list(rows: &[(Autopilot, Option<String>)], format: OutputFor
 /// surface test's "disabled" assertion).
 const fn autopilot_badge(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
+}
+
+/// Render the webhook delivery audit log (`hangar autopilot deliveries <id>`).
+fn render_webhook_deliveries(
+    rows: &[ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(webhook_delivery_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("received_at,outcome,event,http_status,run_id");
+            for d in rows {
+                println!(
+                    "{},{},{},{},{}",
+                    d.received_at,
+                    csv_field(&d.outcome),
+                    csv_field(d.event.as_deref().unwrap_or("")),
+                    d.http_status,
+                    csv_field(d.run_id.as_deref().unwrap_or("")),
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| received_at | outcome | event | status | run |");
+            println!("| --- | --- | --- | --- | --- |");
+            for d in rows {
+                println!(
+                    "| {} | {} | {} | {} | {} |",
+                    d.received_at,
+                    d.outcome,
+                    d.event.as_deref().unwrap_or("-"),
+                    d.http_status,
+                    d.run_id.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no webhook deliveries");
+            } else {
+                for d in rows {
+                    println!(
+                        "{}  {}  event={}  status={}  run={}",
+                        d.received_at,
+                        d.outcome,
+                        d.event.as_deref().unwrap_or("-"),
+                        d.http_status,
+                        d.run_id.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One webhook delivery as a JSON object (for the `--format json` surface).
+fn webhook_delivery_to_json(
+    d: &ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery,
+) -> String {
+    serde_json::json!({
+        "id": d.id,
+        "autopilot_id": d.autopilot_id,
+        "received_at": d.received_at,
+        "outcome": d.outcome,
+        "event": d.event,
+        "http_status": d.http_status,
+        "run_id": d.run_id,
+        "detail": d.detail,
+    })
+    .to_string()
 }
 
 /// One-line text summary of an autopilot.
