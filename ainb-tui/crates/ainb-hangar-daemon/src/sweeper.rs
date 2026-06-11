@@ -80,6 +80,15 @@ pub const DEFAULT_BATCH_SIZE: i64 = 500;
 /// individual sweep functions).
 pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Default interval between workspace-GC passes (the on-disk orphan/Full reclaim
+/// driven by [`crate::execenv::sweep_workspaces_gc`]).
+///
+/// Far longer than the row-sweep cadence: the 72h grace window means a leaked
+/// dir is never near reclaim before hours have passed, so scanning the disk
+/// hourly is ample (and keeps the IO cost negligible). Overridable via
+/// `HANGAR_GC_INTERVAL_MS` for deterministic / tight-budget tests.
+pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(3_600);
+
 /// Tunable thresholds for the sweepers.
 ///
 /// Production constructs [`SweeperConfig::default`] (the Multica defaults);
@@ -97,6 +106,8 @@ pub struct SweeperConfig {
     pub running_ttl: Duration,
     /// Interval between sweep passes (consumed by the daemon scheduler).
     pub sweep_interval: Duration,
+    /// Interval between workspace-GC passes (on-disk orphan/Full reclaim).
+    pub gc_interval: Duration,
     /// Maximum rows mutated per pass.
     pub batch_size: i64,
 }
@@ -109,6 +120,7 @@ impl Default for SweeperConfig {
             reclaim_window: RECLAIM_WINDOW,
             running_ttl: RUNNING_TTL,
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
+            gc_interval: DEFAULT_GC_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
         }
     }

@@ -21,6 +21,7 @@
 //! | `HANGAR_CODEX_PATH` | `codex` provider binary path (e38.16) | `codex` (resolved on `PATH`) |
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
+//! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | Multica running TTL (2.5h) |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | Multica default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
@@ -112,6 +113,12 @@ impl DaemonConfig {
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_INTERVAL_MS") {
             sweeper.sweep_interval = Duration::from_millis(ms);
         }
+        // e38.22: the on-disk workspace-GC cadence is independently tunable (it
+        // is far longer than the row-sweep cadence by default); an e2e test can
+        // tighten it to drive a reclaim within a bounded budget.
+        if let Some(ms) = env_u64_opt("HANGAR_GC_INTERVAL_MS") {
+            sweeper.gc_interval = Duration::from_millis(ms);
+        }
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_DISPATCHED_TTL_MS") {
             sweeper.dispatched_ttl = Duration::from_millis(ms);
             // Keep the reclaim window strictly below the (now tiny) TTL so a
@@ -170,6 +177,17 @@ pub async fn run(
     events: EventSink,
 ) -> anyhow::Result<()> {
     spawn_sweepers(pool.clone(), cfg.sweeper);
+    // e38.22: schedule the on-disk workspace GC alongside the row-sweepers, so
+    // leaked per-task dirs (no `.gc_meta.json`, mtime past the 72h grace) and
+    // build artifacts are actually reclaimed instead of accumulating forever.
+    // Rooted at the same Hangar home the per-task env tree is created under. The
+    // handle is dropped (process exit tears the task down, mirroring
+    // `spawn_sweepers`); a future supervisor can keep it to cancel cleanly.
+    let _gc = spawn_gc_sweeper(
+        hangar_home(),
+        cfg.sweeper.gc_interval,
+        Arc::new(SystemClock),
+    );
 
     if cfg.disable_claim || cfg.runtime_id.is_none() {
         tracing::info!(claim = false, "claim loop disabled; sweepers only");
@@ -268,6 +286,49 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
             }
         }
     });
+}
+
+/// Spawn the periodic workspace-GC sweeper as a background task (e38.22).
+///
+/// On every `interval` tick it walks the live workspace tree under `home`
+/// (`{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/`) via
+/// [`sweep_workspaces_gc`], reclaiming each orphaned per-task dir — no
+/// `.gc_meta.json` marker AND mtime older than the 72h grace relative to the
+/// injected clock's `now_ms()` — while leaving every live (marked) dir and every
+/// young orphan in place. This is the scheduled driver the bead is about: the
+/// orphan-scan code existed but nothing ticked it, so leaked dirs accumulated
+/// forever.
+///
+/// The `clock` is injected so the 72h grace comparison is deterministic under
+/// test (production passes [`SystemClock`]). Each pass is independent and
+/// idempotent (a missing tree is a no-op, an already-removed dir is success), so
+/// a missed or overlapping tick is harmless. Returns the task's [`JoinHandle`]
+/// so a caller (the integration test, a future supervisor) can stop it; the
+/// production daemon drops it and relies on process exit to tear the task down,
+/// mirroring [`spawn_sweepers`].
+#[must_use]
+pub fn spawn_gc_sweeper(
+    home: PathBuf,
+    interval: Duration,
+    clock: Arc<dyn HangarClock>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            match crate::execenv::sweep_workspaces_gc(&home, clock.now_ms()) {
+                Ok(report) if report.reclaimed > 0 => {
+                    tracing::info!(
+                        reclaimed = report.reclaimed,
+                        retained = report.retained,
+                        "workspace_gc_swept"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, kind = "workspace_gc", "gc pass failed"),
+            }
+        }
+    })
 }
 
 /// Walk one claimed task through `dispatched -> running -> done|failed`.
