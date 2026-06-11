@@ -543,6 +543,14 @@ impl EventHandler {
 
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
+        // Mode boundary (defense in depth): while the interactive embed owns
+        // input, host mouse handling must never mutate focus/selection under
+        // the live pane. main.rs already swallows/forwards mouse events before
+        // calling this, but the boundary must hold even if a future call site
+        // forgets the gate. Pinned by the mode-boundary tripwire.
+        if state.is_interactive_pane() {
+            return None;
+        }
         match event {
             AppEvent::MouseClick { x, y } => {
                 if state.current_screen == screen_ids::HOME && !state.help_visible {

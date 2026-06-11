@@ -9,9 +9,14 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ainb::app::state::AppState;
+use ainb::app::events::{AppEvent, EventHandler};
+use ainb::app::state::{AppState, FocusedPane};
 use ainb::components::{LayoutComponent, TmuxPreviewPane};
 use ainb::models::OtherTmuxSession;
+use ainb::tmux::{encode_key_event, encode_mouse_event};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -177,5 +182,148 @@ fn interactive_embed_expands_to_near_full_width() {
     assert!(
         cols > 100,
         "interactive pane should expand to near-full width in a 120-col terminal; got {cols}"
+    );
+}
+
+/// Mode-boundary tripwire: while the embed is interactive, host mouse handling
+/// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
+/// of opening the slash palette, and after release the host owns the mouse
+/// again. Drives the REAL state-level handlers (EventHandler::handle_mouse_event,
+/// encode_key_event/encode_mouse_event + write_input — exactly what the event
+/// loop calls) against a REAL tmux session.
+#[test]
+fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("boundary");
+    let mut state = AppState::new();
+    // session_list: the split-pane screen the embed lives on (poll_embed_exit
+    // releases on any other screen) and the screen whose mouse handler owns
+    // pane focus.
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    assert!(
+        state.enter_interactive_pane(26, 100),
+        "enter_interactive_pane"
+    );
+
+    // One full layout render publishes embed_pane_area + the sessions/preview
+    // rects the mouse handler consults.
+    let mut layout = LayoutComponent::new();
+    let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let inner = state
+        .embed_pane_area
+        .expect("interactive render must publish the embed pane interior");
+
+    // A point inside the embed interior under the interactive layout AND
+    // inside the preview pane under the normal layout (for the post-release
+    // check) — middle of the right pane.
+    let (px, py) = (80u16, 10u16);
+    assert!(
+        px > inner.x && px < inner.x + inner.width && py > inner.y && py < inner.y + inner.height,
+        "test point must be inside the embed interior {inner:?}"
+    );
+
+    // ── (a) mouse click through the real state-level handler: swallowed ──
+    let click = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    let click_swallowed = click.is_none();
+    let still_interactive_after_click = state.is_interactive_pane() && state.embed.is_some();
+
+    // ── (b) ':' through the interactive key path reaches the PTY ──
+    // Runs BEFORE the wheel check: a forwarded wheel-up legitimately puts
+    // tmux into copy-mode (that's the scrollback feature), where ':' opens
+    // the goto-line prompt instead of echoing in the shell.
+    // The slash palette lives in main.rs's loop AFTER the interactive
+    // intercept, so it can never see this key; here we pin the encode+write
+    // path the intercept uses and that the byte lands in the live session.
+    let marker = format!("TRIPWIRE_BOUNDARY_{}", std::process::id());
+    let pre_frame = {
+        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        buffer_text(&term)
+    };
+    assert!(
+        !pre_frame.contains(&marker),
+        "negative placeholder: marker must not pre-exist in the pane"
+    );
+    let colon = KeyEvent {
+        code: KeyCode::Char(':'),
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    };
+    let colon_bytes = encode_key_event(&colon).expect("':' must encode");
+    assert_eq!(colon_bytes, b":".to_vec());
+    let embed = state.embed.as_ref().expect("embed");
+    embed.write_input(&colon_bytes).expect("write ':'");
+    // `: <marker>` — the shell no-op builtin; the echoed input line carries
+    // the marker into the rendered pane.
+    embed.write_input(format!(" {marker}\n").as_bytes()).expect("write marker");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut colon_reached_pty = false;
+    while Instant::now() < deadline {
+        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        if buffer_text(&term).contains(&marker) {
+            colon_reached_pty = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let last_frame = buffer_text(&term);
+    let still_interactive_after_colon = state.is_interactive_pane();
+
+    // ── (c) wheel over the pane: encodes + forwards, mode still holds ──
+    let wheel = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: px,
+        row: py,
+        modifiers: KeyModifiers::NONE,
+    };
+    let wheel_bytes = encode_mouse_event(&wheel, inner).expect("wheel inside the pane must encode");
+    state
+        .embed
+        .as_ref()
+        .expect("embed")
+        .write_input(&wheel_bytes)
+        .expect("forward wheel");
+    let still_interactive_after_wheel = state.is_interactive_pane();
+
+    // ── (d) after release, host mouse handling works again ──
+    state.release_interactive_pane();
+    // Next frame re-lays-out the normal split; (80,10) sits in the preview
+    // pane, so a click there must move focus to LiveLogs.
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let _ = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    let host_mouse_back = state.focused_pane == FocusedPane::LiveLogs;
+
+    kill_session(&session);
+
+    assert!(
+        click_swallowed,
+        "host mouse handler must not act while interactive"
+    );
+    assert!(
+        still_interactive_after_click,
+        "a click inside the pane must not break interactive mode"
+    );
+    assert!(
+        still_interactive_after_wheel,
+        "a wheel over the pane must not break interactive mode"
+    );
+    assert!(
+        colon_reached_pty,
+        "':' never reached the live session (palette boundary broken?):\n{last_frame}"
+    );
+    assert!(
+        still_interactive_after_colon,
+        "typing ':' must not break interactive mode"
+    );
+    assert!(
+        host_mouse_back,
+        "after release, a preview click must move focus to LiveLogs again"
     );
 }
