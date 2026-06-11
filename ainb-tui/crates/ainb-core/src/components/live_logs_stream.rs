@@ -81,7 +81,7 @@ impl LiveLogsStreamComponent {
         use crate::app::state::FocusedPane;
         let (border_color, title_color) = match state.focused_pane {
             FocusedPane::LiveLogs | FocusedPane::Preview => (Color::Cyan, Color::Yellow), // Focused
-            FocusedPane::Sessions => (Color::Gray, Color::Blue),                          // Not focused
+            FocusedPane::Sessions => (Color::Gray, Color::Blue), // Not focused
         };
 
         let block = Block::default()
