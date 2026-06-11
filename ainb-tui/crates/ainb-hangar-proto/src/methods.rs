@@ -294,6 +294,58 @@ pub const HANGAR_MEMBER_SET_ROLE: &str = "hangar/member_set_role";
 /// owner is rejected so a workspace always keeps an owner.
 pub const HANGAR_MEMBER_REMOVE: &str = "hangar/member_remove";
 
+/// `hangar/squads_list` — snapshot the squads of a workspace (e38.17).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::SquadsListResult`] — the workspace's squads, each
+/// with its leader actor-ref and member actor-refs, ordered by name. Drives the
+/// `ainb hangar squad list` status view. Workspace-scoped like every snapshot: a
+/// foreign / unknown workspace yields an empty list (a read, so no
+/// `INVALID_PARAMS` rejection — mirrors `members_list`), never another tenant's
+/// squads.
+pub const HANGAR_SQUADS_LIST: &str = "hangar/squads_list";
+
+/// `hangar/squad_create` — create one squad with a leader in a workspace (e38.17).
+///
+/// Params: [`crate::snapshots::SquadCreateParams`]
+/// (`{ workspace_id, name, leader }`). Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`] for the workspace, or an error.
+/// `leader` is a polymorphic actor-ref (`"agent:<id>"` / `"member:<id>"`) — the
+/// actor a squad-assigned task routes to (an `agent` leader's id becomes the
+/// task's `agent_id`). The leader is how leader-routing takes effect rather than a
+/// new `ActorKind::Squad`.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_MEMBER_SET_ROLE`]: the daemon
+/// resolves the workspace and **rejects** a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op). A squad name already used in the workspace is rejected
+/// (the `(workspace_id, name)` resolve-or-reject guard), and a malformed `leader`
+/// actor-ref is `INVALID_PARAMS`.
+pub const HANGAR_SQUAD_CREATE: &str = "hangar/squad_create";
+
+/// `hangar/squad_member_add` — add one member actor to a squad (e38.17).
+///
+/// Params: [`crate::snapshots::SquadMemberParams`]
+/// (`{ workspace_id, squad_id, member }`). Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`] for the workspace, or an error.
+/// `member` is a polymorphic actor-ref (`"agent:<id>"` / `"member:<id>"`). The add
+/// is idempotent (re-adding the same member is a no-op).
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a foreign-tenant
+/// squad id touches no row and is rejected as a not-found error (never a
+/// cross-tenant edit).
+pub const HANGAR_SQUAD_MEMBER_ADD: &str = "hangar/squad_member_add";
+
+/// `hangar/squad_member_remove` — remove one member actor from a squad (e38.17).
+///
+/// Params: [`crate::snapshots::SquadMemberParams`]
+/// (`{ workspace_id, squad_id, member }`). Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`] for the workspace, or an error. Removing
+/// a member that is not in the squad is a no-op (idempotent).
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_MEMBER_ADD`]: a foreign-tenant
+/// squad id touches no row (a not-found error).
+pub const HANGAR_SQUAD_MEMBER_REMOVE: &str = "hangar/squad_member_remove";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -355,6 +407,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_MEMBERS_LIST,
     HANGAR_MEMBER_SET_ROLE,
     HANGAR_MEMBER_REMOVE,
+    HANGAR_SQUADS_LIST,
+    HANGAR_SQUAD_CREATE,
+    HANGAR_SQUAD_MEMBER_ADD,
+    HANGAR_SQUAD_MEMBER_REMOVE,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     AUTH_HELLO,
@@ -421,6 +477,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_SQUADS_LIST,
+            HANGAR_SQUAD_CREATE,
+            HANGAR_SQUAD_MEMBER_ADD,
+            HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
         ] {
@@ -463,6 +523,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_SQUADS_LIST,
+            HANGAR_SQUAD_CREATE,
+            HANGAR_SQUAD_MEMBER_ADD,
+            HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             AUTH_HELLO,

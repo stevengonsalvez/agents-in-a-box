@@ -477,6 +477,76 @@ pub struct MemberRemoveParams {
     pub user_id: String,
 }
 
+/// One squad for the `ainb hangar squad list` status view
+/// ([`crate::methods::HANGAR_SQUADS_LIST`], e38.17).
+///
+/// `id` + `name` identify the squad; `leader` is the squad's leader as a
+/// canonical actor-ref (`member:<id>` / `agent:<id>`) — the actor a squad-assigned
+/// task routes to; `members` are the squad's member actor-refs in the same form.
+/// A pure wire row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SquadWireRow {
+    /// The squad's id (`squad.id`) — what `squad_member_add`/`remove` key off.
+    pub id: String,
+    /// The squad's name (unique within its workspace) — the display label.
+    pub name: String,
+    /// The squad's leader as a canonical actor-ref (`member:<id>` / `agent:<id>`).
+    /// An `agent` leader is the actor a squad-assigned task is routed to.
+    pub leader: String,
+    /// The squad's member actor-refs (`member:<id>` / `agent:<id>`), ordered.
+    pub members: Vec<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_SQUADS_LIST`] and the refreshed view the
+/// `squad_create` / `squad_member_add` / `squad_member_remove` mutations answer
+/// with (e38.17).
+///
+/// The workspace's squads, ordered by name. The mutations re-read and return this
+/// same envelope so a caller re-renders from the response without a separate
+/// `squads_list` round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SquadsListResult {
+    /// The squad rows.
+    pub squads: Vec<SquadWireRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_CREATE`] (e38.17): create one squad
+/// with a leader, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// rejects a foreign one. `name` must be unique within the workspace (the
+/// resolve-or-reject guard). `leader` is a canonical actor-ref
+/// (`"agent:<id>"` / `"member:<id>"`) the daemon parses — an `agent` leader is the
+/// actor a squad-assigned task is routed to (leader-routing rides this ref rather
+/// than a new `ActorKind::Squad`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadCreateParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad name (unique within the workspace).
+    pub name: String,
+    /// The squad leader in canonical `member:<id>` / `agent:<id>` form.
+    pub leader: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and
+/// [`crate::methods::HANGAR_SQUAD_MEMBER_REMOVE`] (e38.17): add / remove one member
+/// actor from a squad, scoped to a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard, scoping the mutation by
+/// `(workspace_id, squad_id)` so a cross-tenant squad touches no row. `member` is a
+/// canonical actor-ref (`"agent:<id>"` / `"member:<id>"`). Add is idempotent
+/// (re-adding is a no-op); remove of an absent member is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadMemberParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to mutate (`squad.id`).
+    pub squad_id: String,
+    /// The member actor in canonical `member:<id>` / `agent:<id>` form.
+    pub member: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +933,43 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MemberRemoveParams>(&s).unwrap(),
             remove
+        );
+    }
+
+    /// The e38.17 squad envelopes round-trip through JSON.
+    #[test]
+    fn e38_squad_envelopes_roundtrip() {
+        let list = SquadsListResult {
+            squads: vec![SquadWireRow {
+                id: "s1".into(),
+                name: "alpha".into(),
+                leader: "agent:a-lead".into(),
+                members: vec!["agent:a-1".into(), "member:u-1".into()],
+            }],
+        };
+        let s = serde_json::to_string(&list).unwrap();
+        assert_eq!(serde_json::from_str::<SquadsListResult>(&s).unwrap(), list);
+
+        let create = SquadCreateParams {
+            workspace_id: "ws-1".into(),
+            name: "alpha".into(),
+            leader: "agent:a-lead".into(),
+        };
+        let s = serde_json::to_string(&create).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadCreateParams>(&s).unwrap(),
+            create
+        );
+
+        let member = SquadMemberParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            member: "agent:a-1".into(),
+        };
+        let s = serde_json::to_string(&member).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadMemberParams>(&s).unwrap(),
+            member
         );
     }
 }
