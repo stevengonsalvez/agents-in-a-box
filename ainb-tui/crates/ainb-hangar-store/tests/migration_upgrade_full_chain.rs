@@ -21,7 +21,7 @@
 //!    user, member, `agent_runtime`, agent, skill, issue, `agent_task_queue`
 //!    (task), autopilot, `autopilot_run`, pat, `daemon_token`, and
 //!    `beads_mapping` (a token / correlation row),
-//! 3. runs `apply_migrations` to carry the database to head (0010..0015),
+//! 3. runs `apply_migrations` to carry the database to head (0010..0016),
 //! 4. asserts (a) the upgrade returns no error, (b) EVERY seeded row survives
 //!    with its identity columns untouched and the columns added along the way
 //!    read back their declared defaults, and (c) a SECOND `apply_migrations` is a
@@ -34,7 +34,7 @@ use ainb_hangar_store::apply_migrations;
 
 /// The seed schema version: migrations 0001..=[`SEED_VERSION`] are applied
 /// before any rows are inserted, reproducing an install that predates the whole
-/// 0010..0015 upgrade tail. 9 is the earliest version at which every entity the
+/// 0010..0016 upgrade tail. 9 is the earliest version at which every entity the
 /// parity bead enumerates already has a table (`autopilot` lands in 0009).
 const SEED_VERSION: i64 = 9;
 
@@ -398,7 +398,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
     );
 
     // (a) Upgrade to head applies cleanly: the embedded migrator skips the
-    //     already-recorded 0001..0009 and applies 0010..0015.
+    //     already-recorded 0001..0009 and applies 0010..0016.
     apply_migrations(&pool).await.expect("upgrade to head applies");
 
     // The seed version plus the whole tail are now recorded.
@@ -406,7 +406,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 15, "head is migration 0015");
+    assert_eq!(head_version, 16, "head is migration 0016");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
