@@ -133,6 +133,16 @@ pub mod sweeper;
 pub mod templates;
 /// Danger-full-access warning emission at provider invocation (P5.6).
 pub mod warnings;
+/// The local HTTP webhook ingress for webhook-triggered autopilots (e38.18).
+///
+/// A hand-rolled HTTP/1.1 handler over a `tokio` `TcpListener` bound to
+/// `127.0.0.1` only. Serves `POST /hangar/webhook/<autopilot_id>`,
+/// constant-time-verifies the request's HMAC-SHA256 body signature against the
+/// autopilot's secret, applies the optional event filter, and fires the
+/// autopilot through the existing P7.4 enqueue path on success. An unsigned /
+/// wrong-signature / disabled / unknown request fires nothing (401/403/404) and
+/// is recorded in the delivery audit log.
+pub mod webhook_ingress;
 /// Git-worktree integration for per-task working dirs (P1.6).
 pub mod worktree;
 
@@ -281,6 +291,43 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         .with_hangar_events(broker.sink());
         tokio::spawn(scheduler.run());
         tracing::info!("autopilot scheduler spawned");
+    }
+
+    // e38.18: the webhook ingress. OPT-IN — it only binds when
+    // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come
+    // up by default). It binds 127.0.0.1 ONLY (never 0.0.0.0), so it is
+    // unreachable off-host. A bind failure is non-fatal to the claim loop,
+    // mirroring the RPC socket. Pass `0` for an ephemeral port.
+    if let Some(port) = std::env::var_os("AINB_HANGAR_WEBHOOK_PORT")
+        .and_then(|v| v.into_string().ok())
+        .and_then(|v| v.trim().parse::<u16>().ok())
+    {
+        use std::sync::Arc;
+
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_store::repo::autopilot_webhook::WebhookSecretStore;
+
+        match crate::webhook_ingress::bind(port).await {
+            Ok(listener) => {
+                let addr = listener.local_addr().ok();
+                tracing::info!(
+                    bind = ?addr,
+                    "hangar webhook ingress listening (127.0.0.1 only)"
+                );
+                let secrets = Arc::new(WebhookSecretStore::in_home(&dir));
+                let clock: Arc<dyn ainb_hangar_core::clock::HangarClock + Send + Sync> =
+                    Arc::new(SystemClock);
+                tokio::spawn(crate::webhook_ingress::serve(
+                    listener,
+                    store.pool().clone(),
+                    secrets,
+                    clock,
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, port, "hangar webhook ingress bind failed");
+            }
+        }
     }
 
     tracing::info!(idle = true, "ainb-hangar-daemon ready idle=true");
