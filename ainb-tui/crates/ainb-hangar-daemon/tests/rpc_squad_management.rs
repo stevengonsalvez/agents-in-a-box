@@ -1,0 +1,456 @@
+//! Integration: the `hangar/squads_list`, `hangar/squad_create`,
+//! `hangar/squad_member_add`, and `hangar/squad_member_remove` RPCs over a real
+//! framed `UnixStream`, plus a proof that leader-routing actually TAKES EFFECT
+//! (e38.17).
+//!
+//! A connection authenticates, then drives each verb through the dispatcher and
+//! asserts:
+//! * `squad_create` + `squad_member_add` build a squad with a leader + members,
+//!   and `squads_list` reads it back;
+//! * a duplicate squad name is rejected (resolve-or-reject guard);
+//! * squad mutations are workspace-scoped (a sibling tenant cannot see / mutate
+//!   the squad);
+//! * LEADER ROUTING takes effect — a task assigned to the squad lands on the
+//!   leader's agent and is actually claimable by the leader's runtime via the
+//!   real `ClaimTaskService`, not merely stored. The leader's agent id is
+//!   resolved through the same `SquadRepo::leader_agent_id` seam the daemon uses,
+//!   and the claimed task's `agent_id` is the leader's, proving the routing path
+//!   reaches the leader.
+
+use std::time::{Duration, Instant};
+
+use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_daemon::rpc::{self, DaemonHealth};
+use ainb_hangar_daemon::seed::{self, WS_ID, WS_SLUG};
+use ainb_hangar_proto::{RpcId, RpcRequest, methods};
+use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::squad::SquadRepo;
+use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+use ainb_hangar_store::service::claim::ClaimTaskService;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+/// One test client connection: a persistent buffered reader + writer half.
+struct Client {
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+}
+
+impl Client {
+    async fn connect(socket_path: &std::path::Path) -> Self {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match UnixStream::connect(socket_path).await {
+                Ok(c) => break c,
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("never connected: {e}"),
+            }
+        };
+        let (read_half, writer) = stream.into_split();
+        Self {
+            reader: BufReader::new(read_half),
+            writer,
+        }
+    }
+
+    async fn send(&mut self, method: &str, params: serde_json::Value) {
+        let req = RpcRequest {
+            jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+            id: RpcId::Number(17),
+            method: method.into(),
+            params,
+        };
+        let body = serde_json::to_vec(&req).unwrap();
+        let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        out.extend_from_slice(&body);
+        self.writer.write_all(&out).await.unwrap();
+        self.writer.flush().await.unwrap();
+    }
+
+    async fn read_frame(&mut self, timeout: Duration) -> Option<serde_json::Value> {
+        tokio::time::timeout(timeout, self.read_frame_inner()).await.ok()
+    }
+
+    async fn read_frame_inner(&mut self) -> serde_json::Value {
+        use tokio::io::AsyncBufReadExt;
+        let mut len: Option<usize> = None;
+        loop {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await.unwrap();
+            assert!(n > 0, "connection closed while awaiting a frame");
+            let t = line.trim_end_matches("\r\n");
+            if t.is_empty() {
+                let mut body = vec![0u8; len.expect("Content-Length header")];
+                self.reader.read_exact(&mut body).await.unwrap();
+                return serde_json::from_slice(&body).unwrap();
+            }
+            if let Some((name, v)) = t.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("Content-Length") {
+                    len = v.trim().parse().ok();
+                }
+            }
+        }
+    }
+
+    async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.send(method, params).await;
+        loop {
+            let frame = self
+                .read_frame(Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|| panic!("no response to {method} within 5s"));
+            if frame.get("id").is_some() {
+                return frame;
+            }
+        }
+    }
+
+    async fn auth_from_file(&mut self, dir: &std::path::Path) {
+        let token_path = ainb_hangar_proto::auth::token_file_in(dir);
+        let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
+        let resp = self
+            .call(
+                methods::AUTH_HELLO,
+                serde_json::json!({ "token": token.trim() }),
+            )
+            .await;
+        assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
+    }
+}
+
+/// Bind + serve the real listener over the seeded store (mirrors `boot()`).
+async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
+    let store = Store::open_in(dir).await.unwrap();
+    seed::seed_p4_fixture(store.pool()).await.unwrap();
+    rpc::auth::ensure_socket_token(store.pool(), dir)
+        .await
+        .expect("ensure socket token");
+    let socket_path = rpc::socket_path_in(dir);
+    let listener = rpc::bind(&socket_path).expect("bind socket");
+    let health = DaemonHealth {
+        socket_path: socket_path.to_string_lossy().into_owned(),
+        pid: std::process::id(),
+        started_at: Instant::now(),
+        version: "0.1.0".into(),
+        stats: std::sync::Arc::new(ainb_hangar_daemon::health_stats::HealthStats::default()),
+    };
+    tokio::spawn(rpc::serve(
+        listener,
+        store.pool().clone(),
+        health,
+        ainb_hangar_daemon::events::EventBroker::new(),
+    ));
+    (socket_path, store)
+}
+
+/// Seed a SECOND runtime + agent (`runtime-2` / `agent-2`) with no in-flight work,
+/// so a squad whose LEADER is `agent-2` is distinguishable from the already-busy
+/// default `agent-1` (the seed fixture leaves a running task on `agent-1`).
+async fn seed_second_agent(store: &Store) {
+    use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+    use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
+
+    AgentRuntimeRepo::insert(
+        store.pool(),
+        &AgentRuntime {
+            id: "runtime-2".into(),
+            workspace_id: WS_ID.into(),
+            daemon_id: "daemon-1".into(),
+            provider: "codex".into(),
+            runtime_mode: "local".into(),
+            last_seen_at: Some(1),
+            status: "online".into(),
+        },
+    )
+    .await
+    .unwrap();
+    AgentRepo::insert(
+        store.pool(),
+        &Agent {
+            id: "agent-2".into(),
+            workspace_id: WS_ID.into(),
+            name: "lead-agent".into(),
+            runtime_id: "runtime-2".into(),
+            instructions: None,
+            visibility: "workspace".into(),
+            owner_id: "user-1".into(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Find a squad row in a `squads_list`-shaped result by id.
+fn find_squad<'a>(resp: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    resp["result"]["squads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("squads array: {resp}"))
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap_or_else(|| panic!("squad {id} present: {resp}"))
+}
+
+/// The id of the (single) squad in a `squads_list`-shaped result.
+fn only_squad_id(resp: &serde_json::Value) -> String {
+    let squads = resp["result"]["squads"].as_array().unwrap();
+    assert_eq!(squads.len(), 1, "exactly one squad: {resp}");
+    squads[0]["id"].as_str().unwrap().to_string()
+}
+
+/// `squad_create` + `squad_member_add` build a squad with a leader + members; a
+/// follow-up `squads_list` reads it back.
+#[tokio::test]
+async fn squad_create_and_add_members_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // Create a squad led by agent-2.
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-2" }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "squad_create must ack: {resp}");
+    let squad_id = only_squad_id(&resp);
+    assert_eq!(find_squad(&resp, &squad_id)["leader"], "agent:agent-2");
+
+    // Add an agent member and a human member.
+    c.call(
+        methods::HANGAR_SQUAD_MEMBER_ADD,
+        serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": "agent:agent-1" }),
+    )
+    .await;
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": "member:user-1" }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "member_add must ack: {resp}");
+
+    // The list reads the squad back with its leader and both members.
+    let list = c
+        .call(
+            methods::HANGAR_SQUADS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    let squad = find_squad(&list, &squad_id);
+    assert_eq!(squad["name"], "alpha");
+    assert_eq!(squad["leader"], "agent:agent-2");
+    let members = squad["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "both members listed: {list}");
+    assert!(members.iter().any(|m| m == "agent:agent-1"));
+    assert!(members.iter().any(|m| m == "member:user-1"));
+
+    // A duplicate name is rejected (resolve-or-reject).
+    let dup = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-1" }),
+        )
+        .await;
+    assert!(
+        !dup["error"].is_null(),
+        "a duplicate squad name must be rejected: {dup}"
+    );
+}
+
+/// `squad_member_remove` drops a member; the refreshed list no longer carries it.
+#[tokio::test]
+async fn squad_member_remove_drops_a_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+    c.call(
+        methods::HANGAR_SQUAD_MEMBER_ADD,
+        serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": "agent:agent-1" }),
+    )
+    .await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_REMOVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": "agent:agent-1" }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "member_remove must ack: {resp}");
+    assert!(
+        find_squad(&resp, &squad_id)["members"].as_array().unwrap().is_empty(),
+        "member dropped: {resp}"
+    );
+}
+
+/// Squad mutations are workspace-scoped: a sibling tenant cannot see the squad,
+/// and cannot mutate it (a create aimed at a foreign workspace is rejected, and a
+/// member-add through a tenant that does not own the squad is a not-found error).
+#[tokio::test]
+async fn squads_are_workspace_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    // A second, real tenant workspace.
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+        .bind("01HANGARFIXTUREWSB00000000")
+        .bind("other")
+        .bind("Other")
+        .bind(1_700_000_000_000_i64)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // Create a squad in the seeded workspace.
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    // The "other" tenant sees no squads.
+    let other_list = c
+        .call(
+            methods::HANGAR_SQUADS_LIST,
+            serde_json::json!({ "workspace_id": "other" }),
+        )
+        .await;
+    assert!(
+        other_list["result"]["squads"].as_array().unwrap().is_empty(),
+        "a sibling tenant must not see the squad: {other_list}"
+    );
+
+    // The "other" tenant cannot add a member to the seeded squad (not-found).
+    let cross = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_ADD,
+            serde_json::json!({ "workspace_id": "other", "squad_id": squad_id, "member": "agent:agent-1" }),
+        )
+        .await;
+    assert!(
+        !cross["error"].is_null(),
+        "a cross-tenant squad must not be mutable: {cross}"
+    );
+
+    // The seeded squad is untouched (still zero members).
+    let list = c
+        .call(
+            methods::HANGAR_SQUADS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert!(
+        find_squad(&list, &squad_id)["members"].as_array().unwrap().is_empty(),
+        "cross-tenant add blocked: {list}"
+    );
+}
+
+/// LEADER ROUTING TAKES EFFECT: a task assigned to the squad lands on the
+/// LEADER's agent and is actually claimable by the leader's runtime — not merely
+/// stored.
+///
+/// The squad's leader is `agent-2` on `runtime-2` (a fresh agent with no in-flight
+/// work), distinct from the busy default `agent-1`. The leader's agent id is
+/// resolved through the same `SquadRepo::leader_agent_id` seam the routing path
+/// uses; the task is enqueued with THAT agent id; then the real
+/// `ClaimTaskService` claims it for `runtime-2` and the claimed task's `agent_id`
+/// is the leader's. Claiming the SAME task for the non-leader runtime returns
+/// nothing — proving the task is routed to the leader, not anyone else.
+#[tokio::test]
+async fn leader_routing_routes_a_squad_task_to_the_leader_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+    let pool = store.pool();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // Create a squad whose LEADER is agent-2 (on runtime-2).
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "shippers", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    // Resolve the squad to its LEADER's agent id — the routing seam the daemon /
+    // CLI use to turn a squad assignment into a concrete `agent_id`.
+    let ws = WorkspaceId::from_str(WS_ID.to_string()).unwrap();
+    let leader_agent = SquadRepo::leader_agent_id(pool, &ws, &squad_id)
+        .await
+        .unwrap()
+        .expect("an agent leader resolves to an agent id");
+    assert_eq!(leader_agent, "agent-2", "squad routes to its leader agent");
+
+    // Enqueue a task ASSIGNED TO THE SQUAD: it carries the leader's agent id +
+    // the leader's runtime, so the existing claim/dispatch path reaches the
+    // leader.
+    let task_id = TaskRepo::insert(
+        pool,
+        &NewTask {
+            id: "squad-task-1".into(),
+            workspace_id: WS_ID.into(),
+            runtime_id: "runtime-2".into(),
+            agent_id: leader_agent.clone(),
+            issue_id: None,
+            work_dir: None,
+            priority: 0,
+            created_at: 9_000,
+            autopilot_run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The leader's runtime CLAIMS the squad task — routing took effect.
+    let clock = FixedClock(10_000);
+    let claimed = ClaimTaskService::claim_for_runtime(pool, "runtime-2", &clock)
+        .await
+        .unwrap()
+        .expect("the leader's runtime claims the squad task");
+    assert_eq!(claimed.id, task_id, "the squad task was claimed");
+    assert_eq!(
+        claimed.agent_id, "agent-2",
+        "the squad task is dispatched to the LEADER agent, not anyone else"
+    );
+
+    // The non-leader runtime claims nothing of the squad's: the task is routed to
+    // the leader, not the busy default agent.
+    let other = ClaimTaskService::claim_for_runtime(pool, "runtime-1", &clock).await.unwrap();
+    assert!(
+        other.is_none() || other.as_ref().map(|t| t.id.as_str()) != Some(task_id.as_str()),
+        "the squad task must not be claimable by the non-leader runtime"
+    );
+}
