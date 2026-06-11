@@ -52,7 +52,9 @@ struct ClaudeUsage {
 pub fn parse_dir(projects_root: &Path) -> Vec<ProviderCall> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        parse_dir_cached(projects_root, &mut None)
+        let mut cache = None;
+        let mut ctx = crate::scanner::ScanCtx::full(&mut cache);
+        parse_dir_cached(projects_root, &mut ctx)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -66,10 +68,10 @@ pub fn parse_dir(projects_root: &Path) -> Vec<ProviderCall> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_dir_cached(
     projects_root: &Path,
-    cache: &mut Option<crate::cache::UsageCache>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
 ) -> Vec<ProviderCall> {
     let mut reporter = crate::scanner::ProgressReporter::noop();
-    parse_dir_cached_with_progress(projects_root, cache, &mut reporter)
+    parse_dir_cached_with_progress(projects_root, ctx, &mut reporter)
 }
 
 /// Cache + progress-aware walk. Drives `reporter.note_file` once per
@@ -78,7 +80,7 @@ pub fn parse_dir_cached(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_dir_cached_with_progress(
     projects_root: &Path,
-    cache: &mut Option<crate::cache::UsageCache>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
     reporter: &mut crate::scanner::ProgressReporter,
 ) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
@@ -114,7 +116,7 @@ pub fn parse_dir_cached_with_progress(
             let project_path_str = project_path.to_string_lossy().into_owned();
             let project_owned = project.clone();
             reporter.note_file(&project_owned);
-            let file_calls = super::read_file_cached(&path, cache, |content| {
+            let file_calls = super::read_file_cached(&path, ctx, |content| {
                 parse_source(&path_str, &project_owned, &project_path_str, content)
             });
             calls.extend(file_calls);

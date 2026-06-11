@@ -7,9 +7,13 @@
 //!   the host's `cts_runner` integration test can `include_bytes!` /
 //!   `include_str!` them without depending on cargo-build state.
 //! * `clean-canaries` — remove fixtures + the sub-workspace's `target/`.
+//! * `ci-lint` — assert `.github/workflows/ci.yml` satisfies the real Hangar
+//!   e2e CI contract (the `hangar-e2e` job). See [`ci_lint`].
 //!
 //! No external CLI parser dependency on purpose — this binary is meant to
 //! be cheap to compile and stay out of the way.
+
+mod ci_lint;
 
 use std::env;
 use std::fs;
@@ -43,10 +47,11 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let cmd = args
         .next()
-        .ok_or_else(|| anyhow!("usage: cargo xtask <build-canaries|clean-canaries>"))?;
+        .ok_or_else(|| anyhow!("usage: cargo xtask <build-canaries|clean-canaries|ci-lint>"))?;
     match cmd.as_str() {
         "build-canaries" => build_canaries(),
         "clean-canaries" => clean_canaries(),
+        "ci-lint" => ci_lint::run(),
         other => bail!("unknown xtask subcommand {other:?}"),
     }
 }

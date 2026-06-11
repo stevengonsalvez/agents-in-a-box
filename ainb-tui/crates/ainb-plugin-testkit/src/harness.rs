@@ -20,11 +20,13 @@
 //!    [`ObservedFrame`]s for assertion APIs to inspect later.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -80,18 +82,37 @@ impl ObservedFrame {
 /// the canonical caller. The plugin starts running immediately; the
 /// first thing the test should do is [`Harness::init`].
 pub fn run_plugin<P: Plugin>(plugin: P) -> Harness {
+    run_plugin_with_state(plugin).0
+}
+
+/// Like [`run_plugin`], but also returns a handle to the plugin state.
+///
+/// The returned `Arc<Mutex<P>>` is the same one the SDK [`Server`] runs
+/// the plugin behind, so the test can lock it and assert the plugin's
+/// internal state after an init/render round-trip.
+///
+/// Use this when the behaviour under test mutates plugin state that has
+/// no wire-observable side effect — e.g. config applied in `on_init`
+/// that only the data layer reads later. The handle shares the *same*
+/// mutex the server uses, so lock it only between calls (never hold it
+/// across a `Harness` request, or the server's handler will block).
+pub fn run_plugin_with_state<P: Plugin>(plugin: P) -> (Harness, Arc<Mutex<P>>) {
+    let plugin = Arc::new(Mutex::new(plugin));
+    let server_plugin = Arc::clone(&plugin);
     let (host_side, plugin_side) = tokio::io::duplex(DUPLEX_BUF_BYTES);
     let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
-    let server_task =
-        tokio::spawn(async move { Server::new(plugin).run(plugin_read, plugin_write).await });
+    let server_task = tokio::spawn(async move {
+        Server::from_shared(server_plugin).run(plugin_read, plugin_write).await
+    });
     let (host_read, host_write) = tokio::io::split(host_side);
-    Harness {
+    let harness = Harness {
         server_task: Some(server_task),
         plugin_in: Some(host_write),
         plugin_out: BufReader::new(host_read),
         next_id: AtomicI64::new(1),
         observed: VecDeque::new(),
-    }
+    };
+    (harness, plugin)
 }
 
 /// In-process JSON-RPC harness for a single [`Plugin`].
@@ -285,13 +306,22 @@ impl Harness {
     }
 
     /// Send a `plugin/init` request with the canonical empty params
-    /// (no granted capabilities, ABI v2). Returns the
+    /// (no granted capabilities, ABI v2, `config = null`). Returns the
     /// `PluginInitResult` echoed back from the plugin's manifest.
     pub async fn init(&mut self) -> HarnessResult<Value> {
+        self.init_with_config(serde_json::Value::Null).await
+    }
+
+    /// Send a `plugin/init` request injecting a resolved per-plugin
+    /// `config` table (the `[plugins.<name>]` value the host resolves and
+    /// forwards on `PluginInitParams.config`). Mirrors what the runtime
+    /// does so a test can prove `on_init` consumes the injected config.
+    pub async fn init_with_config(&mut self, config: Value) -> HarnessResult<Value> {
         let params = PluginInitParams {
             manifest_path: "/in-process/manifest.toml".into(),
             granted_capabilities: Vec::new(),
             abi_version: 2,
+            config,
         };
         self.send_request(methods::PLUGIN_INIT, params).await
     }
@@ -559,7 +589,7 @@ async fn read_one_frame<R: tokio::io::AsyncBufRead + Unpin>(
 mod tests {
     use super::*;
     use ainb_plugin_protocol::wire_buffer::{Cell, Coord};
-    use ainb_plugin_sdk::{HostClient, Result as SdkResult};
+    use ainb_plugin_sdk::{HostClient, InitContext, Result as SdkResult};
     use async_trait::async_trait;
 
     /// Tiny in-tree fixture mirroring `ainb-plugin-runtime`'s subprocess
@@ -573,7 +603,7 @@ mod tests {
         fn manifest(&self) -> &'static str {
             "[plugin]\nname = \"fixture\"\nversion = \"0.1.0\"\nabi_version = 2\n"
         }
-        async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> SdkResult<()> {
+        async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> SdkResult<()> {
             host.snapshot_publish("fixture.greeting", bytes::Bytes::from_static(b"hello"))
                 .await
         }

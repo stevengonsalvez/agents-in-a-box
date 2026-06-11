@@ -1,0 +1,151 @@
+document_id: lrn-graph-hub
+extracted_at: "2026-06-07T00:00:00.000000+00:00"
+entities:
+  - name: "zzz-graph-hub"
+    type: concept
+    description: "A hot entity wired to many neighbours to exercise the map node cap"
+  - name: "hub-target-01"
+    type: concept
+    description: "Neighbour 01 of the graph hub"
+  - name: "hub-target-02"
+    type: concept
+    description: "Neighbour 02 of the graph hub"
+  - name: "hub-target-03"
+    type: concept
+    description: "Neighbour 03 of the graph hub"
+  - name: "hub-target-04"
+    type: concept
+    description: "Neighbour 04 of the graph hub"
+  - name: "hub-target-05"
+    type: concept
+    description: "Neighbour 05 of the graph hub"
+  - name: "hub-target-06"
+    type: concept
+    description: "Neighbour 06 of the graph hub"
+  - name: "hub-target-07"
+    type: concept
+    description: "Neighbour 07 of the graph hub"
+  - name: "hub-target-08"
+    type: concept
+    description: "Neighbour 08 of the graph hub"
+  - name: "hub-target-09"
+    type: concept
+    description: "Neighbour 09 of the graph hub"
+  - name: "hub-target-10"
+    type: concept
+    description: "Neighbour 10 of the graph hub"
+  - name: "hub-target-11"
+    type: concept
+    description: "Neighbour 11 of the graph hub"
+  - name: "hub-target-12"
+    type: concept
+    description: "Neighbour 12 of the graph hub"
+  - name: "hub-target-13"
+    type: concept
+    description: "Neighbour 13 of the graph hub"
+  - name: "hub-target-14"
+    type: concept
+    description: "Neighbour 14 of the graph hub"
+  - name: "hub-target-15"
+    type: concept
+    description: "Neighbour 15 of the graph hub"
+  - name: "hub-target-16"
+    type: concept
+    description: "Neighbour 16 of the graph hub"
+  - name: "hub-target-17"
+    type: concept
+    description: "Neighbour 17 of the graph hub"
+  - name: "hub-target-18"
+    type: concept
+    description: "Neighbour 18 of the graph hub"
+relationships:
+  - source: "zzz-graph-hub"
+    target: "hub-target-01"
+    type: solves
+    description: "hub edge 01"
+    strength: 18
+  - source: "zzz-graph-hub"
+    target: "hub-target-02"
+    type: solves
+    description: "hub edge 02"
+    strength: 17
+  - source: "zzz-graph-hub"
+    target: "hub-target-03"
+    type: solves
+    description: "hub edge 03"
+    strength: 16
+  - source: "zzz-graph-hub"
+    target: "hub-target-04"
+    type: solves
+    description: "hub edge 04"
+    strength: 15
+  - source: "zzz-graph-hub"
+    target: "hub-target-05"
+    type: solves
+    description: "hub edge 05"
+    strength: 14
+  - source: "zzz-graph-hub"
+    target: "hub-target-06"
+    type: solves
+    description: "hub edge 06"
+    strength: 13
+  - source: "zzz-graph-hub"
+    target: "hub-target-07"
+    type: solves
+    description: "hub edge 07"
+    strength: 12
+  - source: "zzz-graph-hub"
+    target: "hub-target-08"
+    type: solves
+    description: "hub edge 08"
+    strength: 11
+  - source: "zzz-graph-hub"
+    target: "hub-target-09"
+    type: solves
+    description: "hub edge 09"
+    strength: 10
+  - source: "zzz-graph-hub"
+    target: "hub-target-10"
+    type: solves
+    description: "hub edge 10"
+    strength: 9
+  - source: "zzz-graph-hub"
+    target: "hub-target-11"
+    type: solves
+    description: "hub edge 11"
+    strength: 8
+  - source: "zzz-graph-hub"
+    target: "hub-target-12"
+    type: solves
+    description: "hub edge 12"
+    strength: 7
+  - source: "zzz-graph-hub"
+    target: "hub-target-13"
+    type: solves
+    description: "hub edge 13"
+    strength: 6
+  - source: "zzz-graph-hub"
+    target: "hub-target-14"
+    type: solves
+    description: "hub edge 14"
+    strength: 5
+  - source: "zzz-graph-hub"
+    target: "hub-target-15"
+    type: solves
+    description: "hub edge 15"
+    strength: 4
+  - source: "zzz-graph-hub"
+    target: "hub-target-16"
+    type: solves
+    description: "hub edge 16"
+    strength: 3
+  - source: "zzz-graph-hub"
+    target: "hub-target-17"
+    type: solves
+    description: "hub edge 17"
+    strength: 2
+  - source: "zzz-graph-hub"
+    target: "hub-target-18"
+    type: solves
+    description: "hub edge 18"
+    strength: 1

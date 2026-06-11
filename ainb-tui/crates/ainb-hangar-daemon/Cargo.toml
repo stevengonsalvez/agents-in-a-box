@@ -1,0 +1,171 @@
+[package]
+name = "ainb-hangar-daemon"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar control-plane daemon: boots the persistence layer and idles. P0 ships a no-op idle stub; later phases add the task FSM and JSON-RPC handlers."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "hangar", "daemon"]
+
+[features]
+# Exposes the `bd` adapter test fixtures (`beads_adapter::fake_bd`) to
+# downstream crates' integration tests (P2.3+ reuse the fake-bd script writer).
+# Within this crate they are also available under `#[cfg(test)]` without the
+# feature.
+test-support = []
+# Exposes the advanceable test clock ([`scheduler::AdvanceableClock`]) to
+# integration tests (P7.6 e2e tripwires). Integration tests do not inherit
+# `#[cfg(test)]`, so the deterministic fast-forward seam must be reachable
+# behind an explicit feature. Off in production builds — nothing here ships in
+# the daemon binary.
+test-clock = []
+# P8.2: opt-in OTLP span export. OFF by default so a plain `cargo build` links
+# ZERO OpenTelemetry crates — the JSONL sink stays the daemon's only telemetry
+# path in the shipped binary. Turning this on pulls the `opentelemetry*` +
+# `tracing-opentelemetry` stack (all declared `optional = true`) and lets
+# `observability::install` attach an OTLP layer when `OTEL_EXPORTER_OTLP_ENDPOINT`
+# is set. Endpoint unset => silent JSONL-only fallback even with the feature on.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[[bin]]
+name = "ainb-hangar-daemon"
+path = "src/main.rs"
+
+[lib]
+name = "ainb_hangar_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+ainb-hangar-store = { path = "../ainb-hangar-store" }
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
+# serialises over the unix socket (P4.10). Pure data — no host deps leak in.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
+tokio = { version = "1.36", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "process",
+    "io-util",
+    # P4.10: the JSON-RPC server binds a `UnixListener` and accepts plugin
+    # connections, which needs tokio's `net` feature.
+    "net",
+] }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# P8.1 observability: the non-blocking rolling JSONL sink. `rolling` builds the
+# daily-rotated `daemon.<date>` file under `~/.ainb/hangar/logs`; `non_blocking`
+# moves the actual writes onto a background thread and hands back a
+# `WorkerGuard` the daemon `main` must hold for the whole process lifetime
+# (dropping it early flushes and stops the writer, losing buffered lines).
+tracing-appender = "0.2"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# P6.2 skill importer: parse the YAML frontmatter block of each `SKILL.md`
+# (`name:` / `description:`) when syncing `toolkit/packages/skills/`.
+serde_yaml = { workspace = true }
+# Home-directory resolution for the per-task env tree root (mirrors the store's
+# `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
+dirs = { workspace = true }
+# Unix process-group signalling: the runner spawns the provider in its own
+# process group so a timeout can SIGKILL the whole tree (the provider plus any
+# `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
+# EOFs immediately instead of blocking on the orphaned grandchild.
+nix = { workspace = true, features = ["signal"] }
+# Resolves the `bd` binary on PATH (or validates an explicit path) so the
+# adapter can fail fast with `BdNotInstalled` instead of an opaque exec error
+# when the issue tracker is absent. Used by `BdClient::new`.
+which = { workspace = true }
+chrono = { workspace = true }
+# CancellationToken for cooperative shutdown of the inbound beads poll loop
+# (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
+# stop it within one tick.
+tokio-util = { workspace = true }
+# P5.3 env allowlist config: parse/serialise `~/.ainb/hangar/env.allow.toml`
+# while preserving foreign sections (the daemon reads its `[env]` table but
+# round-trips the rest of the document untouched).
+toml = { workspace = true }
+
+# P8.2 OTLP export (ALL optional, only pulled under `--features otlp`). A plain
+# `cargo build` resolves none of these, so the shipped daemon links zero OTEL
+# code. The OTLP exporter uses HTTP/protobuf (`http-proto` + the reqwest blocking
+# client) so it has no separate async-grpc runtime to coordinate with the daemon's
+# tokio runtime, and force-flush on shutdown is a synchronous call.
+opentelemetry = { version = "0.30", optional = true }
+# Default `BatchSpanProcessor` runs on its own dedicated OS thread (no tokio
+# runtime), so the export path never re-enters the daemon's tokio runtime — the
+# `reference_tokio_runtime_drop_trap` safe configuration. No `rt-tokio` needed.
+opentelemetry_sdk = { version = "0.30", optional = true }
+opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = [
+    "trace",
+    "http-proto",
+    "reqwest-blocking-client",
+] }
+tracing-opentelemetry = { version = "0.31", optional = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+# The inbound-sync poll-loop tests (P2.4) drive `run_inbound_loop` with a
+# `CancellationToken` directly, so the integration suite needs tokio-util too.
+tokio-util = { workspace = true }
+# Self-dependency to activate this crate's own `test-support` feature for its
+# integration tests: integration tests compile against the lib's default
+# feature set and do NOT inherit `#[cfg(test)]`, so the shared `beads_adapter::
+# fake_bd` fixtures are only reachable when `test-support` is turned on here.
+# This lets the integration suite consume the one canonical fake-bd source of
+# truth instead of duplicating the script writer (P2.2 REFACTOR intent).
+ainb-hangar-daemon = { path = ".", features = ["test-support", "test-clock"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
+# Enables `ainb_hangar_store::test_support` (isolated `$HOME` + `ENV_LOCK`) for
+# the boot tripwire. Integration tests do not inherit `#[cfg(test)]`, so the
+# store's `test-support` feature must be turned on explicitly here.
+ainb-hangar-store = { path = "../ainb-hangar-store", features = ["test-support"] }
+# Enables `ainb_hangar_core::clock::FixedClock` for the deterministic sweeper
+# tests (P1.4). Same rationale as the store dev-dep: the `test-support` cfg is
+# not inherited by integration tests, so it must be requested explicitly.
+ainb-hangar-core = { path = "../ainb-hangar-core", features = ["test-support"] }
+
+# Local lint config rather than `workspace = true`: the workspace-level lints
+# declare lint groups (clippy::all, ::pedantic, ::nursery, ::cargo) at the same
+# priority as specific lints, which rustc rejects with `lint group has the same
+# priority as a lint`. Mirror the workspace intent locally with explicit
+# priorities so this crate cleanly passes
+# `cargo clippy -p ainb-hangar-daemon -- -D warnings`.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

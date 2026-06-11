@@ -86,6 +86,20 @@ curl -sS -H "Authorization: Bearer $PH_TOKEN" \
   -o blobs.raw
 ```
 
+> **Hard cap: 20 blob keys per request.** Asking for a span wider than 20 (e.g. `start_blob_key=0&end_blob_key=28`) returns HTTP 400 `{"type":"validation_error","code":"invalid_input","detail":"Cannot request more than 20 blob keys at once"}`. The single-call recipe above only works when `N <= 19`. For longer recordings, **chunk into windows of ≤20 keys and concatenate the NDJSON**:
+>
+> ```bash
+> : > blobs.raw
+> for a in $(seq 0 20 "$N"); do
+>   b=$(( a + 19 )); [ "$b" -gt "$N" ] && b=$N
+>   curl -sS -H "Authorization: Bearer $PH_TOKEN" \
+>     "$PH_HOST/api/projects/$PH_PROJECT_ID/session_recordings/$PH_RECORDING_ID/snapshots/?source=blob_v2&start_blob_key=$a&end_blob_key=$b" \
+>     >> blobs.raw
+> done
+> ```
+>
+> Doing the fetch+decode inside one Python process (urllib per chunk) is cleaner than piping curl into `python3 - <<PY` — mixing raw replay bytes with the heredoc stdin corrupts the stream.
+
 Output is **NDJSON**: each line is `[session_id, event_object]`.
 
 ## Step 4 — Decode the Events

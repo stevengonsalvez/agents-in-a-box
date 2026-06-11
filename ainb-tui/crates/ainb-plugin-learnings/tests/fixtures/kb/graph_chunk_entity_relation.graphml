@@ -1,0 +1,51 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+  <key id="d_rel" for="edge" attr.name="rel_type" attr.type="string" />
+  <key id="d7" for="edge" attr.name="order" attr.type="long" />
+  <key id="d6" for="edge" attr.name="source_id" attr.type="string" />
+  <key id="d5" for="edge" attr.name="description" attr.type="string" />
+  <key id="d4" for="edge" attr.name="weight" attr.type="double" />
+  <key id="d3" for="node" attr.name="clusters" attr.type="string" />
+  <key id="d2" for="node" attr.name="source_id" attr.type="string" />
+  <key id="d1" for="node" attr.name="description" attr.type="string" />
+  <key id="d0" for="node" attr.name="entity_type" attr.type="string" />
+  <graph edgedefault="undirected">
+    <node id="&quot;AUDIT-AFTER-REBASE&quot;">
+      <data key="d0">"PATTERN"</data>
+      <data key="d1">"Discipline of stopping the in-flight plan after a large pull"</data>
+      <data key="d2">chunk-aaa111</data>
+      <data key="d3">[{"level": 0, "cluster": 1}]</data>
+    </node>
+    <node id="&quot;STALE-PLAN-EXECUTION&quot;">
+      <data key="d0">"ERROR"</data>
+      <data key="d1">"Continuing a plan after main has moved significantly"</data>
+      <data key="d2">chunk-bbb222</data>
+      <data key="d3">[{"level": 0, "cluster": 1}]</data>
+    </node>
+    <node id="&quot;GIT-PULL-REBASE&quot;">
+      <data key="d0">"TOOL"</data>
+      <data key="d1">"Standard git command for syncing onto remote HEAD"</data>
+      <data key="d2">chunk-ccc333</data>
+    </node>
+    <edge source="&quot;AUDIT-AFTER-REBASE&quot;" target="&quot;STALE-PLAN-EXECUTION&quot;">
+      <data key="d_rel">"solves"</data>
+      <data key="d4">9.0</data>
+      <data key="d5">"audit step prevents continuing a superseded plan"</data>
+      <data key="d6">chunk-aaa111&lt;SEP&gt;chunk-bbb222</data>
+      <data key="d7">1</data>
+    </edge>
+    <edge source="&quot;STALE-PLAN-EXECUTION&quot;" target="&quot;GIT-PULL-REBASE&quot;">
+      <data key="d_rel">"caused_by"</data>
+      <data key="d4">8.0</data>
+      <data key="d5">"continuing after a rebase reveals new commits leads to staleness"</data>
+      <data key="d6">chunk-bbb222&lt;SEP&gt;chunk-ccc333</data>
+      <data key="d7">1</data>
+    </edge>
+    <edge source="&quot;AUDIT-AFTER-REBASE&quot;" target="&quot;GIT-PULL-REBASE&quot;">
+      <data key="d4">5.0</data>
+      <data key="d5">"audit happens right after a rebase reveals many commits"</data>
+      <data key="d6">chunk-aaa111&lt;SEP&gt;chunk-ccc333</data>
+      <data key="d7">1</data>
+    </edge>
+  </graph>
+</graphml>

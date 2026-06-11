@@ -1,10 +1,11 @@
-//! Host-side conformance tests: 14 axes for ABI v2.
+//! Host-side conformance tests for ABI v2: the 18 axes plus the
+//! `read_paths`/`[config]`, mouse-forwarding, and redraw-hint canaries.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use ainb_plugin_protocol::manifest::{
-    Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
 };
 use ainb_plugin_runtime::registry::RegisteredPlugin;
 use ainb_plugin_runtime::types::{
@@ -41,6 +42,7 @@ fn manifest(name: &str) -> Manifest {
             spawn: SpawnMode::Lazy,
             idle_reap_secs: 600,
         },
+        config: Vec::new(),
     }
 }
 
@@ -448,6 +450,1240 @@ fn a14_cli_dispatch_stdout_capture() {
         CliOutcome::Ok(r) => {
             assert_eq!(&r.stdout[..], b"hello\n");
             assert_eq!(r.exit_code, 0);
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// read_paths + [config] axis — host/fs read enforcement + config inject
+// =====================================================================
+//
+// The runtime's `host/fs/read_file` guard must allow a read whose target is
+// under a granted `read_paths` prefix and DENY one that is not (`-32001`).
+// A separate test asserts the host injects the resolved `[plugins.<name>]`
+// config table into the plugin at `plugin/init`.
+//
+// DISK SAFETY: every path here lives under `CARGO_TARGET_TMPDIR`
+// (`target/tmp/...`, repo-local). Nothing touches the real home dir.
+
+/// Per-run temp dir under `target/tmp/<pkg>` (repo-local; never `~`).
+/// `CARGO_TARGET_TMPDIR` is set by cargo for integration-test binaries.
+fn run_tmp(tag: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "rpc-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&base).expect("create temp dir");
+    base
+}
+
+/// Register the read_paths/[config] canary with a custom `read_paths`
+/// allow-list, a `[config]` schema, and a stamped resolved config table.
+fn register_read_paths_canary(
+    rt: &Runtime,
+    read_paths: Vec<String>,
+    config: serde_json::Value,
+) -> PluginId {
+    let mut m = manifest("cts-read-paths-config");
+    m.capabilities = Capabilities {
+        read_paths: CapabilityGrant::List(read_paths),
+        ..Capabilities::default()
+    };
+    m.provides.cli_namespaces = vec!["rpc".into()];
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-read-paths-config"));
+    let plugin =
+        RegisteredPlugin::new(m, bin, PathBuf::from("/dev/null/manifest.toml")).with_config(config);
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    id
+}
+
+#[test]
+fn axis_read_paths_grant_honored() {
+    let (rt, handle) = build_runtime();
+
+    // Allowed envelope: a per-run temp dir with one file inside it.
+    let allowed = run_tmp("allowed");
+    let in_envelope = allowed.join("note.md");
+    std::fs::write(&in_envelope, b"hello-in-envelope").expect("write in-envelope file");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec!["read".into(), in_envelope.to_string_lossy().into_owned()],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            assert_eq!(
+                stdout.trim(),
+                "OK:17",
+                "in-envelope read should succeed (17 bytes), got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+#[test]
+fn axis_read_paths_denied_out_of_envelope() {
+    let (rt, handle) = build_runtime();
+
+    // Granted envelope.
+    let allowed = run_tmp("allowed");
+    std::fs::write(allowed.join("note.md"), b"in").expect("write in-envelope file");
+
+    // A sibling dir NOT under the grant — must be denied.
+    let denied = run_tmp("denied");
+    let out_of_envelope = denied.join("secret.md");
+    std::fs::write(&out_of_envelope, b"secret").expect("write out-of-envelope file");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec![
+            "read".into(),
+            out_of_envelope.to_string_lossy().into_owned(),
+        ],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            assert_eq!(
+                stdout.trim(),
+                format!("DENIED:{}", ainb_plugin_protocol::errors::CAPABILITY_DENIED),
+                "out-of-envelope read must be denied with -32001, got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+/// A non-existent in-envelope read under a *symlinked* grant must NOT be denied
+/// as out-of-envelope. On macOS (and many Linux setups) the grant's resolved
+/// path differs from its literal path because an ancestor is a symlink
+/// (`/tmp -> /private/tmp`, a symlinked `$HOME`, etc.). The guard canonicalizes
+/// the granted prefix (it exists) but, for a target that does *not* yet exist,
+/// must resolve it against the same on-disk anchor — otherwise a legitimate
+/// in-envelope read of a not-yet-existing file (write-then-read-back, probe for
+/// an optional file) gets a spurious `-32001`.
+///
+/// This axis stages a symlinked grant entirely under `CARGO_TARGET_TMPDIR`
+/// (repo-local): `grant -> real`, grants `read_paths = [grant]`, and reads a
+/// GHOST (non-existent) file under `grant`. The host must NOT return
+/// `CAPABILITY_DENIED`; it surfaces the real `ENOENT` read error
+/// (`INVALID_PARAMS`) instead.
+#[test]
+fn axis_read_paths_nonexistent_in_envelope_under_symlink_grant() {
+    let (rt, handle) = build_runtime();
+
+    // Stage `grant -> real` under the repo-local temp dir so an ancestor of the
+    // granted prefix is a symlink (mirrors macOS `/tmp -> /private/tmp`).
+    let base = run_tmp("symlink-grant");
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).expect("create real grant dir");
+    let grant = base.join("grant");
+    std::os::unix::fs::symlink(&real, &grant).expect("symlink grant -> real");
+
+    // The target is a not-yet-existing file *inside* the granted (symlinked)
+    // prefix — i.e. genuinely in-envelope, just not on disk yet.
+    let ghost = grant.join("ghost.md");
+    assert!(!ghost.exists(), "ghost must not exist for this axis");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![grant.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec!["read".into(), ghost.to_string_lossy().into_owned()],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            let trimmed = stdout.trim();
+            // Must NOT be denied as out-of-envelope: the read passed the guard
+            // and failed at the filesystem with a real ENOENT.
+            assert_ne!(
+                trimmed,
+                format!("DENIED:{}", ainb_plugin_protocol::errors::CAPABILITY_DENIED),
+                "in-envelope NON-existent read under a symlinked grant was wrongly \
+                 denied -32001 (symlink-prefix asymmetry over-denial), got {stdout:?}"
+            );
+            assert_eq!(
+                trimmed,
+                format!("DENIED:{}", ainb_plugin_protocol::errors::INVALID_PARAMS),
+                "expected the real ENOENT read error (-32602), got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// plugin/handle_mouse axis — host forwards a mouse event to the plugin
+// =====================================================================
+//
+// `RuntimeHandle::send_mouse` must deliver the event over the priority
+// mouse channel as a `plugin/handle_mouse` notification, preserving the
+// wire shape (kind + button) and the (already viewport-relative)
+// coordinates. The canary records the last event and echoes it via cli.
+
+#[test]
+fn axis_handle_mouse_forwarded_to_plugin() {
+    use ainb_plugin_runtime::{MouseButton, MouseEvent, MouseKind};
+
+    let (rt, handle) = build_runtime();
+    let mut m = manifest("cts-mouse-forward");
+    m.provides.cli_namespaces = vec!["mouse".into()];
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-mouse-forward"));
+    let id = register(&rt, bin, m);
+
+    // Spawn + reach Running before forwarding (a mouse event arriving
+    // before the child exists is dropped by design).
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // No event yet → canary reports `none`.
+    match block_cli(&rt, &handle, &id, "mouse", vec!["last".into()]) {
+        CliOutcome::Ok(r) => {
+            assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "none");
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+
+    // Forward a left-button-down at viewport (7, 2) with no modifiers.
+    let sent = handle.send_mouse(
+        &id,
+        "cts-screen",
+        MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 7,
+            row: 2,
+            mods: 0,
+        },
+    );
+    assert!(sent, "send_mouse should enqueue for a running plugin");
+
+    // Poll the read-back until the notification has been observed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        if let CliOutcome::Ok(r) = block_cli(&rt, &handle, &id, "mouse", vec!["last".into()]) {
+            last = String::from_utf8_lossy(&r.stdout).trim().to_string();
+            if last != "none" {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        last, "down_left:7,2:0",
+        "canary must report the forwarded mouse event verbatim"
+    );
+}
+
+// =====================================================================
+// A15: event_stream_subscribe — cap-gated streaming, cancellation,
+//      anti-cheat sentinel verification, restart cleanup
+// =====================================================================
+
+/// Drive a CLI command and return trimmed stdout as a String.
+fn cli_stdout(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    ns: &str,
+    argv: Vec<String>,
+) -> String {
+    match block_cli(rt, handle, id, ns, argv) {
+        CliOutcome::Ok(r) => String::from_utf8_lossy(&r.stdout).trim().to_string(),
+        other => panic!("cli outcome: {other:?}"),
+    }
+}
+
+fn a15_manifest(name: &str, grant_cap: bool) -> Manifest {
+    let mut m = manifest(name);
+    m.provides.cli_namespaces = vec!["a15".into()];
+    if grant_cap {
+        m.capabilities.event_stream_subscribe =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(vec!["workspace:*".into()]);
+    }
+    m
+}
+
+#[test]
+fn a15_event_stream_subscribe_delivery_and_cancel() {
+    let (rt, handle) = build_runtime();
+    // Install a host-side sentinel tap so we can prove the cap-allowed
+    // delivery path actually ran (anti-cheat) rather than the canary
+    // faking its counter.
+    let sentinels = handle.install_log_tap();
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a15-event-stream"));
+    let id = register(&rt, bin, a15_manifest("cts-a15", true));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Plugin subscribed during on_init; learn its unique topic.
+    let topic = cli_stdout(&rt, &handle, &id, "a15", vec!["topic".into()]);
+    assert!(
+        topic.starts_with("workspace:cts-canary-"),
+        "unexpected topic: {topic}"
+    );
+
+    // Publish 3 sentinel events; canary should log SENTINEL_RX_1..=3.
+    for _ in 0..3 {
+        handle.publish_stream_event(&topic, Bytes::from_static(b"evt"));
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    // 4th event triggers cancel inside the canary.
+    handle.publish_stream_event(&topic, Bytes::from_static(b"evt"));
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Anti-cheat: 4 sentinels captured HOST-side (not just the canary's count).
+    let logs = sentinels.lock().unwrap().clone();
+    for n in 1..=4 {
+        assert!(
+            logs.iter().any(|l| l == &format!("SENTINEL_RX_{n}")),
+            "missing host-side sentinel SENTINEL_RX_{n}; got {logs:?}"
+        );
+    }
+
+    // Cancellation honoured: publish a 5th event, assert no SENTINEL_RX_5.
+    handle.publish_stream_event(&topic, Bytes::from_static(b"evt"));
+    std::thread::sleep(Duration::from_millis(300));
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        !logs.iter().any(|l| l == "SENTINEL_RX_5"),
+        "stream not cancelled — leaked SENTINEL_RX_5: {logs:?}"
+    );
+
+    // Canary's own count agrees: exactly 4 received.
+    let count = cli_stdout(&rt, &handle, &id, "a15", vec!["count".into()]);
+    assert_eq!(count, "4", "canary received count mismatch");
+}
+
+#[test]
+fn a15_event_stream_subscribe_cap_denied() {
+    let (rt, handle) = build_runtime();
+    // Same canary binary, but registered WITHOUT the cap grant.
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a15-event-stream"));
+    let id = register(&rt, bin, a15_manifest("cts-a15-denied", false));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // on_init's subscribe was denied; canary stashed the error code.
+    let suberr = cli_stdout(&rt, &handle, &id, "a15", vec!["suberr".into()]);
+    assert_eq!(
+        suberr,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "cap-omitted subscribe must return -32001"
+    );
+}
+
+// =====================================================================
+// A16: spawn_managed_subprocess — cap gating, bin allow-list, bool-true
+//      rejection, env-allowlist filtering, leak-guard reap on shutdown,
+//      anti-cheat sentinel verification
+// =====================================================================
+
+/// Build an A16 manifest. `grant` selects the `spawn_managed_subprocess`
+/// cap form: `Some(list)` = list grant, `None` = cap omitted (denied).
+fn a16_manifest(name: &str, grant: Option<Vec<&str>>) -> Manifest {
+    let mut m = manifest(name);
+    m.provides.cli_namespaces = vec!["a16".into()];
+    if let Some(bins) = grant {
+        m.capabilities.spawn_managed_subprocess =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(
+                bins.into_iter().map(String::from).collect(),
+            );
+    }
+    m
+}
+
+/// Probe process liveness without `unsafe` (CTS forbids it): `kill -0 <pid>`
+/// exits 0 iff the process exists and we may signal it.
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[test]
+fn a16_spawn_managed_subprocess_granted_and_reaped() {
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
+    let id = register(&rt, bin, a16_manifest("cts-a16", Some(vec!["sleep", "sh"])));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Drive the canary to spawn `sleep 30` via the cap.
+    let pid_str = cli_stdout(&rt, &handle, &id, "a16", vec!["spawn".into()]);
+    let pid: u32 = pid_str.parse().expect("pid");
+    assert_ne!(pid, 0, "spawn returned pid 0");
+    assert!(process_alive(pid), "managed child not alive after spawn");
+
+    // Anti-cheat: sentinel captured host-side proves the cap-allowed
+    // handler actually ran (not a faked CLI reply).
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        logs.iter().any(|l| l == "SENTINEL_SPAWN_OK"),
+        "missing host-side SENTINEL_SPAWN_OK; got {logs:?}"
+    );
+
+    // Leak guard: dropping the runtime must reap the managed child.
+    drop(rt);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while process_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !process_alive(pid),
+        "managed child leaked after Runtime drop (pid {pid} still alive)"
+    );
+}
+
+#[test]
+fn a16_spawn_managed_subprocess_cap_denied() {
+    let (rt, handle) = build_runtime();
+    // Cap omitted entirely → -32001, no fork.
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
+    let id = register(&rt, bin, a16_manifest("cts-a16-denied", None));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sleep".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "cap-omitted spawn must return -32001"
+    );
+}
+
+#[test]
+fn a16_spawn_managed_subprocess_bin_not_whitelisted() {
+    let (rt, handle) = build_runtime();
+    // Grant for `sleep` only; attempt to spawn `sh` → -32001.
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
+    let id = register(&rt, bin, a16_manifest("cts-a16-wl", Some(vec!["sleep"])));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sh".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "bin off the allow-list must return -32001"
+    );
+}
+
+#[test]
+fn a16_spawn_managed_subprocess_bool_true_rejected() {
+    let (rt, handle) = build_runtime();
+    // Bool-true grant is a request for unrestricted spawn — rejected at
+    // manifest validation with -32003 (MANIFEST_VALIDATION).
+    let mut m = manifest("cts-a16-booltrue");
+    m.provides.cli_namespaces = vec!["a16".into()];
+    m.capabilities.spawn_managed_subprocess =
+        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sleep".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::MANIFEST_VALIDATION.to_string(),
+        "bool-true grant must be rejected with -32003"
+    );
+}
+
+#[test]
+fn a16_spawn_managed_subprocess_env_allowlist_enforced() {
+    // Set two env vars on the HOST process (the registry's spawn reads
+    // host env). Only CTS_MANAGED_KEEP is on the canary's env_allowlist.
+    std::env::set_var("CTS_MANAGED_KEEP", "keep-me");
+    std::env::set_var("CTS_MANAGED_DROP", "drop-me");
+
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
+    let id = register(
+        &rt,
+        bin,
+        a16_manifest("cts-a16-env", Some(vec!["sleep", "sh"])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let tmp = std::env::temp_dir().join(format!("cts-a16-env-{}.txt", std::process::id()));
+    let tmp_str = tmp.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&tmp);
+
+    let pid_str = cli_stdout(&rt, &handle, &id, "a16", vec!["spawnenv".into(), tmp_str]);
+    assert_ne!(pid_str, "0", "spawnenv returned pid 0");
+
+    // Wait for the `sh -c printenv > out` child to finish writing.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut env_dump = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(s) = std::fs::read_to_string(&tmp) {
+            if !s.is_empty() {
+                env_dump = s;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    std::env::remove_var("CTS_MANAGED_KEEP");
+    std::env::remove_var("CTS_MANAGED_DROP");
+    let _ = std::fs::remove_file(&tmp);
+    drop(rt);
+
+    assert!(
+        env_dump.contains("CTS_MANAGED_KEEP=keep-me"),
+        "allow-listed var missing from child env: {env_dump}"
+    );
+    assert!(
+        !env_dump.contains("CTS_MANAGED_DROP"),
+        "unlisted var leaked into child env: {env_dump}"
+    );
+}
+
+#[test]
+fn a15_event_stream_dropped_on_plugin_restart() {
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a15-event-stream"));
+    let id = register(&rt, bin, a15_manifest("cts-a15-restart", true));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+    let topic = cli_stdout(&rt, &handle, &id, "a15", vec!["topic".into()]);
+
+    // Kill the plugin — host MUST drop its streams so no events leak.
+    handle.inject_kill(&id).expect("inject_kill");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Clear any sentinels captured before the kill.
+    sentinels.lock().unwrap().clear();
+
+    // Publish to the (now-dead) stream's topic. With the stream dropped,
+    // nothing should be delivered to the OLD subscription.
+    handle.publish_stream_event(&topic, Bytes::from_static(b"leak"));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        logs.is_empty(),
+        "stream leaked after plugin restart: {logs:?}"
+    );
+}
+
+// =====================================================================
+// A17: unix_socket_dial — cap gating, path allow-list, bool-true
+//      rejection, symlink-resolution whitelist, bidirectional data,
+//      drop-on-restart, anti-cheat sentinel verification
+// =====================================================================
+
+/// Build an A17 manifest. `grant` selects the `unix_socket_dial` cap
+/// form: `Some(paths)` = list grant, `None` = cap omitted (denied).
+fn a17_manifest(name: &str, grant: Option<Vec<String>>) -> Manifest {
+    let mut m = manifest(name);
+    m.provides.cli_namespaces = vec!["a17".into()];
+    if let Some(paths) = grant {
+        m.capabilities.unix_socket_dial =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(paths);
+    }
+    m
+}
+
+/// A tiny mock `AF_UNIX` echo/push server on `path`, run on a background
+/// std thread. On the first connection it sends `greeting` immediately,
+/// then echoes every byte it reads back to the client until the peer
+/// closes. The bound listener is closed when the thread ends after one
+/// connection.
+fn spawn_mock_unix_server(path: &std::path::Path, greeting: &'static [u8]) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path).expect("bind mock unix socket");
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(greeting);
+            let _ = stream.flush();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        // Echo back with an `ECHO:` prefix so the test can
+                        // distinguish the greeting from the echo.
+                        let mut out = b"ECHO:".to_vec();
+                        out.extend_from_slice(&buf[..n]);
+                        if stream.write_all(&out).is_err() {
+                            break;
+                        }
+                        let _ = stream.flush();
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn a17_unix_socket_dial_granted_bidirectional_and_sentinel() {
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("hangar.sock");
+    spawn_mock_unix_server(&sock, b"HELLO");
+    // Give the listener a moment to bind.
+    std::thread::sleep(Duration::from_millis(50));
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    let sock_str = sock.to_string_lossy().to_string();
+    let id = register(
+        &rt,
+        bin,
+        a17_manifest("cts-a17", Some(vec![sock_str.clone()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Dial the whitelisted socket.
+    let stream_id = cli_stdout(&rt, &handle, &id, "a17", vec!["dial".into(), sock_str]);
+    assert!(!stream_id.is_empty(), "dial returned empty stream_id");
+
+    // The mock server pushed "HELLO" on connect — the read loop should
+    // deliver it as a `data` frame. Wait for it.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Anti-cheat: dial + at-least-one data sentinel captured host-side.
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        logs.iter().any(|l| l == "SENTINEL_DIAL_OK"),
+        "missing host-side SENTINEL_DIAL_OK; got {logs:?}"
+    );
+    assert!(
+        logs.iter().any(|l| l == "SENTINEL_RX_DATA"),
+        "no socket data delivered to plugin; got {logs:?}"
+    );
+
+    let rxbytes = cli_stdout(&rt, &handle, &id, "a17", vec!["rxbytes".into()]);
+    assert!(
+        rxbytes.contains("HELLO"),
+        "greeting not received: {rxbytes}"
+    );
+
+    // Write to the socket; the mock echoes back with an ECHO: prefix.
+    let _ = cli_stdout(&rt, &handle, &id, "a17", vec!["send".into(), "ping".into()]);
+    std::thread::sleep(Duration::from_millis(200));
+    let rxbytes = cli_stdout(&rt, &handle, &id, "a17", vec!["rxbytes".into()]);
+    assert!(
+        rxbytes.contains("ECHO:ping"),
+        "echo not received after send: {rxbytes}"
+    );
+
+    // Close honoured: closing then dropping the runtime must not panic.
+    let _ = cli_stdout(&rt, &handle, &id, "a17", vec!["close".into()]);
+    drop(rt);
+}
+
+#[test]
+fn a17_unix_socket_dial_cap_denied() {
+    let (rt, handle) = build_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("hangar.sock");
+    spawn_mock_unix_server(&sock, b"HI");
+    std::thread::sleep(Duration::from_millis(50));
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    // Cap omitted entirely → -32001, no connect.
+    let id = register(&rt, bin, a17_manifest("cts-a17-denied", None));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a17",
+        vec!["dialerr".into(), sock.to_string_lossy().to_string()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "cap-omitted dial must return -32001"
+    );
+}
+
+#[test]
+fn a17_unix_socket_dial_path_not_whitelisted() {
+    let (rt, handle) = build_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = dir.path().join("hangar.sock");
+    let other = dir.path().join("evil.sock");
+    spawn_mock_unix_server(&allowed, b"HI");
+    spawn_mock_unix_server(&other, b"HI");
+    std::thread::sleep(Duration::from_millis(50));
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    let id = register(
+        &rt,
+        bin,
+        a17_manifest(
+            "cts-a17-wl",
+            Some(vec![allowed.to_string_lossy().to_string()]),
+        ),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Dial a real socket that is NOT on the allow-list → -32001.
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a17",
+        vec!["dialerr".into(), other.to_string_lossy().to_string()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "path off the allow-list must return -32001"
+    );
+}
+
+#[test]
+fn a17_unix_socket_dial_bool_true_rejected() {
+    let (rt, handle) = build_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("hangar.sock");
+    spawn_mock_unix_server(&sock, b"HI");
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Bool-true grant is a request for unrestricted dial — rejected at
+    // manifest validation with -32003 (MANIFEST_VALIDATION).
+    let mut m = manifest("cts-a17-booltrue");
+    m.provides.cli_namespaces = vec!["a17".into()];
+    m.capabilities.unix_socket_dial = ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a17",
+        vec!["dialerr".into(), sock.to_string_lossy().to_string()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::MANIFEST_VALIDATION.to_string(),
+        "bool-true grant must be rejected with -32003"
+    );
+}
+
+#[test]
+fn a17_unix_socket_dial_symlink_outside_whitelist_denied() {
+    let (rt, handle) = build_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    // The canonical whitelisted socket.
+    let whitelisted = dir.path().join("hangar.sock");
+    spawn_mock_unix_server(&whitelisted, b"HI");
+    // A different real socket the attacker wants to reach.
+    let target = dir.path().join("docker.sock");
+    spawn_mock_unix_server(&target, b"DOCKER");
+    // A symlink whose name differs but resolves to the non-whitelisted
+    // target — must be DENIED because canonicalization resolves it.
+    let link = dir.path().join("attack.sock");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    let id = register(
+        &rt,
+        bin,
+        a17_manifest(
+            "cts-a17-symlink",
+            Some(vec![whitelisted.to_string_lossy().to_string()]),
+        ),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a17",
+        vec!["dialerr".into(), link.to_string_lossy().to_string()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "symlink resolving outside the whitelist must return -32001"
+    );
+}
+
+#[test]
+fn a17_unix_socket_dropped_on_plugin_restart() {
+    let (rt, handle) = build_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("hangar.sock");
+    spawn_mock_unix_server(&sock, b"HELLO");
+    std::thread::sleep(Duration::from_millis(50));
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
+    let id = register(
+        &rt,
+        bin,
+        a17_manifest(
+            "cts-a17-restart",
+            Some(vec![sock.to_string_lossy().to_string()]),
+        ),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+    let stream_id = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a17",
+        vec!["dial".into(), sock.to_string_lossy().to_string()],
+    );
+    assert!(!stream_id.is_empty());
+
+    // Kill the plugin — host MUST drop its dialled sockets so the read
+    // loop is aborted and no `socket:<id>` frame leaks to a dead process.
+    handle.inject_kill(&id).expect("inject_kill");
+    std::thread::sleep(Duration::from_millis(400));
+
+    // The registry must hold no live sockets for the (dead) plugin.
+    // We can't reach the registry directly from the test, but dropping
+    // the runtime here must not panic and must not hang on a leaked task.
+    drop(rt);
+}
+
+// =====================================================================
+// A18: secret_store_get — scope/key contract (P5.2). Cap gating
+//      (`secrets:read`), key allow-list, bool-true unconditional read,
+//      base64 round-trip, scope isolation, not-found, anti-cheat sentinel.
+//
+// The golden injects an in-memory `SecretBackend` via the runtime's DI seam
+// (`Runtime::with_config_and_secret_backend`) so it is platform-independent
+// and never touches the real login Keychain. The real-keychain end-to-end
+// path lives in `ainb-hangar-secrets`'s own tripwire (P5.1).
+// =====================================================================
+
+use ainb_hangar_secrets::{InMemoryBackend, Scope, SecretBackend};
+use std::sync::Arc;
+
+/// Build a runtime whose `host/secret_store_get` reads from the supplied
+/// in-memory backend (already seeded by the caller).
+fn build_runtime_with_secret_backend(backend: Arc<InMemoryBackend>) -> (Runtime, RuntimeHandle) {
+    let cfg = RuntimeConfig {
+        respawn_backoff: [
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(150),
+        ],
+        failure_window: Duration::from_secs(60),
+        ..RuntimeConfig::default()
+    };
+    Runtime::with_config_and_secret_backend(cfg, backend).expect("build runtime")
+}
+
+/// Build an A18 manifest. `grant` selects the `secrets:read` cap form:
+/// `Some(keys)` = list grant, `None` = cap omitted (denied).
+fn a18_manifest(name: &str, grant: Option<Vec<String>>) -> Manifest {
+    let mut m = manifest(name);
+    m.provides.cli_namespaces = vec!["a18".into()];
+    if let Some(keys) = grant {
+        m.capabilities.secrets_read = ainb_plugin_protocol::manifest::CapabilityGrant::List(keys);
+    }
+    m
+}
+
+#[test]
+fn a18_secret_store_get_cap_denied() {
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    // Cap omitted entirely → -32001, no backend hit.
+    let id = register(&rt, bin, a18_manifest("cts-a18-denied", None));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "any_key".into(),
+        ],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "cap-omitted secret read must return -32001"
+    );
+}
+
+#[test]
+fn a18_secret_store_get_key_not_whitelisted() {
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    // Grant whitelists ONLY "anthropic_api_key"; request a different key.
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-wl", Some(vec!["anthropic_api_key".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "evil_key".into(),
+        ],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "key not on allow-list must return -32001"
+    );
+}
+
+/// Granted + seeded: read a global-scope secret back through the cap, assert
+/// the base64-decoded bytes match and the anti-cheat sentinel fired
+/// host-side.
+#[test]
+fn a18_secret_store_get_granted_reads_secret_and_sentinel() {
+    let backend = Arc::new(InMemoryBackend::new());
+    backend.put(&Scope::Global, "anthropic_api_key", b"super-secret-token").unwrap();
+
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-ok", Some(vec!["anthropic_api_key".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let out = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "get".into(),
+            "global".into(),
+            "-".into(),
+            "anthropic_api_key".into(),
+        ],
+    );
+    assert_eq!(out, "super-secret-token", "secret bytes mismatch: {out}");
+
+    // Anti-cheat: SECRET_READ_OK fired host-side — proves the genuine
+    // backend path ran (not a fabricated value).
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        logs.iter().any(|l| l == "SECRET_READ_OK"),
+        "missing host-side SECRET_READ_OK sentinel; got {logs:?}"
+    );
+}
+
+/// Workspace scope isolates: a secret seeded under workspace `ws-aaa` is
+/// readable there, but a read under `ws-bbb` misses with `-32004`.
+#[test]
+fn a18_secret_store_get_workspace_scope_isolation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let ws_a = Scope::Workspace(ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap());
+    backend.put(&ws_a, "anthropic_api_key", b"ws-a-secret").unwrap();
+
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-ws", Some(vec!["anthropic_api_key".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Matching workspace reads it.
+    let out = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "get".into(),
+            "workspace".into(),
+            "ws-aaa".into(),
+            "anthropic_api_key".into(),
+        ],
+    );
+    assert_eq!(
+        out, "ws-a-secret",
+        "matching workspace must read the secret"
+    );
+
+    // A different workspace must NOT see it.
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "workspace".into(),
+            "ws-bbb".into(),
+            "anthropic_api_key".into(),
+        ],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::SECRET_NOT_FOUND.to_string(),
+        "cross-workspace read must miss with -32004"
+    );
+}
+
+/// Bool-true grant reads any key unconditionally (no allow-list).
+#[test]
+fn a18_secret_store_get_bool_true_grants_any_key() {
+    let backend = Arc::new(InMemoryBackend::new());
+    backend.put(&Scope::Global, "any_key", b"v").unwrap();
+
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let mut m = manifest("cts-a18-bool");
+    m.provides.cli_namespaces = vec!["a18".into()];
+    m.capabilities.secrets_read = ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "any_key".into(),
+        ],
+    );
+    assert_eq!(code, "0", "bool-true grant must read any key: {code}");
+}
+
+/// Key granted but no such secret → -32004 `SECRET_NOT_FOUND`, and the
+/// `SECRET_READ_OK` sentinel must NOT fire (anti-cheat for the miss path).
+#[test]
+fn a18_secret_store_get_not_found() {
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-missing", Some(vec!["openai_api_key".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "openai_api_key".into(),
+        ],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::SECRET_NOT_FOUND.to_string(),
+        "absent secret must return -32004"
+    );
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        !logs.iter().any(|l| l == "SECRET_READ_OK"),
+        "SECRET_READ_OK must not fire on the not-found path: {logs:?}"
+    );
+}
+
+// =====================================================================
+// RenderResult.redraw axis — self-animation hint re-marks dirty
+// =====================================================================
+//
+// When a render reply sets `redraw = true`, the runtime must re-mark the
+// plugin's render-dirty flag so the host's render loop kicks another
+// `plugin/render` without further input. Once the plugin returns
+// `redraw = false`, the flag must stay clear. The canary animates for its
+// first two renders, then settles.
+
+#[test]
+fn axis_render_redraw_hint_remarks_dirty() {
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-redraw-hint"));
+    let id = register(&rt, bin, manifest("cts-redraw-hint"));
+
+    // Clear the registration dirty-seed so we observe only redraw-driven marks.
+    let _ = handle.take_render_dirty(&id);
+
+    // Render #0 → canary wants_redraw == true → runtime re-marks dirty.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 0 failed: {other:?}"),
+    }
+    assert!(
+        handle.take_render_dirty(&id),
+        "redraw=true must re-mark the plugin dirty for another frame"
+    );
+
+    // Render #1 → still animating (count 2 < 3) → re-marks dirty again.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 1 failed: {other:?}"),
+    }
+    assert!(
+        handle.take_render_dirty(&id),
+        "redraw=true on frame 1 must re-mark dirty"
+    );
+
+    // Render #2 → count now 3, wants_redraw == false → no re-mark.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 2 failed: {other:?}"),
+    }
+    assert!(
+        !handle.take_render_dirty(&id),
+        "redraw=false must NOT re-mark dirty (animation settled)"
+    );
+}
+
+#[test]
+fn axis_config_injected_at_init() {
+    let (rt, handle) = build_runtime();
+
+    let allowed = run_tmp("allowed");
+    let injected = serde_json::json!({
+        "learnings_dir": "/tmp/learnings",
+        "qmd_collection": "learnings",
+    });
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        injected.clone(),
+    );
+
+    let outcome = block_cli(&rt, &handle, &id, "rpc", vec!["config".into()]);
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            let reported: serde_json::Value =
+                serde_json::from_str(stdout.trim()).expect("canary echoed valid JSON config");
+            assert_eq!(
+                reported, injected,
+                "canary must report the config the host injected"
+            );
         }
         other => panic!("expected CliOutcome::Ok, got {other:?}"),
     }

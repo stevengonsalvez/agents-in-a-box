@@ -104,6 +104,16 @@ async fn main() -> Result<()> {
     app = app.subcommand(
         clap::Command::new("tui").about("Launch the TUI (default if no command given)"),
     );
+    // `diff-review` is also handled inline (owns the alternate screen, like `tui`).
+    app = app.subcommand(
+        clap::Command::new("diff-review")
+            .about("Review a repository's uncommitted changes in the Code Review surface")
+            .arg(
+                clap::Arg::new("path")
+                    .help("Repository path (default: current directory)")
+                    .default_value("."),
+            ),
+    );
     app = registry.build_clap(app);
     let matches = app.get_matches();
     let format = matches.get_one::<cli::OutputFormat>("format").copied().unwrap_or_default();
@@ -219,6 +229,16 @@ async fn main() -> Result<()> {
             }
 
             tui_result
+        }
+
+        // diff-review: interactive Code Review surface for a repo path (owns the
+        // alternate screen, so it is handled inline rather than via the registry).
+        Some(("diff-review", sub)) => {
+            entered_tui = true;
+            let path = sub
+                .get_one::<String>("path")
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+            cli::diff_review::run(path)
         }
 
         // Every other subcommand routes through the registry.
@@ -383,10 +403,20 @@ async fn run_tui_loop(
                     if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
-                                tracing::info!(
-                                    "slash command requested (stub, no dispatch yet): /{}",
-                                    cmd
-                                );
+                                // Route host-mapped slash commands (e.g. the
+                                // learnings plugin's `/recall` + `/memory`,
+                                // wired in P9) to the same AppEvent path the
+                                // global keyboard shortcuts use. Commands with
+                                // no host mapping fall through to the log-only
+                                // stub (plugin-owned dispatch lands later).
+                                if let Some(app_event) = EventHandler::slash_command_event(&cmd) {
+                                    EventHandler::process_event(app_event, &mut app.state);
+                                } else {
+                                    tracing::info!(
+                                        "slash command requested (no host mapping): /{}",
+                                        cmd
+                                    );
+                                }
                             }
                             SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
                         }
@@ -539,6 +569,19 @@ async fn run_tui_loop(
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
 
+                    // A focused plugin screen owns the pointer (mirrors the
+                    // key-forwarding contract). Forward + consume before the
+                    // host's own mouse handling so the two never double-act.
+                    if matches!(
+                        crate::app::screens::builtin::forward_mouse_to_focused_plugin(
+                            &mut app.state,
+                            &mouse_event,
+                        ),
+                        crate::app::screens::EventOutcome::Handled
+                    ) {
+                        continue;
+                    }
+
                     match mouse_event.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             // Convert coordinates to pane focus
@@ -548,6 +591,15 @@ async fn run_tui_loop(
                             if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 // Log history viewer takes full screen, starts at (0, 0)
                                 app.state.log_history_state.handle_click(col, row, 0, 0);
+                            } else if app.state.current_screen == crate::app::screens::ids::GIT_VIEW
+                                && app.state.git_view_state.as_ref().is_some_and(|g| {
+                                    g.active_tab == crate::components::git_view::GitTab::Review
+                                })
+                            {
+                                // Code Review sidebar: click a file/folder row to select/toggle.
+                                if let Some(ref mut git_state) = app.state.git_view_state {
+                                    git_state.review_sidebar_click(col, row);
+                                }
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseClick { x: col, y: row },
                                 &mut app.state,
@@ -585,6 +637,13 @@ async fn run_tui_loop(
                                 // Scroll git view content (markdown or diff)
                                 if let Some(ref mut git_state) = app.state.git_view_state {
                                     match git_state.active_tab {
+                                        crate::components::git_view::GitTab::Review => {
+                                            if is_down {
+                                                git_state.review_scroll_down(SCROLL_LINES);
+                                            } else {
+                                                git_state.review_scroll_up(SCROLL_LINES);
+                                            }
+                                        }
                                         crate::components::git_view::GitTab::Diff => {
                                             if is_down {
                                                 git_state.scroll_diff_down_by(SCROLL_LINES);
@@ -823,6 +882,110 @@ async fn run_tui_loop(
                                 ));
                             }
                         }
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::AttachAbtop => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        const ABTOP_SESSION: &str = "ainb-abtop";
+                        info!(
+                            "[ACTION] Launching abtop in tmux session '{}'",
+                            ABTOP_SESSION
+                        );
+
+                        // Atomic create-or-reuse: `-A` attaches if the session exists,
+                        // creates it otherwise; `-d` keeps it detached so we drive the
+                        // attach (with TUI suspend/resume) ourselves below. tmux runs
+                        // the command in its OWN pty, so abtop gets a real TTY even
+                        // though ainb owns the alternate screen. `--exit-on-jump` makes
+                        // abtop quit (returning the terminal to ainb) after the user
+                        // jumps to an agent's pane with Enter. The command is passed as a
+                        // single string so tmux doesn't parse `--exit-on-jump` as a flag.
+                        let created = Command::new("tmux")
+                            .args([
+                                "new-session",
+                                "-A",
+                                "-d",
+                                "-s",
+                                ABTOP_SESSION,
+                                "abtop --exit-on-jump",
+                            ])
+                            .status()
+                            .await;
+                        match created {
+                            Ok(s) if s.success() => {
+                                let mut attach_handler =
+                                    AttachHandler::new_from_terminal(terminal)?;
+                                if let Err(e) =
+                                    attach_handler.attach_to_session(ABTOP_SESSION).await
+                                {
+                                    error!("[ACTION] abtop attach failed: {}", e);
+                                    app.state.add_error_notification(format!(
+                                        "Failed to open abtop: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(s) => {
+                                error!(
+                                    "[ACTION] failed to create abtop tmux session (exit {:?})",
+                                    s.code()
+                                );
+                                app.state.add_error_notification(
+                                    "Could not start abtop — is `abtop` installed and on PATH? Install: brew install graykode/tap/abtop · cargo install abtop"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                error!("[ACTION] tmux new-session for abtop errored: {}", e);
+                                app.state
+                                    .add_error_notification(format!("Failed to open abtop: {}", e));
+                            }
+                        }
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::SetupAbtopRateLimits => {
+                        use tokio::process::Command;
+
+                        info!("[ACTION] Running abtop --setup (rate-limit StatusLine hook)");
+                        // `abtop --setup` writes a StatusLine hook into
+                        // ~/.claude/settings.json. Run it in its OWN detached
+                        // tmux pane so it gets a real TTY (abtop's CLI paths
+                        // expect one) without disturbing ainb's alternate
+                        // screen. We don't attach — it completes on its own.
+                        let setup = Command::new("tmux")
+                            .args([
+                                // `-A`: attach-or-create so a stale/slow
+                                // setup pane doesn't fail a retry with a
+                                // misleading "is abtop installed?" error.
+                                "new-session",
+                                "-A",
+                                "-d",
+                                "-s",
+                                "ainb-abtop-setup",
+                                "abtop --setup",
+                            ])
+                            .status()
+                            .await;
+                        match setup {
+                            Ok(s) if s.success() => {
+                                app.state.add_info_notification(
+                                    "Enabling abtop rate-limit tracking (abtop --setup)…"
+                                        .to_string(),
+                                );
+                            }
+                            _ => {
+                                app.state.add_error_notification(
+                                    "Could not run `abtop --setup` — is `abtop` on PATH? You can run it manually."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        // Open abtop regardless of the setup outcome.
+                        app.state.pending_async_action = Some(AsyncAction::AttachAbtop);
                         app.state.ui_needs_refresh = true;
                     }
 

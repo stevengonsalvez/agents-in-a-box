@@ -42,13 +42,22 @@ Retrieval closes the loop: `/reflect:recall` (the same engine the SessionStart a
 
 ## Install
 
+Reflect is two layers: the plugin (hooks + skills) and the `reflect-kb` CLI (recall/search + qmd + nano-graphrag). `claude plugin install` only does the first, so install both — the one-step path uses `ainb`:
+
 ```bash
+# 1. plugin: hooks + skills
 claude plugin marketplace add stevengonsalvez/agents-in-a-box
 claude plugin install reflect@agents-in-a-box
 
-# install the underlying CLI (provides nano-graphrag + qmd)
-uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
+# 2. everything else in one shot — auto-installs reflect-kb[graph] via uv,
+#    and prints any missing system tools (bash>=4, coreutils, jq) for you to run
+ainb reflect bootstrap
+
+# 3. verify — dependency check classified by what needs each tool
+ainb doctor
 ```
+
+`ainb reflect bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]`) and only *prints* the `brew`/`apt` commands for system tools, so it never mutates your OS or PATH. The manual equivalent (with annotated commands + the nano-graphrag `--no-deps` caveat) lives in [`plugins/reflect/README.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/README.md#install).
 
 The plugin is published via the repo's root `.claude-plugin/marketplace.json` (marketplace name `agents-in-a-box`). Codex CLI and GitHub Copilot don't have a native plugin runtime — for those, use the Python adapters under `plugins/reflect/adapters/<codex|copilot>/`.
 

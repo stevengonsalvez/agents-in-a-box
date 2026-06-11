@@ -1,0 +1,15 @@
+document_id: lrn-claude-plugin-autowire
+extracted_at: "2026-05-20T18:00:00.000000+00:00"
+entities:
+  - name: "plugin.json hooks block"
+    type: concept
+    description: "Top-level hooks declaration in a Claude Code plugin manifest"
+  - name: "copy-paste hook snippets"
+    type: error
+    description: "Anti-pattern of asking users to paste hook config by hand"
+relationships:
+  - source: "plugin.json hooks block"
+    target: "copy-paste hook snippets"
+    type: solves
+    description: "Declaring hooks in the manifest removes the manual copy-paste step"
+    strength: 6

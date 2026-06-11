@@ -145,6 +145,27 @@ Content managed by external plugins (installed via `claude plugin install`):
 - Skills/commands provided by plugins (e.g., Beads provides its own skill in `plugins/cache/`)
 - These are tracked in `external-dependencies.yaml`, NOT in `packages/`
 
+### Category 5b: Bundled vs Pulled — presence in the manifest is NOT "external"
+
+CRITICAL (a misclassification cost real cycles 2026-06-05): a skill appearing in
+`external-dependencies.yaml` does **not** mean "external, don't sync". The
+*section* and *key* discriminate — not mere presence in the file:
+
+| Manifest shape | Meaning | Sync? |
+|----------------|---------|-------|
+| `bundled-skills:` entry with `path: packages/skills/<name>` | committed in repo, deployed **FROM** repo by bootstrap | **YES — sync both directions** |
+| `agent-skills:` entry with `repo:` + `multi-subpath:` | git-cloned into `~/.{tool}/skills` at bootstrap | NO — external; update via update-externals |
+| `nanoclaw-skills:` entry | synced from the nanoclaw fork (`container/skills/`) | NO — external; edit in the fork |
+
+- `source:` is **provenance only**. It can sit on a *bundled* (`path:`) skill —
+  e.g. `media-processing` has both a `source:` URL AND `path:`; it is bundled
+  and DOES sync. `source:` alone never means "don't sync".
+- The discriminator is **`path:` (bundled → sync) vs `repo:`/`multi-subpath:`
+  (cloned at bootstrap → skip)**.
+- Before dropping a *common* skill (one that exists in BOTH `~/.claude` and
+  `packages/`) as "external", grep its manifest entry and confirm whether it
+  has `path:`. If it does, it is bundled — sync it.
+
 ## Reverse Scan Phase (Orphan Detection)
 
 CRITICAL: Before comparing files, enumerate items in {{HOME_TOOL_DIR}}/ that aren't part of this toolkit's internal set, then surface ONLY genuine orphans (candidates for SYNC TO REPO or DEPRECATED).
@@ -447,10 +468,26 @@ chore: sync learnings to packages
 ## Quick Diff Commands
 
 ```bash
-# CLAUDE.md diff (tool-specific config file)
-# Normalize template vars before comparing to avoid false positives
-diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|{{HOME_TOOL_DIR}}|g' \
-  toolkit/claude-code-4.5/CLAUDE.md) /.claude/CLAUDE.md
+# CANONICALIZE BOTH SIDES BEFORE ANY DIFF. A bare diff shows `~/.claude` vs
+# `/Users/x/.claude` vs an unsubstituted template placeholder as false
+# divergences — a polluted first pass cost real cycles 2026-06-05. This helper
+# collapses every home-path form (and a leaked, unsubstituted placeholder) to
+# one token, on BOTH the repo and home side, so only TRUE content diffs remain.
+canon() { perl -pe '
+  s|\{\{HOME_TOOL_DIR\}\}|@H@|g; s|\$HOME/\{\{TOOL_DIR\}\}|@H@|g;
+  s|/Users/[^/]+/\.claude|@H@|g; s|~/\.claude|@H@|g; s|\$HOME/\.claude|@H@|g;
+  s|\{\{TOOL_DIR\}\}|.claude|g;' "$1"; }
+# Usage:  diff <(canon REPO_FILE) <(canon HOME_FILE)   # → only real diffs
+# DIRECTION (mtime is unreliable — bulk deploys cluster-touch mtimes): decide by
+# CONTENT ASYMMETRY, not timestamps. Count lines unique to each side:
+#   only_repo=$(diff <(canon REPO) <(canon HOME) | grep -c '^<')
+#   only_home=$(diff <(canon REPO) <(canon HOME) | grep -c '^>')
+# only_home > only_repo → home richer → →repo · only_repo > only_home → →home.
+# If both sides have unique lines, it is a real bidirectional divergence →
+# inspect/merge, never blind-overwrite (see Safety Checks).
+
+# CLAUDE.md diff (tool-specific config file) — uses the canon() helper above
+diff <(canon toolkit/claude-code-4.5/CLAUDE.md) <(canon /.claude/CLAUDE.md)
 
 # settings.json diff (Claude Code harness config)
 # Fails if repo has drifted from /.claude — sync TO_REPO if live has newer keys
@@ -496,8 +533,28 @@ grep -rl '\bbd\b' packages/skills/*/SKILL.md 2>/dev/null
 ## Safety Checks
 
 - **Never overwrite** without assessment first
-- **Check modification times** when both versions exist - sync newer to older
-- **Skip binaries** and non-text files
+- **Decide direction by CONTENT ASYMMETRY, never mtime.** Bulk deploys
+  cluster-touch mtimes, so "newer to older" is wrong. Canonicalize both sides
+  (see `canon()` in Quick Diff Commands), then count lines unique to each side:
+  more-unique-on-home → `→repo`; more-unique-on-repo → `→home`; unique on BOTH
+  → real bidirectional divergence (inspect/merge, do not blind-copy).
+- **Bundled vs pulled before any drop.** A skill in `external-dependencies.yaml`
+  is NOT automatically external — `bundled-skills` + `path:` = committed in repo
+  and DOES sync; only `agent-skills`/`nanoclaw-skills` (git-cloned at bootstrap)
+  are external. `source:` is provenance, not an exclusion marker. See Category 5b.
+- **Compare against `origin/main`, not just local HEAD, when local is behind.**
+  `git fetch` first; a TO_REPO target may already have moved on origin (re-check
+  before proposing, to avoid stale or clobbering syncs).
+- **Tool-specific files (statusline.sh, settings.json, CLAUDE.md) can diverge
+  BOTH ways.** Diff against origin and, if each side has unique blocks, do a
+  surgical per-block merge (port the new block by content anchor) — never
+  overwrite, or you silently drop the other side's improvements.
+- **Deleting a bundled skill = four steps, not one:** (1) remove the skill dir,
+  (2) remove its `bundled-skills` entry from `external-dependencies.yaml`,
+  (3) remove any skill-specific handling in `bootstrap.js` (e.g. a compile
+  step), (4) regenerate `catalog.yaml`. Then grep the toolkit for dangling refs.
+- **Skip binaries** and non-text files (never run `perl -i` interpolation on a
+  compiled binary — copy it raw)
 - **Validate** markdown frontmatter before copying agent files
 - **Route commands** to correct package directory
 - **Exclude** files matching exclusion categories

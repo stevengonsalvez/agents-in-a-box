@@ -1,5 +1,6 @@
 use ainb_plugin_sdk::{
-    Cell, Coord, HostClient, LogLevel, Plugin, RenderParams, Result, Server, WireBuffer,
+    Cell, Coord, HostClient, InitContext, LogLevel, Plugin, RenderParams, Result, Server,
+    WireBuffer,
 };
 use async_trait::async_trait;
 
@@ -11,7 +12,7 @@ impl Plugin for A09 {
         "[plugin]\nname = \"cts-a09\"\nversion = \"0.0.1\"\nabi_version = 2\n"
     }
 
-    async fn on_init(&mut self, host: &HostClient, _caps: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         host.log(LogLevel::Trace, "trace-msg".to_string(), None).await?;
         host.log(LogLevel::Debug, "debug-msg".to_string(), None).await?;
         host.log(LogLevel::Info, "info-msg".to_string(), None).await?;

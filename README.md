@@ -150,6 +150,13 @@ A Rust-based terminal application for managing AI coding sessions with git workt
       <em>See exactly which repos and worktrees consume your context budget. Input, cache, output, and session counts per project.</em>
     </td>
   </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <img src="docs/assets/screenshots/code-review-diff.gif" alt="Warp-style Code Review diff — file sidebar, per-file collapsible blocks, Dracula syntax highlighting, word-level emphasis, gutter with green/red change bars" width="100%"><br>
+      <strong>🔍 Warp-style Code Review diff</strong><br>
+      <em>Press <code>g</code> on a session (or run <code>ainb diff-review</code>) for a cohesive review surface — file sidebar, per-file collapsible blocks in one scroll, Dracula syntax highlighting, word-level intra-line emphasis, a line-number gutter with green/red change bars, expandable context, and <code>n</code>/<code>N</code> hunk navigation. <a href="docs/tui/code-review.md">Docs →</a></em>
+    </td>
+  </tr>
 </table>
 
 ### CLI — Scriptable Equivalent of Every TUI Feature
@@ -404,6 +411,10 @@ The `/reflect` skill captures learnings. The `/research` and `/prime` skills ret
 ---
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/assets/diagrams/ecosystem-architecture.svg" alt="agents-in-a-box ecosystem architecture — ainb TUI Rust workspace, JSON-RPC plugin host, fleet orchestration, portable toolkit deploying to 9+ tool homes, reflect GraphRAG memory, and the on-disk state that ties them together" width="900">
+</p>
 
 ```
 agents-in-a-box/

@@ -1,19 +1,21 @@
-//! Tripwire: Esc on the loaded burndown screen pops back to home.
+//! Tripwire: Esc on the loaded burndown screen returns to its origin.
 //!
-//! User-visible regression we're locking down: when the burndown
-//! plugin is fully rendered, pressing `Esc` MUST return the user to
-//! the home screen (sidebar + welcome panel). Before the fix in
-//! `is_host_reserved_key`, every keystroke — including `Esc` — was
-//! forwarded to the plugin via the one-way `plugin/handle_key`
-//! notification. The plugin's Esc handler popped filter chips or
-//! closed zoom, but when there was nothing to pop it silently
-//! swallowed the key, leaving the user stuck on the analytics screen.
+//! User-visible contract we're locking down: when the burndown plugin
+//! is fully rendered at its ROOT view (no zoom/overlay/chips), pressing
+//! `Esc` MUST close the panel back to the screen it was opened from —
+//! home when opened via the home sidebar (`i`), the session list when
+//! opened from the session list (`i` mirrors there too).
 //!
-//! The fix: Esc is now host-reserved (see
-//! `crates/ainb-core/src/app/screens/builtin.rs::is_host_reserved_key`)
-//! so it bypasses the plugin forwarder and routes through the central
-//! key dispatch to `GoToHomeScreen`. The plugin's internal pop-state
-//! semantics moved to `Backspace` (see `tripwire_burndown_keys.rs`).
+//! Mechanism (overlay-panels redesign): Esc is forwarded to the plugin
+//! (`is_host_reserved_key` no longer reserves it). The plugin pops one
+//! internal level per press; at the root it publishes
+//! `ui.close_request` on the snapshot bus, and the host's
+//! `tick_panel_close_requests` poll navigates back to the saved
+//! `previous_screen`. So this tripwire exercises the full round trip:
+//! key forward → root-Esc detection → publish → host poll → nav.
+//! The earlier silent-swallow failure mode (one-way `plugin/handle_key`
+//! with no close signal left the user stuck on analytics) is exactly
+//! what these assertions would catch.
 //!
 //! Skips gracefully if `tmux` isn't on `$PATH` or `dist/plugins/` isn't
 //! staged — mirrors the gate pattern in
@@ -94,6 +96,17 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the `i` keystroke this tripwire sends.
+    // `prompt_dismissed` mirrors the user's "Don't ask again" choice
+    // (see `ainb_plugin_notifyd::dismiss_prompt`).
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 
     let fixture = fixture_root();
     let claude_src = fixture.join("claude").join("projects");
@@ -180,7 +193,7 @@ fn esc_on_burndown_returns_to_home() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen — sidebar + Stats entry visible.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_home = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -199,7 +212,7 @@ fn esc_on_burndown_returns_to_home() {
 
     // Open burndown.
     send_key(&session, "i");
-    let burndown_deadline = Instant::now() + Duration::from_secs(45);
+    let burndown_deadline = Instant::now() + Duration::from_secs(90);
     let on_burndown = poll_capture(&session, burndown_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
@@ -217,11 +230,14 @@ fn esc_on_burndown_returns_to_home() {
         "burndown render missing `Usage Analytics`:\n---\n{burndown_cap}\n---"
     );
 
-    // Press Esc. Wait for home chrome to reappear. This is the
-    // assertion that locks the fix: before host-reserving Esc, the
-    // plugin silently swallowed it and the user stayed on burndown.
+    // Press Esc. Wait for home chrome to reappear. This locks the full
+    // close round trip: the host forwards Esc to the plugin, the
+    // plugin (at its root view) publishes `ui.close_request`, and the
+    // host's poll pops back to the origin screen — home here, because
+    // burndown was opened from the home sidebar. A regression anywhere
+    // along that chain leaves the user stuck on the analytics screen.
     send_key(&session, "Escape");
-    let back_home_deadline = Instant::now() + Duration::from_secs(10);
+    let back_home_deadline = Instant::now() + Duration::from_secs(25);
     let back_home = poll_capture(&session, back_home_deadline, |c| {
         // Home chrome: sidebar with Stats entry visible AND the
         // burndown's "Usage Analytics" title gone. Either alone is
@@ -235,7 +251,104 @@ fn esc_on_burndown_returns_to_home() {
 
     assert!(
         back_home.is_some(),
-        "Esc on burndown did not return to home within 10s. \
+        "Esc on burndown did not return to home within 25s. \
          Final capture:\n---\n{final_cap}\n---"
+    );
+}
+
+/// Same close round trip, but with the panel opened FROM THE SESSION
+/// LIST (`s` → `i`). Esc must return to the session list — not home —
+/// proving the host pops the saved `previous_screen` rather than
+/// hardcoding a destination. This is the core overlay-panels contract:
+/// panels return to wherever they were opened from.
+#[test]
+fn esc_on_burndown_returns_to_session_list_when_opened_there() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    let Some(plugin_root) = plugins_staged() else {
+        eprintln!(
+            "SKIP: dist/plugins/{{burndown,session-reader}} not staged — \
+             run `scripts/build-plugins.sh` first"
+        );
+        return;
+    };
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_fixture_home(home_tmp.path());
+
+    let session = format!("tripwire-esc-sessions-{}", std::process::id());
+    let ainb = ainb_bin();
+
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
+        .status()
+        .expect("tmux new-session");
+    assert!(status.success(), "tmux new-session failed");
+
+    let cmd = format!(
+        "HOME={} AINB_PLUGIN_ROOT={} AINB_NOW={} exec {} tui",
+        home_tmp.path().display(),
+        plugin_root.display(),
+        fixture_now(),
+        ainb.display()
+    );
+    Command::new("tmux")
+        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .status()
+        .expect("tmux send launch cmd");
+
+    // Wait for HomeScreen, then hop to the session list.
+    let home_deadline = Instant::now() + Duration::from_secs(90);
+    if poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
+    }
+    send_key(&session, "s");
+
+    // Session-list chrome: the four-line menu legend is unique to this
+    // screen — `del-sel` only appears there.
+    let sessions_deadline = Instant::now() + Duration::from_secs(40);
+    if poll_capture(&session, sessions_deadline, |c| c.contains("del-sel")).is_none() {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+    }
+
+    // Open burndown from the session list.
+    send_key(&session, "i");
+    let burndown_deadline = Instant::now() + Duration::from_secs(90);
+    if poll_capture(&session, burndown_deadline, |c| {
+        c.contains("Usage Analytics")
+            && !c.contains("Waiting for session-reader plugin")
+            && c.contains('$')
+    })
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("burndown never rendered real data after `i`; last:\n---\n{last}\n---");
+    }
+
+    // Esc at the burndown root must land back on the SESSION LIST.
+    send_key(&session, "Escape");
+    let back_deadline = Instant::now() + Duration::from_secs(25);
+    let back_on_sessions = poll_capture(&session, back_deadline, |c| {
+        c.contains("del-sel") && !c.contains("Usage Analytics")
+    });
+
+    let final_cap = capture_pane(&session);
+    kill_session(&session);
+
+    assert!(
+        back_on_sessions.is_some(),
+        "Esc on burndown (opened from session list) did not return to the \
+         session list within 25s. Final capture:\n---\n{final_cap}\n---"
     );
 }

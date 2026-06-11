@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ainb-core",
     "crates/ainb-plugin-burndown",
+    "crates/ainb-plugin-learnings",
     "crates/ainb-plugin-notifyd",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
@@ -12,6 +13,13 @@ members = [
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
     "crates/ainb-plugin-witr",
+    "crates/ainb-plugin-abtop",
+    "crates/ainb-hangar-core",
+    "crates/ainb-hangar-secrets",
+    "crates/ainb-hangar-store",
+    "crates/ainb-hangar-proto",
+    "crates/ainb-hangar-daemon",
+    "../plugins/hangar-tui",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -20,7 +28,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.3.3"
+version = "1.6.1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"
@@ -29,6 +37,10 @@ repository = "https://github.com/stevengonsalvez/agents-in-a-box"
 [workspace.dependencies]
 # Core
 tokio = { version = "1.36", features = ["full"] }
+# CancellationToken for cooperative shutdown of the daemon's poll loops
+# (ainb-hangar-daemon inbound beads sync, P2.4). The default `sync` feature
+# carries `CancellationToken`.
+tokio-util = "0.7"
 ratatui = "0.30"
 crossterm = "0.29"
 
@@ -80,11 +92,19 @@ url = "2.5"
 
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"
-syntect = "5.0"
+syntect = "5.2"
 ansi-to-tui = "8.0.1"
+# Code Review diff surface: structured + word-level diff (similar),
+# Dracula theme + extra grammars (two-face). syntect→ratatui span conversion
+# is inlined.
+similar = { version = "2", features = ["inline"] }
+two-face = "0.5"
 
 # Persistent usage analytics cache
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+# Bumped 0.31 -> 0.32 so `libsqlite3-sys` (links = "sqlite3") resolves to a
+# single 0.30.1 copy shared with sqlx-sqlite 0.8 in ainb-hangar-store. Two
+# crates linking different libsqlite3-sys majors is a hard `links` collision.
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 blake3 = "1"
 bincode = "1.3"
 

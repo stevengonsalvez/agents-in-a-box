@@ -91,7 +91,7 @@ impl LayoutComponent {
                 Constraint::Length(3), // Top status bar
                 Constraint::Min(0),    // Main content area
                 Constraint::Length(3), // Session info (single line + borders)
-                Constraint::Length(4), // Bottom menu bar (2 lines + borders)
+                Constraint::Length(6), // Bottom menu bar (4 lines + borders)
             ])
             .split(frame.area());
 
@@ -228,7 +228,29 @@ impl LayoutComponent {
         frame.render_widget(rail, area);
     }
 
+    /// Bottom shortcut legend. Two presentations share the same key set:
+    ///   - **Two-column** (wide terminals): session actions on the left,
+    ///     panels/views on the right, split by a vertical divider. Reclaims
+    ///     the horizontal space the old centred stack wasted.
+    ///   - **Stacked** (narrow terminals, < `TWO_COL_MIN_WIDTH`): the original
+    ///     four centred lines, which the 80-col truncation test still pins.
+    ///
+    /// The dispatch is width-only so the layout degrades predictably and the
+    /// `menu_bar_keys_not_truncated_at_80_cols` test exercises the stacked
+    /// path unchanged.
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        // Below this width the two-column split can't hold the widest
+        // session-action line (~41 cols) plus the panels column without
+        // clipping, so fall back to the stacked legend.
+        const TWO_COL_MIN_WIDTH: u16 = 100;
+        if area.width >= TWO_COL_MIN_WIDTH {
+            self.render_menu_bar_two_col(frame, area, state);
+        } else {
+            self.render_menu_bar_stacked(frame, area, state);
+        }
+    }
+
+    fn render_menu_bar_stacked(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         // Pure decision for which restart-shaped affordance to surface.
         // See test below for the truth table.
         // The session-action group's restart-shaped affordance is split
@@ -240,125 +262,126 @@ impl LayoutComponent {
         // events.rs:868 for the dispatch logic.
         let (restart_key, restart_label) = restart_affordance(state.selected_session());
 
-        // Premium styled command bar with separators - 2 lines for better readability
-        // Line 1: Navigation, Session Actions
+        // Premium styled command bar with separators - 3 lines for better
+        // discoverability. Grouped: (1) navigation + selection, (2) session
+        // actions, (3) git / tools / system. Every key that the home screen
+        // actually binds is surfaced here so nothing is hidden from the user.
+        let key = |k: &'static str, color: Color| {
+            Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        };
+        let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+        let sep = || Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER));
+        let red = Color::Rgb(230, 100, 100);
+
+        // Line 1: Navigation + selection. Panel shortcuts (inbox/stats/
+        // witr/skills) moved to line 4 so the unread badge can grow
+        // without pushing this line past the 80-col minimum (see the
+        // `menu_bar_keys_not_truncated_at_80_cols` test).
         let line1_spans = vec![
-            // Navigation group
-            Span::styled("n", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("ew ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("E", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("xpand ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "Tab",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" focus", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // Session actions group
-            Span::styled(
-                "a",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("ttach ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "i",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("nteractive ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                restart_key,
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(restart_label, Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "d",
-                Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("elete ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("$", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "o",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" editor", Style::default().fg(MUTED_GRAY)),
+            key("n", GOLD),
+            desc("ew "),
+            key("E", GOLD),
+            desc("xpand "),
+            key("Tab", GOLD),
+            desc(" focus"),
+            sep(),
+            // Attach / select group
+            key("a", SELECTION_GREEN),
+            desc("ttach "),
+            key("l", SELECTION_GREEN),
+            desc("ive "),
+            key("1-9", SELECTION_GREEN),
+            desc(" quick "),
+            key("Space", SELECTION_GREEN),
+            desc(" select"),
+            sep(),
+            key("s", GOLD),
+            desc("tar"),
         ];
 
-        // Line 2: Git, Tools, System
+        // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
         let line2_spans = vec![
-            // Git group
-            Span::styled(
-                "g",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("it ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "p",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" commit", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // Tools group
-            Span::styled(
-                "c",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("laude ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "f",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" refresh ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "x",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cleanup", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // System group
-            Span::styled(
-                "r",
-                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" re-auth ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "H",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" help ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "q",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" home", Style::default().fg(MUTED_GRAY)),
+            key(restart_key, SELECTION_GREEN),
+            desc(restart_label),
+            key("d", red),
+            desc("elete "),
+            key("D", red),
+            desc(" del-sel "),
+            key("o", SELECTION_GREEN),
+            desc(" editor "),
+            key("$", GOLD),
+            desc(" shell "),
+            key("F2", SELECTION_GREEN),
+            desc(" rename"),
+            sep(),
+            key("g", CORNFLOWER_BLUE),
+            desc("it "),
+            key("p", CORNFLOWER_BLUE),
+            desc(" commit"),
         ];
 
-        // ainb-hooks inbox shortcut on the menu bar. Always shown so
-        // users can discover the Inbox screen even on a fresh install
-        // with zero events. When the store reports unread + non-
-        // dismissed rows, a `● N` glyph is rendered alongside the
-        // `I inbox` hint to surface that there is something to read.
+        // Line 3: Tools
+        let line3_spans = vec![
+            key("c", WARNING_ORANGE),
+            desc("laude "),
+            key("f", WARNING_ORANGE),
+            desc(" refresh "),
+            key("F", WARNING_ORANGE),
+            desc(" filter "),
+            key("x", WARNING_ORANGE),
+            desc(" cleanup"),
+            sep(),
+            key("A", MUTED_GRAY),
+            desc(" re-auth"),
+        ];
+
+        // Line 4: Panels + System. Every panel screen mirrors its
+        // home-menu letter here (the session-list key handler binds the
+        // same set), and closing a panel returns to this screen. The
+        // inbox hint is always shown so users can discover the Inbox
+        // screen even on a fresh install with zero events. When the
+        // store reports unread + non-dismissed rows, a `● N` glyph is
+        // rendered alongside the `b inbox` hint, capped at `99+` so a
+        // large backlog can't widen the bar unbounded.
         let inbox_unread = state
             .inbox_state
             .store
             .as_ref()
             .and_then(|s| s.unread_count().ok())
             .unwrap_or(0);
-        let mut line2_spans = line2_spans;
-        line2_spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
-        if inbox_unread > 0 {
-            line2_spans.push(Span::styled(
-                format!("● {inbox_unread} "),
+        let mut line4_spans = Vec::new();
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            line4_spans.push(Span::styled(
+                badge,
                 Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
             ));
         }
-        line2_spans.push(Span::styled(
-            "b",
-            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-        ));
-        line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));
+        line4_spans.extend([
+            key("b", GOLD),
+            desc(" inbox "),
+            key("i", GOLD),
+            desc(" stats "),
+            key("w", GOLD),
+            desc(" witr "),
+            key("k", GOLD),
+            desc(" skills "),
+            key("m", GOLD),
+            desc(" memory "),
+            key("t", GOLD),
+            desc(" abtop"),
+            sep(),
+            key("?/H", CORNFLOWER_BLUE),
+            desc(" help "),
+            key("q", CORNFLOWER_BLUE),
+            desc(" home"),
+        ]);
 
-        let menu_lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
+        let menu_lines = vec![
+            Line::from(line1_spans),
+            Line::from(line2_spans),
+            Line::from(line3_spans),
+            Line::from(line4_spans),
+        ];
 
         let menu = Paragraph::new(menu_lines)
             .block(
@@ -371,6 +394,193 @@ impl LayoutComponent {
             .alignment(Alignment::Center);
 
         frame.render_widget(menu, area);
+    }
+
+    /// Wide-terminal legend: two columns separated by a vertical rule. The
+    /// left column is everything that acts on a session/workspace; the right
+    /// column is the panels, views, and navigation. Two of the keys are
+    /// mode-specific — `x cleanup` only applies to Boss/container sessions and
+    /// `F filter` only to normal interactive sessions — so the inactive one is
+    /// dimmed based on the highlighted row (see `mode_dim_flags`).
+    fn render_menu_bar_two_col(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let (restart_key, restart_label) = restart_affordance(state.selected_session());
+        let (dim_filter, dim_cleanup) = mode_dim_flags(state.selected_session());
+
+        let key = |k: &'static str, color: Color| {
+            Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        };
+        let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+        let red = Color::Rgb(230, 100, 100);
+        // A mode key that doesn't apply to the highlighted session renders in
+        // the border colour so it reads as present-but-inactive rather than
+        // disappearing (which would make the bar twitch as the cursor moves).
+        let dim = |s: &'static str| Span::styled(s, Style::default().fg(SUBDUED_BORDER));
+
+        // `F filter` (normal-only) and `x cleanup` (Boss-only) dim when the
+        // highlighted session is the other mode — see `mode_dim_flags`.
+        let (filter_key, filter_desc) = if dim_filter {
+            (dim("F"), dim(" filter  "))
+        } else {
+            (key("F", WARNING_ORANGE), desc(" filter  "))
+        };
+        let (cleanup_key, cleanup_desc) = if dim_cleanup {
+            (dim("x"), dim(" cleanup  "))
+        } else {
+            (key("x", WARNING_ORANGE), desc(" cleanup  "))
+        };
+
+        // ── Left column: session & workspace actions ──────────────────────
+        let left_lines = vec![
+            Line::from(vec![
+                key("n", GOLD),
+                desc("ew  "),
+                key("a", SELECTION_GREEN),
+                desc("ttach  "),
+                key("l", SELECTION_GREEN),
+                desc("ive  "),
+                key("1-9", SELECTION_GREEN),
+                desc(" quick  "),
+                key("Space", SELECTION_GREEN),
+                desc(" select"),
+            ]),
+            Line::from(vec![
+                key(restart_key, SELECTION_GREEN),
+                desc(restart_label),
+                key("d", red),
+                desc("elete  "),
+                key("D", red),
+                desc(" del-sel  "),
+                key("s", GOLD),
+                desc("tar"),
+            ]),
+            Line::from(vec![
+                key("o", SELECTION_GREEN),
+                desc(" editor  "),
+                key("$", GOLD),
+                desc(" shell  "),
+                key("p", CORNFLOWER_BLUE),
+                desc(" commit  "),
+                key("F2", SELECTION_GREEN),
+                desc(" rename"),
+            ]),
+            Line::from(vec![
+                key("f", WARNING_ORANGE),
+                desc(" refresh  "),
+                filter_key,
+                filter_desc,
+                cleanup_key,
+                cleanup_desc,
+                key("A", MUTED_GRAY),
+                desc(" re-auth"),
+            ]),
+        ];
+
+        // ── Right column: panels, views & navigation ─────────────────────
+        // The inbox unread badge keeps its place ahead of `b inbox`, capped at
+        // `99+` so a backlog can't widen the column past the divider.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut row1 = Vec::new();
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            row1.push(Span::styled(
+                badge,
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        row1.extend([
+            key("b", GOLD),
+            desc(" inbox  "),
+            key("i", GOLD),
+            desc(" stats  "),
+            key("w", GOLD),
+            desc(" witr"),
+        ]);
+        let right_lines = vec![
+            Line::from(row1),
+            Line::from(vec![
+                key("k", GOLD),
+                desc(" skills  "),
+                key("m", GOLD),
+                desc(" memory  "),
+                key("t", GOLD),
+                desc(" abtop"),
+            ]),
+            Line::from(vec![
+                key("g", CORNFLOWER_BLUE),
+                desc("it  "),
+                key("c", WARNING_ORANGE),
+                desc("laude  "),
+                key("E", GOLD),
+                desc("xpand"),
+            ]),
+            Line::from(vec![
+                key("Tab", GOLD),
+                desc(" focus  "),
+                key("?/H", CORNFLOWER_BLUE),
+                desc(" help  "),
+                key("q", CORNFLOWER_BLUE),
+                desc(" home"),
+            ]),
+        ];
+
+        // Outer frame carries the two section headers on its top border so
+        // they cost no inner row — the four content rows mirror the stacked
+        // legend's height exactly (menu area stays `Length(6)`).
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .style(Style::default().bg(PANEL_BG))
+            .title(
+                Line::from(vec![
+                    Span::styled(" ⌨ ", Style::default().fg(GOLD)),
+                    Span::styled(
+                        "Session actions ",
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+                .alignment(Alignment::Left),
+            )
+            .title(
+                Line::from(vec![Span::styled(
+                    " Panels & views ",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                )])
+                .alignment(Alignment::Right),
+            );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Split the body into [left | divider | right]. The columns are
+        // centred within their halves so the legend spreads across the bar
+        // instead of huddling in the middle the way the old stack did.
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        frame.render_widget(
+            Paragraph::new(left_lines).alignment(Alignment::Center),
+            cols[0],
+        );
+
+        let divider: Vec<Line> = (0..inner.height)
+            .map(|_| Line::from(Span::styled("│", Style::default().fg(SUBDUED_BORDER))))
+            .collect();
+        frame.render_widget(Paragraph::new(divider), cols[1]);
+
+        frame.render_widget(
+            Paragraph::new(right_lines).alignment(Alignment::Center),
+            cols[2],
+        );
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
@@ -676,12 +886,27 @@ impl LayoutComponent {
 ///
 /// `r` resumes a Stopped Interactive (tmux) session in-place — the
 /// recoverable escape hatch added with the soft-stop feature. `e`
-/// restarts a Boss/Docker session into a fresh container.
+/// recreates a Boss/Docker session in a fresh container.
 ///
-/// Showing `e restart` for a stopped Interactive session would point
-/// users at the wrong key — pressing `e` triggers Docker restart logic
-/// that doesn't apply, while `r` is what actually resumes the tmux
-/// pane and relaunches the embedded CLI.
+/// The label deliberately reads `recreate` (not the generic `restart`)
+/// so it is obvious this is the Docker/Boss path — `e` tears down the
+/// old container and spins up a new one. Showing it for a stopped
+/// Interactive session would point users at the wrong key — pressing
+/// `e` triggers Docker logic that doesn't apply, while `r` is what
+/// actually resumes the tmux pane and relaunches the embedded CLI.
+/// Format the inbox unread badge for the menu bar, or `None` when there is
+/// nothing unread. The count is capped at `99+` so a large backlog can't
+/// widen line 1 of the bar past the 80-col minimum (the badge is the only
+/// variable-width token on that line). The widest possible badge is
+/// `"● 99+ "` (6 columns).
+fn inbox_unread_badge(unread: u64) -> Option<String> {
+    match unread {
+        0 => None,
+        1..=99 => Some(format!("● {unread} ")),
+        _ => Some("● 99+ ".to_string()),
+    }
+}
+
 fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
     use crate::models::{SessionMode, SessionStatus};
     let stopped_interactive = matches!(
@@ -692,7 +917,24 @@ fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static st
     if stopped_interactive {
         ("r", " resume ")
     } else {
-        ("e", " restart ")
+        ("e", " recreate ")
+    }
+}
+
+/// Decide which mode-specific legend keys to dim for the highlighted session.
+///
+/// Two keys only apply to one mode: `F filter` cycles the *normal interactive*
+/// session filter, and `x cleanup` reaps orphaned *Boss/container* sessions.
+/// Returns `(dim_filter, dim_cleanup)` — when a Boss session is selected the
+/// normal-only `filter` is dimmed, and when an Interactive session is selected
+/// the Boss-only `cleanup` is dimmed. With no selection (or any other row type)
+/// neither is dimmed, since both actions are still reachable.
+fn mode_dim_flags(selected: Option<&crate::models::Session>) -> (bool, bool) {
+    use crate::models::SessionMode;
+    match selected.map(|s| &s.mode) {
+        Some(SessionMode::Boss) => (true, false),
+        Some(SessionMode::Interactive) => (false, true),
+        None => (false, false),
     }
 }
 
@@ -758,6 +1000,12 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             format!(" {pct}%"),
             Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
         ));
+        if let Some(reset) = live.five_hour_resets_at {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
     }
     if let Some(pct) = live.seven_day_pct {
         if !out.is_empty() {
@@ -772,19 +1020,20 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             format!(" {pct}%"),
             Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
         ));
+        if let Some(reset) = live.seven_day_resets_at {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
     }
     // today_cost_usd intentionally not rendered: Claude Code's
     // /cost/total_cost_usd is the lifetime cost of a *single* session
     // (whichever invoked the statusline most recently), not today's
     // total. Misleading at a glance — keep the field on the cache
-    // schema but don't surface it.
-    if let Some(d) = live.resets_in {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled("⏱ ", Style::default().fg(SOFT_WHITE)));
-        out.push(Span::styled(format_hms(d), Style::default().fg(SOFT_WHITE)));
-    }
+    // schema but don't surface it. The old combined "⏱ Xh Ym" countdown
+    // was likewise dropped in favour of the absolute per-window reset
+    // instants ("↻ <date> <time>") rendered next to each bar above.
     out
 }
 
@@ -832,15 +1081,11 @@ fn bar_color_7d(pct: u8) -> Color {
     }
 }
 
-fn format_hms(d: std::time::Duration) -> String {
-    let total = d.as_secs();
-    let h = total / 3600;
-    let m = (total % 3600) / 60;
-    if h > 0 {
-        format!("{h}h {m:02}m")
-    } else {
-        format!("{m}m")
-    }
+/// Format an absolute quota-reset instant for the top bar, in the
+/// viewer's local timezone: e.g. `Jun 8 05:00`. Date + time so both the
+/// 5-hour (same/next-day) and weekly (days-out) windows read unambiguously.
+fn format_reset_at(reset: chrono::DateTime<chrono::Utc>) -> String {
+    reset.with_timezone(&chrono::Local).format("%b %-d %H:%M").to_string()
 }
 
 #[cfg(test)]
@@ -866,11 +1111,14 @@ mod live_widget_tests {
 
     #[test]
     fn live_widget_renders_5h_7d_and_reset() {
+        use chrono::{TimeZone, Utc};
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
             today_cost_usd: Some(1.5),
             resets_in: Some(Duration::from_secs(2 * 3600)),
+            five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap()),
+            seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 12, 5, 0, 0).unwrap()),
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
@@ -885,7 +1133,10 @@ mod live_widget_tests {
         // it's a single session's lifetime cost, not today's total.
         assert!(!text.contains("$"));
         assert!(!text.contains("today"));
-        assert!(text.contains("2h 00m"));
+        // The combined "⏱ Xh Ym" countdown is gone; each window now carries
+        // its own absolute reset stamp prefixed by ↻ (local-tz date+time).
+        assert!(!text.contains("⏱"));
+        assert_eq!(text.matches('↻').count(), 2, "one reset stamp per window");
     }
 
     #[test]
@@ -895,6 +1146,8 @@ mod live_widget_tests {
             seven_day_pct: None,
             today_cost_usd: None,
             resets_in: None,
+            five_hour_resets_at: None,
+            seven_day_resets_at: None,
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
@@ -905,6 +1158,7 @@ mod live_widget_tests {
         assert!(!text.contains("wk"));
         assert!(!text.contains("$"));
         assert!(!text.contains("⏱"));
+        assert!(!text.contains("↻"), "no reset stamp when instants absent");
     }
 
     #[test]
@@ -935,17 +1189,84 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn format_hms_smoke() {
-        assert_eq!(format_hms(Duration::ZERO), "0m");
-        assert_eq!(format_hms(Duration::from_secs(45 * 60)), "45m");
-        assert_eq!(format_hms(Duration::from_secs(3600)), "1h 00m");
+    fn format_reset_at_is_local_date_and_time() {
+        use chrono::{TimeZone, Utc};
+        let reset = Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap();
+        let s = format_reset_at(reset);
+        // Host-local tz varies, but the rendered shape is fixed:
+        // "<Mon> <D> <HH>:<MM>" — three space-separated parts.
+        let parts: Vec<&str> = s.split(' ').collect();
+        assert_eq!(parts.len(), 3, "expected `Mon D HH:MM`, got {s:?}");
+        // Month: 3-letter English abbreviation (chrono's %b, locale-independent).
+        assert_eq!(parts[0].len(), 3, "month abbrev: {s:?}");
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_alphabetic()),
+            "month abbrev: {s:?}"
+        );
+        // Day: 1–2 digits, no zero-pad (%-d).
+        assert!(
+            (1..=2).contains(&parts[1].len()) && parts[1].chars().all(|c| c.is_ascii_digit()),
+            "day numeral: {s:?}"
+        );
+        // Clock: zero-padded HH:MM.
+        let clock: Vec<&str> = parts[2].split(':').collect();
+        assert_eq!(clock.len(), 2, "HH:MM: {s:?}");
+        assert!(
+            clock[0].len() == 2 && clock[0].bytes().all(|b| b.is_ascii_digit()),
+            "HH: {s:?}"
+        );
+        assert!(
+            clock[1].len() == 2 && clock[1].bytes().all(|b| b.is_ascii_digit()),
+            "MM: {s:?}"
+        );
+    }
+
+    // format_reset_at runs in the per-frame render path, so it must never
+    // panic regardless of the instant handed to it. Exercise the extremes
+    // of chrono's representable range plus the epoch boundary; the test
+    // passing at all (no panic/unwind) is the assertion.
+    #[test]
+    fn format_reset_at_never_panics_on_extreme_instants() {
+        use chrono::{TimeZone, Utc};
+        let cases = [
+            Utc.timestamp_opt(0, 0).unwrap(),
+            Utc.with_ymd_and_hms(1, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap(),
+        ];
+        for c in cases {
+            assert!(!format_reset_at(c).is_empty(), "non-empty for {c}");
+        }
     }
 }
 
 #[cfg(test)]
 mod menu_bar_tests {
-    use super::restart_affordance;
+    use super::{inbox_unread_badge, restart_affordance};
     use crate::models::{Session, SessionMode, SessionStatus};
+
+    #[test]
+    fn inbox_badge_hidden_when_zero() {
+        assert_eq!(inbox_unread_badge(0), None);
+    }
+
+    #[test]
+    fn inbox_badge_shows_exact_count_up_to_99() {
+        assert_eq!(inbox_unread_badge(1).as_deref(), Some("● 1 "));
+        assert_eq!(inbox_unread_badge(99).as_deref(), Some("● 99 "));
+    }
+
+    #[test]
+    fn inbox_badge_caps_at_99_plus_and_bounds_width() {
+        // Beyond 99 the count is clamped so a huge backlog can't widen the
+        // bar. The widest badge must stay at 6 columns ("● 99+ ").
+        assert_eq!(inbox_unread_badge(100).as_deref(), Some("● 99+ "));
+        for n in [100u64, 655, 9_999, u64::MAX] {
+            let badge = inbox_unread_badge(n).expect("badge present");
+            assert_eq!(badge, "● 99+ ");
+            assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
+        }
+    }
 
     fn stopped_interactive() -> Session {
         let mut s = Session::new("t".to_string(), "/tmp".to_string());
@@ -975,23 +1296,241 @@ mod menu_bar_tests {
     }
 
     #[test]
-    fn running_interactive_shows_e_restart() {
-        // `r` is reauth-credentials when the session isn't stopped, so
-        // surfacing `r resume` would be wrong. Fall back to `e restart`.
+    fn running_interactive_shows_e_recreate() {
+        // `r` only resumes a *stopped* interactive session, so surfacing
+        // `r resume` for a running one would be wrong. Fall back to the
+        // Docker/Boss `e recreate` affordance.
         let s = running_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
     }
 
     #[test]
-    fn stopped_boss_shows_e_restart() {
-        // Boss/Docker sessions use the Docker container restart path.
+    fn stopped_boss_shows_e_recreate() {
+        // Boss/Docker sessions use the Docker container recreate path.
         let s = stopped_boss();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
     }
 
     #[test]
-    fn no_selection_shows_e_restart() {
-        assert_eq!(restart_affordance(None), ("e", " restart "));
+    fn no_selection_shows_e_recreate() {
+        assert_eq!(restart_affordance(None), ("e", " recreate "));
+    }
+
+    /// Render the menu bar at the conventional 80-column minimum and assert
+    /// every advertised key token survives — i.e. nothing is silently
+    /// truncated off either end of the centered four-line bar. This guards
+    /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
+    /// inbox) overflowed 80 cols and clipped the inbox shortcut.
+    #[test]
+    fn menu_bar_keys_not_truncated_at_80_cols() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                layout.render_menu_bar(f, area, &state);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        // With no session selected the restart slot shows `e recreate`.
+        for token in [
+            "ew",       // new
+            "xpand",    // expand
+            "focus",    // Tab focus
+            "ttach",    // attach
+            "ive",      // l — live interactive embed
+            "1-9",      // quick attach
+            "Space",    // multi-select
+            "tar",      // star
+            "recreate", // e — Boss/Docker recreate (no selection)
+            "del-sel",  // D bulk delete
+            "editor",   // o
+            "shell",    // $
+            "F2",       // rename
+            "git",      // g (rendered as g + "it")
+            "commit",   // p
+            "laude",    // c claude
+            "refresh",  // f
+            "filter",   // F  ← the key that was missing before
+            "cleanup",  // x
+            "re-auth",  // A (moved off r)
+            "?/H",      // help
+            "home",     // q
+            "inbox",    // b
+            "stats",    // i — analytics panel
+            "witr",     // w — process-causality browser
+            "skills",   // k — skills browser
+            "memory",   // m — learnings KB browser
+            "abtop",    // t — top-for-agents monitor
+        ] {
+            assert!(
+                rendered.contains(token),
+                "menu token {token:?} truncated at 80 cols.\nRendered:\n{rendered}"
+            );
+        }
+
+        // Stronger guard: the centered Paragraph truncates from both ends when
+        // a line is wider than the inner area. Each of the 4 content rows
+        // (rows 1..=4; rows 0 and 5 are the rounded border) must therefore
+        // keep at least one space of padding against both inner edges — if a
+        // row filled edge-to-edge it would mean content was clipped.
+        let buf = terminal.backend().buffer();
+        for y in 1..=4u16 {
+            let left = buf.get(1, y).symbol().to_string();
+            let right = buf.get(78, y).symbol().to_string();
+            assert!(
+                left == " " && right == " ",
+                "menu row {y} fills the bar edge-to-edge (clipped). \
+                 left={left:?} right={right:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_filter_for_boss() {
+        // Boss/container row → the normal-only `F filter` is the inactive key.
+        let s = stopped_boss();
+        assert_eq!(super::mode_dim_flags(Some(&s)), (true, false));
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_cleanup_for_interactive() {
+        // Interactive row → the Boss-only `x cleanup` is the inactive key.
+        let s = running_interactive();
+        assert_eq!(super::mode_dim_flags(Some(&s)), (false, true));
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_nothing_without_selection() {
+        // No highlighted session → both mode actions stay reachable, so
+        // neither is dimmed.
+        assert_eq!(super::mode_dim_flags(None), (false, false));
+    }
+
+    /// On a wide terminal the legend switches to the two-column split. Assert
+    /// the divider and both section headers render (proving we took the split
+    /// path, not the stacked fallback) and that every advertised key survives
+    /// — the wide analogue of `menu_bar_keys_not_truncated_at_80_cols`.
+    #[test]
+    fn menu_bar_two_col_keeps_every_key_and_draws_divider() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        // Comfortably above TWO_COL_MIN_WIDTH so the split path renders.
+        let mut terminal = Terminal::new(TestBackend::new(140, 6)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                layout.render_menu_bar(f, area, &state);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        // Vertical divider proves the two-column path (stacked has none).
+        assert!(
+            rendered.contains('│'),
+            "two-column divider missing:\n{rendered}"
+        );
+        // Section headers ride the top border.
+        assert!(
+            rendered.contains("Session actions"),
+            "left header missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Panels & views"),
+            "right header missing:\n{rendered}"
+        );
+
+        for token in [
+            "ew",       // new
+            "ttach",    // attach
+            "ive",      // l — live interactive embed
+            "1-9",      // quick attach
+            "Space",    // multi-select
+            "tar",      // star
+            "recreate", // e — Boss/Docker recreate (no selection)
+            "del-sel",  // D bulk delete
+            "editor",   // o
+            "shell",    // $
+            "F2",       // rename
+            "commit",   // p
+            "refresh",  // f
+            "filter",   // F (dimmed when a Boss row is selected, still present)
+            "cleanup",  // x (dimmed when an Interactive row is selected)
+            "re-auth",  // A
+            "inbox",    // b
+            "stats",    // i
+            "witr",     // w
+            "skills",   // k
+            "memory",   // m
+            "abtop",    // t
+            "git",      // g
+            "claude",   // c
+            "xpand",    // E expand
+            "focus",    // Tab focus
+            "?/H",      // help
+            "home",     // q
+        ] {
+            assert!(
+                rendered.contains(token),
+                "menu token {token:?} missing in two-col legend.\nRendered:\n{rendered}"
+            );
+        }
+    }
+
+    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (100),
+    /// which is also where its columns are narrowest and clipping would first
+    /// bite. Render at the boundary and assert the longest token in each column
+    /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
+    /// content rows keep their edge padding — the centred Paragraphs would eat
+    /// both ends if a line overflowed its half.
+    #[test]
+    fn menu_bar_two_col_no_clip_at_threshold_width() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        // Took the split path, not the stacked fallback.
+        assert!(
+            rendered.contains('│'),
+            "no divider at threshold:\n{rendered}"
+        );
+        for token in ["re-auth", "recreate", "del-sel", "abtop", "home", "witr"] {
+            assert!(
+                rendered.contains(token),
+                "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
+            );
+        }
+        // Inner edges (cols 1 and 98) must stay blank on every content row.
+        for y in 1..=4u16 {
+            let left = buf.get(1, y).symbol().to_string();
+            let right = buf.get(98, y).symbol().to_string();
+            assert!(
+                left == " " && right == " ",
+                "menu row {y} clipped to the edge at width 100. left={left:?} right={right:?}"
+            );
+        }
     }
 }
 

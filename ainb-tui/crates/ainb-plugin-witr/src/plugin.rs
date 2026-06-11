@@ -14,8 +14,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, Viewport, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
+    RenderParams, Result, Viewport, WireBuffer,
 };
 
 use crate::cli::{self, OutputFormat};
@@ -75,11 +75,7 @@ impl Plugin for WitrPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(
-        &mut self,
-        _host: &HostClient,
-        _granted_capabilities: &[String],
-    ) -> Result<()> {
+    async fn on_init(&mut self, _host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         let result = detect_witr().await;
         match &result {
             crate::detect::DetectResult::Ready { path, .. } => {

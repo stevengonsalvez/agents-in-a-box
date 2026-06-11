@@ -433,13 +433,29 @@ impl WorktreeManager {
             return Ok(());
         }
 
-        // Get the base branch commit
-        let base_branch_ref = repo.find_branch(base_branch, BranchType::Local)?;
-        let base_commit = base_branch_ref.get().peel_to_commit()?;
+        // Resolve the base. Local branch first (legacy path), then any
+        // revparse-able ref — `origin/feature-x`, a tag, or a SHA. The base
+        // picker (2026-06) hands remote-tracking refs straight through here.
+        let base_commit = match repo.find_branch(base_branch, BranchType::Local) {
+            Ok(branch) => branch.get().peel_to_commit()?,
+            Err(_) => repo.revparse_single(base_branch)?.peel_to_commit()?,
+        };
 
         // Create the new branch
-        repo.branch(branch_name, &base_commit, false)?;
+        let mut new_branch = repo.branch(branch_name, &base_commit, false)?;
         info!("Created new branch: {} from {}", branch_name, base_branch);
+
+        // Checkout-direct case: branch created from its own remote-tracking
+        // ref (`feature-x` off `origin/feature-x`) — wire up the upstream so
+        // pull/push work out of the box in the worktree.
+        if base_branch == format!("origin/{branch_name}") {
+            if let Err(e) = new_branch.set_upstream(Some(base_branch)) {
+                warn!(
+                    "Could not set upstream {} for {}: {}",
+                    base_branch, branch_name, e
+                );
+            }
+        }
 
         Ok(())
     }
@@ -873,6 +889,26 @@ mod tests {
 
         let default_branch = manager.get_default_branch(&repo);
         assert!(!default_branch.is_empty());
+    }
+
+    #[test]
+    fn test_ensure_branch_exists_from_revparse_ref() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = create_test_repo(temp_dir.path()).unwrap();
+        let manager = WorktreeManager::with_base_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        // A SHA base exercises the revparse fallback — the same path
+        // remote-tracking refs (`origin/feature-x`) take when the base
+        // picker hands one through.
+        let head_sha = repo.head().unwrap().target().unwrap().to_string();
+        manager.ensure_branch_exists(&repo, "picked-base", &head_sha).unwrap();
+        assert!(repo.find_branch("picked-base", BranchType::Local).is_ok());
+
+        // Unresolvable base must error, not silently fall back.
+        assert!(
+            manager.ensure_branch_exists(&repo, "other", "origin/does-not-exist").is_err(),
+            "unknown base ref must fail loudly"
+        );
     }
 
     #[test]

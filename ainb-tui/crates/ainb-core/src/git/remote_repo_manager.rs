@@ -74,8 +74,32 @@ impl RemoteRepoManager {
 
     /// Check if a repo is already cached (standard clone with .git subdirectory)
     pub fn is_cached(&self, parsed: &ParsedRepo) -> bool {
-        let cache_path = self.get_cache_path(parsed);
+        Self::cache_path_is_populated(&self.get_cache_path(parsed))
+    }
+
+    /// The one definition of "this cache path holds a usable clone" — shared
+    /// by `is_cached` and `cached_source_path` so the rule can't drift.
+    fn cache_path_is_populated(cache_path: &Path) -> bool {
         cache_path.exists() && cache_path.join(".git").exists()
+    }
+
+    /// Cache path for a clonable remote source IF it is already cloned.
+    /// `None` for a not-yet-cached remote and for sources that never clone
+    /// (local paths, SSH sessions, filter text). This is the disk location
+    /// whose refs seed the Configure screen's branch-collision guards and
+    /// the base-branch popup — keep every caller on this one resolver so the
+    /// guards and the popup can never disagree about where refs live.
+    pub fn cached_source_path(&self, source: &RepoSource) -> Option<PathBuf> {
+        match source {
+            RepoSource::HttpsUrl(_)
+            | RepoSource::SshUrl(_)
+            | RepoSource::GithubShorthand { .. } => {
+                let parsed = source.parse_components().ok()?;
+                let cache_path = self.get_cache_path(&parsed);
+                Self::cache_path_is_populated(&cache_path).then_some(cache_path)
+            }
+            _ => None,
+        }
     }
 
     /// List remote branches without cloning (uses git ls-remote)
@@ -88,6 +112,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["ls-remote", "--heads", "--refs", &url])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .map_err(|e| RemoteRepoError::NetworkError(e.to_string()))?;
 
@@ -154,6 +180,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["ls-remote", "--symref", &url, "HEAD"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .ok()?;
 
@@ -210,11 +238,27 @@ impl RemoteRepoManager {
         let output = Command::new("git")
             .args(["clone", &url])
             .arg(&cache_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .map_err(|e| RemoteRepoError::CloneFailed(e.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // `git clone` can leave a partially-initialised directory behind on
+            // failure (e.g. auth rejected mid-transfer). `is_cached()` only
+            // checks for a `.git` entry, so a broken partial would be treated as
+            // a warm cache on the next attempt and never re-cloned after the
+            // user fixes credentials. Remove it so the retry starts clean.
+            if cache_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&cache_path) {
+                    warn!(
+                        "Failed to remove partial clone at {}: {}",
+                        cache_path.display(),
+                        e
+                    );
+                }
+            }
             return Err(classify_git_error(&stderr, &url));
         }
 
@@ -228,6 +272,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["fetch", "--all", "--prune"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .current_dir(cache_path)
             .output()
             .map_err(|e| RemoteRepoError::NetworkError(e.to_string()))?;
@@ -257,21 +303,42 @@ impl RemoteRepoManager {
         new_branch: &str,
         source: &RepoSource,
     ) -> Result<PathBuf, RemoteRepoError> {
+        // Resolve the default lazily inside the shared impl so the fetch
+        // happens first (origin/HEAD may move).
+        self.create_worktree_off_remote_branch(cache_path, worktree_path, new_branch, None, source)
+    }
+
+    /// Create a worktree for a NEW branch cut from an arbitrary remote branch
+    /// (`origin/<base_branch>`), after a fresh fetch. `base_branch = None`
+    /// resolves the remote's default (the star-launch policy). This is the
+    /// base-branch-picker path (2026-06): the picked entry's short name comes
+    /// straight through as `base_branch`.
+    pub fn create_worktree_off_remote_branch(
+        &self,
+        cache_path: &Path,
+        worktree_path: &Path,
+        new_branch: &str,
+        base_branch: Option<&str>,
+        source: &RepoSource,
+    ) -> Result<PathBuf, RemoteRepoError> {
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Refresh remote refs so origin/<default> reflects upstream. Defensive:
+        // Refresh remote refs so origin/<base> reflects upstream. Defensive:
         // clone_repo already fetches on cache reuse, but a directly-supplied
         // cache may be stale. Non-fatal — we can still branch off whatever
-        // origin/<default> currently points at.
+        // origin/<base> currently points at.
         let _ = Command::new("git")
             .args(["fetch", "origin", "--prune"])
             .current_dir(cache_path)
             .output();
 
-        let default_branch = self.resolve_default_branch(cache_path, source)?;
-        let start_point = format!("origin/{default_branch}");
+        let base = match base_branch {
+            Some(b) => b.to_string(),
+            None => self.resolve_default_branch(cache_path, source)?,
+        };
+        let start_point = format!("origin/{base}");
         info!(
             "Creating worktree at {} for new branch '{}' off {}",
             worktree_path.display(),
@@ -1090,6 +1157,39 @@ mod tests {
         let parsed = source.parse_components().unwrap();
 
         assert!(!manager.is_cached(&parsed));
+    }
+
+    #[test]
+    fn cached_source_path_resolves_only_cached_remotes() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        // Fake a cached clone: `is_cached` checks for `<cache>/.git` on disk.
+        let cached = temp_dir.path().join("github.com").join("owner").join("repo");
+        std::fs::create_dir_all(cached.join(".git")).unwrap();
+
+        // Cached remote → resolves to the clone-cache path. This is the seed
+        // for the Configure screen's branch-collision guards: without it a
+        // remote pick gets empty guard lists and an existing branch name only
+        // fails AFTER Launch, at `git worktree add -b` (the feat/ota repro).
+        let hit = RepoSource::GithubShorthand {
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        assert_eq!(manager.cached_source_path(&hit), Some(cached));
+
+        // Same shape, never cloned → None (guards backfill async instead).
+        let miss = RepoSource::GithubShorthand {
+            owner: "owner".to_string(),
+            repo: "never-cloned".to_string(),
+        };
+        assert_eq!(manager.cached_source_path(&miss), None);
+
+        // Non-clonable sources never resolve, even if a path happens to exist.
+        let local = RepoSource::LocalPath(temp_dir.path().to_path_buf());
+        assert_eq!(manager.cached_source_path(&local), None);
+        let ssh_session = RepoSource::SshSession("ssh://user@host".to_string());
+        assert_eq!(manager.cached_source_path(&ssh_session), None);
     }
 
     #[test]

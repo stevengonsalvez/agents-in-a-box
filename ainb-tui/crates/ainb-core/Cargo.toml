@@ -71,6 +71,9 @@ url = { workspace = true }
 pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
 ansi-to-tui = { workspace = true }
+# Code Review diff surface
+similar = { workspace = true }
+two-face = { workspace = true }
 
 # Persistent usage analytics cache
 rusqlite = { workspace = true }
@@ -82,6 +85,21 @@ ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
 # Notification daemon — used in-process for the Inbox screen reader.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
+# CSPRNG for `ainb hangar auth token create` (the OsRng passed to the store's
+# `mint_pat` / `mint_daemon_token`). All hashing/encoding lives in the store +
+# core; the CLI only supplies the random source.
+rand = "0.8"
+# Hangar control plane — backs the `ainb hangar <verb>` CLI namespace.
+ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
+ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon", version = "0.1.0" }
+# sqlx — the hangar CLI workspace-bootstrap path issues raw SQL against the
+# store's pool (`Store::pool`) for the default-workspace seed and lookups.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
 # Zero-copy byte buffers — required for `RuntimeHandle::publish_snapshot`'s
 # `payload: bytes::Bytes` parameter, used by the Phase 7c CLI dispatcher.
 bytes = "1.6"

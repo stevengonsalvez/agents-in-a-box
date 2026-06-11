@@ -15,6 +15,26 @@ Reproducible TUI screenshots for the project docs. Generated headlessly by [vhs]
 
 Both tapes run against the **contributor's real `$HOME`** so the screenshots reflect actual workspace state and Claude usage. The committed PNGs are point-in-time snapshots of whoever last regenerated them — they're not byte-identical across machines.
 
+### Code Review (animated)
+
+| File | What it shows |
+|---|---|
+| `code-review-diff.gif` | The Code Review surface — file sidebar, per-file diff blocks, syntax colours, row tints, gutter. |
+| `code-review-expand.gif` | Word-level emphasis (only changed tokens are brighter) + `z` revealing hidden context. |
+| `code-review-collapse.gif` | `Space` collapsing a file's diff block to its header and back. |
+| `code-review-hunk.gif` | `n` / `N` jumping hunks with the `Hunk x/y` counter. |
+
+These are recorded with vhs driving `ainb diff-review <repo>` on a throwaway demo repo (a few modified files with intra-line word changes, an untracked file, a deleted file), then optimised with `gifsicle -O3 --lossy=60 --colors 200 --resize-width 1100`. They don't need a seeded `$HOME` — `diff-review` skips onboarding and reads the target repo directly.
+
+### Overlay panels (animated)
+
+| File | Tape | What it shows |
+|---|---|---|
+| `overlay-home-stats-home.gif` | `overlay-home-stats-home.tape` | Open the Stats panel from the **home** menu (`i`) and `Esc` back — the panel returns to home. |
+| `overlay-sessions-stats-sessions.gif` | `overlay-sessions-stats-sessions.tape` | Open the same Stats panel from the **session list** (`s` then `i`) and `Esc` back — the panel returns to the session list, not home. The session-list legend visibly advertises `b inbox  i stats  w witr  k skills`. |
+
+These demonstrate the overlay-panels return-to-origin contract (PR #249): every panel (inbox/stats/witr/skills) opens from both the home menu and the session list, and `Esc` closes back to wherever it was opened from. Recorded against a seeded `tripwire_keys` fixture `$HOME` (each tape's header documents the seed steps) with `AINB_NOW` pinned so burndown renders deterministic numbers, then optimised with `gifsicle -O3 --lossy=60 --colors 200 --resize-width 1100`.
+
 ## Regenerating
 
 From `ainb-tui/`:
