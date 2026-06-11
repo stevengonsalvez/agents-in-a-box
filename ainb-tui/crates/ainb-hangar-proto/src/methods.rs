@@ -161,6 +161,39 @@ pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 /// list re-renders the new row without re-pulling the whole snapshot.
 pub const HANGAR_ISSUE_CREATE: &str = "hangar/issue_create";
 
+/// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
+///
+/// Params: [`crate::snapshots::IssueLabelParams`]
+/// (`{ workspace_id, issue_id, name, color? }`). Result: the refreshed
+/// [`crate::events::IssueRow`], or an error. The `name` is resolve-or-created
+/// within the workspace (a fresh label carries the optional `color`; an existing
+/// label is reused and its colour left as-is). The attach is idempotent —
+/// attaching the same label twice leaves exactly one link.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_UPDATE`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op), and the mutation is scoped by `(issue_id,
+/// workspace_id)` so a foreign-tenant issue id writes no join row (a not-found
+/// error, never a cross-tenant attach). After a committed attach the daemon
+/// pushes the matching [`crate::events::HangarEvent::IssueUpdated`] so a
+/// subscribed issue list re-renders the new chip.
+pub const HANGAR_ISSUE_LABEL_ATTACH: &str = "hangar/issue_label_attach";
+
+/// `hangar/issue_label_detach` — detach a label from one issue (e38.10).
+///
+/// Params: [`crate::snapshots::IssueLabelParams`]
+/// (`{ workspace_id, issue_id, name, color? }` — `color` is ignored on detach).
+/// Result: the refreshed [`crate::events::IssueRow`], or an error. Detaching an
+/// absent link (an unknown label name, or one never attached) is a no-op, so
+/// detach is idempotent. The label definition itself is left intact (it can be
+/// shared across issues); only the link is removed.
+///
+/// Mutating + workspace-scoped like [`HANGAR_ISSUE_LABEL_ATTACH`]: a
+/// foreign-tenant issue id touches no link and is rejected as a not-found error.
+/// A committed detach pushes the matching
+/// [`crate::events::HangarEvent::IssueUpdated`].
+pub const HANGAR_ISSUE_LABEL_DETACH: &str = "hangar/issue_label_detach";
+
 /// `hangar/comment_add` — append a comment to one issue (e38.5).
 ///
 /// Params: [`crate::snapshots::CommentAddParams`]
@@ -259,6 +292,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_ISSUE_UPDATE,
+    HANGAR_ISSUE_LABEL_ATTACH,
+    HANGAR_ISSUE_LABEL_DETACH,
     HANGAR_COMMENT_ADD,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
@@ -319,6 +354,8 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUE_LABEL_ATTACH,
+            HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
@@ -355,6 +392,8 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUE_LABEL_ATTACH,
+            HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,

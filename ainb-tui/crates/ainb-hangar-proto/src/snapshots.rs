@@ -269,6 +269,29 @@ pub struct IssueUpdateParams {
     pub due_date: FieldUpdate<i64>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
+/// [`crate::methods::HANGAR_ISSUE_LABEL_DETACH`] (e38.10): attach or detach a
+/// label on one issue, scoped to a workspace.
+///
+/// `workspace_id` + `issue_id` identify the target row (the workspace is the
+/// tenant-isolation guard — a foreign-tenant issue id touches nothing). `name`
+/// is the label name, resolved (or, on attach, created) within the workspace.
+/// `color` is an optional presentation hint applied only when an attach mints a
+/// fresh label; it is ignored on detach and when an existing label is reused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLabelParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to (de)label (`issue.id`).
+    pub issue_id: String,
+    /// The label name (resolved or, on attach, created within the workspace).
+    pub name: String,
+    /// Optional presentation colour (hex) applied when an attach mints a fresh
+    /// label; omitted when unset, ignored on detach / label reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_ISSUE_CREATE`] (e38.29): create one new
 /// issue in a workspace.
 ///
