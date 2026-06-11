@@ -19,14 +19,19 @@
 //! | `hangar task cancel`          | `ainb_hangar_store::service::cancel::CancelTaskService`  |
 //! | `hangar task retry`           | `ainb_hangar_store::service::retry::RetryService`        |
 //! | `hangar beads reconcile`      | `ainb_hangar_daemon::beads_sync::reconcile`              |
-//! | `hangar daemon status`        | [`ainb_hangar_store::Store::open_default`] reachability  |
+//! | `hangar daemon status`        | PID-file + socket liveness + db reachability             |
+//! | `hangar daemon run`           | [`ainb_hangar_daemon::boot`] (foreground)                |
+//! | `hangar daemon start`         | spawn the daemon binary as a background child + PID file |
+//! | `hangar daemon stop`          | signal the exact recorded PID via `nix` + remove PID file|
+//! | `hangar daemon restart`       | `stop` then `start`                                      |
+//! | `hangar daemon setup`         | ensure db + socket token, then `start`                   |
 //!
 //! # Deliberately NOT wired
 //!
-//! `skill`, `autopilot`, `config`, `init`, `tui`, and `daemon start|stop` land
-//! in later phases. The [`HangarCommand`](crate::cli::registry) subtree is built
-//! with derive `Subcommand`s, so a later phase slots a new verb in by adding a
-//! variant — no stubs are shipped for unimplemented verbs today.
+//! `init` and `tui` land in later phases. The
+//! [`HangarCommand`](crate::cli::registry) subtree is built with derive
+//! `Subcommand`s, so a later phase slots a new verb in by adding a variant — no
+//! stubs are shipped for unimplemented verbs today.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -1059,8 +1064,27 @@ pub struct BeadsReconcileArgs {
 /// `hangar daemon <verb>`.
 #[derive(Subcommand, Debug)]
 pub enum DaemonCommand {
-    /// Report whether the Hangar database is reachable and migrated.
+    /// Report whether the daemon is running (PID file + socket) and the
+    /// database is reachable.
     Status,
+    /// Run the daemon in the FOREGROUND (boot + claim loop until interrupted).
+    ///
+    /// This blocks; `start` is the background variant. Equivalent to launching
+    /// the `ainb-hangar-daemon` binary directly.
+    Run,
+    /// Start the daemon as a BACKGROUND child, recording its PID.
+    ///
+    /// Spawns the `ainb-hangar-daemon` binary detached and writes its exact pid
+    /// to `<hangar_home>/hangar/daemon.pid`. A no-op (with a notice) if a live
+    /// daemon is already recorded.
+    Start,
+    /// Stop the running daemon: signal the exact recorded PID, then remove the
+    /// PID file.
+    Stop,
+    /// Restart the daemon: `stop` (if running) then `start`.
+    Restart,
+    /// One-command bring-up: ensure the store + socket-auth token, then `start`.
+    Setup,
 }
 
 /// Dispatch a parsed [`HangarCommand`] to its backing service.
@@ -1079,7 +1103,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Issue(c) => dispatch_issue(c, format).await,
         HangarCommand::Task(c) => dispatch_task(c, format).await,
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
-        HangarCommand::Daemon(DaemonCommand::Status) => run_daemon_status().await,
+        HangarCommand::Daemon(c) => dispatch_daemon(c).await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
@@ -2622,23 +2646,223 @@ async fn run_beads_reconcile(args: BeadsReconcileArgs) -> Result<()> {
     reconcile::dispatch(&daemon_args).await
 }
 
-/// `hangar daemon status`: probe the database reachability.
+// ──────────────────────────────────────────────────────────────────────────
+// Daemon lifecycle (e38.20): run / start / stop / restart / setup / status.
+//
+// `start` spawns the `ainb-hangar-daemon` binary as a detached background child
+// and records its EXACT pid in `<hangar_home>/hangar/daemon.pid`; `stop` reads
+// that pid back and signals it directly (never by name). The pid file is the
+// single source of truth for liveness, cross-checked against the bound socket.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Env override pointing at the `ainb-hangar-daemon` binary to spawn.
 ///
-/// The daemon owns no pidfile yet, so "status" is the database-reachability
-/// check (`Store::open_default` runs every migration). A reachable, migrated
-/// database is the precondition the daemon needs to boot; this is the real,
-/// backed signal available today (`daemon start|stop` land in a later phase).
-async fn run_daemon_status() -> Result<()> {
-    match Store::open_default().await {
-        Ok(_) => {
-            println!("hangar daemon: database reachable (migrations applied)");
-            Ok(())
-        }
-        Err(e) => {
-            println!("hangar daemon: database unreachable: {e}");
-            Err(e.context("open hangar database"))
+/// Production resolves the binary as a sibling of the running `ainb` executable
+/// (then falls back to `$PATH`); the integration test sets this to the
+/// cargo-built daemon binary so `start` spawns the test artifact, not whatever
+/// `ainb-hangar-daemon` happens to be installed.
+const DAEMON_BIN_ENV: &str = "AINB_HANGAR_DAEMON_BIN";
+
+/// Resolve the path to the daemon's PID file: `<hangar_home>/hangar/daemon.pid`.
+fn daemon_pid_path() -> Result<std::path::PathBuf> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(home.join("hangar").join("daemon.pid"))
+}
+
+/// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
+fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.trim().parse().ok()
+}
+
+/// Is `pid` a live process? `kill(pid, 0)` succeeds iff it exists (and we may
+/// signal it), so this is a non-destructive liveness probe.
+fn pid_is_running(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    matches!(kill(Pid::from_raw(pid as i32), None), Ok(()))
+}
+
+/// Resolve the `ainb-hangar-daemon` binary to spawn for `start`.
+///
+/// Order: the [`DAEMON_BIN_ENV`] override → a sibling of the current `ainb`
+/// executable (the normal install layout) → the bare name on `$PATH`.
+fn resolve_daemon_bin() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os(DAEMON_BIN_ENV).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("ainb-hangar-daemon");
+            if sibling.exists() {
+                return sibling;
+            }
         }
     }
+    std::path::PathBuf::from("ainb-hangar-daemon")
+}
+
+/// Dispatch a `hangar daemon <verb>`.
+async fn dispatch_daemon(cmd: DaemonCommand) -> Result<()> {
+    match cmd {
+        DaemonCommand::Status => run_daemon_status().await,
+        DaemonCommand::Run => run_daemon_run().await,
+        DaemonCommand::Start => run_daemon_start(),
+        DaemonCommand::Stop => run_daemon_stop(),
+        DaemonCommand::Restart => run_daemon_restart(),
+        DaemonCommand::Setup => run_daemon_setup().await,
+    }
+}
+
+/// `hangar daemon status`: report the daemon's run state from the PID file +
+/// socket, and the database reachability.
+///
+/// "running" requires the recorded pid to be alive; a pid file naming a dead
+/// process is reported as a stale "stopped". The control socket's presence is
+/// surfaced alongside as the second liveness signal.
+async fn run_daemon_status() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    let socket = ainb_hangar_daemon::hangar_dir()
+        .context("resolve hangar home")?
+        .join("hangar.sock");
+
+    match read_daemon_pid(&pid_path) {
+        Some(pid) if pid_is_running(pid) => {
+            let sock = if socket.exists() {
+                "socket bound"
+            } else {
+                "socket not yet bound"
+            };
+            println!("hangar daemon: running (pid {pid}, {sock})");
+        }
+        Some(pid) => {
+            println!("hangar daemon: stopped (stale pid {pid}, process gone)");
+        }
+        None => {
+            println!("hangar daemon: stopped (no pid file)");
+        }
+    }
+
+    // The database-reachability line stays as a secondary signal: a stopped
+    // daemon with a migrated db is still a healthy, bootable install.
+    match Store::open_default().await {
+        Ok(_) => println!("  database: reachable (migrations applied)"),
+        Err(e) => println!("  database: unreachable: {e}"),
+    }
+    Ok(())
+}
+
+/// `hangar daemon run`: boot the daemon in the FOREGROUND.
+///
+/// Equivalent to launching the `ainb-hangar-daemon` binary directly — boots,
+/// binds the socket, self-registers the runtime, and runs the claim loop until
+/// interrupted. Blocks; use `start` for the background variant.
+async fn run_daemon_run() -> Result<()> {
+    ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)")
+}
+
+/// `hangar daemon start`: spawn the daemon as a detached background child and
+/// record its EXACT pid.
+///
+/// Idempotent: if the recorded pid is already alive, this is a no-op with a
+/// notice (never a second daemon). The child is spawned with the same
+/// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
+/// stderr go to the daemon's own rolling log, not this terminal.
+fn run_daemon_start() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+
+    // Already running? Bail out cleanly rather than spawning a duplicate.
+    if let Some(pid) = read_daemon_pid(&pid_path) {
+        if pid_is_running(pid) {
+            println!("hangar daemon: already running (pid {pid})");
+            return Ok(());
+        }
+        // Stale pid file from a crashed daemon: drop it before re-spawning.
+        std::fs::remove_file(&pid_path).ok();
+    }
+
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).context("create hangar home dir")?;
+    }
+
+    let bin = resolve_daemon_bin();
+    let child = std::process::Command::new(&bin)
+        // The child must not inherit this process's controlling terminal's
+        // stdio; the daemon writes its own rolling JSONL log under the hangar
+        // home, so discard the std streams.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn daemon binary `{}`", bin.display()))?;
+
+    let pid = child.id();
+    // Write the EXACT child pid (the one we just spawned) so `stop` signals this
+    // process and no other. `child` is intentionally dropped without `wait` —
+    // the daemon is meant to outlive this CLI invocation.
+    std::fs::write(&pid_path, format!("{pid}\n"))
+        .with_context(|| format!("write pid file {}", pid_path.display()))?;
+
+    println!("hangar daemon: started (pid {pid})");
+    Ok(())
+}
+
+/// `hangar daemon stop`: signal the EXACT recorded pid, then remove the file.
+///
+/// Reads the pid back from the PID file and sends `SIGTERM` to that exact
+/// process (never a name-based `pkill`). A stale pid file (process already gone)
+/// is cleaned up; an absent file is reported as "not running".
+fn run_daemon_stop() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    match read_daemon_pid(&pid_path) {
+        Some(pid) if pid_is_running(pid) => {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+                .with_context(|| format!("send SIGTERM to pid {pid}"))?;
+            std::fs::remove_file(&pid_path).ok();
+            println!("hangar daemon: stopped (signalled pid {pid})");
+        }
+        Some(pid) => {
+            std::fs::remove_file(&pid_path).ok();
+            println!("hangar daemon: not running (cleaned up stale pid {pid})");
+        }
+        None => {
+            println!("hangar daemon: not running");
+        }
+    }
+    Ok(())
+}
+
+/// `hangar daemon restart`: `stop` (if running) then `start`.
+fn run_daemon_restart() -> Result<()> {
+    run_daemon_stop()?;
+    run_daemon_start()
+}
+
+/// `hangar daemon setup`: one-command bring-up.
+///
+/// Ensures the store exists + is migrated (`Store::open_default`), mints/ensures
+/// the socket-auth token (e38.1 `ensure_socket_token`) so the control plane
+/// comes up authenticated, then `start`s the daemon. Idempotent: a second
+/// `setup` reuses the existing token + db and is a no-op start if the daemon is
+/// already up.
+async fn run_daemon_setup() -> Result<()> {
+    // Ensure the database + migrations, and resolve the home the token lives in.
+    let store = Store::open_default().await.context("open hangar database")?;
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+
+    // Mint (or reuse) the socket-auth credential before the daemon binds, so a
+    // client can present it on first frame. Reuses e38.1's ensure path.
+    let token_path = ainb_hangar_daemon::rpc::auth::ensure_socket_token(store.pool(), &home)
+        .await
+        .context("ensure socket auth token")?;
+    println!(
+        "hangar setup: database ready, socket token at {}",
+        token_path.display()
+    );
+
+    run_daemon_start()
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3962,6 +4186,28 @@ mod tests {
     fn parses_daemon_status() {
         let cmd = parse_hangar(&["ainb", "hangar", "daemon", "status"]);
         assert!(matches!(cmd, HangarCommand::Daemon(DaemonCommand::Status)));
+    }
+
+    #[test]
+    fn parses_daemon_lifecycle_verbs() {
+        for (verb, want) in [
+            ("run", DaemonCommand::Run),
+            ("start", DaemonCommand::Start),
+            ("stop", DaemonCommand::Stop),
+            ("restart", DaemonCommand::Restart),
+            ("setup", DaemonCommand::Setup),
+        ] {
+            let cmd = parse_hangar(&["ainb", "hangar", "daemon", verb]);
+            let HangarCommand::Daemon(got) = cmd else {
+                panic!("`daemon {verb}` did not parse to a Daemon command");
+            };
+            // Compare via the debug repr — DaemonCommand has no PartialEq.
+            assert_eq!(
+                format!("{got:?}"),
+                format!("{want:?}"),
+                "`daemon {verb}` parsed to the wrong verb"
+            );
+        }
     }
 
     #[test]

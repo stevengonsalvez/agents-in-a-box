@@ -1261,9 +1261,10 @@ impl CliCommand for FleetCommand {
 /// builder command, mirroring the hybrid derive+builder pattern used elsewhere
 /// in this registry. The dispatch lives in the `cli::hangar` lib module
 /// (`reference_rust_bin_lib_split`); `run` only extracts the parsed enum and
-/// hands it off. Verbs whose backing impl does not yet exist (`skill`,
-/// `autopilot`, `config`, `init`, `tui`, `daemon start|stop`) are intentionally
-/// absent — a later phase adds a variant rather than un-stubbing one here.
+/// hands it off. Verbs whose backing impl does not yet exist (`init`, `tui`)
+/// are intentionally absent — a later phase adds a variant rather than
+/// un-stubbing one here. (`daemon run|start|stop|restart|setup` landed in
+/// e38.20.)
 pub struct HangarCommand;
 impl CliCommand for HangarCommand {
     fn name(&self) -> &'static str {
