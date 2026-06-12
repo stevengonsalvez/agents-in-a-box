@@ -69,17 +69,6 @@
         ]
       },
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ~/.claude/hooks/caveman_posttooluse.js",
-            "timeout": 3,
-            "async": true
-          }
-        ]
-      },
-      {
         "matcher": "*",
         "hooks": [
           {
@@ -157,16 +146,6 @@
             "command": "uv run ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
           }
         ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ~/.claude/hooks/caveman_precompact.js",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "SessionStart": [
@@ -232,6 +211,7 @@
     "reflect@agents-in-a-box": true,
     "ainb-fleet@agents-in-a-box": true,
     "ainb-hooks@agents-in-a-box": true,
+    "caveman-stats@agents-in-a-box": true,
     "caveman@caveman": true
   },
   "extraKnownMarketplaces": {
