@@ -888,7 +888,7 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_twenty_three_tables() {
+async fn all_migrations_create_exactly_twenty_four_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -924,10 +924,11 @@ async fn all_migrations_create_exactly_twenty_three_tables() {
         "skill_file",
         "squad",
         "squad_member",
+        "task_usage",
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 23, "expected 23 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 24, "expected 24 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
