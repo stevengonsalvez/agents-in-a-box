@@ -53,6 +53,20 @@
         "claude-code",
         "awaiting-input"
       ]
+    },
+    {
+      "name": "caveman-stats",
+      "source": "./plugins/caveman-stats",
+      "description": "Caveman mode lifecycle hooks. PostToolUse watermark-tracks output tokens per session and writes .caveman-statusline-suffix so the statusline badge updates live. PreCompact re-injects the full caveman ruleset into the compaction summary so mode survives context compaction. Pair with caveman@caveman for full caveman setup.",
+      "strict": false,
+      "keywords": [
+        "caveman",
+        "statusline",
+        "hooks",
+        "token-savings",
+        "compaction",
+        "caveman-mode"
+      ]
     }
   ]
 }
