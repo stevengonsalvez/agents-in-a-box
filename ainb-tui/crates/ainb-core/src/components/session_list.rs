@@ -85,7 +85,7 @@ impl SessionListComponent {
         use crate::app::state::FocusedPane;
         let (border_color, is_focused) = match state.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
-            FocusedPane::LiveLogs => (SUBDUED_BORDER, false),
+            FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };
         let border_color = if state.sessions_pane_state.edge_highlighted() {
             GOLD
@@ -130,6 +130,12 @@ impl SessionListComponent {
             ));
         }
         title_spans.push(Span::raw(" "));
+        // 'B' is the keyboard twin of clicking the [-] glyph (hint lives next
+        // to the control it drives, not in the bottom menu bar).
+        title_spans.push(Span::styled(
+            "B",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        ));
         title_spans.push(Span::styled(
             "[-]",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),

@@ -61,6 +61,9 @@ pub enum AppEvent {
     GoToBottom,
     // Pane focus management
     SwitchPaneFocus,
+    /// Toggle the sessions sidebar between full width and the thin rail —
+    /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
+    ToggleSessionsSidebar,
     // Log scrolling events
     ScrollLogsUp,
     ScrollLogsDown,
@@ -165,13 +168,14 @@ pub enum AppEvent {
     GitReviewExpandAllFolders, // e — expand all folders
     GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
-    AttachTmuxSession, // Attach to tmux session
-    DetachTmuxSession, // Detach from tmux session
-    EnterScrollMode,   // Enter scroll mode in tmux preview
-    ExitScrollMode,    // Exit scroll mode in tmux preview
-    ScrollPreviewUp,   // Scroll tmux preview up
-    ScrollPreviewDown, // Scroll tmux preview down
-    ToggleExpandAll,   // Toggle expand/collapse all workspaces
+    AttachTmuxSession,    // Attach to tmux session (full-screen)
+    EnterInteractivePane, // Attach in-place: interactive embedded tmux pane
+    DetachTmuxSession,    // Detach from tmux session
+    EnterScrollMode,      // Enter scroll mode in tmux preview
+    ExitScrollMode,       // Exit scroll mode in tmux preview
+    ScrollPreviewUp,      // Scroll tmux preview up
+    ScrollPreviewDown,    // Scroll tmux preview down
+    ToggleExpandAll,      // Toggle expand/collapse all workspaces
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -542,6 +546,14 @@ impl EventHandler {
 
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
+        // Mode boundary (defense in depth): while the interactive embed owns
+        // input, host mouse handling must never mutate focus/selection under
+        // the live pane. main.rs already swallows/forwards mouse events before
+        // calling this, but the boundary must hold even if a future call site
+        // forgets the gate. Pinned by the mode-boundary tripwire.
+        if state.is_interactive_pane() {
+            return None;
+        }
         match event {
             AppEvent::MouseClick { x, y } => {
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
@@ -1199,6 +1211,15 @@ impl EventHandler {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
             }
+            KeyCode::Char('A') => {
+                // In-place interactive embed: Shift+A is the in-pane sibling of
+                // 'a' (full-screen attach) — same verb, different surface. Only
+                // meaningful if the selection has a tmux session; the handler in
+                // the loop no-ops otherwise. (Re-auth, which used to live on
+                // 'A', moved to 'u'.)
+                tracing::info!("[ACTION] 'A' key pressed - EnterInteractivePane requested");
+                Some(AppEvent::EnterInteractivePane)
+            }
             // The badge-to-position mapping is recomputed on every render —
             // digit N attaches to whatever is at that position *now*, not a
             // fixed session ID.
@@ -1282,9 +1303,10 @@ impl EventHandler {
                     None
                 }
             }
-            // Re-authenticate agent credentials. Lives on 'A' (was 'r') so the
-            // resume affordance can own 'r' unambiguously. See restart_affordance.
-            KeyCode::Char('A') => Some(AppEvent::ReauthenticateCredentials),
+            // Re-authenticate agent credentials. Lives on 'u' ("re-aUth"; was
+            // 'A' until Shift+A became the in-pane attach, and 'r' before that
+            // so the resume affordance could own 'r'). See restart_affordance.
+            KeyCode::Char('u') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {
@@ -1312,6 +1334,9 @@ impl EventHandler {
             // where `handle_home_screen_keys` also binds it. Without this arm
             // the menu hint pointed at a dead key.
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
+            // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
+            // 'B' is its keyboard twin. Hinted next to the glyph itself.
+            KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
             // k skills, m memory, t abtop — same set
@@ -1342,7 +1367,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextSession");
                         Some(AppEvent::NextSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsDown");
                         Some(AppEvent::ScrollLogsDown)
                     }
@@ -1355,7 +1380,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousSession");
                         Some(AppEvent::PreviousSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsUp");
                         Some(AppEvent::ScrollLogsUp)
                     }
@@ -1368,7 +1393,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousWorkspace");
                         Some(AppEvent::PreviousWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1381,7 +1406,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextWorkspace");
                         Some(AppEvent::NextWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1389,15 +1414,15 @@ impl EventHandler {
             }
             KeyCode::Home => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToTop),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToTop),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
             },
             KeyCode::End => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToBottom),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToBottom),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToBottom),
             },
             KeyCode::Char(' ') => match state.focused_pane {
                 FocusedPane::Sessions => None, // Space does nothing in sessions pane
-                FocusedPane::LiveLogs => Some(AppEvent::ToggleAutoScroll),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ToggleAutoScroll),
             },
             _ => None,
         }
@@ -2305,6 +2330,15 @@ impl EventHandler {
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            AppEvent::ToggleSessionsSidebar => {
+                // Same path the [-]/[+] mouse glyph takes: flip + persist the
+                // preference so the choice survives restarts.
+                state.sessions_pane_state.toggle_collapsed();
+                Self::persist_sessions_pane_preferences(state);
+            }
+            // Entering the interactive embed is handled in the main loop (it needs
+            // the terminal size and the embed lives in the event loop) — no-op here.
+            AppEvent::EnterInteractivePane => {}
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
             AppEvent::OtherTmuxRenameChar(c) => state.other_tmux_rename_char(c),
@@ -2888,7 +2922,10 @@ impl EventHandler {
                 let old_pane = state.focused_pane.clone();
                 state.focused_pane = match state.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
-                    FocusedPane::LiveLogs => FocusedPane::Sessions,
+                    // Preview is entered via 'l' / exited via Ctrl+Q, not Tab —
+                    // Tab while focused is intercepted upstream, so this is only a
+                    // safe fallback.
+                    FocusedPane::LiveLogs | FocusedPane::Preview => FocusedPane::Sessions,
                 };
                 tracing::debug!(
                     "Switched focus from {:?} to {:?}",
@@ -5203,6 +5240,53 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::SESSION_RECOVERY
             | ids::SKILLS
     )
+}
+
+#[cfg(test)]
+mod session_list_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), state)
+    }
+
+    fn session_list_state() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state
+    }
+
+    /// Locks the attach-key pairing: 'a' = full-screen, Shift+A = in-pane
+    /// embed, and re-auth (which used to hold 'A') now answers to 'u'.
+    #[test]
+    fn attach_pair_and_reauth_mapping() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'a'),
+            Some(AppEvent::AttachTmuxSession)
+        ));
+        assert!(matches!(
+            key(&mut state, 'A'),
+            Some(AppEvent::EnterInteractivePane)
+        ));
+        assert!(matches!(
+            key(&mut state, 'u'),
+            Some(AppEvent::ReauthenticateCredentials)
+        ));
+    }
+
+    /// 'B' is the keyboard twin of the [-]/[+] sidebar glyph (mouse-only
+    /// before). Mapping-level test: no persistence side effects here.
+    #[test]
+    fn shift_b_toggles_sessions_sidebar() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'B'),
+            Some(AppEvent::ToggleSessionsSidebar)
+        ));
+    }
 }
 
 #[cfg(test)]

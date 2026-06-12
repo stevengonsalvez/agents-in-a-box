@@ -41,8 +41,8 @@ tokio = { version = "1.36", features = ["full"] }
 # (ainb-hangar-daemon inbound beads sync, P2.4). The default `sync` feature
 # carries `CancellationToken`.
 tokio-util = "0.7"
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Docker
 bollard = "0.16"
@@ -50,7 +50,9 @@ futures-util = "0.3"
 tar = "0.4"
 
 # Tmux/PTY support
-portable-pty = "0.8"
+portable-pty = "0.9"
+vt100 = "0.16"
+tui-term = "0.3.4"
 
 # Git operations (vendored-openssl for cross-compilation support)
 git2 = { version = "0.18", features = ["vendored-openssl"] }
@@ -91,12 +93,20 @@ url = "2.5"
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"
 syntect = "5.2"
-ansi-to-tui = "4"
+ansi-to-tui = "8.0.1"
 # Code Review diff surface: structured + word-level diff (similar),
 # Dracula theme + extra grammars (two-face). syntect→ratatui span conversion
-# is inlined (ainb pins ratatui 0.26; syntect-tui targets a newer ratatui).
+# is inlined.
 similar = { version = "2", features = ["inline"] }
 two-face = "0.5"
+# TRANSITIVE VERSION CAP, not a real dependency: time 0.3.48 (released
+# 2026-06-11/12) fails to compile against this graph — E0119 "conflicting
+# implementations of From<HourBase>" the moment ratatui-core's blanket impls
+# are in scope (reproduced locally AND the cause of every red CI run since
+# 2026-06-11; no Cargo.lock is tracked, so CI always resolves the latest).
+# time reaches us via syntect→plist and ratatui-widgets. Remove this cap when
+# a fixed time release (>0.3.48) compiles: `cargo update -p time` + build.
+time = ">=0.3.36, <0.3.48"
 
 # Persistent usage analytics cache
 # Bumped 0.31 -> 0.32 so `libsqlite3-sys` (links = "sqlite3") resolves to a
@@ -119,7 +129,7 @@ notify = "6.1"
 mockall = "0.12"
 pretty_assertions = "1.4"
 rexpect = "0.5"
-vt100 = "0.15"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -32,6 +32,7 @@ The `ainb` terminal app and its CLI.
 - [Overview](tui/overview.md)
 - [Install](tui/install.md)
 - [First session quickstart](tui/quickstart.md)
+- [Attaching to sessions](tui/attach.md) — full-screen and in-pane tmux attach
 - [CLI reference](tui/cli.md) — every subcommand, every flag
 - [Keyboard shortcuts](tui/keyboard-shortcuts.md)
 - [Architecture](tui/architecture.md)

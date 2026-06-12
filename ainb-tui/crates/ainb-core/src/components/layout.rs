@@ -27,6 +27,25 @@ use crate::app::{
     screens::{builtin::register_builtins, ids as screen_ids},
 };
 
+/// Cell size the embed gets under the interactive layout: the right pane's
+/// interior once the session list has collapsed to the thin rail. Used at
+/// entry (`EnterInteractivePane`) so the very first attach already matches
+/// what the first interactive frame will resize to — otherwise tmux reflows
+/// the session twice back-to-back (attach size → layout size).
+///
+/// Must mirror `render`'s split: vertical chrome is the status bar (3) +
+/// session info (3) + menu bar (6), and the pane border takes 2 more rows/
+/// cols off the interior.
+pub fn interactive_embed_size(width: u16, height: u16) -> (u16, u16) {
+    const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
+    const PANE_BORDERS: u16 = 2;
+    let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
+    let cols = width
+        .saturating_sub(crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH + PANE_BORDERS)
+        .max(1);
+    (rows, cols)
+}
+
 pub struct LayoutComponent {
     session_list: SessionListComponent,
     logs_viewer: LogsViewerComponent,
@@ -64,7 +83,7 @@ impl LayoutComponent {
         // owns its component(s) and renders any screen-specific overlays
         // (e.g. Config's auth-provider/config popups). Help overlay is
         // rendered post-screen as it's universal across full-screen views.
-        let frame_size = frame.size();
+        let frame_size = frame.area();
         if let Some(screen) = self.screens.get_mut(&state.current_screen) {
             tracing::debug!("Rendering screen via registry: {}", state.current_screen);
             screen.render(frame, frame_size, state);
@@ -93,13 +112,20 @@ impl LayoutComponent {
                 Constraint::Length(3), // Session info (single line + borders)
                 Constraint::Length(6), // Bottom menu bar (4 lines + borders)
             ])
-            .split(frame.size());
+            .split(frame.area());
 
         // Render top status bar
         self.render_status_bar(frame, main_layout[0], state);
 
-        // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
-        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
+        // Simple 2-panel layout: session list | logs (Claude chat is now a popup).
+        // While the interactive embed is focused, collapse the session list to a
+        // thin rail so the embed gets near-full width (locked decision: pane
+        // expands while interactive; reverts on Ctrl+Q release).
+        let sessions_width = if state.is_interactive_pane() {
+            crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH
+        } else {
+            state.sessions_pane_state.effective_width(main_layout[1].width)
+        };
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -110,7 +136,7 @@ impl LayoutComponent {
         state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        if state.sessions_pane_state.collapsed {
+        if state.sessions_pane_state.collapsed || state.is_interactive_pane() {
             self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
         } else {
             self.session_list.render(frame, content_chunks[0], state);
@@ -124,8 +150,24 @@ impl LayoutComponent {
             .is_some()
             || state.selected_shell_session().is_some();
 
-        if selected_has_tmux {
-            // Render tmux preview pane
+        if state.is_interactive_pane() {
+            // Live interactive embed occupies the right pane. Resize the embed to
+            // the pane interior (minus the border) so the inner program reflows,
+            // then render the live terminal in place of the read-only preview.
+            let area = content_chunks[1];
+            let inner = area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            if let Some(e) = state.embed.as_mut() {
+                let _ = e.resize(inner.height, inner.width);
+            }
+            // Publish the interior so mouse events can be translated into
+            // 1-based pane-local SGR coordinates (see encode_mouse_event).
+            state.embed_pane_area = Some(inner);
+            self.tmux_preview.render_interactive(frame, area, state);
+        } else if selected_has_tmux {
+            // Render tmux preview pane (read-only capture)
             self.tmux_preview.render(frame, content_chunks[1], state);
         } else {
             // Render traditional live logs stream
@@ -140,34 +182,34 @@ impl LayoutComponent {
 
         // Render help overlay if visible
         if state.help_visible {
-            self.help.render(frame, frame.size());
+            self.help.render(frame, frame.area());
         }
 
         // Render new session overlay if visible
         if state.current_screen == screen_ids::NEW_SESSION
             || state.current_screen == screen_ids::SEARCH_WORKSPACE
         {
-            self.new_session.render(frame, frame.size(), state);
+            self.new_session.render(frame, frame.area(), state);
         }
 
         // Render Claude chat popup if visible
         if state.current_screen == screen_ids::CLAUDE_CHAT {
-            let popup_area = centered_rect(80, 80, frame.size());
+            let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
         if state.confirmation_dialog.is_some() {
-            self.confirmation_dialog.render(frame, frame.size(), state);
+            self.confirmation_dialog.render(frame, frame.area(), state);
         }
 
         // Render quick commit dialog if visible
         if state.is_in_quick_commit_mode() {
-            self.render_quick_commit_dialog(frame, frame.size(), state);
+            self.render_quick_commit_dialog(frame, frame.area(), state);
         }
 
         // Render notifications (top-right corner)
-        self.render_notifications(frame, frame.size(), state);
+        self.render_notifications(frame, frame.area(), state);
     }
 
     /// Get mutable reference to live logs component for scroll handling
@@ -193,7 +235,11 @@ impl LayoutComponent {
                 "[+]",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
+            // 'B' is the keyboard twin of clicking [+] (hint next to control).
+            Line::from(Span::styled(
+                "B",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("E", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
@@ -270,6 +316,8 @@ impl LayoutComponent {
             // Attach / select group
             key("a", SELECTION_GREEN),
             desc("ttach "),
+            key("A", SELECTION_GREEN),
+            desc(" pane "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
             key("Space", SELECTION_GREEN),
@@ -311,7 +359,7 @@ impl LayoutComponent {
             key("x", WARNING_ORANGE),
             desc(" cleanup"),
             sep(),
-            key("A", MUTED_GRAY),
+            key("u", MUTED_GRAY),
             desc(" re-auth"),
         ];
 
@@ -383,8 +431,6 @@ impl LayoutComponent {
     /// `F filter` only to normal interactive sessions — so the inactive one is
     /// dimmed based on the highlighted row (see `mode_dim_flags`).
     fn render_menu_bar_two_col(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        use ratatui::widgets::block::Title;
-
         let (restart_key, restart_label) = restart_affordance(state.selected_session());
         let (dim_filter, dim_cleanup) = mode_dim_flags(state.selected_session());
 
@@ -418,6 +464,8 @@ impl LayoutComponent {
                 desc("ew  "),
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
+                key("A", SELECTION_GREEN),
+                desc(" pane  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
                 key("Space", SELECTION_GREEN),
@@ -450,7 +498,7 @@ impl LayoutComponent {
                 filter_desc,
                 cleanup_key,
                 cleanup_desc,
-                key("A", MUTED_GRAY),
+                key("u", MUTED_GRAY),
                 desc(" re-auth"),
             ]),
         ];
@@ -516,20 +564,20 @@ impl LayoutComponent {
             .border_style(Style::default().fg(SUBDUED_BORDER))
             .style(Style::default().bg(PANEL_BG))
             .title(
-                Title::from(Line::from(vec![
+                Line::from(vec![
                     Span::styled(" ⌨ ", Style::default().fg(GOLD)),
                     Span::styled(
                         "Session actions ",
                         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                     ),
-                ]))
+                ])
                 .alignment(Alignment::Left),
             )
             .title(
-                Title::from(Line::from(vec![Span::styled(
+                Line::from(vec![Span::styled(
                     " Panels & views ",
                     Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                )]))
+                )])
                 .alignment(Alignment::Right),
             );
         let inner = block.inner(area);
@@ -1326,6 +1374,7 @@ mod menu_bar_tests {
             "xpand",    // expand
             "focus",    // Tab focus
             "ttach",    // attach
+            "pane",     // A — in-pane interactive embed
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
@@ -1340,7 +1389,7 @@ mod menu_bar_tests {
             "refresh",  // f
             "filter",   // F  ← the key that was missing before
             "cleanup",  // x
-            "re-auth",  // A (moved off r)
+            "re-auth",  // u (moved off A for in-pane attach)
             "?/H",      // help
             "home",     // q
             "inbox",    // b
@@ -1436,6 +1485,7 @@ mod menu_bar_tests {
         for token in [
             "ew",       // new
             "ttach",    // attach
+            "pane",     // A — in-pane interactive embed
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
@@ -1448,7 +1498,7 @@ mod menu_bar_tests {
             "refresh",  // f
             "filter",   // F (dimmed when a Boss row is selected, still present)
             "cleanup",  // x (dimmed when an Interactive row is selected)
-            "re-auth",  // A
+            "re-auth",  // u
             "inbox",    // b
             "stats",    // i
             "witr",     // w
@@ -1531,4 +1581,25 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod interactive_embed_size_tests {
+    use super::interactive_embed_size;
+
+    #[test]
+    fn matches_the_interactive_layout_interior() {
+        // 120x30 terminal: chrome = 3+3+6 plus the pane border (2) → rows 16;
+        // collapsed rail (5) plus the border (2) → cols 113. Must equal what
+        // the first interactive frame resizes the embed to (the tripwire
+        // drives the real render path against this).
+        assert_eq!(interactive_embed_size(120, 30), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24), (10, 73));
+    }
+
+    #[test]
+    fn never_returns_zero_cells() {
+        assert_eq!(interactive_embed_size(0, 0), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14), (1, 1));
+    }
 }

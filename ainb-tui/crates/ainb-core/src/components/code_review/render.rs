@@ -958,7 +958,7 @@ mod tests {
         let ui = CodeReviewUi::default();
 
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|fr| render(fr, fr.size(), &model, &ui)).unwrap();
+        term.draw(|fr| render(fr, fr.area(), &model, &ui)).unwrap();
         let buf = term.backend().buffer();
 
         let mut text = String::new();
@@ -1149,7 +1149,7 @@ mod tests {
         // 20 frames over a 2000-row diff. Viewport-only rendering keeps this fast.
         let start = Instant::now();
         for _ in 0..20 {
-            term.draw(|fr| render(fr, fr.size(), &model, &ui)).unwrap();
+            term.draw(|fr| render(fr, fr.area(), &model, &ui)).unwrap();
         }
         let elapsed = start.elapsed();
         assert!(
@@ -1218,7 +1218,7 @@ mod tests {
             files: vec![file("src/a.rs", false, vec![hunk(0, 0, 2)])],
         };
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|f| render(f, f.size(), &model, &ui)).unwrap();
+        term.draw(|f| render(f, f.area(), &model, &ui)).unwrap();
 
         // render() recorded the sidebar list rect; clicks inside map to tree rows.
         let r = ui.sidebar_rect.get();
