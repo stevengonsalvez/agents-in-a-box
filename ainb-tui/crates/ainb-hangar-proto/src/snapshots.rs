@@ -321,6 +321,46 @@ pub struct InboxMarkReadResult {
     pub unread: i64,
 }
 
+/// One per-agent usage row in the dashboard rollup
+/// ([`crate::methods::HANGAR_USAGE_ROLLUP`], e38.35): an agent's summed tokens +
+/// cost over the runs it executed in the workspace.
+///
+/// Carries an `f64` cost, so it is `PartialEq` only (no `Eq`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentUsageRow {
+    /// The agent the row aggregates (`agent.id`, the GROUP BY key).
+    pub agent_id: String,
+    /// Sum of input tokens over this agent's runs.
+    pub input_tokens: i64,
+    /// Sum of output tokens over this agent's runs.
+    pub output_tokens: i64,
+    /// Sum of cost (USD) over this agent's runs.
+    pub cost_usd: f64,
+    /// Number of runs this agent executed.
+    pub runs: i64,
+}
+
+/// Result of [`crate::methods::HANGAR_USAGE_ROLLUP`] (e38.35): the workspace's
+/// token/cost usage dashboard.
+///
+/// The grand totals (summed across every recorded run) drive the dashboard
+/// header; `agents` is the per-agent breakdown, heaviest cost first. A workspace
+/// with no recorded usage answers all-zero totals + an empty `agents` vec (the
+/// empty-dashboard state). Carries `f64` costs, so it is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct UsageRollupResult {
+    /// Sum of input tokens over every recorded run in the workspace.
+    pub total_input_tokens: i64,
+    /// Sum of output tokens over every recorded run in the workspace.
+    pub total_output_tokens: i64,
+    /// Sum of cost (USD) over every recorded run in the workspace.
+    pub total_cost_usd: f64,
+    /// Number of recorded runs the totals aggregate.
+    pub total_runs: i64,
+    /// The per-agent breakdown rows, heaviest cost first.
+    pub agents: Vec<AgentUsageRow>,
+}
+
 /// Params for [`crate::methods::HANGAR_TASK_TRANSITION`]: the workspace (tenant
 /// guard), the task to move, and the target status (P8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -980,6 +1020,40 @@ mod tests {
             serde_json::from_str::<TaskTransitionParams>(&s).unwrap(),
             transition
         );
+    }
+
+    /// The usage-rollup result + its per-agent rows round-trip through JSON,
+    /// preserving the grand totals and the ordered breakdown (e38.35).
+    #[test]
+    fn e38_usage_rollup_roundtrips() {
+        let rollup = UsageRollupResult {
+            total_input_tokens: 3500,
+            total_output_tokens: 1100,
+            total_cost_usd: 0.055,
+            total_runs: 3,
+            agents: vec![
+                AgentUsageRow {
+                    agent_id: "agent-y".into(),
+                    input_tokens: 2000,
+                    output_tokens: 800,
+                    cost_usd: 0.04,
+                    runs: 1,
+                },
+                AgentUsageRow {
+                    agent_id: "agent-x".into(),
+                    input_tokens: 1500,
+                    output_tokens: 300,
+                    cost_usd: 0.015,
+                    runs: 2,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&rollup).unwrap();
+        let back: UsageRollupResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, rollup);
+        // The empty-dashboard state is the type default (all-zero, no agents).
+        assert_eq!(UsageRollupResult::default().agents.len(), 0);
+        assert_eq!(UsageRollupResult::default().total_runs, 0);
     }
 
     /// A pre-priority snapshot (no `priority` key) still decodes: the field

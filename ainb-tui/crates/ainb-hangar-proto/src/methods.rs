@@ -401,6 +401,21 @@ pub const HANGAR_HEALTH: &str = "hangar/health";
 /// view-layer snapshot, **not** a persisted aggregate.
 pub const HANGAR_DAEMON_HEALTH: &str = "hangar/daemon_health";
 
+/// `hangar/usage_rollup` — snapshot the workspace's token/cost usage dashboard
+/// (e38.35).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::UsageRollupResult`] — the grand totals (summed
+/// input/output tokens + cost + run count across every recorded run) plus the
+/// per-agent breakdown (the same totals grouped by agent, heaviest cost first).
+/// Drives the usage-dashboard screen (`U`). Reads the durable `task_usage`
+/// aggregate the daemon's run loop records at each task's finalize seam (store
+/// migration 0022), so usage that accrued while no plugin was attached is still
+/// counted. Workspace-scoped like every snapshot: a foreign / unknown workspace
+/// yields all-zero totals + an empty rollup (a read, so no `INVALID_PARAMS`
+/// rejection — mirrors `inbox_list`).
+pub const HANGAR_USAGE_ROLLUP: &str = "hangar/usage_rollup";
+
 /// `hangar/inbox_list` — snapshot the aggregated notification inbox of a
 /// workspace (e38.14).
 ///
@@ -480,6 +495,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_ASSIGN,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
+    HANGAR_USAGE_ROLLUP,
     HANGAR_INBOX_LIST,
     HANGAR_INBOX_MARK_READ,
     AUTH_HELLO,
@@ -554,6 +570,7 @@ mod tests {
             HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
+            HANGAR_USAGE_ROLLUP,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
         ] {
@@ -604,6 +621,7 @@ mod tests {
             HANGAR_SQUAD_ASSIGN,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
+            HANGAR_USAGE_ROLLUP,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
             AUTH_HELLO,
