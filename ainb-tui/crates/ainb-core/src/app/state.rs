@@ -440,11 +440,17 @@ impl AppState {
     /// on the read-only preview.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
         if self.embed.is_some() {
-            // Self-healing re-entry: a live embed with focus drifted off the
-            // preview pane is a leaked state — restore the mode invariant
-            // instead of silently no-opping.
-            self.focused_pane = FocusedPane::Preview;
-            return true;
+            if self.selected_tmux_name() == self.embed_session {
+                // Self-healing re-entry on the SAME row: a live embed with
+                // focus drifted off the preview pane is a leaked state —
+                // restore the mode invariant instead of silently no-opping.
+                self.focused_pane = FocusedPane::Preview;
+                return true;
+            }
+            // Different row: the user means "attach HERE" — release the stale
+            // client and fall through to a fresh attach, instead of
+            // refocusing an embed that renders some other session.
+            self.release_interactive_pane();
         }
         let Some(name) = self.selected_tmux_name() else {
             self.add_warning_notification("No tmux session on this row".to_string());
@@ -457,6 +463,7 @@ impl AppState {
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
             Ok(client) => {
                 self.embed = Some(client);
+                self.embed_session = Some(name);
                 self.focused_pane = FocusedPane::Preview;
                 if attached_elsewhere {
                     self.add_warning_notification(
@@ -474,11 +481,13 @@ impl AppState {
     }
 
     /// Whether the current selection's tmux session already has another client
-    /// attached. Only the kinds that track attachment report it (Claude
-    /// sessions via `is_attached`, other-tmux rows via tmux's attached flag);
-    /// SSH/shell selections have no liveness flag and report false.
+    /// attached. Every kind that tracks attachment reports it (Claude and SSH
+    /// rows via `is_attached`, other-tmux rows via tmux's attached flag);
+    /// shell selections have no liveness flag and report false.
     fn selected_session_attached_elsewhere(&self) -> bool {
-        if self.is_ssh_session_selected() || self.shell_selected {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().map(|s| s.is_attached).unwrap_or(false)
+        } else if self.shell_selected {
             false
         } else if self.is_other_tmux_selected() {
             self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
@@ -493,6 +502,7 @@ impl AppState {
         if let Some(mut client) = self.embed.take() {
             client.shutdown();
         }
+        self.embed_session = None;
         self.embed_pane_area = None;
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
@@ -2593,6 +2603,11 @@ pub struct AppState {
     //    never forwarded to an invisible PTY.
     // Dropping it kills the ephemeral tmux client (never the session).
     pub embed: Option<crate::tmux::EmbedClient>,
+    // The tmux session name the live embed is attached to. Some iff `embed`
+    // is Some. Re-entering on a DIFFERENT row releases the old client and
+    // attaches to the new target instead of silently refocusing the stale
+    // one (see `enter_interactive_pane`).
+    pub embed_session: Option<String>,
     // Interior screen rect (inside the border) the embed's PseudoTerminal
     // occupies, published by the interactive render branch each frame. Drives
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
@@ -3147,6 +3162,7 @@ impl Default for AppState {
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
             embed: None,
+            embed_session: None,
             embed_pane_area: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,

@@ -185,6 +185,64 @@ fn interactive_embed_expands_to_near_full_width() {
     );
 }
 
+/// Re-target: pressing the attach key on a DIFFERENT row while an embed is
+/// live must release the stale client and attach to the new target — not
+/// silently refocus the old one (which would render session X under a row
+/// selecting session Y). Both sessions must survive the swap (release kills
+/// clients, never sessions).
+#[test]
+fn reentering_on_a_different_row_retargets_the_embed() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let first = new_session("retarget-a");
+    let second = new_session("retarget-b");
+
+    let mut state = AppState::new();
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![
+        OtherTmuxSession::new(first.clone(), false, 1),
+        OtherTmuxSession::new(second.clone(), false, 1),
+    ];
+    state.selected_other_tmux_index = Some(0);
+    assert!(state.enter_interactive_pane(26, 100), "attach to first");
+    let initial_target = state.embed_session.clone();
+
+    // Same row again = self-healing no-op, embed target unchanged.
+    assert!(state.enter_interactive_pane(26, 100), "same-row re-entry");
+    let same_row_target = state.embed_session.clone();
+
+    // Different row: must swap the embed onto the newly selected session.
+    state.selected_other_tmux_index = Some(1);
+    assert!(state.enter_interactive_pane(26, 100), "re-target to second");
+    let swapped_target = state.embed_session.clone();
+    let interactive_after = state.is_interactive_pane();
+
+    state.release_interactive_pane();
+    let both_alive = session_alive(&first) && session_alive(&second);
+
+    kill_session(&first);
+    kill_session(&second);
+
+    assert_eq!(initial_target.as_deref(), Some(first.as_str()));
+    assert_eq!(
+        same_row_target.as_deref(),
+        Some(first.as_str()),
+        "same-row re-entry must not re-attach"
+    );
+    assert_eq!(
+        swapped_target.as_deref(),
+        Some(second.as_str()),
+        "different-row re-entry must release the stale embed and attach to the selected session"
+    );
+    assert!(interactive_after, "still interactive after the swap");
+    assert!(
+        both_alive,
+        "re-targeting kills only the ephemeral client — both tmux sessions survive"
+    );
+}
+
 /// Mode-boundary tripwire: while the embed is interactive, host mouse handling
 /// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
 /// of opening the slash palette, and after release the host owns the mouse
