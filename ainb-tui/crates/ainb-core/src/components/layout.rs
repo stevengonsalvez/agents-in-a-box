@@ -42,7 +42,7 @@ pub fn interactive_embed_size(width: u16, height: u16, sidebar_width: u16) -> (u
     const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
     const PANE_BORDERS: u16 = 2;
     let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
-    let cols = width.saturating_sub(sidebar_width + PANE_BORDERS).max(1);
+    let cols = width.saturating_sub(sidebar_width.saturating_add(PANE_BORDERS)).max(1);
     (rows, cols)
 }
 
