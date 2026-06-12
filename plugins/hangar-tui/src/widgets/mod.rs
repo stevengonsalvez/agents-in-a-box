@@ -25,6 +25,7 @@ pub mod filter_chip;
 pub mod frosted_banner;
 pub mod key_entry;
 pub mod label_chip;
+pub mod offline_empty_state;
 pub mod presence_dot;
 pub mod sidebar;
 pub mod sparkline_dual;
