@@ -146,11 +146,13 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     );
 }
 
-/// B7: while interactive, the session list collapses and the embed expands to
-/// near-full width. Driving the full LayoutComponent render resizes the embed to
-/// the pane interior, so the embed's cell width reflects the expanded pane.
+/// B7 (amended 2026-06-12): the embed honors the user's sidebar instead of
+/// forcing a collapse. With the default 40-col sidebar the embed gets the
+/// pane next to it; pre-collapsing via `B` (the rail) hands it near-full
+/// width. Driving the full LayoutComponent render resizes the embed to the
+/// pane interior, so the embed's cell width reflects the user's layout.
 #[test]
-fn interactive_embed_expands_to_near_full_width() {
+fn interactive_embed_width_follows_the_sidebar_state() {
     if !tmux_available() {
         eprintln!("SKIP: tmux unavailable");
         return;
@@ -162,6 +164,10 @@ fn interactive_embed_expands_to_near_full_width() {
     state.current_screen = "session_list".to_string();
     state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.selected_other_tmux_index = Some(0);
+    // Pin the sidebar to a known width: AppState::new() restores the
+    // developer's persisted preference from the real config, which would make
+    // the expected interior widths env-dependent.
+    state.sessions_pane_state.restore(Some(40), false);
     assert!(
         state.enter_interactive_pane(28, 80),
         "enter_interactive_pane"
@@ -169,19 +175,27 @@ fn interactive_embed_expands_to_near_full_width() {
 
     let mut layout = LayoutComponent::new();
     let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
-    // Render the full layout — the interactive branch collapses the list to a rail
-    // and resizes the embed to the (now near-full-width) preview pane.
-    term.draw(|f| layout.render(f, &mut state)).expect("draw");
 
-    let (_, cols) = state.embed.as_ref().expect("embed").size();
+    // 40-col sidebar: the embed gets the remaining pane interior —
+    // 120 − 40 − 2 (border) = 78 — NOT a forced near-full-width expansion.
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let (_, cols_with_sidebar) = state.embed.as_ref().expect("embed").size();
+
+    // Pre-collapsed rail (what `B` toggles): near-full width — 120 − 5 − 2.
+    state.sessions_pane_state.collapsed = true;
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let (_, cols_with_rail) = state.embed.as_ref().expect("embed").size();
+
     state.release_interactive_pane();
     kill_session(&session);
 
-    // In a 120-col terminal the read-only split gives the preview ~60% (~70 cols);
-    // expansion (list collapsed to a 5-col rail) should give it >100.
-    assert!(
-        cols > 100,
-        "interactive pane should expand to near-full width in a 120-col terminal; got {cols}"
+    assert_eq!(
+        cols_with_sidebar, 78,
+        "embed must honor the default 40-col sidebar (120 − 40 − 2)"
+    );
+    assert_eq!(
+        cols_with_rail, 113,
+        "embed must take near-full width once the sidebar is the collapsed rail (120 − 5 − 2)"
     );
 }
 

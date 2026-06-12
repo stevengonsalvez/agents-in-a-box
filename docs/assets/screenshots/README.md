@@ -31,7 +31,7 @@ These are recorded with vhs driving `ainb diff-review <repo>` on a throwaway dem
 | File | Tape | What it shows |
 |---|---|---|
 | `attach-fullscreen.gif` | `attach-fullscreen.tape` | `a` full-screen attach — the TUI suspends into the real tmux client, a command runs inside, `Ctrl+B` `d` detaches back to ainb. |
-| `attach-in-pane.gif` | `attach-in-pane.tape` | `A` in-pane attach — the preview pane becomes a live embedded tmux client (`● INTERACTIVE — Ctrl+Q release` badge, sidebar rail), typed input lands in the session, `Ctrl+Q` releases. |
+| `attach-in-pane.gif` | `attach-in-pane.tape` | `A` in-pane attach — the preview pane becomes a live embedded tmux client (`● INTERACTIVE — Ctrl+Q release` badge; the sidebar stays exactly as the user has it), typed input lands in the session, `Ctrl+Q` releases. |
 
 Recorded with vhs against an isolated `$HOME` (seeded `onboarding.toml` + complete notify `install.json`) and an **isolated tmux server** (`TMUX_TMPDIR` pointed at a temp dir) holding a single `demo-agent` session, so no real session names leak into the frames. Optimised with `gifsicle -O3 --lossy=60 --colors 200 --resize-width 1100`.
 

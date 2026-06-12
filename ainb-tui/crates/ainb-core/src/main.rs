@@ -599,18 +599,20 @@ async fn run_tui_loop(
                             }
                             AppEvent::EnterInteractivePane => {
                                 // Size the embed to the EXACT interactive
-                                // layout (collapsed rail + chrome) so tmux
-                                // reflows once at attach instead of attach-size
-                                // → layout-size back-to-back. The render path
-                                // still resizes each frame for terminal
-                                // resizes.
+                                // layout (the user's current sidebar + chrome)
+                                // so tmux reflows once at attach instead of
+                                // attach-size → layout-size back-to-back. The
+                                // render path still resizes each frame for
+                                // terminal resizes.
                                 let sz = terminal.size().unwrap_or(ratatui::layout::Size {
                                     width: 80,
                                     height: 24,
                                 });
+                                let sidebar =
+                                    app.state.sessions_pane_state.effective_width(sz.width);
                                 let (rows, cols) =
                                     crate::components::layout::interactive_embed_size(
-                                        sz.width, sz.height,
+                                        sz.width, sz.height, sidebar,
                                     );
                                 // Failure (no tmux session on the row / attach
                                 // error) surfaces as a notification from

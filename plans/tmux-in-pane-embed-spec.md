@@ -43,13 +43,14 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 | `DetachTmuxSession` event still present (`events.rs:156`) | repurpose as the focus-release handler as planned |
 | Deps unchanged on main (ratatui 0.26 etc.) | the 0.30 upgrade gap + Phase 0 plan still valid |
 
-## Shipped-reality amendments (2026-06-11)
+## Shipped-reality amendments (2026-06-11, expansion row amended 2026-06-12)
 
-The implementation deviates from this spec in four places. The spec text below
+The implementation deviates from this spec in five places. The spec text below
 is historical; these amendments win:
 
 | Spec said | Shipped reality |
 |---|---|
+| Pane expands to near-full width while interactive (sidebar forced to the rail); reverts on release | **REVERSED 2026-06-12 — the embed honors the user's sidebar layout.** The sidebar is a fixed ~40 cols (not the 40% this spec assumed), modern TUIs reflow cleanly on SIGWINCH, and `B` toggles the rail on demand — so the forced layout jump bought little. Entry size derives from the live `effective_width`; pre-collapse with `B` for a near-full-width embed. |
 | `i` enters the interactive embed | **`A` (Shift+A, "in-pane attach")** — `i` collided with Stats, the interim `l` ("live") read as confusing; `A` pairs with `a` (same verb, different surface). Re-auth moved off `A` to `u`. Every `i`/`l`-as-interactive reference below reads as `A`. |
 | Mouse routing planned for Phase 3 | **SHIPPED** — SGR (mode 1006) encoding with 1-based pane-local coordinate translation (`encode_mouse_event` in `tmux/embed_input.rs`). Events outside the pane interior are swallowed while interactive; bare motion is never forwarded. |
 | Ctrl+Q `detach-client` freebie for full-screen attach (`bind -n C-q detach-client` in `configure_session`) | **DEFERRED — pending decision, do not implement.** `bind -n` lands in the server-global root key table: it would leak the Ctrl+Q override into every session on the user's tmux server (non-ainb ones included) and shadow XON inside them. Needs a scoped design (per-session key table) first. |

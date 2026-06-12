@@ -28,21 +28,21 @@ use crate::app::{
 };
 
 /// Cell size the embed gets under the interactive layout: the right pane's
-/// interior once the session list has collapsed to the thin rail. Used at
+/// interior next to the user's CURRENT sidebar (the embed honors the sidebar
+/// — collapsed rail or full width — rather than forcing a layout). Used at
 /// entry (`EnterInteractivePane`) so the very first attach already matches
 /// what the first interactive frame will resize to — otherwise tmux reflows
 /// the session twice back-to-back (attach size → layout size).
 ///
 /// Must mirror `render`'s split: vertical chrome is the status bar (3) +
 /// session info (3) + menu bar (6), and the pane border takes 2 more rows/
-/// cols off the interior.
-pub fn interactive_embed_size(width: u16, height: u16) -> (u16, u16) {
+/// cols off the interior. `sidebar_width` is the live
+/// `sessions_pane_state.effective_width(..)` for the same terminal width.
+pub fn interactive_embed_size(width: u16, height: u16, sidebar_width: u16) -> (u16, u16) {
     const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
     const PANE_BORDERS: u16 = 2;
     let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
-    let cols = width
-        .saturating_sub(crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH + PANE_BORDERS)
-        .max(1);
+    let cols = width.saturating_sub(sidebar_width.saturating_add(PANE_BORDERS)).max(1);
     (rows, cols)
 }
 
@@ -118,14 +118,11 @@ impl LayoutComponent {
         self.render_status_bar(frame, main_layout[0], state);
 
         // Simple 2-panel layout: session list | logs (Claude chat is now a popup).
-        // While the interactive embed is focused, collapse the session list to a
-        // thin rail so the embed gets near-full width (locked decision: pane
-        // expands while interactive; reverts on Ctrl+Q release).
-        let sessions_width = if state.is_interactive_pane() {
-            crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH
-        } else {
-            state.sessions_pane_state.effective_width(main_layout[1].width)
-        };
+        // The interactive embed honors whatever sidebar layout the user has
+        // (decision 2026-06-12: no forced collapse — the sidebar is a fixed
+        // ~40 cols, modern TUIs reflow cleanly, and `B` pre-collapses to the
+        // rail when maximum embed width is wanted).
+        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -136,7 +133,7 @@ impl LayoutComponent {
         state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        if state.sessions_pane_state.collapsed || state.is_interactive_pane() {
+        if state.sessions_pane_state.collapsed {
             self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
         } else {
             self.session_list.render(frame, content_chunks[0], state);
@@ -1589,17 +1586,19 @@ mod interactive_embed_size_tests {
 
     #[test]
     fn matches_the_interactive_layout_interior() {
-        // 120x30 terminal: chrome = 3+3+6 plus the pane border (2) → rows 16;
-        // collapsed rail (5) plus the border (2) → cols 113. Must equal what
-        // the first interactive frame resizes the embed to (the tripwire
-        // drives the real render path against this).
-        assert_eq!(interactive_embed_size(120, 30), (16, 113));
-        assert_eq!(interactive_embed_size(80, 24), (10, 73));
+        // 120x30 terminal: chrome = 3+3+6 plus the pane border (2) → rows 16.
+        // Cols follow the user's CURRENT sidebar: the default 40-col sidebar
+        // plus the border (2) → 78; pre-collapsed to the 5-col rail → 113.
+        // Must equal what the first interactive frame resizes the embed to
+        // (the tripwire drives the real render path against this).
+        assert_eq!(interactive_embed_size(120, 30, 40), (16, 78));
+        assert_eq!(interactive_embed_size(120, 30, 5), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24, 5), (10, 73));
     }
 
     #[test]
     fn never_returns_zero_cells() {
-        assert_eq!(interactive_embed_size(0, 0), (1, 1));
-        assert_eq!(interactive_embed_size(7, 14), (1, 1));
+        assert_eq!(interactive_embed_size(0, 0, 5), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14, 40), (1, 1));
     }
 }

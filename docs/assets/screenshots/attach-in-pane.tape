@@ -1,7 +1,7 @@
 # vhs tape: Shift+A in-pane attach — the preview pane becomes a LIVE embedded
-# tmux client ("● INTERACTIVE — Ctrl+Q release" badge, sidebar collapses to a
-# thin rail, typed keys land in the session). Ctrl+Q releases; the session
-# survives.
+# tmux client ("● INTERACTIVE — Ctrl+Q release" badge; the sidebar stays exactly
+# as the user has it, typed keys land in the session). Ctrl+Q releases; the
+# session survives.
 #
 # Seed: identical to attach-fullscreen.tape (see that file's header) — isolated
 # HOME + isolated tmux server (TMUX_TMPDIR) holding a single demo-agent session.
@@ -35,7 +35,7 @@ Show
 # session list, demo-agent selected under "Other tmux"
 Sleep 2.5s
 
-# Shift+A: the pane becomes the live embed (badge + rail + session content)
+# Shift+A: the pane becomes the live embed (badge + session content; sidebar stays as-is)
 Type "A"
 Sleep 4s
 
@@ -45,6 +45,6 @@ Sleep 1s
 Enter
 Sleep 4s
 
-# Ctrl+Q releases: sidebar restores, badge gone, session survives
+# Ctrl+Q releases: badge gone, read-only panel back, sidebar unchanged, session survives
 Ctrl+Q
 Sleep 4s
