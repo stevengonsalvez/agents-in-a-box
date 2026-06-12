@@ -41,6 +41,7 @@ pub enum SidebarItem {
     Stats,     // Analytics & usage
     Witr,      // Process causality (witr plugin)
     Skills,    // Browse per-agent skills
+    Hangar,    // Autopilot control plane (hangar-tui plugin)
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
     Help,      // Docs & guides
@@ -60,6 +61,7 @@ impl SidebarItem {
             Self::Stats => "📊",
             Self::Witr => "🌳",
             Self::Skills => "🧠",
+            Self::Hangar => "🛩️",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
             Self::Help => "❓",
@@ -79,6 +81,7 @@ impl SidebarItem {
             Self::Stats => "Stats",
             Self::Witr => "Witr",
             Self::Skills => "Skills",
+            Self::Hangar => "Hangar",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
             Self::Help => "Help",
@@ -98,6 +101,7 @@ impl SidebarItem {
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
             Self::Skills => "Per-Agent Skills",
+            Self::Hangar => "Autopilot Control Plane",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
             Self::Help => "Docs & Guides",
@@ -117,6 +121,7 @@ impl SidebarItem {
             Self::Stats => "i",
             Self::Witr => "w",
             Self::Skills => "k",
+            Self::Hangar => "g",
             Self::Changelog => "v",
             Self::Setup => "S",
             Self::Help => "?",
@@ -136,6 +141,7 @@ impl SidebarItem {
             Self::Stats,
             Self::Witr,
             Self::Skills,
+            Self::Hangar,
             Self::Changelog,
             Self::Setup,
             Self::Help,
@@ -523,6 +529,69 @@ mod tests {
         let mut state = SidebarState::new();
         state.select(SidebarItem::Config);
         assert_eq!(state.selected_item(), SidebarItem::Config);
+    }
+
+    #[test]
+    fn hangar_tile_registered_with_discoverable_shortcut() {
+        // Hangar was previously reachable only via the undiscoverable 'g'
+        // hotkey — it had no home-screen tile, so a user who didn't know
+        // the key couldn't find it. Lock in the tile shape + a position
+        // after the first item so a refactor can't quietly drop it again.
+        let all = SidebarItem::all();
+        let hangar_pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Hangar)
+            .expect("SidebarItem::Hangar missing from all()");
+        assert!(hangar_pos > 0, "Hangar shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Hangar.label(), "Hangar");
+        assert_eq!(SidebarItem::Hangar.shortcut(), "g");
+        // 'g' mirrors the existing GoToHangar hotkey (events.rs) and must
+        // not collide with any other tile shortcut.
+        let collisions =
+            all.iter().filter(|i| **i != SidebarItem::Hangar && i.shortcut() == "g").count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'g' collides");
+    }
+
+    #[test]
+    fn renders_hangar_label_and_key_in_sidebar() {
+        // USER-VISIBLE proof: the rendered home sidebar must show the
+        // "Hangar" label and its 'g' key hint so the destination is
+        // discoverable without prior knowledge. Removing the Hangar
+        // entry from SidebarItem::all() (or its label/shortcut) breaks
+        // this assertion.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(40, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = SidebarState::new();
+        let component = SidebarComponent::new();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                component.render(f, area, &state);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            text.contains("Hangar"),
+            "Hangar label missing from sidebar render:\n{text}"
+        );
+        // The 'g' key hint is rendered as "[g]" next to the label.
+        assert!(
+            text.contains("[g]"),
+            "Hangar 'g' key hint missing from sidebar render:\n{text}"
+        );
     }
 
     #[test]

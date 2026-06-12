@@ -3452,6 +3452,14 @@ impl EventHandler {
                         state.current_screen = screen_ids::SKILLS.to_string();
                         state.start_background_skills_load(false);
                     }
+                    SidebarItem::Hangar => {
+                        tracing::info!("Navigating to Hangar from sidebar");
+                        // Mirror AppEvent::GoToHangar: the plugin-owned
+                        // `hangar-tui` screen renders itself and owns its
+                        // own data load (snapshot RPCs over the daemon
+                        // socket).
+                        state.current_screen = screen_ids::HANGAR.to_string();
+                    }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
                     }
