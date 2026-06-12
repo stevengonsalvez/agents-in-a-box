@@ -456,10 +456,20 @@ async fn run_tui_loop(
                     // inside the embed reaches the PTY instead of opening the
                     // palette.
                     if app.state.is_interactive_pane() {
-                        if let Some(client) = app.state.embed.as_ref() {
-                            if let Some(bytes) = crate::tmux::encode_key_event(&key_event) {
-                                let _ = client.write_input(&bytes);
-                            }
+                        // write_input only errors when the PTY writer thread is
+                        // gone — release immediately instead of leaving a
+                        // focused pane that silently eats input.
+                        let write_failed = app
+                            .state
+                            .embed
+                            .as_ref()
+                            .zip(crate::tmux::encode_key_event(&key_event))
+                            .is_some_and(|(client, bytes)| client.write_input(&bytes).is_err());
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
                         }
                         continue;
                     }
@@ -657,14 +667,20 @@ async fn run_tui_loop(
                     // without it ignore the sequences). Everything else is
                     // swallowed.
                     if app.state.is_interactive_pane() {
-                        if let (Some(inner), Some(client)) =
-                            (app.state.embed_pane_area, app.state.embed.as_ref())
-                        {
-                            if let Some(bytes) =
+                        let write_failed = app
+                            .state
+                            .embed_pane_area
+                            .zip(app.state.embed.as_ref())
+                            .and_then(|(inner, client)| {
                                 crate::tmux::encode_mouse_event(&mouse_event, inner)
-                            {
-                                let _ = client.write_input(&bytes);
-                            }
+                                    .map(|bytes| client.write_input(&bytes).is_err())
+                            })
+                            .unwrap_or(false);
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
                         }
                         continue;
                     }
@@ -856,12 +872,18 @@ async fn run_tui_loop(
                     if app.state.is_interactive_pane() {
                         // Forward as a bracketed paste so the inner program
                         // doesn't submit multi-line content line-by-line.
-                        if let Some(client) = app.state.embed.as_ref() {
+                        let write_failed = app.state.embed.as_ref().is_some_and(|client| {
                             let mut bytes = Vec::with_capacity(text.len() + 12);
                             bytes.extend_from_slice(b"\x1b[200~");
                             bytes.extend_from_slice(text.as_bytes());
                             bytes.extend_from_slice(b"\x1b[201~");
-                            let _ = client.write_input(&bytes);
+                            client.write_input(&bytes).is_err()
+                        });
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
                         }
                     } else if let Some(app_event) =
                         EventHandler::handle_paste_event(text, &app.state)
