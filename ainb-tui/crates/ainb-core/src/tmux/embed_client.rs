@@ -139,6 +139,11 @@ impl EmbedClient {
                                 }
                                 dirty.store(true, Ordering::Relaxed);
                             }
+                            // EINTR: a signal (e.g. SIGWINCH on terminal
+                            // resize) interrupted the blocking read. Not EOF —
+                            // treating it as fatal would tear down the embed
+                            // every time the outer terminal resizes.
+                            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(_) => break,
                         }
                     }
