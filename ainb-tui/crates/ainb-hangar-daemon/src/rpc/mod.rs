@@ -142,7 +142,18 @@ async fn serve_conn(
 ) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    while let Some(body) = read_frame(&mut reader).await? {
+    // Idle read timeout so an abandoned / half-open client connection cannot pin
+    // this per-connection task (and its fd) forever. The RPC is request/response
+    // and clients reconnect per request, so a generous idle window only reclaims
+    // dead connections — it never interrupts an in-flight exchange. (bead `dsp`)
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    while let Some(body) = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
+        Ok(frame_result) => frame_result?,
+        Err(_elapsed) => {
+            tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
+            None
+        }
+    } {
         let resp = match serde_json::from_slice::<RpcRequest>(&body) {
             Ok(req) => dispatch(&pool, &req, &health).await,
             Err(e) => RpcResponse {

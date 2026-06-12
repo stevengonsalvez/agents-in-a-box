@@ -527,9 +527,11 @@ impl AppState {
     /// pane reverts to the read-only preview rather than a dead screen. Also
     /// releases defensively when the current screen is no longer the session
     /// list — keys must never be forwarded to an invisible PTY.
-    pub fn poll_embed_exit(&mut self) {
+    ///
+    /// Returns true when it released (the layout changed → repaint needed).
+    pub fn poll_embed_exit(&mut self) -> bool {
         if self.embed.is_none() {
-            return;
+            return false;
         }
         let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
         let invisible = self.current_screen != screen_ids::SESSION_LIST;
@@ -538,7 +540,17 @@ impl AppState {
             if exited {
                 self.add_info_notification("Live session ended — released".to_string());
             }
+            return true;
         }
+        false
+    }
+
+    /// New embed output since the last call? Clears the embed's dirty flag.
+    /// The render loop polls this as a repaint trigger: live PTY output
+    /// arrives without host input, so the dirty-gate (perf bead `wai`) would
+    /// otherwise hold the pane at the 250ms animation floor.
+    pub fn embed_take_dirty(&self) -> bool {
+        self.embed.as_ref().is_some_and(|e| e.take_dirty())
     }
 }
 
@@ -2698,6 +2710,13 @@ pub struct AppState {
     pub pending_plugin_renders:
         std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
 
+    /// Cache of workspace paths that are currently favorited (starred).
+    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
+    /// list or the favorites store changes — NOT in the render path. The
+    /// session-list render reads this set with an O(1) lookup, so it never
+    /// re-parses `favorites.yaml` or opens a git repo per frame.
+    pub favorite_workspace_paths: HashSet<PathBuf>,
+
     /// Last `(width, height)` `PluginScreen::render` was handed for each
     /// screen id. `tick_plugin_renders` reads this and forwards it to
     /// `handle.render(..)` so the plugin paints at the actual allocated
@@ -2786,6 +2805,13 @@ pub struct AppState {
 
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
     pub last_preview_update: Option<Instant>,
+
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview — one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
 
     // Background workspace loading state
     pub is_loading_workspaces: bool,
@@ -3195,6 +3221,7 @@ impl Default for AppState {
             inbox_state: crate::components::inbox::InboxState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
+            favorite_workspace_paths: HashSet::new(),
             plugin_render_areas: std::collections::HashMap::new(),
             plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
@@ -3217,6 +3244,7 @@ impl Default for AppState {
 
             // Throttled tmux preview updates
             last_preview_update: None,
+            last_status_check: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -4003,6 +4031,12 @@ impl AppState {
                             self.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
+                            // Resolve favorite status once per workspace now
+                            // that the list changed, so the session-list render
+                            // never opens a git repo or parses favorites.yaml
+                            // per frame (perf: bead 9ov + 8rn).
+                            self.recompute_favorite_workspaces();
+
                             // Populate tmux_sessions HashMap for Interactive mode sessions
                             // This is needed for update_tmux_previews() to capture pane content
                             for workspace in &self.workspaces {
@@ -4121,6 +4155,59 @@ impl AppState {
             }
         }
         false
+    }
+
+    /// Recompute which workspaces are favorited and cache the result in
+    /// `favorite_workspace_paths`. Loads `favorites.yaml` ONCE and resolves
+    /// each workspace's favorite status (by local path or git remote) here,
+    /// off the render path. Call after the workspace list changes or a
+    /// favorite is toggled — never per frame. (perf: beads 9ov + 8rn)
+    pub fn recompute_favorite_workspaces(&mut self) {
+        let favorites = crate::config::FavoritesStore::load();
+        let mut starred: HashSet<PathBuf> = HashSet::new();
+        for workspace in &self.workspaces {
+            if Self::workspace_is_favorite(&workspace.path, &favorites) {
+                starred.insert(workspace.path.clone());
+            }
+        }
+        self.favorite_workspace_paths = starred;
+    }
+
+    /// True if `path` is favorited, by local-path match or by the repo's git
+    /// remote (owner/repo shorthand or full URL). The git remote lookup is the
+    /// expensive part (libgit2 open + config read), so this MUST stay out of
+    /// the render path — it runs only from `recompute_favorite_workspaces`.
+    fn workspace_is_favorite(
+        path: &std::path::Path,
+        favorites: &crate::config::FavoritesStore,
+    ) -> bool {
+        let path_str = path.display().to_string();
+        if favorites.favorites.iter().any(|f| f.source == path_str) {
+            return true;
+        }
+        // Fall back to the repo's `origin` remote. `from_input` is deprecated
+        // for free-form input, but the URL comes from `get_remote_url()` so the
+        // legacy contract holds.
+        crate::perf::record_git_resolve();
+        let Ok(git_repo) = crate::git::RepositoryManager::open(path) else {
+            return false;
+        };
+        let Ok(Some(remote_url)) = git_repo.get_remote_url() else {
+            return false;
+        };
+        #[allow(deprecated)]
+        let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url) else {
+            return false;
+        };
+        if let Ok(parsed) = repo_source.parse_components() {
+            let shorthand = format!("{}/{}", parsed.owner, parsed.repo_name);
+            favorites
+                .favorites
+                .iter()
+                .any(|f| f.source == shorthand || f.source == remote_url)
+        } else {
+            favorites.favorites.iter().any(|f| f.source == remote_url)
+        }
     }
 
     /// Kick off a background scan of ~/.claude/skills and ~/.claude/agents.
@@ -9283,6 +9370,19 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
+        // Non-selected sessions only need a status (running/idle) refresh, which
+        // is not time-critical — sweep them on a longer cadence so we don't
+        // spawn one `capture-pane` per non-selected session on every 5s preview
+        // refresh. (perf: bead 9pb)
+        const STATUS_INTERVAL_SECS: u64 = 20;
+        let do_status_check = match self.last_status_check {
+            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
+            None => true,
+        };
+        if do_status_check {
+            self.last_status_check = Some(now);
+        }
+
         // updates: (session_id, content, claude_running) for the selected session.
         // Attention markers are derived separately from hook events in
         // `refresh_attention_markers`, not from live pane state.
@@ -9333,9 +9433,10 @@ impl AppState {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
                     }
                 }
-            } else {
-                // Non-selected sessions: only capture visible area for status detection
-                // Much cheaper — just the last screenful (~50 lines)
+            } else if do_status_check {
+                // Non-selected sessions: only capture visible area for status
+                // detection, and only on the longer status cadence. Much
+                // cheaper — just the last screenful (~50 lines). (perf: 9pb)
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
@@ -9649,13 +9750,17 @@ impl App {
     /// burndown + session-reader as Rust subprocess binaries). Loop is
     /// no-op when discovery returned empty; once 7c lands, the screen
     /// routing table below populates again.
-    pub fn tick_plugin_renders(&mut self) {
+    /// Drive plugin-owned screens. Returns `true` if a fresh plugin frame was
+    /// drained into `pending_plugin_renders` this tick, so the render loop can
+    /// treat that as a reason to repaint (perf: bead `wai` dirty-gate).
+    pub fn tick_plugin_renders(&mut self) -> bool {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
         let Some(handle) = self.state.plugin_runtime.clone() else {
-            return;
+            return false;
         };
+        let mut drained = false;
 
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
@@ -9690,6 +9795,7 @@ impl App {
             // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+                drained = true;
             }
 
             // Visibility gate: only the plugin owning the focused screen
@@ -9764,6 +9870,7 @@ impl App {
             // pickup happens via `try_recv_render` next tick.
             let _ = handle.render(&pid, viewport, 0);
         }
+        drained
     }
 
     pub async fn init(&mut self) {

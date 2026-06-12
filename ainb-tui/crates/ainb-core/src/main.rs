@@ -43,6 +43,7 @@ mod fleet;
 mod git;
 mod interactive;
 mod models;
+mod perf;
 mod plugins;
 mod providers;
 mod tmux;
@@ -88,6 +89,7 @@ where
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    crate::perf::init();
     setup_logging();
     setup_panic_handler();
 
@@ -299,6 +301,10 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
         cleanup_terminal();
     }
 
+    // Perf trace summary (no-op unless AINB_PERF_TRACE is set). Emitted after
+    // the alternate screen is torn down so the report lands on the real stderr.
+    crate::perf::report();
+
     result
 }
 
@@ -327,6 +333,24 @@ async fn run_tui_loop(
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 
+    // Perf trace: timestamp of the most recent keystroke awaiting its paint.
+    // Set when a key event is read; consumed at the top of the next loop
+    // iteration once the paint that reflects it has completed. Gated behind
+    // `AINB_PERF_TRACE` (see `crate::perf`); zero cost when disabled.
+    let mut pending_key_at: Option<Instant> = None;
+
+    // Dirty-gate for the host layout repaint (perf: bead `wai`). The TUI used
+    // to call `terminal.draw()` unconditionally every 33 ms (~30 fps) even when
+    // nothing changed, burning ~5-6% CPU at idle. Animations and periodic state
+    // already advance only on the 250 ms `app_tick`, so a frame between ticks
+    // was an identical repaint. We now paint only when something actually
+    // changed: an input/resize/paste event, a fresh plugin frame, an
+    // `app_tick` (covers mascot/spinner/state at their existing 250 ms
+    // cadence), or an explicit `ui_needs_refresh`. Starts `true` for the first
+    // paint. Worst-case staleness is one `app_tick` (250 ms) — identical to the
+    // pre-existing animation cadence — so there is no visible regression.
+    let mut needs_redraw = true;
+
     // Startup guard: Ignore key events for the first 100ms to prevent stray keypresses
     // from triggering actions (e.g., buffered 'n' key opening New Session dialog)
     let startup_time = Instant::now();
@@ -340,27 +364,62 @@ async fn run_tui_loop(
         // WireBuffer into `state.pending_plugin_renders`, so layout's
         // `PluginScreen` can paint without touching the plugin host
         // directly.
-        app.tick_plugin_renders();
+        // A fresh plugin frame is a reason to repaint even if nothing else
+        // changed (e.g. a self-animating plugin screen).
+        if app.tick_plugin_renders() {
+            needs_redraw = true;
+        }
 
         // If the interactive embed ended (detach / session gone / EOF), auto-
-        // release so the pane reverts to the read-only preview, not a dead screen.
-        app.state.poll_embed_exit();
+        // release so the pane reverts to the read-only preview, not a dead
+        // screen. Releasing changes the layout, so it is a repaint trigger.
+        if app.state.poll_embed_exit() {
+            needs_redraw = true;
+        }
 
-        terminal.draw(|frame| {
-            layout.render(frame, &mut app.state);
-        })?;
+        // Live embed output is the third repaint source alongside input and
+        // plugin frames: the PTY reader thread marks the embed dirty as bytes
+        // stream in, with no host input involved. Without this the dirty-gate
+        // would hold the live pane at the 250ms app-tick floor.
+        if app.state.embed_take_dirty() {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            let draw_start = Instant::now();
+            terminal.draw(|frame| {
+                layout.render(frame, &mut app.state);
+            })?;
+            crate::perf::record_draw(draw_start.elapsed());
+            // This paint is the first one to reflect any key read in the
+            // previous iteration, so it marks the end of the key-to-render
+            // interval.
+            if let Some(key_at) = pending_key_at.take() {
+                crate::perf::record_key_to_render(key_at.elapsed());
+            }
+            needs_redraw = false;
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if crossterm::event::poll(timeout)? {
+            // Any input (key/mouse/paste/resize) warrants a repaint on the next
+            // loop iteration (perf: bead `wai` dirty-gate).
+            needs_redraw = true;
             match event::read()? {
                 Event::Key(key_event) => {
                     // Windows fires Press + Release for every key; macOS/Linux fire only Press.
                     // Drop Release so Enter doesn't immediately re-trigger and close popups.
                     if key_event.kind == KeyEventKind::Release {
                         continue;
+                    }
+
+                    // Perf trace: this real keystroke now awaits the next paint.
+                    if crate::perf::enabled() {
+                        crate::perf::record_key();
+                        pending_key_at = Some(Instant::now());
                     }
 
                     // Startup guard: Ignore key events during startup period
@@ -1592,14 +1651,9 @@ async fn run_tui_loop(
             match app.tick().await {
                 Ok(()) => {
                     last_app_tick = Instant::now();
-
-                    // Check if UI needs immediate refresh after async operations
-                    if app.needs_ui_refresh() {
-                        // Force immediate redraw by skipping the timeout
-                        terminal.draw(|frame| {
-                            layout.render(frame, &mut app.state);
-                        })?;
-                    }
+                    // Consume the refresh flag; the repaint is handled by the
+                    // app-tick redraw below (perf: bead `wai`).
+                    let _ = app.needs_ui_refresh();
                 }
                 Err(e) => {
                     use tracing::error;
@@ -1608,6 +1662,12 @@ async fn run_tui_loop(
                     last_app_tick = Instant::now();
                 }
             }
+
+            // The app tick is the only place mascot/spinner/streaming state
+            // advances, so repaint once per tick (its existing ~250 ms cadence).
+            // This is the animation floor of the dirty-gate: between ticks, with
+            // no input or plugin frame, we draw nothing. (perf: bead `wai`)
+            needs_redraw = true;
         }
 
         if app.state.should_quit {

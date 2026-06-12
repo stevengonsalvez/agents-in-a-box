@@ -18,8 +18,8 @@ use std::sync::mpsc::{self, Receiver};
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    Cell, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext, MouseButton,
-    MouseKind, Plugin, RenderParams, Result, WireBuffer,
+    Cell, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext, KeyCode,
+    MouseButton, MouseKind, Plugin, RenderParams, Result, WireBuffer, topics,
 };
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -387,10 +387,14 @@ impl Plugin for LearningsPlugin {
         Ok(wire)
     }
 
-    /// Route a forwarded key into the UI. The host reserves global nav (Esc,
-    /// etc.) and only forwards keys it hasn't consumed, so a no-op here for an
-    /// unhandled key is correct.
-    async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
+    /// Route a forwarded key into the UI. The host forwards every non-reserved
+    /// key here (Esc included — it is plugin-owned, not host-reserved). The UI
+    /// pops its own internal levels (detail drawer, picker, focused graph); at
+    /// the root view, an unconsumed Esc must close the screen, so we publish
+    /// `ui.close_request` for the host to pop back to wherever the panel was
+    /// opened from. Without it the user is trapped on the panel (only Ctrl+C
+    /// quits). Mirrors the burndown plugin's root-Esc path.
+    async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
         // Build the Search context fresh from the resolved config: the
         // collection/index the Search tab threads into its query. The `qmd`
         // runner is NOT in the context — a search submit returns a request and
@@ -403,6 +407,16 @@ impl Plugin for LearningsPlugin {
         let outcome = self.ui.handle_key(&params.key.code, &ctx);
         if outcome.changed {
             self.generation = self.generation.wrapping_add(1);
+        }
+        // Root-level Esc: the UI consumed nothing (`changed == false`), so there
+        // was no inner level to pop — ask the host to close this screen. Best
+        // effort; if the publish is lost the user just presses Esc again.
+        if matches!(params.key.code, KeyCode::Esc) && !outcome.changed {
+            let req = topics::UiCloseRequest {
+                screen_id: params.screen_id.clone(),
+            };
+            let payload = serde_json::to_vec(&req).unwrap_or_default();
+            let _ = host.snapshot_publish(topics::UI_CLOSE_REQUEST, payload).await;
         }
         // A fresh Search submit: kick the `qmd` worker OFF this thread. The
         // result is polled back in on the next render.

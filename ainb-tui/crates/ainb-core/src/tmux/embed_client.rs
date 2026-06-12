@@ -72,6 +72,13 @@ pub struct EmbedClient {
     /// dropping this client) closes the channel and the thread exits.
     input_tx: SyncSender<Vec<u8>>,
     exited: Arc<AtomicBool>,
+    /// New PTY output since the last `take_dirty()`. The host render loop is
+    /// dirty-gated (perf bead `wai`: it only paints on input, a plugin frame,
+    /// or the 250ms app-tick) — embed output arrives WITHOUT host input, so
+    /// the reader thread marks this flag and the loop treats it as a repaint
+    /// trigger. Without it the live pane would chug at the 250ms animation
+    /// floor instead of painting as output streams in.
+    dirty: Arc<AtomicBool>,
     rows: u16,
     cols: u16,
 }
@@ -103,10 +110,12 @@ impl EmbedClient {
 
         let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
+        // Starts dirty so the first interactive frame paints immediately.
+        let dirty = Arc::new(AtomicBool::new(true));
 
         // Reader thread: master fd -> vt100 parser. Blocking reads on a
-        // dedicated OS thread; the render loop redraws every frame (~33ms)
-        // and reads the latest screen straight off the shared parser.
+        // dedicated OS thread; each processed chunk marks the client dirty so
+        // the dirty-gated render loop knows to repaint (see `take_dirty`).
         let reader = {
             let master = pty.master();
             let guard = master.lock().map_err(|e| anyhow::anyhow!("master lock: {e}"))?;
@@ -115,6 +124,7 @@ impl EmbedClient {
         {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
+            let dirty = Arc::clone(&dirty);
             std::thread::Builder::new()
                 .name("embed-pty-reader".into())
                 .spawn(move || {
@@ -127,11 +137,14 @@ impl EmbedClient {
                                 if let Ok(mut p) = parser.write() {
                                     p.process(&buf[..n]);
                                 }
+                                dirty.store(true, Ordering::Relaxed);
                             }
                             Err(_) => break,
                         }
                     }
                     exited.store(true, Ordering::Relaxed);
+                    // The exit itself needs a repaint (badge -> read-only revert).
+                    dirty.store(true, Ordering::Relaxed);
                 })
                 .context("spawn embed reader thread")?;
         }
@@ -165,9 +178,18 @@ impl EmbedClient {
             parser,
             input_tx,
             exited,
+            dirty,
             rows,
             cols,
         })
+    }
+
+    /// Has new output arrived since the last call? Clears the flag. The host
+    /// render loop polls this each iteration and treats `true` as a repaint
+    /// trigger — the embed's equivalent of a fresh plugin frame under the
+    /// dirty-gate (perf bead `wai`).
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
     }
 
     /// Shared parser handle — the render path reads `.screen()` off this.
@@ -218,6 +240,9 @@ impl EmbedClient {
         }
         self.rows = rows;
         self.cols = cols;
+        // A resize reflows the screen model — repaint even before the inner
+        // program reacts to the SIGWINCH.
+        self.dirty.store(true, Ordering::Relaxed);
         Ok(())
     }
 

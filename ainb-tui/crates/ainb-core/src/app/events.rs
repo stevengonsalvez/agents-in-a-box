@@ -3563,6 +3563,12 @@ impl EventHandler {
                         tracing::info!("Navigating to Skills from sidebar");
                         Self::process_event(AppEvent::GoToSkills, state);
                     }
+                    SidebarItem::Memory => {
+                        tracing::info!("Navigating to Memory (knowledge base) from sidebar");
+                        // Canonical event saves `previous_screen` so the
+                        // panel's Esc-close returns here, not to a stale origin.
+                        Self::process_event(AppEvent::GoToLearnings, state);
+                    }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
                     }
@@ -3678,6 +3684,11 @@ impl EventHandler {
                                 ));
                             }
                         }
+
+                        // Favorites changed — refresh the precomputed star
+                        // cache so the session list reflects the toggle without
+                        // re-resolving favorites in the render path. (perf 9ov/8rn)
+                        state.recompute_favorite_workspaces();
                     }
                 }
             }
@@ -5417,6 +5428,23 @@ mod panel_back_tests {
             matches!(evt, AppEvent::GoToLearnings),
             "`m` must map to GoToLearnings, got {evt:?}"
         );
+    }
+
+    /// Activating the Memory tile on the home sidebar (Enter) must open the
+    /// learnings panel, saving home as the origin so the panel's Esc-close
+    /// returns there. The tile was missing entirely before — every other
+    /// overlay panel had one.
+    #[test]
+    fn home_sidebar_memory_tile_opens_learnings() {
+        use crate::components::sidebar::SidebarItem;
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+        state.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
+
+        EventHandler::process_event(AppEvent::HomeScreenSidebarSelect, &mut state);
+
+        assert_eq!(state.current_screen, ids::LEARNINGS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
     }
 
     /// Re-firing the open event while already on the panel must not
