@@ -31,13 +31,24 @@ fn registry() -> &'static StdMutex<Vec<(u64, Box<dyn ChildKiller + Send + Sync>)
 /// Kill every registered embed child. Called from the panic hook before the
 /// terminal is restored, and safe to call at normal shutdown. Best-effort: a
 /// kill error on an already-dead child is ignored.
+///
+/// Panic-hook safety: `try_lock` instead of `lock` — if the panicking thread
+/// itself holds the registry lock, a blocking `lock()` here would deadlock
+/// the hook and the terminal would never be restored. A POISONED registry
+/// (some thread panicked while holding it — exactly the scenario this hook
+/// exists for) is still drained via the poison guard; only a lock held
+/// right now by another live thread is skipped (best-effort).
 pub fn kill_all_embed_children() {
-    if let Ok(mut reg) = registry().lock() {
-        for (_, killer) in reg.iter_mut() {
-            let _ = killer.kill();
-        }
-        reg.clear();
+    use std::sync::TryLockError;
+    let mut guard = match registry().try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    for (_, killer) in guard.iter_mut() {
+        let _ = killer.kill();
     }
+    guard.clear();
 }
 
 /// Number of currently-registered embed children (test/diagnostic aid).
