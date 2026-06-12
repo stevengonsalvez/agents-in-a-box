@@ -69,6 +69,17 @@
         ]
       },
       {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/caveman_posttooluse.js",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      },
+      {
         "matcher": "*",
         "hooks": [
           {
@@ -146,6 +157,16 @@
             "command": "uv run ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/caveman_precompact.js",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -207,8 +228,25 @@
   },
   "enabledPlugins": {
     "warp@claude-code-warp": true,
+    "security-guidance@claude-plugins-official": true,
     "reflect@agents-in-a-box": true,
-    "ainb-fleet@agents-in-a-box": true
+    "ainb-fleet@agents-in-a-box": true,
+    "ainb-hooks@agents-in-a-box": true,
+    "caveman@caveman": true
+  },
+  "extraKnownMarketplaces": {
+    "agents-in-a-box": {
+      "source": {
+        "source": "directory",
+        "path": "~/d/git/ai-coder-rules"
+      }
+    },
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman"
+      }
+    }
   },
   "skipDangerousModePermissionPrompt": true,
   "teammateMode": "auto",
