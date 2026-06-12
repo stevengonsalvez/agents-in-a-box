@@ -25,6 +25,27 @@ use std::io;
 /// of launching a real browser.
 pub const OPENER_PROBE_ENV: &str = "HANGAR_OPENER_PROBE_FILE";
 
+/// The env var the tripwire / test sets to redirect the daemon-starter to a
+/// probe file instead of actually spawning `ainb hangar daemon start` (e38.36).
+pub const DAEMON_START_PROBE_ENV: &str = "HANGAR_DAEMON_START_PROBE_FILE";
+
+/// The env var that overrides the resolved `ainb` host binary path (e38.36).
+///
+/// When unset the daemon-starter resolves a sibling of the plugin's own
+/// executable, then the bare `ainb` on `$PATH`.
+pub const AINB_BIN_ENV: &str = "AINB_BIN";
+
+/// Bare name of the host binary the plugin shells to start the daemon.
+const AINB_BIN_NAME: &str = "ainb";
+
+/// The `ainb` subcommand args that start the daemon (e38.36).
+///
+/// The literal CLI command the offline empty-state prints for a manual start,
+/// and the verb the [`SystemDaemonStarter`] passes to the resolved `ainb`
+/// binary. Kept as one source of truth so the on-screen hint and the real spawn
+/// never drift.
+pub const DAEMON_START_ARGS: [&str; 3] = ["hangar", "daemon", "start"];
+
 /// Opens a URL in the host environment.
 ///
 /// The seam between the pure task-detail screen and the OS browser launch, so the
@@ -111,6 +132,124 @@ pub fn default_opener() -> Box<dyn Opener> {
     }
 }
 
+/// Starts the Hangar daemon by shelling the host `ainb hangar daemon start`
+/// command (e38.36).
+///
+/// The seam between the offline empty-state `[s]` action and the OS process
+/// launch, so the start path is testable without spawning a real daemon. The
+/// plugin holds a `Box<dyn DaemonStarter>` and calls [`DaemonStarter::start`]
+/// for `[s]`; production uses [`SystemDaemonStarter`], tests inject a
+/// [`RecordingDaemonStarter`] that writes a marker file instead of launching the
+/// binary.
+pub trait DaemonStarter: std::fmt::Debug + Send + Sync {
+    /// Start the Hangar daemon (typically by spawning `ainb hangar daemon
+    /// start`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] when the underlying launch fails (e.g. the
+    /// resolved `ainb` binary could not be spawned). The plugin surfaces the
+    /// message in the offline empty-state rather than crashing.
+    fn start(&self) -> io::Result<()>;
+}
+
+/// The real daemon starter: spawns the resolved `ainb` binary with
+/// `hangar daemon start` as a fire-and-forget background child.
+///
+/// The `ainb hangar daemon start` subcommand itself double-forks the daemon and
+/// returns immediately, so this only needs to spawn the foreground `ainb`
+/// process and not wait on it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemDaemonStarter;
+
+impl DaemonStarter for SystemDaemonStarter {
+    fn start(&self) -> io::Result<()> {
+        let bin = resolve_ainb_bin();
+        std::process::Command::new(bin)
+            .args(DAEMON_START_ARGS)
+            .spawn()
+            .map(|_child| ())
+    }
+}
+
+/// Resolve the `ainb` host binary the daemon starter shells (e38.36).
+///
+/// Order, mirroring the daemon's own `resolve_daemon_bin`: the [`AINB_BIN_ENV`]
+/// override → a sibling of the plugin's own executable (the normal install
+/// layout puts `ainb` next to the bundled plugin binary) → the bare `ainb` name
+/// on `$PATH`. The plugin runs as a subprocess of `ainb`, so `current_exe`
+/// points at the plugin binary, whose install dir also holds `ainb`.
+fn resolve_ainb_bin() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os(AINB_BIN_ENV).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(AINB_BIN_NAME);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from(AINB_BIN_NAME)
+}
+
+/// A test daemon starter that records the start request to a file instead of
+/// spawning the real `ainb` binary.
+///
+/// Writes a fixed marker (the `ainb hangar daemon start` command line) to the
+/// path it was constructed with. Tests point it at a tempfile and assert the
+/// file exists / contains the command — proving the `[s]` action fired, with no
+/// real daemon spawned.
+#[derive(Debug, Clone)]
+pub struct RecordingDaemonStarter {
+    probe_path: std::path::PathBuf,
+}
+
+impl RecordingDaemonStarter {
+    /// A recording starter that writes a start marker to `probe_path`.
+    #[must_use]
+    pub fn new(probe_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            probe_path: probe_path.into(),
+        }
+    }
+}
+
+impl DaemonStarter for RecordingDaemonStarter {
+    fn start(&self) -> io::Result<()> {
+        std::fs::write(&self.probe_path, DAEMON_START_ARGS.join(" "))
+    }
+}
+
+/// A test daemon starter that always fails, to exercise the empty-state error
+/// surface without crashing the plugin.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FailingDaemonStarter;
+
+impl DaemonStarter for FailingDaemonStarter {
+    fn start(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "ainb binary not found",
+        ))
+    }
+}
+
+/// The daemon starter the production plugin uses, chosen from the environment.
+///
+/// When `$HANGAR_DAEMON_START_PROBE_FILE` is set (a tripwire flips it) the
+/// binary records the start request to that path via a [`RecordingDaemonStarter`]
+/// instead of spawning a real daemon; otherwise it uses the real
+/// [`SystemDaemonStarter`]. Mirrors [`default_opener`].
+#[must_use]
+pub fn default_daemon_starter() -> Box<dyn DaemonStarter> {
+    match std::env::var_os(DAEMON_START_PROBE_ENV) {
+        Some(path) if !path.is_empty() => Box::new(RecordingDaemonStarter::new(path)),
+        _ => Box::new(SystemDaemonStarter),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +281,45 @@ mod tests {
             let opener = default_opener();
             assert_eq!(format!("{opener:?}"), "SystemOpener");
         }
+    }
+
+    /// The recording daemon starter writes the start command line to its probe
+    /// file (e38.36) — the testable seam the `[s]` action drives.
+    #[test]
+    fn recording_daemon_starter_writes_start_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("started.txt");
+        let starter = RecordingDaemonStarter::new(&probe);
+        starter.start().expect("record start");
+        let written = std::fs::read_to_string(&probe).expect("read probe");
+        assert_eq!(written, "hangar daemon start");
+    }
+
+    /// The failing starter surfaces a typed error rather than panicking, so the
+    /// plugin can show it in the empty-state (e38.36).
+    #[test]
+    fn failing_daemon_starter_returns_error() {
+        let err = FailingDaemonStarter.start().expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// With the probe env unset, `default_daemon_starter` falls back to the real
+    /// [`SystemDaemonStarter`] (debug-formats as `SystemDaemonStarter`).
+    #[test]
+    fn default_daemon_starter_without_probe_env_is_system_starter() {
+        if std::env::var_os(DAEMON_START_PROBE_ENV).is_none() {
+            let starter = default_daemon_starter();
+            assert_eq!(format!("{starter:?}"), "SystemDaemonStarter");
+        }
+    }
+
+    /// The on-screen literal command and the spawned argv share one source of
+    /// truth — `ainb` + the joined args spells the documented manual command.
+    #[test]
+    fn daemon_start_args_match_documented_command() {
+        assert_eq!(
+            format!("{AINB_BIN_NAME} {}", DAEMON_START_ARGS.join(" ")),
+            "ainb hangar daemon start"
+        );
     }
 }
