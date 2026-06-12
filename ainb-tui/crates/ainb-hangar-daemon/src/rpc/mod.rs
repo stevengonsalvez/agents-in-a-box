@@ -399,6 +399,7 @@ async fn handle(
             to_value(&ainb_hangar_proto::snapshots::IssuesListResult { issues })
         }
         methods::HANGAR_ISSUES_SEARCH => handle_issues_search(pool, req).await,
+        methods::HANGAR_SEARCH => handle_search(pool, req).await,
         methods::HANGAR_AGENTS_LIST => {
             let actors = match resolve(pool, req).await? {
                 Some(ws) => snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?,
@@ -455,13 +456,7 @@ async fn handle(
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
         | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req, events).await,
-        methods::HANGAR_TASKS_LIST => {
-            let tasks = match resolve(pool, req).await? {
-                Some(ws) => snapshots::tasks_list(pool, &ws).await.map_err(|e| store_err(&e))?,
-                None => Vec::new(),
-            };
-            to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
-        }
+        methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
@@ -676,6 +671,43 @@ async fn handle_issues_search(
         None => Vec::new(),
     };
     to_value(&ainb_hangar_proto::snapshots::IssuesListResult { issues })
+}
+
+/// Dispatch `hangar/search` (e38.13): ranked cross-entity command-palette search
+/// across the workspace's issues, agents, skills, and autopilots, answering with
+/// the matching [`SearchEntry`]s in rank order.
+///
+/// A read like `hangar/issues_search`: an unknown workspace yields an empty result
+/// rather than an `INVALID_PARAMS` rejection (search is non-mutating, so a
+/// mistyped workspace is "no matches", not a client error). Split out of [`handle`]
+/// to keep that dispatcher within the line cap.
+///
+/// [`SearchEntry`]: ainb_hangar_proto::snapshots::SearchEntry
+async fn handle_search(pool: &SqlitePool, req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SearchParams =
+        parse_params(req, "{ workspace_id, query }")?;
+    let entries = match resolve_workspace_id(pool, &params.workspace_id)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        Some(ws) => snapshots::search(pool, &ws, &params.query).await.map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::SearchResult { entries })
+}
+
+/// Dispatch `hangar/tasks_list` (P8.4): snapshot the workspace's task queue for
+/// the Kanban board. An unknown workspace yields an empty set (a read). Split out
+/// of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_tasks_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let tasks = match resolve(pool, req).await? {
+        Some(ws) => snapshots::tasks_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
 }
 
 /// Dispatch `hangar/issue_create` (e38.29): create one new issue, push the

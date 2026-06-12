@@ -129,6 +129,51 @@ pub async fn issues_search(
     Ok(out)
 }
 
+/// Ranked cross-entity search within `workspace_id`, mapped to the proto wire
+/// [`SearchEntry`]s the command palette renders + jumps from (`hangar/search`,
+/// e38.13).
+///
+/// Delegates the ranking + workspace scoping to
+/// [`ainb_hangar_store::repo::search::cross_entity_search`] (a match across the
+/// issue title / agent name / skill name / autopilot name, ranked exact > prefix >
+/// substring then kind then label) and maps each [`SearchHit`] into the wire
+/// [`SearchEntry`], deriving the jump-target `screen` token from the entry kind so
+/// the plugin needs no kind→screen table of its own. Order is preserved
+/// one-for-one. Workspace-scoped: an unknown workspace yields an empty result.
+///
+/// [`SearchHit`]: ainb_hangar_store::repo::search::SearchHit
+/// [`SearchEntry`]: ainb_hangar_proto::snapshots::SearchEntry
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the underlying search query fails.
+pub async fn search(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    query: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::SearchEntry>, sqlx::Error> {
+    use ainb_hangar_proto::snapshots::{SearchEntry, SearchEntryKind};
+    use ainb_hangar_store::repo::search::{SearchHitKind, cross_entity_search};
+    let hits = cross_entity_search(pool, workspace_id, query).await?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| {
+            let kind = match hit.kind {
+                SearchHitKind::Issue => SearchEntryKind::Issue,
+                SearchHitKind::Agent => SearchEntryKind::Agent,
+                SearchHitKind::Skill => SearchEntryKind::Skill,
+                SearchHitKind::Autopilot => SearchEntryKind::Autopilot,
+            };
+            SearchEntry {
+                kind,
+                id: hit.id,
+                label: hit.label,
+                screen: kind.target_screen().to_string(),
+            }
+        })
+        .collect())
+}
+
 /// The PR URL captured into the latest completed task's `result.pr_url` for
 /// `issue_id` in `workspace_id`, or `None` when no task on the issue produced a
 /// PR (P9.2).
