@@ -1,5 +1,13 @@
 # TDD Plan: Interactive In-Place tmux Pane (ainb-tui)
 
+> **HISTORICAL RECORD (point-in-time, 2026-06-02).** The feature shipped via a
+> single PR (#263); phase/PR-split language below describes the plan as written,
+> not the rollout that happened. Where paths disagree with the tree, the tree
+> wins: code lives under `ainb-tui/crates/ainb-core/src/` and the key encoder is
+> `src/tmux/embed_input.rs` (any `ainb-tui/src/...` / `app/embed_input.rs`
+> reference below is stale). Shipped-reality deltas (key = `A` not `i`/`l`,
+> mouse forwarding, notifications) are tabled in the spec's amendment section.
+
 **From spec:** plans/tmux-in-pane-embed-spec.md (re-grounded on origin/main v1.3.1)
 **Branch:** feat/tmux-in-pane-2
 **Code root:** `ainb-tui/crates/ainb-core/src/`
