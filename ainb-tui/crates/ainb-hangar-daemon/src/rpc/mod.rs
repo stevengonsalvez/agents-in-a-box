@@ -475,6 +475,7 @@ async fn handle(
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
+        methods::HANGAR_USAGE_ROLLUP => handle_usage_rollup(pool, req).await,
         methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
         methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
         other => Err(RpcError {
@@ -708,6 +709,22 @@ async fn handle_tasks_list(
         None => Vec::new(),
     };
     to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
+}
+
+/// Dispatch `hangar/usage_rollup` (e38.35): snapshot the workspace's token/cost
+/// usage dashboard (grand totals + per-agent breakdown) off the durable
+/// `task_usage` aggregate. An unknown workspace yields all-zero totals + an empty
+/// rollup (a read). Split out of [`handle`] to keep that dispatcher within the
+/// line cap.
+async fn handle_usage_rollup(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let rollup = match resolve(pool, req).await? {
+        Some(ws) => snapshots::usage_rollup(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => ainb_hangar_proto::snapshots::UsageRollupResult::default(),
+    };
+    to_value(&rollup)
 }
 
 /// Dispatch `hangar/issue_create` (e38.29): create one new issue, push the

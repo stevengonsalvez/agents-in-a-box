@@ -34,6 +34,7 @@ use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
+use ainb_hangar_store::repo::usage::UsageRepo;
 use ainb_hangar_store::repo::workspace::apply_issue_prefix;
 use sqlx::{Row, SqlitePool};
 
@@ -777,6 +778,42 @@ pub async fn inbox_list(
         })
         .collect();
     Ok((rows, unread))
+}
+
+/// Snapshot a workspace's token/cost usage rollup (`hangar/usage_rollup`,
+/// e38.35).
+///
+/// Reads the durable `task_usage` rows the daemon's run loop records at each
+/// task's finalize seam: the grand totals (summed tokens in/out + cost + run
+/// count) plus the per-agent breakdown (the same totals grouped by agent,
+/// heaviest cost first). Workspace-scoped: a foreign / unknown workspace yields
+/// all-zero totals + an empty per-agent list.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if either aggregate query fails.
+pub async fn usage_rollup(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<ainb_hangar_proto::snapshots::UsageRollupResult, sqlx::Error> {
+    let totals = UsageRepo::workspace_totals(pool, workspace_id).await?;
+    let agents = UsageRepo::rollup_by_agent(pool, workspace_id).await?;
+    Ok(ainb_hangar_proto::snapshots::UsageRollupResult {
+        total_input_tokens: totals.input_tokens,
+        total_output_tokens: totals.output_tokens,
+        total_cost_usd: totals.cost_usd,
+        total_runs: totals.runs,
+        agents: agents
+            .into_iter()
+            .map(|a| ainb_hangar_proto::snapshots::AgentUsageRow {
+                agent_id: a.agent_id,
+                input_tokens: a.input_tokens,
+                output_tokens: a.output_tokens,
+                cost_usd: a.cost_usd,
+                runs: a.runs,
+            })
+            .collect(),
+    })
 }
 
 /// Mark every currently-unread inbox entry in `workspace` as read, returning
