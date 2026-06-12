@@ -86,7 +86,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
         "selection should resolve to the tmux session name"
     );
 
-    // ── B5: 'l' enters → the live render shows the INTERACTIVE focus badge ──
+    // ── B5: 'A' (in-pane attach) enters → the live render shows the INTERACTIVE focus badge ──
     assert!(
         state.enter_interactive_pane(26, 100),
         "enter_interactive_pane should attach"

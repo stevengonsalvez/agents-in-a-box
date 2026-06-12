@@ -1208,12 +1208,13 @@ impl EventHandler {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
             }
-            KeyCode::Char('l') => {
-                // In-place interactive embed ("live"). 'i' is Stats; this is the
-                // live-attach sibling of 'a' (full-screen attach). Only meaningful
-                // if the selection has a tmux session; the handler in the loop
-                // no-ops otherwise.
-                tracing::info!("[ACTION] 'l' key pressed - EnterInteractivePane requested");
+            KeyCode::Char('A') => {
+                // In-place interactive embed: Shift+A is the in-pane sibling of
+                // 'a' (full-screen attach) — same verb, different surface. Only
+                // meaningful if the selection has a tmux session; the handler in
+                // the loop no-ops otherwise. (Re-auth, which used to live on
+                // 'A', moved to 'u'.)
+                tracing::info!("[ACTION] 'A' key pressed - EnterInteractivePane requested");
                 Some(AppEvent::EnterInteractivePane)
             }
             // The badge-to-position mapping is recomputed on every render —
@@ -1299,9 +1300,10 @@ impl EventHandler {
                     None
                 }
             }
-            // Re-authenticate agent credentials. Lives on 'A' (was 'r') so the
-            // resume affordance can own 'r' unambiguously. See restart_affordance.
-            KeyCode::Char('A') => Some(AppEvent::ReauthenticateCredentials),
+            // Re-authenticate agent credentials. Lives on 'u' ("re-aUth"; was
+            // 'A' until Shift+A became the in-pane attach, and 'r' before that
+            // so the resume affordance could own 'r'). See restart_affordance.
+            KeyCode::Char('u') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {

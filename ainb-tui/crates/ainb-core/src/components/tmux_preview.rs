@@ -373,10 +373,10 @@ impl TmuxPreviewPane {
                 Span::styled(" attach ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
-                    " l",
+                    " A",
                     Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" live ", Style::default().fg(SOFT_WHITE)),
+                Span::styled(" pane ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
                     " Shift+↑↓",

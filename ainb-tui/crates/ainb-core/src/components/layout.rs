@@ -312,8 +312,8 @@ impl LayoutComponent {
             // Attach / select group
             key("a", SELECTION_GREEN),
             desc("ttach "),
-            key("l", SELECTION_GREEN),
-            desc("ive "),
+            key("A", SELECTION_GREEN),
+            desc(" pane "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
             key("Space", SELECTION_GREEN),
@@ -355,7 +355,7 @@ impl LayoutComponent {
             key("x", WARNING_ORANGE),
             desc(" cleanup"),
             sep(),
-            key("A", MUTED_GRAY),
+            key("u", MUTED_GRAY),
             desc(" re-auth"),
         ];
 
@@ -460,8 +460,8 @@ impl LayoutComponent {
                 desc("ew  "),
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
-                key("l", SELECTION_GREEN),
-                desc("ive  "),
+                key("A", SELECTION_GREEN),
+                desc(" pane  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
                 key("Space", SELECTION_GREEN),
@@ -494,7 +494,7 @@ impl LayoutComponent {
                 filter_desc,
                 cleanup_key,
                 cleanup_desc,
-                key("A", MUTED_GRAY),
+                key("u", MUTED_GRAY),
                 desc(" re-auth"),
             ]),
         ];
@@ -1370,7 +1370,7 @@ mod menu_bar_tests {
             "xpand",    // expand
             "focus",    // Tab focus
             "ttach",    // attach
-            "ive",      // l — live interactive embed
+            "pane",     // A — in-pane interactive embed
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
@@ -1385,7 +1385,7 @@ mod menu_bar_tests {
             "refresh",  // f
             "filter",   // F  ← the key that was missing before
             "cleanup",  // x
-            "re-auth",  // A (moved off r)
+            "re-auth",  // u (moved off A for in-pane attach)
             "?/H",      // help
             "home",     // q
             "inbox",    // b
@@ -1481,7 +1481,7 @@ mod menu_bar_tests {
         for token in [
             "ew",       // new
             "ttach",    // attach
-            "ive",      // l — live interactive embed
+            "pane",     // A — in-pane interactive embed
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
@@ -1494,7 +1494,7 @@ mod menu_bar_tests {
             "refresh",  // f
             "filter",   // F (dimmed when a Boss row is selected, still present)
             "cleanup",  // x (dimmed when an Interactive row is selected)
-            "re-auth",  // A
+            "re-auth",  // u
             "inbox",    // b
             "stats",    // i
             "witr",     // w

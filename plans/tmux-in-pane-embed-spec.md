@@ -50,7 +50,7 @@ is historical; these amendments win:
 
 | Spec said | Shipped reality |
 |---|---|
-| `i` enters the interactive embed | **`l` ("live")** — `i` collides with Stats elsewhere; `l` sits beside `a attach` in the session-list handler and the preview footer hint. Every `'i'`-as-interactive reference below reads as `'l'`. |
+| `i` enters the interactive embed | **`A` (Shift+A, "in-pane attach")** — `i` collided with Stats, the interim `l` ("live") read as confusing; `A` pairs with `a` (same verb, different surface). Re-auth moved off `A` to `u`. Every `i`/`l`-as-interactive reference below reads as `A`. |
 | Mouse routing planned for Phase 3 | **SHIPPED** — SGR (mode 1006) encoding with 1-based pane-local coordinate translation (`encode_mouse_event` in `tmux/embed_input.rs`). Events outside the pane interior are swallowed while interactive; bare motion is never forwarded. |
 | Ctrl+Q `detach-client` freebie for full-screen attach (`bind -n C-q detach-client` in `configure_session`) | **DEFERRED — pending decision, do not implement.** `bind -n` lands in the server-global root key table: it would leak the Ctrl+Q override into every session on the user's tmux server (non-ainb ones included) and shadow XON inside them. Needs a scoped design (per-session key table) first. |
 | Embed failures log-only | **SHIPPED as notifications** — no-tmux-on-row warning, attach-error notice, "Live session ended — released" on embed death, and an attached-elsewhere size-fight warning. |
