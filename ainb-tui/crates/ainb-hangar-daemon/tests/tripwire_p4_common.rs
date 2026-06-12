@@ -162,6 +162,29 @@ pub fn prepare_pipeline() -> Pipeline {
 ///
 /// Panics only after [`can_run_tripwire`] has gated the caller.
 pub fn prepare_pipeline_with(extra_env: &[(&str, &str)]) -> Pipeline {
+    prepare_pipeline_seeded(extra_env, |_| {})
+}
+
+/// Like [`prepare_pipeline`], plus one cron autopilot (`daily-triage`,
+/// `0 9 * * *`) seeded into the fixture BEFORE the daemon spawns — for the
+/// Autopilots-manager tripwire. The autopilot is written through the same
+/// pre-daemon connection that seeds the issues (closed before the daemon opens
+/// its own), NOT a second live connection racing the running daemon: that race
+/// wedges the daemon's first issue snapshot on slow CI runners, leaving the
+/// issue list empty until the whole tripwire times out.
+pub fn prepare_pipeline_with_autopilot() -> Pipeline {
+    prepare_pipeline_seeded(&[("HANGAR_DAEMON_DISABLE_CLAIM", "1")], seed_autopilot)
+}
+
+/// Shared body of [`prepare_pipeline_with`] and its variants: seed the isolated
+/// `$HOME` fixture, run `pre_spawn_seed(home)` while no daemon is attached to the
+/// database, then spawn the daemon. Splitting the pre-spawn seed out lets a
+/// caller add fixture rows (e.g. an autopilot) through a connection that closes
+/// before the daemon opens, instead of a second live connection.
+fn prepare_pipeline_seeded(
+    extra_env: &[(&str, &str)],
+    pre_spawn_seed: impl FnOnce(&Path),
+) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".ainb");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
@@ -188,6 +211,12 @@ pub fn prepare_pipeline_with(extra_env: &[(&str, &str)]) -> Pipeline {
     // tripwire at its full poll deadline (dialog ships since PR #194 /
     // 642dd6b4, which reached this branch via the main merge).
     seed_notify_prompt_dismissed(home.path());
+
+    // Caller-provided fixture rows seeded while NO daemon is attached — their
+    // connection closes before the daemon opens its own. Seeding here (not via a
+    // second live connection after spawn) avoids a concurrency race that wedges
+    // the daemon's first issue snapshot on slow CI runners.
+    pre_spawn_seed(home.path());
 
     // Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
     let bin = daemon_bin().expect("gated by can_run_tripwire");

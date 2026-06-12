@@ -39,8 +39,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    READY_MARKER, TuiSession, ainb_bin, can_run_tripwire, hangar_chrome_visible, prepare_pipeline,
-    seed_autopilot, skip,
+    READY_MARKER, TuiSession, ainb_bin, can_run_tripwire, hangar_chrome_visible,
+    prepare_pipeline_with_autopilot, skip,
 };
 
 /// The seeded autopilot's name + cron, exactly as the screen renders them.
@@ -54,10 +54,12 @@ fn autopilots_screen_renders_seeded_autopilot() {
         return;
     }
 
-    // Seed the P4 fixture + spawn the RPC-only daemon, then add one autopilot so
-    // the manager has a live row to render.
-    let pipeline = prepare_pipeline();
-    seed_autopilot(pipeline.home());
+    // Seed the P4 fixture + one autopilot into the database BEFORE the RPC-only
+    // daemon spawns, so the manager has a row to render. Seeding the autopilot
+    // pre-spawn (not via a second live connection after the daemon is up) keeps
+    // the daemon's first issue snapshot off a concurrency race that wedges it on
+    // slow CI runners.
+    let pipeline = prepare_pipeline_with_autopilot();
 
     let bin = ainb_bin().expect("gated by can_run_tripwire");
     let (session, landing) = TuiSession::launch_to_hangar(&bin, pipeline.home());
