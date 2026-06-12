@@ -9,6 +9,12 @@ description = "Terminal-based development environment manager for Claude Code co
 keywords = ["claude", "docker", "tui", "development", "containers"]
 categories = ["command-line-utilities", "development-tools"]
 
+# `time` is intentionally unused in code — it exists only to cap the
+# transitive version below the broken 0.3.48 release (see the workspace
+# manifest comment).
+[package.metadata.cargo-machete]
+ignored = ["time"]
+
 [[bin]]
 name = "ainb"
 path = "src/main.rs"
@@ -74,6 +80,10 @@ ansi-to-tui = { workspace = true }
 # Code Review diff surface
 similar = { workspace = true }
 two-face = { workspace = true }
+# Version cap only (no code uses it directly) — pins the TRANSITIVE time
+# crate below the broken 0.3.48 release. See the workspace manifest comment
+# for the E0119 story + removal condition.
+time = { workspace = true }
 
 # Persistent usage analytics cache
 rusqlite = { workspace = true }
