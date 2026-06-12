@@ -161,8 +161,16 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
+        // The command palette: Enter jumps, Esc closes (e38.13). `^P` is already
+        // pressed to open it.
+        Screen::CommandPalette => vec![("enter", "go"), ("esc", "close")],
     };
-    // Global hints always trail.
+    // Global hints always trail. `^P` opens the command palette from any screen,
+    // but not from within a modal (it would type a `p` into the palette query), so
+    // suppress the hint there to avoid implying an unavailable binding.
+    if !active.is_modal() {
+        hints.push(("^P", "search"));
+    }
     hints.push(("?", "help"));
     hints.push(("q", "quit"));
     hints

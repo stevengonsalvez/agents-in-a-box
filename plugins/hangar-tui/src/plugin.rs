@@ -115,6 +115,9 @@ const INBOX_LIST_REQ_ID: i64 = 29;
 /// JSON-RPC id for a `hangar/inbox_mark_read` request raised by the Inbox `r`
 /// key (e38.14).
 const INBOX_MARK_READ_REQ_ID: i64 = 30;
+/// JSON-RPC id for a `hangar/search` request raised by the command palette
+/// (e38.13).
+const SEARCH_REQ_ID: i64 = 31;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -523,6 +526,7 @@ impl HangarPlugin {
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
+            RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition, issue assign, inbox mark-read) answer with
             // the changed row or `{}`; we re-fetch the relevant lists to refresh
@@ -589,6 +593,19 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_inbox(r.entries, r.unread);
+            }
+        }
+    }
+
+    /// Fold a `hangar/search` result into the open command palette (e38.13): the
+    /// ranked cross-entity entries the palette renders + jumps from. A no-op when
+    /// the palette has since closed (a stale reply for a dismissed modal).
+    fn apply_search(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) =
+                serde_json::from_value::<ainb_hangar_proto::snapshots::SearchResult>(result.clone())
+            {
+                self.screens.set_palette_results(r.entries);
             }
         }
     }
@@ -675,6 +692,27 @@ impl HangarPlugin {
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host
                 .log_info(format!("hangar: inbox mark-read send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fire a deferred `hangar/search` raised by the command palette (e38.13):
+    /// the ranked cross-entity search for the typed `query`, framed over the
+    /// socket cap. The read reply (`apply_search`) folds the entries back into the
+    /// palette. A send failure is logged but non-fatal — the results simply don't
+    /// update.
+    async fn run_palette_search(&mut self, host: &HostClient, query: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "query": query });
+        let Ok(body) = encode_request(SEARCH_REQ_ID, daemon_methods::HANGAR_SEARCH, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: search send failed: {e}"))
                 .await;
         }
     }
@@ -1258,6 +1296,18 @@ impl HangarPlugin {
             return;
         }
 
+        // e38.13: `Ctrl+P` opens the global command palette from any non-modal
+        // screen. It is a modifier chord, so it never shadows a per-screen `p`
+        // (bare `p` still reaches the active reducer). When the palette is already
+        // open the chord falls through to its reducer (where it is an unmodelled
+        // no-op), so it never re-opens a fresh palette over itself.
+        if !app.screen.is_modal() && is_ctrl_p(key) {
+            let reduction = crate::screen::reduce(&app, AppEvent::OpenCommandPalette);
+            self.screens.open_palette();
+            self.app = Some(reduction.state);
+            return;
+        }
+
         // Routing-layer keys: tab switches, `?` help, Esc-close-modal, `q` quit.
         if let Some(ev) = routing_event(key, &app) {
             let reduction = crate::screen::reduce(&app, ev);
@@ -1320,7 +1370,57 @@ impl HangarPlugin {
                 let reduction = crate::screen::reduce(app, AppEvent::Esc);
                 self.app = Some(reduction.state);
             }
+            NavIntent::NavigateToEntity { screen, id, kind } => {
+                self.navigate_to_entity(app, &screen, &id, &kind);
+            }
         }
+    }
+
+    /// Jump to the entity the command palette selected (e38.13): switch the
+    /// routing screen to the entity's target and, where the screen supports it,
+    /// select the matching row.
+    ///
+    /// The `screen` token is the wire value the daemon carried on the
+    /// [`SearchEntry`](ainb_hangar_proto::snapshots::SearchEntry) (derived from the
+    /// entity kind). An unknown token is ignored (the palette closes without a
+    /// jump rather than panicking). Issue + agent entries land on the issue list;
+    /// the issue-list cache is asked to select the matching issue id so the jump
+    /// lands ON the row, not merely on the screen.
+    fn navigate_to_entity(&mut self, app: &AppState, screen: &str, id: &str, kind: &str) {
+        let target = match screen {
+            "issue_list" => Screen::IssueList,
+            "skill_manager" => Screen::SkillManager,
+            "autopilots" => Screen::Autopilots,
+            // An unrecognised token: close the palette, don't jump anywhere.
+            _ => {
+                let reduction = crate::screen::reduce(app, AppEvent::Esc);
+                self.app = Some(reduction.state);
+                return;
+            }
+        };
+        // Select the matching row where the target screen supports it. Issues
+        // (and agents, which land on the issue list) select the issue id.
+        if matches!(target, Screen::IssueList) && kind == "issue" {
+            self.screens.issue_list.select_by_id(id);
+        }
+        let mut next = app.clone();
+        next.screen = target;
+        next.prior_screen = None;
+        self.app = Some(next);
+    }
+}
+
+/// Whether `key` is the `Ctrl+P` command-palette chord (e38.13).
+///
+/// Matches `p`/`P` with the Ctrl modifier set. Some terminals deliver `Ctrl+P` as
+/// the control character `\u{10}` (DLE) with no modifier flag, so that codepoint
+/// is also accepted — both spellings open the palette.
+const fn is_ctrl_p(key: &ainb_plugin_sdk::KeyEvent) -> bool {
+    let ctrl = key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0;
+    match &key.code {
+        KeyCode::Char { ch } if ctrl && (*ch == 'p' || *ch == 'P') => true,
+        KeyCode::Char { ch } => *ch == '\u{10}',
+        _ => false,
     }
 }
 
@@ -1342,9 +1442,15 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
         {
             Some(AppEvent::Key(*ch))
         }
-        // Esc only routes through the router when a modal is open (close it);
-        // otherwise it is a per-screen concern handled by `route_key`.
-        KeyCode::Esc if app.screen.is_modal() => Some(AppEvent::Esc),
+        // Esc routes through the router to close most modals (agent picker, help).
+        // The command palette is excluded: it owns a per-modal cache that must be
+        // cleared on close, so its Esc falls through to `route_command_palette`
+        // (which dismisses the cache AND raises `CloseModal`). Letting the router
+        // pop the screen here would restore the prior screen but leak the palette
+        // cache (a stale modal lingering until the next open).
+        KeyCode::Esc if app.screen.is_modal() && !matches!(app.screen, Screen::CommandPalette) => {
+            Some(AppEvent::Esc)
+        }
         _ => None,
     }
 }
@@ -1438,6 +1544,14 @@ impl Plugin for HangarPlugin {
         // the daemon socket.
         if let Some(action) = self.screens.take_pending_create_action() {
             self.apply_create_action(host, action).await;
+        }
+        // e38.13: drain any deferred command-palette search (every keystroke in
+        // the palette) and fire `hangar/search` over the daemon socket; the read
+        // reply folds the ranked entries back into the open palette.
+        if let Some(crate::screen::PaletteAction::Search(query)) =
+            self.screens.take_pending_palette_action()
+        {
+            self.run_palette_search(host, query).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active
@@ -1804,5 +1918,143 @@ mod tests {
             "failure must be recorded for the empty-state, got {:?}",
             p.daemon_start_error
         );
+    }
+
+    // ----- e38.13: command palette / cross-entity search overlay -----
+
+    /// Build a `Ctrl+P` press (the command-palette chord).
+    fn ctrl_p_press() -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch: 'p' },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    /// Build an Enter press.
+    fn enter_press() -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Enter,
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    /// Seed a connected plugin whose issue list already holds `Refactor API`
+    /// (`issue-1`) so a palette jump to it is observable.
+    fn connected_plugin_with_issue() -> HangarPlugin {
+        use ainb_hangar_proto::events::IssueRow;
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        p.screens.set_issues(vec![IssueRow {
+            id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+            workspace_id: "default".into(),
+            title: "Refactor API".into(),
+            description: None,
+            state: "open".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+        }]);
+        p
+    }
+
+    /// USER-VISIBLE PROOF (key+render): `Ctrl+P` opens the command-palette modal
+    /// over any screen, a typed query arms the `hangar/search` RPC, loaded results
+    /// render in the overlay, and Enter on a result JUMPS to that entity's screen
+    /// (and selects the issue) — the wiring actually takes effect end to end.
+    #[test]
+    fn ctrl_p_opens_palette_renders_results_and_enter_navigates() {
+        use ainb_hangar_proto::snapshots::{SearchEntry, SearchEntryKind};
+        let mut p = connected_plugin_with_issue();
+
+        // From the issue list, Ctrl+P opens the palette modal.
+        assert!(matches!(p.app_state().screen, Screen::IssueList));
+        p.on_key(&ctrl_p_press());
+        assert!(
+            matches!(p.app_state().screen, Screen::CommandPalette),
+            "Ctrl+P must open the command palette"
+        );
+        assert!(p.screens.command_palette.is_some(), "palette state created");
+
+        // Typing arms the search RPC (drained in `render`).
+        p.on_key(&char_press('r'));
+        assert!(
+            matches!(
+                p.screens.pending_palette_action,
+                Some(crate::screen::PaletteAction::Search(ref q)) if q == "r"
+            ),
+            "a keystroke arms hangar/search for the typed query, got {:?}",
+            p.screens.pending_palette_action
+        );
+
+        // Feed a ranked result back (as the `hangar/search` reply would) and prove
+        // it renders inside the overlay.
+        let resp = ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(SEARCH_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::SearchResult {
+                    entries: vec![SearchEntry {
+                        kind: SearchEntryKind::Issue,
+                        id: "issue-1".into(),
+                        label: "Refactor API".into(),
+                        screen: SearchEntryKind::Issue.target_screen().into(),
+                    }],
+                })
+                .unwrap(),
+            ),
+            error: None,
+        };
+        p.on_daemon_response(&resp);
+        let text = buf_text(&p.compose_frame(100, 30), 100, 30);
+        assert!(
+            text.contains("Refactor API") && text.contains("[issue]"),
+            "the palette overlay must render the ranked result:\n{text}"
+        );
+
+        // Enter jumps to the selected entity's screen (issue → issue list) and
+        // selects the matching issue row.
+        p.on_key(&enter_press());
+        assert!(
+            matches!(p.app_state().screen, Screen::IssueList),
+            "Enter on an issue result jumps to the issue list"
+        );
+        assert!(
+            p.screens.command_palette.is_none(),
+            "navigating dismisses the palette"
+        );
+        assert_eq!(
+            p.screens.issue_list.selected_row().map(|r| r.id.as_str()),
+            Some("issue-1"),
+            "the jumped-to issue is selected"
+        );
+    }
+
+    /// Esc closes the palette back to the screen that opened it, with no jump.
+    #[test]
+    fn esc_closes_palette_back_to_prior_screen() {
+        let mut p = connected_plugin_with_issue();
+        // Open from the Autopilots screen so the restore target is non-default.
+        p.on_key(&char_press('4'));
+        assert!(matches!(p.app_state().screen, Screen::Autopilots));
+        p.on_key(&ctrl_p_press());
+        assert!(matches!(p.app_state().screen, Screen::CommandPalette));
+        p.on_key(&ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Esc,
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        });
+        assert!(
+            matches!(p.app_state().screen, Screen::Autopilots),
+            "Esc restores the screen the palette overlaid"
+        );
+        assert!(p.screens.command_palette.is_none(), "palette dismissed");
     }
 }

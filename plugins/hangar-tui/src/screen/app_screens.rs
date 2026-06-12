@@ -24,6 +24,9 @@ use super::agent_picker::{
     reduce_agent_picker, AgentPickerEvent, AgentPickerIntent, AgentPickerState,
 };
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
+use super::command_palette::{
+    reduce_command_palette, CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState,
+};
 use super::daemon_health::DaemonHealthState;
 use super::inbox::InboxState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
@@ -160,6 +163,19 @@ pub enum IssueCreateAction {
     },
 }
 
+/// A deferred daemon RPC raised by the command-palette modal (e38.13).
+///
+/// Like [`IssueCreateAction`], the sync key router can't `await`; the palette
+/// stashes the action on [`ScreenStates::pending_palette_action`] and the
+/// plugin's `render` pass drains it and fires `hangar/search` over the daemon
+/// socket cap, then feeds the ranked result back into the palette reducer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteAction {
+    /// Run a cross-entity search for the typed query (every keystroke in the
+    /// palette) — `hangar/search`.
+    Search(String),
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -190,6 +206,9 @@ pub struct ScreenStates {
     pub task_detail: Option<TaskDetailState>,
     /// Agent-picker modal cache (present only while the modal is open).
     pub agent_picker: Option<AgentPickerState>,
+    /// Command-palette modal cache (present only while the palette is open,
+    /// e38.13).
+    pub command_palette: Option<CommandPaletteState>,
     /// Cached actor snapshot (`hangar/agents_list`); the picker is rebuilt from
     /// it whenever the modal opens for an issue.
     pub actors: Vec<ActorRow>,
@@ -222,6 +241,10 @@ pub struct ScreenStates {
     /// a non-blank title), awaiting the `render` pass to fire `hangar/issue_create`
     /// over the daemon socket (e38.29). `None` when idle.
     pub pending_create_action: Option<IssueCreateAction>,
+    /// A search RPC raised by the command-palette modal (each keystroke),
+    /// awaiting the `render` pass to fire `hangar/search` over the daemon socket
+    /// (e38.13). `None` when idle.
+    pub pending_palette_action: Option<PaletteAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -402,6 +425,12 @@ impl ScreenStates {
     pub const fn take_pending_create_action(&mut self) -> Option<IssueCreateAction> {
         self.pending_create_action.take()
     }
+
+    /// Take the pending search RPC raised by the command palette, if any
+    /// (e38.13).
+    pub const fn take_pending_palette_action(&mut self) -> Option<PaletteAction> {
+        self.pending_palette_action.take()
+    }
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -410,6 +439,20 @@ impl ScreenStates {
     /// Open the agent picker for `issue` over the cached actor snapshot.
     pub fn open_picker(&mut self, issue: ainb_hangar_core::ids::IssueId) {
         self.agent_picker = Some(AgentPickerState::new(issue, self.actors.clone()));
+    }
+
+    /// Open a fresh, empty command palette (e38.13).
+    pub fn open_palette(&mut self) {
+        self.command_palette = Some(CommandPaletteState::new());
+    }
+
+    /// Fold a `hangar/search` result into the open palette (e38.13). A no-op when
+    /// the palette has since closed (a stale reply for a dismissed modal).
+    pub fn set_palette_results(&mut self, results: Vec<ainb_hangar_proto::snapshots::SearchEntry>) {
+        if let Some(palette) = self.command_palette.take() {
+            let out = reduce_command_palette(&palette, CommandPaletteEvent::ResultsLoaded(results));
+            self.command_palette = Some(out.state);
+        }
     }
 
     /// Open task detail for `issue`'s task, seeding from the issue's row.
@@ -433,6 +476,18 @@ pub enum NavIntent {
     OpenPrUrl(String),
     /// Close the active modal back to its prior screen (raised by Esc on a modal).
     CloseModal,
+    /// Jump to an entity's screen from the command palette (raised by Enter on a
+    /// palette result, e38.13). Carries the jump-target screen token, the entity
+    /// id, and the kind tag so the glue can switch the routing screen and select
+    /// the row where possible.
+    NavigateToEntity {
+        /// The screen-routing token to open (e.g. `"issue_list"`).
+        screen: String,
+        /// The selected entity's id.
+        id: String,
+        /// The selected entity's kind tag (e.g. `"issue"`).
+        kind: String,
+    },
 }
 
 /// Render the active screen's body between the chrome top bar (row 0) and footer
@@ -487,6 +542,16 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             }
             if let Some(picker) = &states.agent_picker {
                 super::agent_picker::render_agent_picker(buf, w, h, picker);
+            }
+        }
+        Screen::CommandPalette => {
+            // The palette is a modal: paint the screen it overlays first, then
+            // the palette centred over the whole area (e38.13).
+            if let Some(prior) = &app.prior_screen {
+                render_prior(buf, w, h, prior, states);
+            }
+            if let Some(palette) = &states.command_palette {
+                super::command_palette::render_command_palette(buf, w, h, palette);
             }
         }
         Screen::Help => render_help(buf, w, h),
@@ -655,6 +720,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::TaskDetail(_) => route_task_detail(states, key),
         Screen::AgentPicker(_) => route_agent_picker(states, key),
+        Screen::CommandPalette => route_command_palette(states, key),
         Screen::Logs => {
             // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
             // filter change flags a deferred re-read of the `daemon.*` file
@@ -825,6 +891,50 @@ fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIn
     states.agent_picker = Some(out.state);
     if closed {
         states.agent_picker = None;
+        Some(NavIntent::CloseModal)
+    } else {
+        None
+    }
+}
+
+/// Command-palette key routing (e38.13): fold the key into the pure reducer, then
+/// act on the reduction.
+///
+/// Up/Down (and vi `j`/`k` are NOT used — every printable char is query text)
+/// move the selection; Esc closes; Enter raises [`CommandPaletteIntent::Navigate`]
+/// which lifts into a [`NavIntent::NavigateToEntity`] (the glue switches the
+/// routing screen + selects the row) and dismisses the modal. A query edit raises
+/// [`CommandPaletteIntent::Search`], lifted into a deferred
+/// [`PaletteAction::Search`] the `render` pass drains + fires (the sync key router
+/// can't `await`).
+fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
+    let palette = states.command_palette.take()?;
+    let ev = match key.code {
+        KeyCode::Esc => CommandPaletteEvent::Esc,
+        KeyCode::Down => CommandPaletteEvent::SelectDown,
+        KeyCode::Up => CommandPaletteEvent::SelectUp,
+        _ => CommandPaletteEvent::Key(key_char(key)?),
+    };
+    let out = reduce_command_palette(&palette, ev);
+
+    match out.intent {
+        // Enter on a result: jump to its screen and dismiss the modal.
+        Some(CommandPaletteIntent::Navigate { screen, id, kind }) => {
+            states.command_palette = None;
+            return Some(NavIntent::NavigateToEntity { screen, id, kind });
+        }
+        // A query edit: queue the search RPC, keep the modal open.
+        Some(CommandPaletteIntent::Search(query)) => {
+            states.pending_palette_action = Some(PaletteAction::Search(query));
+        }
+        None => {}
+    }
+
+    // Esc (or a reducer-closed state) dismisses; anything else stays.
+    let closed = out.state.is_closed();
+    states.command_palette = Some(out.state);
+    if closed {
+        states.command_palette = None;
         Some(NavIntent::CloseModal)
     } else {
         None

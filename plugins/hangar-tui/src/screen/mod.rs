@@ -17,6 +17,7 @@ pub mod agent_picker;
 pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
+pub mod command_palette;
 pub mod daemon_health;
 pub mod inbox;
 pub mod issue_list;
@@ -29,7 +30,8 @@ pub mod task_detail;
 
 pub use app_screens::{
     render_body, route_key, AutopilotAction, IssueAssignAction, IssueCommentAction,
-    IssueCreateAction, KanbanAction, NavIntent, ScreenStates, SkillAction, WorkspaceAction,
+    IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates, SkillAction,
+    WorkspaceAction,
 };
 pub use router::reduce;
 
@@ -70,6 +72,10 @@ pub enum Screen {
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
     /// hotkeys, drawn over whatever screen opened it; Esc restores that screen.
     Help,
+    /// Command palette (hotkey `Ctrl+P`) — a modal global cross-entity search
+    /// drawn over whatever screen opened it; Enter jumps to the selected entity,
+    /// Esc restores the prior screen (e38.13).
+    CommandPalette,
 }
 
 impl Screen {
@@ -88,15 +94,19 @@ impl Screen {
             Self::Inbox => "Inbox",
             Self::Settings => "Settings",
             Self::Help => "Help",
+            Self::CommandPalette => "Search",
         }
     }
 
     /// `true` when this screen is a modal overlay drawn over a prior screen
-    /// (only the agent picker, for now). Esc closes a modal back to its
-    /// prior screen rather than quitting.
+    /// (the agent picker, the help overlay, and the command palette). Esc closes
+    /// a modal back to its prior screen rather than quitting.
     #[must_use]
     pub const fn is_modal(&self) -> bool {
-        matches!(self, Self::AgentPicker(_) | Self::Help)
+        matches!(
+            self,
+            Self::AgentPicker(_) | Self::Help | Self::CommandPalette
+        )
     }
 }
 
@@ -167,6 +177,9 @@ pub enum AppEvent {
     /// Open the agent-picker modal for a specific issue (raised by `a` on a
     /// selected issue-list row; carries the issue id the row addresses).
     OpenAgentPicker(IssueId),
+    /// Open the global command-palette modal (raised by `Ctrl+P` from any
+    /// screen, e38.13). Carries no payload — the palette starts empty.
+    OpenCommandPalette,
 }
 
 /// A side-effect the plugin glue must perform after a [`reduce`].

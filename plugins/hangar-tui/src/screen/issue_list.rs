@@ -289,6 +289,21 @@ impl IssueListState {
         self.visible_rows().nth(self.selected)
     }
 
+    /// Select the row whose issue id matches `id` (e38.13 command-palette jump).
+    ///
+    /// Resets the chip filter to `All` and clears the query first so the target is
+    /// guaranteed visible (a search hit may live under any state, and the active
+    /// filter could otherwise hide it), then points the selection at its visible
+    /// index. A no-op when no cached row carries that id (a stale palette hit).
+    pub fn select_by_id(&mut self, id: &str) {
+        self.filter = FilterChip::All;
+        self.query.clear();
+        let idx = self.visible_rows().position(|r| r.id.as_str() == id);
+        if let Some(idx) = idx {
+            self.selected = idx;
+        }
+    }
+
     /// Number of currently visible rows (selection upper bound).
     fn visible_len(&self) -> usize {
         self.visible_rows().count()
