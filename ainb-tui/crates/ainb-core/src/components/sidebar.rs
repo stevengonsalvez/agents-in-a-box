@@ -380,7 +380,7 @@ impl SidebarComponent {
                 )
             };
 
-        // Split the item area for 2-line content (compact to fit 10 items)
+        // Split the item area for 2-line content (compact to fit 14 items)
         let item_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
