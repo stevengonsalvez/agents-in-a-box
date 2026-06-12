@@ -11,7 +11,7 @@
 //! upgrading install carries:
 //!
 //! 1. apply only the PRIOR migrations (0001..0021),
-//! 2. seed a live workspace + user + member + agent_runtime + agent + issue + task
+//! 2. seed a live workspace + user + member + `agent_runtime` + agent + issue + task
 //!    (the rows that existed before the usage table, including the FK targets the
 //!    new `workspace_id` / `agent_id` / `task_id` columns point at),
 //! 3. apply the embedded migrations (which adds exactly 0022),
@@ -214,7 +214,8 @@ async fn migration_0022_upgrades_populated_database_in_place() {
     assert_eq!(row.get::<i64, _>("output_tokens"), 340);
     assert!((row.get::<f64, _>("cost_usd") - 0.0231).abs() < 1e-9);
 
-    // The defaults land 0 for a row that reports only the task linkage.
+    // A usage row whose task_id points at a non-existent task is rejected (the
+    // task FK is enforced).
     sqlx::query(
         "INSERT INTO task_usage (task_id, workspace_id, agent_id, created_at) \
          VALUES ('task-1b', ?, ?, 200)",
