@@ -146,6 +146,28 @@ pub fn fake_claude_happy(dir: &Path, session_id: &str) -> PathBuf {
     write_executable(dir, "fake-claude.sh", &body)
 }
 
+/// Write an executable `fake-claude.sh` that emits a `system` line carrying
+/// `session_id`, then a `result` line whose `usage` block reports
+/// `input_tokens`/`output_tokens` + `total_cost_usd` (e38.35), then exits 0.
+///
+/// The script name differs from [`fake_claude_happy`] so a test can stage both
+/// in the same home without one clobbering the other.
+pub fn fake_claude_with_usage(
+    dir: &Path,
+    session_id: &str,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: f64,
+) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\necho '{{\"type\":\"system\",\"session_id\":\"{session_id}\"}}'\n\
+         echo '{{\"type\":\"result\",\"subtype\":\"success\",\"total_cost_usd\":{cost_usd},\
+         \"usage\":{{\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}}}'\n\
+         exit 0\n"
+    );
+    write_executable(dir, "fake-claude-usage.sh", &body)
+}
+
 /// Write an executable `gh` stand-in into a fresh `bin/` subdir of `dir` that,
 /// on `gh pr create …`, prints `pr_url` on its own line then exits 0 (mimicking
 /// the real `gh pr create` success output). Returns the **bin directory** to

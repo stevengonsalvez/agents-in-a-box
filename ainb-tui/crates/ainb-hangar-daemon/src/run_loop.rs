@@ -495,6 +495,9 @@ async fn finalize_success(
     if let Some(url) = pr_url.as_deref() {
         tracing::info!(task_id = %task.id, pr_url = url, "captured gh pr url");
     }
+    // e38.35: capture the run's usage before `result` is partially moved into
+    // `CompleteParams` below, so the dashboard rollup sees this run's tokens/cost.
+    let usage = result.usage.clone();
     let task_result =
         ainb_hangar_core::result::TaskResult::new(result.stdout_tail, result.exit_code, pr_url);
     let result_json =
@@ -510,6 +513,9 @@ async fn finalize_success(
         clock,
     )
     .await?;
+    // e38.35: record this run's token/cost usage now the task row is terminal
+    // (best-effort; a run that reported no usage records nothing).
+    persist_usage(pool, task, usage.as_ref(), clock).await;
     // P8.5: record the successful terminal outcome into the rolling throughput
     // ring so the daemon-health pane's sparkline sees it.
     stats.record_completed(clock.now_ms() / 1_000);
@@ -557,6 +563,9 @@ async fn finalize_failure(
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
     FailTaskService::fail(pool, &task.id, reason, clock).await?;
+    // e38.35: a failed/timed-out run can still report partial usage worth
+    // accounting; record it now the row is terminal (best-effort).
+    persist_usage(pool, task, result.usage.as_ref(), clock).await;
     // P8.5: record the failed terminal outcome (drives the sparkline's red
     // proportion for this second).
     stats.record_failed(clock.now_ms() / 1_000);
@@ -835,6 +844,36 @@ async fn persist_session_id(
             .await?;
     }
     Ok(())
+}
+
+/// Record the run's token/cost usage into the `task_usage` table (e38.35), so
+/// the usage dashboard can roll it up. Best-effort and only when the provider
+/// actually reported usage — a run with no result-usage records nothing.
+///
+/// Called from both the success and failure finalize paths: a failed or
+/// timed-out run can still report partial usage worth accounting. The upsert is
+/// keyed by `task_id`, so a retry replaces rather than double-counts. A usage
+/// write fault is logged, never propagated — it must never down a finalize that
+/// has already committed the task's terminal state.
+async fn persist_usage(
+    pool: &SqlitePool,
+    task: &Task,
+    usage: Option<&crate::runner::ProviderUsage>,
+    clock: &dyn HangarClock,
+) {
+    let Some(u) = usage else { return };
+    let row = ainb_hangar_store::repo::usage::NewUsage {
+        task_id: task.id.clone(),
+        workspace_id: task.workspace_id.clone(),
+        agent_id: task.agent_id.clone(),
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cost_usd: u.cost_usd,
+        created_at: clock.now_ms(),
+    };
+    if let Err(e) = ainb_hangar_store::repo::usage::UsageRepo::record(pool, &row).await {
+        tracing::warn!(error = %e, task_id = %task.id, "usage record failed");
+    }
 }
 
 /// Load the env-allowlist policy from `~/.ainb/hangar/env.allow.toml`.

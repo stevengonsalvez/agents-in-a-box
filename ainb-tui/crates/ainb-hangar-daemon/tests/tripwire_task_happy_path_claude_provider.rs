@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
-use tripwire_support::{DaemonSession, daemon_bin, fake_claude_happy, seed_world, wait_for_db};
+use tripwire_support::{
+    DaemonSession, daemon_bin, fake_claude_happy, fake_claude_with_usage, seed_world, wait_for_db,
+};
 
 #[tokio::test]
 async fn happy_path_claude_provider_walks_fsm_to_done() {
@@ -122,6 +124,71 @@ async fn happy_path_claude_provider_walks_fsm_to_done() {
         lines, 2,
         "claude.jsonl should have 2 lines, got {lines}: {jsonl}"
     );
+}
+
+/// e38.35: a real daemon run whose fake-claude reports token/cost usage on its
+/// `result` line lands a `task_usage` row at the finalize seam — the runner→store
+/// persist wiring the usage dashboard rolls up. End-to-end through the genuine
+/// daemon binary (no mocks): seed → enqueue → claim → run → done → usage persisted.
+#[tokio::test]
+async fn finalized_task_persists_provider_usage_row() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping e2e tripwire");
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+    let pool = open_pool(&db_path).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+
+    // A fake claude that pins a session id then reports usage on its result line.
+    let fake_claude = fake_claude_with_usage(home.path(), "usage-1", 1200, 340, 0.0231);
+
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", home.path().to_str().unwrap()),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_CLAUDE_PATH", fake_claude.to_str().unwrap()),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+        ],
+    );
+
+    let task_id = "task-usage-1";
+    sqlx::query(
+        "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(&ids.workspace_id)
+    .bind(&ids.runtime_id)
+    .bind(&ids.agent_id)
+    .bind(tripwire_support::now_ms())
+    .execute(&pool)
+    .await
+    .expect("enqueue task");
+
+    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30)).await;
+    drop(session); // kill the tmux session by exact name before assertions
+
+    // The finalize seam recorded this run's usage into task_usage.
+    let row = sqlx::query(
+        "SELECT workspace_id, agent_id, input_tokens, output_tokens, cost_usd \
+         FROM task_usage WHERE task_id = ?",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("a task_usage row was persisted at finalize");
+
+    assert_eq!(row.get::<String, _>("workspace_id"), ids.workspace_id);
+    assert_eq!(row.get::<String, _>("agent_id"), ids.agent_id);
+    assert_eq!(row.get::<i64, _>("input_tokens"), 1200);
+    assert_eq!(row.get::<i64, _>("output_tokens"), 340);
+    assert!((row.get::<f64, _>("cost_usd") - 0.0231).abs() < 1e-9);
 }
 
 /// Open a `SQLite` WAL pool at `db_path` (creating the file if absent).
