@@ -1,4 +1,4 @@
-//! P9.x e2e tripwire — the Autopilots manager screen (`5`) renders a real
+//! P9.x e2e tripwire — the Autopilots manager screen (`4`) renders a real
 //! seeded autopilot row when the user presses the hotkey in `ainb tui`.
 //!
 //! ```text
@@ -7,7 +7,7 @@
 //!         ▼
 //!  ainb-hangar-daemon (RPC only) ◀── hangar/autopilots_list snapshot
 //!         ▲                                   │
-//!  ainb tui (tmux) ──`g`──▶ Hangar ──`5`──▶ Autopilots manager
+//!  ainb tui (tmux) ──`g`──▶ Hangar ──`4`──▶ Autopilots manager
 //!                                            │
 //!         poll_capture: name `daily-triage` + cron `0 9 * * *` + table header
 //! ```
@@ -68,7 +68,7 @@ fn autopilots_screen_renders_seeded_autopilot() {
     // NOT already show the autopilot row (so a later match proves a switch).
     assert!(
         landing.contains(READY_MARKER),
-        "expected the Hangar issue-list landing before pressing 5:\n{landing}"
+        "expected the Hangar issue-list landing before pressing 4:\n{landing}"
     );
     assert!(
         !landing.contains(AUTOPILOT_NAME),
@@ -109,7 +109,7 @@ fn autopilots_screen_renders_seeded_autopilot() {
     // NEGATIVE: no longer on the issue-list landing (the `5` switch happened).
     assert!(
         !pane.contains(READY_MARKER),
-        "still on the issue list after pressing 5 (no screen switch):\n{pane}"
+        "still on the issue list after pressing 4 (no screen switch):\n{pane}"
     );
 
     drop(session);
