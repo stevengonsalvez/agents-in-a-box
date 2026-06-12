@@ -701,7 +701,10 @@ impl SectionBands {
         let mut bands = [Band { start, end: start }; 3];
         for (i, band) in bands.iter_mut().enumerate() {
             let h = base + u16::from(u16::try_from(i).unwrap_or(u16::MAX) < extra);
-            let end = start.saturating_add(h).min(bottom);
+            // Clamp end >= start: when `bottom < col_top` (only reachable from a
+            // degenerate sub-`col_top` pane) the band stays empty rather than
+            // inverting to `{start, end < start}`.
+            let end = start.saturating_add(h).min(bottom).max(start);
             *band = Band { start, end };
             start = end;
         }
