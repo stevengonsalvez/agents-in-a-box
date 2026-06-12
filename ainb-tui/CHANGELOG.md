@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-12
+### Added
+- Merge pull request #256 from stevengonsalvez/feat/antv-infographic-skill
+- Merge pull request #260 from stevengonsalvez/fix/legend-cleanup
+- Merge pull request #263 from stevengonsalvez/feat/tmux-in-pane-2
+- Merge pull request #264 from stevengonsalvez/feat/embed-honor-sidebar
+- **home**: add Memory tile to the home sidebar menu
+- **tmux**: PtyWrapper owns + kills the embed child; panic-hook drains leaked clients
+- **tmux**: encode KeyEvents to terminal bytes for the embed PTY
+- **tmux**: expand the pane to near-full width while interactive (P4/B7)
+- **tmux**: forward mouse events into the embed as SGR sequences
+- **tmux**: live EmbedClient — stream tmux attach into vt100 + forward input
+- **tmux**: wire interactive embed into the live TUI (i enters, Ctrl+Q releases)
+- **tui**: 'B' toggles the sessions sidebar (keyboard twin of the [-]/[+] glyph)
+- **tui**: add 'i interactive' hint to the session menu bar
+- **tui**: pair the attach keys — Shift+A opens the in-pane embed
+- **tui**: the in-pane embed honors the sidebar layout
+- **tui**: two-column session legend with mode-aware key dimming
+- register antv-infographic external agent-skill
+
+### Fixed
+- Merge pull request #261 from stevengonsalvez/fix/memory-panel-exit
+- **deps**: cap transitive time below the broken 0.3.48 release
+- **learnings**: close the knowledge-base panel on root Esc
+- **tests**: share one lock across all REGISTRY-touching PTY tests
+- **tmux**: cover modifier chords in the embed key encoder
+- **tmux**: enforce locale and tmux socket env for the embed client
+- **tmux**: enforce mode-boundary coherence for the interactive embed
+- **tmux**: kill the double reflow at embed entry and harden resize ordering
+- **tmux**: make the panic-hook registry drain deadlock-proof
+- **tmux**: move embed PTY writes off the UI thread
+- **tmux**: re-target the embed when entering on a different row
+- **tmux**: survive EINTR in the embed reader thread
+- **tui**: release the embed on the first input-write failure
+- **tui**: saturate the sidebar+border addition in interactive_embed_size
+- **tui**: surface embed failures and auto-release as notifications
+- **update-externals**: harden antv-infographic flatten loop
+
+### Documentation
+- **explain-to-me**: add /infographic-creator sister skill
+- **plans**: add TDD plan for in-place tmux pane embed
+- **plans**: correct Phase 0 risk with measured cargo check results
+- **plans**: expand Phase 0 with tmux-ui-tripwire render-parity gate
+- **plans**: lock embed source, focus cue, death + poll decisions
+- **plans**: lock scrollback, enter-render, copy-out, footer decisions
+- **plans**: mark the TDD plan as a historical record
+- **plans**: re-verify embed spec on v1.3.3 after rebase
+- **plans**: spec interactive in-place tmux pane embed
+- **research**: analyze in-place tmux pane embedding and prior art
+- **tui**: add June 2026 performance review
+- **tui**: attach guide + spec follow the honor-sidebar behavior
+- **tui**: attach guide — full-screen and in-pane flows with recordings
+- **tui**: correct the stale re-auth key to 'u'
+- **tui**: re-record in-pane attach — embed honors the sidebar layout
+- **tui**: record perf fixes shipped on the review
+
+### Other
+- Merge pull request #262 from stevengonsalvez/f/perform-review
+- **deps**: migrate to ratatui 0.30 (+crossterm 0.29, vt100 0.16, portable-pty 0.9, ansi-to-tui 8)
+- **tmux**: post-ship hygiene sweep for the embed feature
+- **hangar**: add idle read timeout to daemon RPC connections
+- **tui**: add env-gated render-loop instrumentation and micro-benchmarks
+- **tui**: eliminate idle redraw burn and per-frame session-list work
+- **tui**: poll non-selected session status on a longer cadence
+
+
 ## [1.6.1] - 2026-06-10
 ### Added
 - Merge pull request #214 from stevengonsalvez/feat/learnings-plugin
