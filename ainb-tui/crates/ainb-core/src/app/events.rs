@@ -61,6 +61,9 @@ pub enum AppEvent {
     GoToBottom,
     // Pane focus management
     SwitchPaneFocus,
+    /// Toggle the sessions sidebar between full width and the thin rail —
+    /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
+    ToggleSessionsSidebar,
     // Log scrolling events
     ScrollLogsUp,
     ScrollLogsDown,
@@ -1331,6 +1334,9 @@ impl EventHandler {
             // where `handle_home_screen_keys` also binds it. Without this arm
             // the menu hint pointed at a dead key.
             KeyCode::Char('b') => Some(AppEvent::GoToInbox),
+            // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
+            // 'B' is its keyboard twin. Hinted next to the glyph itself.
+            KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
             // k skills, m memory, t abtop — same set
@@ -2324,6 +2330,12 @@ impl EventHandler {
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            AppEvent::ToggleSessionsSidebar => {
+                // Same path the [-]/[+] mouse glyph takes: flip + persist the
+                // preference so the choice survives restarts.
+                state.sessions_pane_state.toggle_collapsed();
+                Self::persist_sessions_pane_preferences(state);
+            }
             // Entering the interactive embed is handled in the main loop (it needs
             // the terminal size and the embed lives in the event loop) — no-op here.
             AppEvent::EnterInteractivePane => {}
@@ -5228,6 +5240,53 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::SESSION_RECOVERY
             | ids::SKILLS
     )
+}
+
+#[cfg(test)]
+mod session_list_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), state)
+    }
+
+    fn session_list_state() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state
+    }
+
+    /// Locks the attach-key pairing: 'a' = full-screen, Shift+A = in-pane
+    /// embed, and re-auth (which used to hold 'A') now answers to 'u'.
+    #[test]
+    fn attach_pair_and_reauth_mapping() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'a'),
+            Some(AppEvent::AttachTmuxSession)
+        ));
+        assert!(matches!(
+            key(&mut state, 'A'),
+            Some(AppEvent::EnterInteractivePane)
+        ));
+        assert!(matches!(
+            key(&mut state, 'u'),
+            Some(AppEvent::ReauthenticateCredentials)
+        ));
+    }
+
+    /// 'B' is the keyboard twin of the [-]/[+] sidebar glyph (mouse-only
+    /// before). Mapping-level test: no persistence side effects here.
+    #[test]
+    fn shift_b_toggles_sessions_sidebar() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'B'),
+            Some(AppEvent::ToggleSessionsSidebar)
+        ));
+    }
 }
 
 #[cfg(test)]

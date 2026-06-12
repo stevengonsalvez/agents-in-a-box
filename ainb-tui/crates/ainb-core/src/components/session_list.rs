@@ -130,6 +130,12 @@ impl SessionListComponent {
             ));
         }
         title_spans.push(Span::raw(" "));
+        // 'B' is the keyboard twin of clicking the [-] glyph (hint lives next
+        // to the control it drives, not in the bottom menu bar).
+        title_spans.push(Span::styled(
+            "B",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        ));
         title_spans.push(Span::styled(
             "[-]",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),

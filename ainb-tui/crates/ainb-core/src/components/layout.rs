@@ -235,7 +235,11 @@ impl LayoutComponent {
                 "[+]",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
+            // 'B' is the keyboard twin of clicking [+] (hint next to control).
+            Line::from(Span::styled(
+                "B",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("E", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
