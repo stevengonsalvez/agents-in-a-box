@@ -610,70 +610,157 @@ pub fn render_issue_list(
     }
 
     // Width split: status/assignee take fixed caps, the title absorbs the rest.
-    let status_w: u16 = 13; // "In Progress" + padding
-    let assignee_w: u16 = area_w.saturating_sub(status_w).min(20);
-    let title_w = area_w
-        .saturating_sub(status_w)
-        .saturating_sub(assignee_w)
-        .max(8);
+    let cols = ColumnWidths::for_area(area_w);
 
-    // The chip bar consumed `top`; the columns start one row below it.
-    let mut row = top.saturating_add(1);
+    // e38.39 — body-filling layout. The three status sections each get a
+    // proportional vertical *band* of the body so they spread down the pane
+    // instead of clustering at the top with a vast void below. The chip bar
+    // consumed `top`; the column body runs from `col_top` to `bottom`, split into
+    // three bands of `bottom - col_top` rows (the remainder lands on the earlier
+    // bands so no row is wasted). Each section paints its header on its band's
+    // first row and its issue rows beneath, clamped to the band end — a dense
+    // section truncates within its share rather than pushing the next section's
+    // header off-screen, which is what keeps the board readable and overflow-free
+    // at the 80×24 floor.
+    let col_top = top.saturating_add(1);
+    let bands = SectionBands::split(col_top, bottom);
+
     let mut visible_index = 0usize;
-    for column in IssueColumn::all() {
-        if row >= bottom {
-            break;
+    for (column, band) in IssueColumn::all().into_iter().zip(bands) {
+        // Column header with live count, e.g. "Todo (3)", anchored at the band top.
+        if band.start < bottom {
+            let header = format!("{} ({})", column.label(), state.column_count(column));
+            put_str(buf, 0, band.start, &header, GOLD, area_w);
         }
-        // Column header with live count, e.g. "Todo (3)".
-        let header = format!("{} ({})", column.label(), state.column_count(column));
-        put_str(buf, 0, row, &header, GOLD, area_w);
-        row = row.saturating_add(1);
 
+        let mut row = band.start.saturating_add(1);
         for r in state.rows_in_column(column) {
-            if row >= bottom {
-                break;
+            // Paint only while inside this section's band; rows past the band are
+            // truncated (their count already shows in the header). `visible_index`
+            // still advances so the selection marker tracks the global visible
+            // order even across a truncated row.
+            if row < band.end {
+                render_issue_row(buf, area_w, row, r, visible_index == state.selected, &cols);
+                row = row.saturating_add(1);
             }
-            let selected = visible_index == state.selected;
-            let marker_color = if selected {
-                SELECTION_GREEN
-            } else {
-                MUTED_GRAY
-            };
-            put_str(
-                buf,
-                0,
-                row,
-                if selected { "▶ " } else { "  " },
-                marker_color,
-                area_w,
-            );
-
-            let text_color = if selected { SOFT_WHITE } else { MUTED_GRAY };
-            put_str(buf, 2, row, &clip(&r.title, title_w), text_color, area_w);
-
-            let ax = 2u16.saturating_add(title_w).saturating_add(1);
-            let assignee = r.assignee.as_deref().unwrap_or("—");
-            let next_x = put_str(
-                buf,
-                ax,
-                row,
-                &clip(assignee, assignee_w),
-                MUTED_GRAY,
-                area_w,
-            );
-
-            // Label chips trail the assignee in whatever width is left, clipped
-            // at the area edge (a row with no labels paints nothing here).
-            if !r.labels.is_empty() {
-                let chips_x = next_x.saturating_add(1);
-                crate::widgets::label_chip::render_label_chips(
-                    buf, chips_x, row, area_w, &r.labels,
-                );
-            }
-
             visible_index = visible_index.saturating_add(1);
-            row = row.saturating_add(1);
         }
+    }
+}
+
+/// The derived sub-widths for an issue row, sized from the area width
+/// (`project_ainb_tui_width_aware_panels`): the status/assignee columns take
+/// fixed caps and the title absorbs the rest.
+struct ColumnWidths {
+    title_w: u16,
+    assignee_w: u16,
+}
+
+impl ColumnWidths {
+    /// Derive the row sub-widths for a body `area_w`.
+    fn for_area(area_w: u16) -> Self {
+        let status_w: u16 = 13; // "In Progress" + padding
+        let assignee_w = area_w.saturating_sub(status_w).min(20);
+        let title_w = area_w
+            .saturating_sub(status_w)
+            .saturating_sub(assignee_w)
+            .max(8);
+        Self {
+            title_w,
+            assignee_w,
+        }
+    }
+}
+
+/// One status section's vertical band: `[start, end)` rows of the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Band {
+    /// The band's header row (inclusive).
+    start: u16,
+    /// One past the band's last issue row (exclusive).
+    end: u16,
+}
+
+/// The three status sections' bands, splitting the body `[col_top, bottom)` into
+/// three contiguous, non-overlapping vertical thirds.
+struct SectionBands {
+    bands: [Band; 3],
+}
+
+impl SectionBands {
+    /// Divide `[col_top, bottom)` into three contiguous bands. The body height is
+    /// split into thirds; the remainder rows go to the earlier bands so the whole
+    /// height is used and the last band still ends exactly at `bottom`. A body too
+    /// short to give every section a row degrades gracefully (zero-height bands
+    /// simply paint nothing — never out of bounds).
+    fn split(col_top: u16, bottom: u16) -> [Band; 3] {
+        let avail = bottom.saturating_sub(col_top);
+        let base = avail / 3;
+        let extra = avail % 3; // 0..=2 leftover rows handed to the earliest bands
+        let mut start = col_top;
+        let mut bands = [Band { start, end: start }; 3];
+        for (i, band) in bands.iter_mut().enumerate() {
+            let h = base + u16::from(u16::try_from(i).unwrap_or(u16::MAX) < extra);
+            let end = start.saturating_add(h).min(bottom);
+            *band = Band { start, end };
+            start = end;
+        }
+        bands
+    }
+}
+
+impl IntoIterator for SectionBands {
+    type Item = Band;
+    type IntoIter = std::array::IntoIter<Band, 3>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.bands.into_iter()
+    }
+}
+
+/// Paint a single issue `row` at `y`: selection marker, clipped title, assignee,
+/// and trailing label chips. Extracted so the section-band loop stays legible.
+fn render_issue_row(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    y: u16,
+    r: &IssueRow,
+    selected: bool,
+    cols: &ColumnWidths,
+) {
+    let marker_color = if selected {
+        SELECTION_GREEN
+    } else {
+        MUTED_GRAY
+    };
+    put_str(
+        buf,
+        0,
+        y,
+        if selected { "▶ " } else { "  " },
+        marker_color,
+        area_w,
+    );
+
+    let text_color = if selected { SOFT_WHITE } else { MUTED_GRAY };
+    put_str(buf, 2, y, &clip(&r.title, cols.title_w), text_color, area_w);
+
+    let ax = 2u16.saturating_add(cols.title_w).saturating_add(1);
+    let assignee = r.assignee.as_deref().unwrap_or("—");
+    let next_x = put_str(
+        buf,
+        ax,
+        y,
+        &clip(assignee, cols.assignee_w),
+        MUTED_GRAY,
+        area_w,
+    );
+
+    // Label chips trail the assignee in whatever width is left, clipped at the
+    // area edge (a row with no labels paints nothing here).
+    if !r.labels.is_empty() {
+        let chips_x = next_x.saturating_add(1);
+        crate::widgets::label_chip::render_label_chips(buf, chips_x, y, area_w, &r.labels);
     }
 }
 
@@ -855,6 +942,122 @@ mod tests {
         let mut buf = WireBuffer::new(FLOOR_W, FLOOR_H);
         assert!(buf.width >= 80 && buf.height >= 24);
         // Render the body region (row 1 .. last-but-one, leaving chrome rows).
+        render_issue_list(&mut buf, FLOOR_W, 1, FLOOR_H - 1, &s, 5);
+
+        for (coord, _) in &buf.cells {
+            assert!(
+                coord.x < FLOOR_W && coord.y < FLOOR_H,
+                "issue list wrote out-of-bounds cell at ({}, {})",
+                coord.x,
+                coord.y,
+            );
+        }
+    }
+
+    /// Read a row's text back out of a `WireBuffer` for assertion. Cells not
+    /// written render as spaces.
+    fn row_text(buf: &WireBuffer, row: u16, width: u16) -> String {
+        let mut out = vec![' '; width as usize];
+        for (coord, cell) in &buf.cells {
+            if coord.y == row && coord.x < width {
+                if let Some(ch) = cell.symbol.chars().next() {
+                    out[coord.x as usize] = ch;
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// The y-row at which a header line (e.g. `"Todo ("`, `"Done ("`) is painted,
+    /// scanning the body region `[top, bottom)`.
+    fn header_row(buf: &WireBuffer, top: u16, bottom: u16, label: &str) -> Option<u16> {
+        (top..bottom).find(|&y| row_text(buf, y, buf.width).contains(label))
+    }
+
+    /// e38.39 — a populated landing must USE the body height: the three status
+    /// sections distribute down the pane instead of clustering at the top with a
+    /// vast void below. With a sparse-but-populated fixture at the 80×24 floor the
+    /// last section header (`Done`) must land in the lower portion of the body,
+    /// and the body's lowest painted content row must reach a sensible fraction of
+    /// the available height — so there is no large empty band before the footer.
+    ///
+    /// Reverting to the old top-packed layout (sections stacked tightly from the
+    /// first body row) lands `Done` near the top and the fill assertion fails.
+    #[test]
+    fn populated_landing_fills_body_height() {
+        const FLOOR_W: u16 = 80;
+        const FLOOR_H: u16 = 24;
+        let top = 1u16;
+        let bottom = FLOOR_H - 1; // footer pinned on the last row
+
+        // Sparse but populated: a few rows in each of the three status columns.
+        let mut rows = Vec::new();
+        for i in 0..3 {
+            rows.push(row(&format!("t{i}"), "open", Some("agent:c")));
+        }
+        for i in 0..2 {
+            rows.push(row(&format!("p{i}"), "in_progress", Some("agent:c")));
+        }
+        for i in 0..2 {
+            rows.push(row(&format!("d{i}"), "done", Some("agent:c")));
+        }
+        let s = IssueListState::with_rows(rows);
+
+        let mut buf = WireBuffer::new(FLOOR_W, FLOOR_H);
+        render_issue_list(&mut buf, FLOOR_W, top, bottom, &s, 0);
+
+        // The body band runs from the first column row (top + 1, below the chip
+        // bar) to `bottom`. The `Done` header is the last of the three sections; in
+        // a body-filling layout it sits in the lower portion, not the top cluster.
+        let body_top = top + 1;
+        let body_h = bottom - body_top;
+        let done_y =
+            header_row(&buf, body_top, bottom, "Done (").expect("Done header must be painted");
+        let done_frac = f64::from(done_y - body_top) / f64::from(body_h);
+        assert!(
+            done_frac >= 0.5,
+            "Done section must distribute into the lower half of the body \
+             (done_y={done_y}, body_top={body_top}, body_h={body_h}, frac={done_frac:.2}); \
+             the layout is still top-packed with a void below",
+        );
+
+        // The lowest painted body row must reach near the bottom of the body, so
+        // there is no large empty band between the content and the footer.
+        let lowest = (body_top..bottom)
+            .rev()
+            .find(|&y| !row_text(&buf, y, FLOOR_W).trim().is_empty())
+            .expect("body must paint at least one row");
+        let fill_frac = f64::from(lowest - body_top + 1) / f64::from(body_h);
+        assert!(
+            fill_frac >= 0.75,
+            "body content must reach at least 75% of the available height \
+             (lowest={lowest}, body_top={body_top}, body_h={body_h}, frac={fill_frac:.2}); \
+             a sparse void dominates the pane",
+        );
+    }
+
+    /// e38.39 — the body-filling layout must NOT overflow at the 80×24 floor with a
+    /// dense fixture (the section bands clamp to their share, never past `bottom`).
+    #[test]
+    fn body_fill_layout_does_not_overflow_at_floor() {
+        const FLOOR_W: u16 = 80;
+        const FLOOR_H: u16 = 24;
+        let rows: Vec<IssueRow> = (0..40)
+            .map(|i| {
+                row(
+                    &format!("i{i}"),
+                    match i % 3 {
+                        0 => "open",
+                        1 => "in_progress",
+                        _ => "done",
+                    },
+                    Some("agent:c"),
+                )
+            })
+            .collect();
+        let s = IssueListState::with_rows(rows);
+
+        let mut buf = WireBuffer::new(FLOOR_W, FLOOR_H);
         render_issue_list(&mut buf, FLOOR_W, 1, FLOOR_H - 1, &s, 5);
 
         for (coord, _) in &buf.cells {
