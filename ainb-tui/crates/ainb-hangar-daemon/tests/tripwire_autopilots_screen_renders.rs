@@ -75,11 +75,11 @@ fn autopilots_screen_renders_seeded_autopilot() {
         "the issue list must not already show the seeded autopilot name:\n{landing}"
     );
 
-    // Press `5` (single-char nav, no Enter) until the manager shows the seeded
+    // Press `4` (single-char nav, no Enter) until the manager shows the seeded
     // autopilot's name AND cron. 45s budget covers the snapshot round-trip.
     let deadline = Instant::now() + Duration::from_secs(45);
     let pane = session
-        .switch_tab_until("5", deadline, |c| {
+        .switch_tab_until("4", deadline, |c| {
             hangar_chrome_visible(c) && c.contains(AUTOPILOT_NAME) && c.contains(AUTOPILOT_CRON)
         })
         .unwrap_or_else(|| {

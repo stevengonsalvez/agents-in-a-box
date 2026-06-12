@@ -23,7 +23,7 @@ fn skill_manager_lists_skills() {
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
     let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
-    sess.send_key("4");
+    sess.send_key("3");
     let skills = sess
         .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
             c.contains("commit") && c.contains("Used")

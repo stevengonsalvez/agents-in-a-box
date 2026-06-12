@@ -46,8 +46,8 @@ fn cross_screen_navigation_walks_tabs() {
         "issue counts missing:\n{issues}"
     );
 
-    // 4 → skills (positive: seeded skill; forbidden: issue count).
-    sess.send_key("4");
+    // 3 → skills (positive: seeded skill; forbidden: issue count).
+    sess.send_key("3");
     let skills = expect_screen(&sess, "commit", "Todo (3)");
     assert!(skills.contains("Used"), "skills chip missing:\n{skills}");
 
