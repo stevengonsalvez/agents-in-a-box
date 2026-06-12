@@ -1,6 +1,6 @@
 //! P7.5 RED — autopilot-manager reducer behaviour.
 //!
-//! The autopilot manager (hotkey `5`) is a table + run-history pane. These tests
+//! The autopilot manager (hotkey `4`) is a table + run-history pane. These tests
 //! pin the pure reducer contract: list navigation (and the run-history load it
 //! raises), the fire-now intent (`r`), the enabled toggle (`d`, false→true), the
 //! add/edit intents, and the event-fold that refreshes a row in place.

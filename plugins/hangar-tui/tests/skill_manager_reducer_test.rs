@@ -1,6 +1,6 @@
 //! P4.6 RED — skill-manager reducer behaviour.
 //!
-//! The skill manager (hotkey `4`) is a three-pane screen: a skill list, a file
+//! The skill manager (hotkey `3`) is a three-pane screen: a skill list, a file
 //! tree for the selected skill, and a read-only editor pane. These tests pin the
 //! pure reducer contract: list navigation, loading a skill's file tree, the
 //! import intent, the Used/Unused filter chips, and the remote-conflict banner

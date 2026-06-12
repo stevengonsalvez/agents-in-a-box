@@ -395,8 +395,9 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         assert!(!last.contains("Loading"), "stuck on loading:\n{last}");
         assert!(last.contains("Todo"), "Todo column header missing:\n{last}");
 
-        // Route the `4` tab key → skill manager renders `commit`.
-        send_key(&mut host_write, '4').await;
+        // Route the `3` tab key → skill manager renders `commit` (e38.38: Skills
+        // renumbered 4→3 to close the `[3]Agents` gap).
+        send_key(&mut host_write, '3').await;
         let (skills, last2) = poll_render_for(&mut host_write, &mut host_read, "commit").await;
         assert!(skills, "tab to skills did not render `commit`:\n{last2}");
         assert!(
@@ -498,8 +499,9 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
         )
         .await;
 
-        // Tab to the skill manager (`4`), then press `s` (sync).
-        send_key(&mut host_write, '4').await;
+        // Tab to the skill manager (`3`), then press `s` (sync). (e38.38: Skills
+        // renumbered 4→3 to close the `[3]Agents` gap.)
+        send_key(&mut host_write, '3').await;
         send_key(&mut host_write, 's').await;
 
         // Pump renders until the plugin's deferred skill action fires the sync

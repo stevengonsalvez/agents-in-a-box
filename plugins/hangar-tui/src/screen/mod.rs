@@ -50,9 +50,9 @@ pub enum Screen {
     TaskDetail(TaskId),
     /// Agent-picker modal overlay opened for a specific issue (hotkey `a`).
     AgentPicker(IssueId),
-    /// Skill manager (hotkey `4`).
+    /// Skill manager (hotkey `3`).
     SkillManager,
-    /// Autopilot manager (hotkey `5`).
+    /// Autopilot manager (hotkey `4`).
     Autopilots,
     /// Kanban board (hotkey `K`) — the task queue laid out as four columns.
     Kanban,

@@ -1332,9 +1332,12 @@ impl HangarPlugin {
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
     match &key.code {
         KeyCode::Char { ch }
+            // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
+            // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
+            // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '4' | '5' | 'K' | 'D' | 'L' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'K' | 'D' | 'L' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))

@@ -1,6 +1,6 @@
 //! P7.5 — Autopilot manager screen: the pure reducer + width-aware render.
 //!
-//! The autopilot manager (hotkey `5`) is a two-region screen: an upper table of
+//! The autopilot manager (hotkey `4`) is a two-region screen: an upper table of
 //! the workspace's cron-scheduled autopilots (NAME / CRON / NEXT TICK / LAST RUN
 //! / STATUS) and a lower run-history pane for the selected autopilot. The action
 //! keys map to live daemon RPCs: `r` fires the selected autopilot now

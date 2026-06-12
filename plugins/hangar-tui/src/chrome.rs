@@ -27,15 +27,21 @@ const ONLINE_GREEN: Color = Color::rgb(100, 200, 120);
 /// Presence dot colour when the daemon link is down.
 const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 
-/// The four primary tabs rendered in the top bar, in display order, each with
-/// its switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip
-/// even though it is only reachable with a selection — it keeps the tab
-/// positions stable so the eye doesn't jump when a task is opened.
+/// The primary tabs rendered in the top bar, in display order, each with its
+/// switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip even
+/// though it is only reachable with a selection — it keeps the tab positions
+/// stable so the eye doesn't jump when a task is opened.
+///
+/// The numbered hotkeys are **contiguous** (`1`→`4`, no gap): the old `[3]Agents`
+/// tab was folded into the issue-list `[Agents]` filter chip, so `Skills` and
+/// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
+/// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
+/// `Agents` slot renumber, and only by one.
 const PRIMARY_TABS: [(char, &str); 9] = [
     ('1', "Issues"),
     ('2', "Task"),
-    ('4', "Skills"),
-    ('5', "Autopilots"),
+    ('3', "Skills"),
+    ('4', "Autopilots"),
     ('K', "Kanban"),
     ('D', "Daemon"),
     ('L', "Logs"),
@@ -64,7 +70,7 @@ impl Presence {
 
 /// Render the top tab bar onto row 0 of `buf`.
 ///
-/// Layout: `[1]Issues [2]Task [4]Skills [,]Settings` on the left, and
+/// Layout: `[1]Issues [2]Task [3]Skills [,]Settings` on the left, and
 /// `<workspace> · <dot> <presence>` flushed to the right. The right cluster is
 /// dropped first when width is too tight to fit both — the tabs always win the
 /// space contest so navigation stays visible at the 80×24 floor.
@@ -170,8 +176,8 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
     match hotkey {
         '1' => matches!(active, Screen::IssueList),
         '2' => matches!(active, Screen::TaskDetail(_)),
-        '4' => matches!(active, Screen::SkillManager),
-        '5' => matches!(active, Screen::Autopilots),
+        '3' => matches!(active, Screen::SkillManager),
+        '4' => matches!(active, Screen::Autopilots),
         'K' => matches!(active, Screen::Kanban),
         'D' => matches!(active, Screen::DaemonHealth),
         'L' => matches!(active, Screen::Logs),
@@ -225,7 +231,8 @@ mod tests {
     fn active_tab_detection() {
         assert!(tab_is_active(&Screen::IssueList, '1'));
         assert!(!tab_is_active(&Screen::IssueList, '2'));
-        assert!(tab_is_active(&Screen::SkillManager, '4'));
+        assert!(tab_is_active(&Screen::SkillManager, '3'));
+        assert!(tab_is_active(&Screen::Autopilots, '4'));
         assert!(tab_is_active(&Screen::Settings, ','));
         let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
         assert!(!tab_is_active(&Screen::AgentPicker(issue), '1'));
@@ -319,6 +326,113 @@ mod tests {
     fn presence_parts_map_state() {
         assert_eq!(Presence::Online.parts().2, ONLINE_GREEN);
         assert_eq!(Presence::Offline.parts().2, OFFLINE_RED);
+    }
+
+    /// e38.38 — the numbered tabs render with NO numbering gap.
+    ///
+    /// The screenshotted bar showed `[1][2][4][5]…` — `[3]` was skipped after the
+    /// old `[3]Agents` tab was folded into the issue-list filter chip, leaving a
+    /// hole. This pins the fix: the digit hotkeys shown in the bar must form a
+    /// contiguous run starting at `1` (so `[1][2][3][4]`, never a `[2]…[4]` jump).
+    /// Re-introducing the gap (a `PRIMARY_TABS` digit that skips a value) makes the
+    /// `expected` sequence diverge and the assertion fail.
+    #[test]
+    fn numbered_tabs_have_no_gap() {
+        let mut buf = WireBuffer::new(120, 24);
+        render_top_bar(&mut buf, 120, &Screen::IssueList, "acme", Presence::Online);
+        let row0 = row_text(&buf, 0, 120);
+
+        // Collect the digit hotkeys shown in `[N]` brackets, in display order.
+        let digits = numbered_hotkeys(&row0);
+        assert!(
+            !digits.is_empty(),
+            "no numbered tabs found in row0 = {row0:?}"
+        );
+
+        // They must be exactly 1, 2, 3, … with no gap (no `[2]` → `[4]` jump).
+        let expected: Vec<u32> = (1..=digits.len())
+            .map(|n| u32::try_from(n).expect("tab count fits u32"))
+            .collect();
+        assert_eq!(
+            digits, expected,
+            "numbered tabs are not contiguous (numbering gap) — row0 = {row0:?}"
+        );
+    }
+
+    /// e38.38 — each digit shown in the bar still selects a real screen, and the
+    /// screen it selects is the one labelled next to that digit in the bar.
+    ///
+    /// This is the "keep every tab reachable by its shown key" guard: renumbering
+    /// the rendered label without remapping the routing key (or vice-versa) would
+    /// land on the wrong screen (or no screen) and fail here.
+    #[test]
+    fn numbered_tab_keys_select_their_labelled_screen() {
+        use crate::screen::{reduce, AppEvent, AppState, Screen as RouteScreen};
+        use ainb_hangar_core::ids::{TaskId, WorkspaceId};
+
+        let mut buf = WireBuffer::new(120, 24);
+        render_top_bar(&mut buf, 120, &Screen::IssueList, "acme", Presence::Online);
+        let row0 = row_text(&buf, 0, 120);
+
+        for (digit, label) in numbered_tabs_with_labels(&row0) {
+            let key = char::from_digit(digit, 10).unwrap();
+            // Seed a selected task so the `2`→Task route is reachable; harmless
+            // for the other digits.
+            let mut state = AppState::new(WorkspaceId::from_str("default").unwrap());
+            state.selected_task = Some(TaskId::from_str("task-1").unwrap());
+
+            let out = reduce(&state, AppEvent::Key(key));
+            let landed: &RouteScreen = &out.state.screen;
+            assert_eq!(
+                landed.tab_label(),
+                label,
+                "key `{key}` landed on `{}` but the bar labels it `{label}` — row0 = {row0:?}",
+                landed.tab_label(),
+            );
+        }
+    }
+
+    /// Pull the digit hotkeys out of a rendered tab row in display order. A tab is
+    /// `[N]Label`; this finds every `[<digit>]` and returns the digit values.
+    fn numbered_hotkeys(row: &str) -> Vec<u32> {
+        numbered_tabs_with_labels(row)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// Pull `(digit, label)` pairs out of a rendered tab row in display order,
+    /// for every `[<digit>]Label` tab. The label runs until the next `[` or two
+    /// trailing spaces (the tab separator).
+    fn numbered_tabs_with_labels(row: &str) -> Vec<(u32, String)> {
+        let chars: Vec<char> = row.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            // Look for `[<digit>]`.
+            if chars[i] == '['
+                && i + 2 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+                && chars[i + 2] == ']'
+            {
+                let digit = chars[i + 1].to_digit(10).unwrap();
+                // Read the label until the next `[` or a run of two spaces.
+                let mut j = i + 3;
+                let mut label = String::new();
+                while j < chars.len() && chars[j] != '[' {
+                    if chars[j] == ' ' && j + 1 < chars.len() && chars[j + 1] == ' ' {
+                        break;
+                    }
+                    label.push(chars[j]);
+                    j += 1;
+                }
+                out.push((digit, label.trim().to_string()));
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        out
     }
 
     /// Read a row's text back out of a `WireBuffer` for assertion. Cells not

@@ -1,7 +1,7 @@
 //! P4.6 / P6.5 — Skill manager screen: the pure reducer + three-pane
 //! width-aware render.
 //!
-//! The skill manager (hotkey `4`) is a three-region screen: a left skill list, a
+//! The skill manager (hotkey `3`) is a three-region screen: a left skill list, a
 //! middle file tree for the selected skill, and a right detail/editor pane.
 //! Filter chips (`All` / `Used` / `Unused` / `Mine`) narrow the list. P6.5 wired
 //! the action keys to live daemon RPCs: `s` runs the curated-skills importer

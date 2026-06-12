@@ -3,8 +3,10 @@
 //! [`reduce`] is the single entry point through which every key press and host
 //! event flows. It owns the tab-switch / modal / quit semantics of P4.1:
 //!
-//! - `1` / `4` / `5` / `,` switch to the issue-list / skill-manager /
-//!   autopilot-manager / settings tabs.
+//! - `1` / `3` / `4` / `,` switch to the issue-list / skill-manager /
+//!   autopilot-manager / settings tabs (the numbered tabs are contiguous; the
+//!   old `[3]Agents` tab folded into the issue-list filter chip, so Skills/
+//!   Autopilots shifted down to `3`/`4` — e38.38).
 //! - `2` switches to task detail **only** when a task is selected (otherwise a
 //!   no-op, per the RED test `reduce_tab_key_2_only_valid_when_task_selected`).
 //! - `?` opens the [help overlay](Screen::Help) modal, remembering the screen
@@ -40,8 +42,11 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
             || unchanged(state),
             |task| switch_tab(state, Screen::TaskDetail(task.clone())),
         ),
-        '4' => switch_tab(state, Screen::SkillManager),
-        '5' => switch_tab(state, Screen::Autopilots),
+        // `3`/`4` are contiguous after the old `[3]Agents` tab folded into the
+        // issue-list filter chip (e38.38): Skills/Autopilots shifted down to close
+        // the numbering gap.
+        '3' => switch_tab(state, Screen::SkillManager),
+        '4' => switch_tab(state, Screen::Autopilots),
         // `K` (capital) opens the Kanban board from anywhere (P8.4).
         'K' => switch_tab(state, Screen::Kanban),
         // `D` (capital) opens the daemon-health pane from anywhere (P8.5).

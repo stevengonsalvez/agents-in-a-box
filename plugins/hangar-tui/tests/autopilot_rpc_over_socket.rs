@@ -374,8 +374,9 @@ async fn key_r_fires_now() {
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen (`5`), then press `r` (run now).
-        send_key(&mut host_write, '5').await;
+        // Tab to the autopilot screen (`4`), then press `r` (run now). (e38.38:
+        // Autopilots renumbered 5→4 to close the `[3]Agents` gap.)
+        send_key(&mut host_write, '4').await;
         send_key(&mut host_write, 'r').await;
 
         let mut sent = false;
@@ -424,9 +425,10 @@ async fn key_d_toggles_enabled() {
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen, then press `d` (disable; the seeded row is
-        // enabled → set_enabled(false)).
-        send_key(&mut host_write, '5').await;
+        // Tab to the autopilot screen (`4`), then press `d` (disable; the seeded
+        // row is enabled → set_enabled(false)). (e38.38: Autopilots renumbered 5→4
+        // to close the `[3]Agents` gap.)
+        send_key(&mut host_write, '4').await;
         send_key(&mut host_write, 'd').await;
 
         // Pump until the daemon records set_enabled(false). The daemon flips its

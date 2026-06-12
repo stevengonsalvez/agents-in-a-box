@@ -528,7 +528,7 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     const GOLD: Color = Color::rgb(255, 215, 0);
     let lines = [
         "Hangar — keys",
-        "1 issues  2 task  4 skills  , settings",
+        "1 issues  2 task  3 skills  , settings",
         "a assign  c create  / filter",
         "esc close  q quit",
     ];
@@ -562,7 +562,7 @@ const fn key_char(key: &KeyEvent) -> Option<char> {
 /// Fold a forwarded key into the active screen's reducer, returning an optional
 /// cross-screen [`NavIntent`] the plugin glue must act on.
 ///
-/// Tab-switch keys (`1`/`2`/`4`/`,`) and `?`/Esc are routing-layer concerns
+/// Tab-switch keys (`1`/`2`/`3`/`,`) and `?`/Esc are routing-layer concerns
 /// handled by the caller via [`super::reduce`]; this function owns the
 /// **per-screen** keys (`j`/`k`/`/`/`a`/Enter/…).
 pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
