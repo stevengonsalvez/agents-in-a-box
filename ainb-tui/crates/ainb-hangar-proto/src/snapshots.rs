@@ -54,6 +54,90 @@ pub struct IssueSearchParams {
     pub query: String,
 }
 
+/// Params for [`crate::methods::HANGAR_SEARCH`] (e38.13): ranked cross-entity
+/// command-palette search within a workspace.
+///
+/// `workspace_id` is the tenant scope (a sibling tenant's matching entity is never
+/// returned). `query` is the case-insensitive substring matched across each
+/// entity's human-readable field (issue title / agent name / skill name /
+/// autopilot name); a blank query matches nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SearchParams {
+    /// The workspace to search within (tenant scope).
+    pub workspace_id: String,
+    /// The case-insensitive substring to match across every entity's
+    /// human-readable field. Blank matches nothing.
+    pub query: String,
+}
+
+/// The entity kind a [`SearchEntry`] points at — the cross-entity axis the
+/// command palette (e38.13) searches over.
+///
+/// The wire tag is `snake_case` (`"issue"` / `"agent"` / `"skill"` /
+/// `"autopilot"`). The variant order is also the tie-break ranking order the
+/// daemon applies after match strength (issues before agents before skills before
+/// autopilots), so a deterministic palette ordering is part of the wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchEntryKind {
+    /// An issue (matched on its title); jumping opens the issue-list screen.
+    Issue,
+    /// An agent (matched on its name); jumping opens the agent-picker / settings.
+    Agent,
+    /// A skill (matched on its name); jumping opens the skill-manager screen.
+    Skill,
+    /// An autopilot (matched on its name); jumping opens the autopilots screen.
+    Autopilot,
+}
+
+impl SearchEntryKind {
+    /// The screen the palette jumps to when this entry is chosen.
+    ///
+    /// A stable wire token (`"issue_list"` / `"skill_manager"` / `"autopilots"`)
+    /// the plugin maps to its [`Screen`](crate) routing target. Agents have no
+    /// dedicated list screen at v1, so an agent entry lands on the issue list
+    /// (where the agent picker is reachable via `a`); this keeps every entry
+    /// navigable rather than dead.
+    #[must_use]
+    pub const fn target_screen(self) -> &'static str {
+        match self {
+            Self::Issue | Self::Agent => "issue_list",
+            Self::Skill => "skill_manager",
+            Self::Autopilot => "autopilots",
+        }
+    }
+}
+
+/// One ranked cross-entity search hit (e38.13): an entity that matched the
+/// palette query, carrying everything the palette needs to render the row AND
+/// jump to it.
+///
+/// `kind` is the entity axis, `id` its workspace-local row id, `label` the
+/// human-readable field that matched (rendered in the result list), and `screen`
+/// the routing token the plugin opens on Enter (derived from
+/// [`SearchEntryKind::target_screen`], carried on the wire so the plugin needs no
+/// kind→screen table of its own).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchEntry {
+    /// The entity kind that matched.
+    pub kind: SearchEntryKind,
+    /// The matched entity's workspace-local id.
+    pub id: String,
+    /// The human-readable label that matched (issue title / entity name).
+    pub label: String,
+    /// The screen-routing token the palette opens on Enter (e.g. `"issue_list"`).
+    pub screen: String,
+}
+
+/// Result of [`crate::methods::HANGAR_SEARCH`] (e38.13): the matching
+/// [`SearchEntry`]s in ranked order (exact > prefix > substring, then kind order,
+/// then label).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SearchResult {
+    /// The ranked cross-entity hits.
+    pub entries: Vec<SearchEntry>,
+}
+
 /// Result of [`crate::methods::HANGAR_AGENTS_LIST`]: the polymorphic actor list
 /// (members + agents) the agent-picker modal renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,6 +769,58 @@ mod tests {
             serde_json::from_str::<SkillsListResult>(&s).unwrap(),
             skills
         );
+    }
+
+    /// The e38.13 cross-entity search envelopes round-trip through JSON, and the
+    /// `kind` tag + `screen` token carry their wire spelling unchanged.
+    #[test]
+    fn search_envelopes_roundtrip() {
+        let p = SearchParams {
+            workspace_id: "ws-1".into(),
+            query: "refactor".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<SearchParams>(&s).unwrap(), p);
+
+        let result = SearchResult {
+            entries: vec![
+                SearchEntry {
+                    kind: SearchEntryKind::Issue,
+                    id: "issue-1".into(),
+                    label: "Refactor API".into(),
+                    screen: SearchEntryKind::Issue.target_screen().into(),
+                },
+                SearchEntry {
+                    kind: SearchEntryKind::Skill,
+                    id: "skill-1".into(),
+                    label: "refactor".into(),
+                    screen: SearchEntryKind::Skill.target_screen().into(),
+                },
+            ],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(serde_json::from_str::<SearchResult>(&s).unwrap(), result);
+        // The wire tag spelling is part of the contract.
+        assert!(s.contains("\"kind\":\"issue\""), "issue kind tag: {s}");
+        assert!(s.contains("\"kind\":\"skill\""), "skill kind tag: {s}");
+        assert!(
+            s.contains("\"screen\":\"issue_list\""),
+            "issue screen token: {s}"
+        );
+        assert!(
+            s.contains("\"screen\":\"skill_manager\""),
+            "skill screen token: {s}"
+        );
+    }
+
+    /// Each search kind maps to a stable jump-target screen token; agents fall
+    /// back to the issue list (no dedicated agent screen at v1).
+    #[test]
+    fn search_kind_target_screens() {
+        assert_eq!(SearchEntryKind::Issue.target_screen(), "issue_list");
+        assert_eq!(SearchEntryKind::Agent.target_screen(), "issue_list");
+        assert_eq!(SearchEntryKind::Skill.target_screen(), "skill_manager");
+        assert_eq!(SearchEntryKind::Autopilot.target_screen(), "autopilots");
     }
 
     /// The P6.5 skill-management envelopes round-trip through JSON.

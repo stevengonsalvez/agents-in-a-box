@@ -48,6 +48,26 @@ pub const HANGAR_ISSUES_LIST: &str = "hangar/issues_list";
 /// [`IssueRow`]: crate::events::IssueRow
 pub const HANGAR_ISSUES_SEARCH: &str = "hangar/issues_search";
 
+/// `hangar/search` — ranked cross-entity command-palette search (e38.13).
+///
+/// Params: [`crate::snapshots::SearchParams`] (`{ workspace_id, query }`). Result:
+/// [`crate::snapshots::SearchResult`] — ranked [`crate::snapshots::SearchEntry`]s
+/// across the workspace's issues, agents, skills, AND autopilots. An entry matches
+/// when the case-insensitive `query` substring appears in the entity's
+/// human-readable field (issue title / agent name / skill name / autopilot name);
+/// entries are ranked exact-match first, then prefix, then substring, ties broken
+/// by a stable kind order (issues, agents, skills, autopilots) and label. Each
+/// entry carries `{ kind, id, label, screen }` so the palette can JUMP to the
+/// selected entity's screen. A blank query matches nothing.
+///
+/// This is the cross-entity superset of [`HANGAR_ISSUES_SEARCH`] (which only
+/// reaches issues): the command palette (`Ctrl+P`) needs to jump across *all* four
+/// entity kinds, which a per-screen `/` filter and the issue-only search cannot.
+/// Workspace-scoped like every read: a sibling tenant's matching entity is never
+/// returned, and an unknown workspace yields an empty result (a read, so no
+/// `INVALID_PARAMS` rejection — mirrors the list snapshot).
+pub const HANGAR_SEARCH: &str = "hangar/search";
+
 /// `hangar/agents_list` — snapshot the assignable actors of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: `{ actors: [ActorRow, ...] }`
@@ -431,6 +451,7 @@ pub const ALL_METHODS: &[&str] = &[
     WORKSPACE_LIST,
     HANGAR_ISSUES_LIST,
     HANGAR_ISSUES_SEARCH,
+    HANGAR_SEARCH,
     HANGAR_AGENTS_LIST,
     HANGAR_SKILLS_LIST,
     HANGAR_SKILL_GET,
@@ -504,6 +525,7 @@ mod tests {
         for m in [
             HANGAR_ISSUES_LIST,
             HANGAR_ISSUES_SEARCH,
+            HANGAR_SEARCH,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
             HANGAR_SKILL_GET,
@@ -553,6 +575,7 @@ mod tests {
             WORKSPACE_LIST,
             HANGAR_ISSUES_LIST,
             HANGAR_ISSUES_SEARCH,
+            HANGAR_SEARCH,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
             HANGAR_SKILL_GET,
