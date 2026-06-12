@@ -29,6 +29,7 @@ use ainb_plugin_types_sessions::{
     SessionUsage, TokenBucket, UsageData,
 };
 use chrono::{Datelike, Duration, NaiveDate};
+use serde::{Deserialize, Serialize};
 
 /// Minimum gap between progress emits. Caps emission to 10 events/s and
 /// satisfies the "every 100 ms or every 10 files, whichever first"
@@ -98,6 +99,7 @@ impl ProgressReporter {
                 scanned: self.scanned,
                 total: self.total,
                 current_project: current_project.to_string(),
+                done: false,
             });
             self.last_emit = Some(now);
         }
@@ -115,6 +117,7 @@ impl ProgressReporter {
             scanned: self.scanned,
             total: self.total,
             current_project: current_project.to_string(),
+            done: false,
         });
         self.last_emit = Some(Instant::now());
     }
@@ -169,6 +172,139 @@ fn cursor_default_root(home: &Path) -> PathBuf {
     } else {
         home.join(".config/Cursor/User/workspaceStorage")
     }
+}
+
+/// Per-scan instrumentation. Counted in the per-file read path so
+/// tests (and refresh logs) can assert what a scan actually did —
+/// "0 reparses on a no-change refresh" is a counted fact, not an
+/// inference from wall-clock time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounters {
+    /// Files visited by the cached walks (each costs one `stat`).
+    pub files_statted: u32,
+    /// Files read from disk and parsed (cache miss or no cache).
+    pub parsed: u32,
+    /// Files served from the per-file parse cache (deserialize only).
+    pub cache_hits: u32,
+    /// Files older than the watermark that were skipped entirely —
+    /// no read, no cache lookup (their contribution rides the stable
+    /// aggregate).
+    pub stable_skipped: u32,
+    /// `true` when the persisted stable aggregate was valid and reused
+    /// (no rebuild pass ran).
+    pub stable_reused: bool,
+}
+
+/// What the per-file read path does with files older than the
+/// watermark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StablePolicy {
+    /// Fast path: record `(path, mtime, size)` and skip the file —
+    /// its calls are already in the persisted stable aggregate.
+    Skip,
+    /// Rebuild pass: read the file (cache-served when warm) and route
+    /// its calls into [`ScanCtx::stable_calls`].
+    Collect,
+}
+
+/// Mutable per-scan context threaded through the cached provider
+/// walks in place of the bare cache handle. Carries the watermark
+/// partition policy, the routed stable output, and the counters.
+pub(crate) struct ScanCtx<'a> {
+    /// Per-file parse cache (None = cache-less, every file parses).
+    pub(crate) cache: &'a mut Option<crate::cache::UsageCache>,
+    /// Files with `mtime < watermark` are stable. `None` disables the
+    /// partition entirely — every file is "recent" (the legacy full
+    /// scan, byte-for-byte).
+    pub(crate) watermark_nanos: Option<u64>,
+    pub(crate) stable_policy: StablePolicy,
+    /// `(path, mtime_nanos, size)` of every stable file seen.
+    pub(crate) stable_present: Vec<(String, u64, u64)>,
+    /// `(path, mtime_nanos, size)` of every *recent* (newer than the
+    /// watermark) cached-provider file seen. Only collected when a
+    /// watermark is set — the full-scan path doesn't pay for it. Feeds
+    /// the unchanged-snapshot short-circuit in [`scan_incremental`].
+    pub(crate) recent_present: Vec<(String, u64, u64)>,
+    /// Stable files' calls — populated only under
+    /// [`StablePolicy::Collect`].
+    pub(crate) stable_calls: Vec<ProviderCall>,
+    /// Files whose `stat` failed this scan. Any non-zero count poisons
+    /// the unchanged-snapshot short-circuit: such a file can still
+    /// parse, but has no fingerprint for the memo to compare.
+    pub(crate) stat_failures: u32,
+    pub(crate) counters: ScanCounters,
+}
+
+impl<'a> ScanCtx<'a> {
+    /// Full-scan context: no watermark, no partition — the legacy
+    /// behavior every existing entry point keeps.
+    pub(crate) fn full(cache: &'a mut Option<crate::cache::UsageCache>) -> Self {
+        Self {
+            cache,
+            watermark_nanos: None,
+            stable_policy: StablePolicy::Skip,
+            stable_present: Vec::new(),
+            recent_present: Vec::new(),
+            stable_calls: Vec::new(),
+            stat_failures: 0,
+            counters: ScanCounters::default(),
+        }
+    }
+
+    /// Watermark-partitioned context for the incremental path.
+    pub(crate) fn incremental(
+        cache: &'a mut Option<crate::cache::UsageCache>,
+        watermark_nanos: u64,
+        stable_policy: StablePolicy,
+    ) -> Self {
+        Self {
+            cache,
+            watermark_nanos: Some(watermark_nanos),
+            stable_policy,
+            stable_present: Vec::new(),
+            recent_present: Vec::new(),
+            stable_calls: Vec::new(),
+            stat_failures: 0,
+            counters: ScanCounters::default(),
+        }
+    }
+}
+
+/// What the previous refresh saw on the recent (newer-than-watermark)
+/// side — the unchanged-snapshot short-circuit's comparison key.
+///
+/// A refresh whose stable fingerprint set, recent fingerprint set, and
+/// uncached-provider output all equal the previous refresh's must
+/// produce a byte-identical snapshot (the cached-provider calls are a
+/// pure function of `(path, mtime, size)` via the parse cache, and
+/// fold/emit are deterministic) — so the aggregation and publish can
+/// be skipped outright.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RecentMemo {
+    /// Sorted `(path, mtime_nanos, size)` of every recent
+    /// cached-provider file.
+    pub(crate) recent_present: Vec<(String, u64, u64)>,
+    /// Gemini / Copilot / Cursor output, in walk order. These parsers
+    /// are uncached so fingerprints don't exist for them; whole-output
+    /// equality is the (cheap — usually empty) correctness guard.
+    pub(crate) uncached_calls: Vec<ProviderCall>,
+}
+
+/// Result of an incremental scan: the snapshot, what the scan did,
+/// and the (reused or rebuilt) stable aggregate the caller should
+/// persist when `stable_rebuilt` is set.
+pub(crate) struct ScanOutcome {
+    /// The emitted snapshot — `None` when the unchanged-snapshot
+    /// short-circuit proved this refresh byte-identical to the
+    /// previous one (the caller keeps its published snapshot and skips
+    /// the publish).
+    pub(crate) data: Option<UsageData>,
+    pub(crate) counters: ScanCounters,
+    pub(crate) stable: StableAggregate,
+    pub(crate) stable_rebuilt: bool,
+    /// What this refresh saw on the recent side — feed back as `prev`
+    /// on the next refresh to arm the short-circuit.
+    pub(crate) memo: RecentMemo,
 }
 
 /// Run every provider parser, aggregate, return a snapshot.
@@ -249,27 +385,191 @@ pub fn scan_with_cache_and_progress(
         reporter.set_total(u32::try_from(total).unwrap_or(u32::MAX));
     }
 
-    let mut all_calls = Vec::new();
+    let mut ctx = ScanCtx::full(cache);
+    let all_calls = walk_providers(roots, &mut ctx, reporter);
+    aggregate(all_calls)
+}
+
+/// Walk every provider through `ctx`. Claude and Codex go through the
+/// cached, watermark-aware per-file path; Gemini / Copilot / Cursor
+/// parsers are uncached and always contribute to the returned (recent)
+/// calls — identically in the full and incremental paths, so the
+/// partition stays a valid split of the same total.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk_providers(
+    roots: &ProviderRoots,
+    ctx: &mut ScanCtx<'_>,
+    reporter: &mut ProgressReporter,
+) -> Vec<ProviderCall> {
+    let mut calls = walk_cached_providers(roots, ctx, reporter);
+    calls.extend(parse_uncached_providers(roots));
+    calls
+}
+
+/// The cache-aware half of [`walk_providers`]: Claude and Codex,
+/// through the watermark-partitioned per-file path.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk_cached_providers(
+    roots: &ProviderRoots,
+    ctx: &mut ScanCtx<'_>,
+    reporter: &mut ProgressReporter,
+) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
-        all_calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
-            root, cache, reporter,
+        calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
+            root, ctx, reporter,
         ));
     }
     if let Some(root) = &roots.codex_sessions {
-        all_calls.extend(crate::parsers::codex::parse_dir_cached_with_progress(
-            root, cache, reporter,
+        calls.extend(crate::parsers::codex::parse_dir_cached_with_progress(
+            root, ctx, reporter,
         ));
     }
+    calls
+}
+
+/// The uncached half of [`walk_providers`]: Gemini / Copilot / Cursor
+/// parse from scratch on every scan (no per-file cache, no watermark
+/// partition). Split out so [`scan_incremental`] can compare their
+/// output across refreshes for the unchanged-snapshot short-circuit.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_uncached_providers(roots: &ProviderRoots) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
     if let Some(root) = &roots.gemini_sessions {
-        all_calls.extend(crate::parsers::gemini::parse_dir(root));
+        calls.extend(crate::parsers::gemini::parse_dir(root));
     }
     if let Some(root) = &roots.copilot_sessions {
-        all_calls.extend(crate::parsers::copilot::parse_dir(root));
+        calls.extend(crate::parsers::copilot::parse_dir(root));
     }
     if let Some(root) = &roots.cursor_sessions {
-        all_calls.extend(crate::parsers::cursor::parse_dir(root));
+        calls.extend(crate::parsers::cursor::parse_dir(root));
     }
-    aggregate(all_calls)
+    calls
+}
+
+/// Incremental scan: re-aggregate only files newer than the watermark
+/// and fold the persisted stable rollup in via [`AggState::absorb`].
+///
+/// Pass 1 walks with [`StablePolicy::Skip`]: recent files take the
+/// normal cached-read path; stable files cost one `stat` each and are
+/// recorded, not read. If the recorded stable set exactly matches
+/// `stored.folded`, the stored state is reused (`stable_reused`).
+///
+/// Any mismatch — a file aged past the watermark, was deleted, or
+/// changed `(mtime, size)` — triggers one rebuild pass with
+/// [`StablePolicy::Collect`]: stable files are read (cache-served when
+/// warm, so typically deserialize-only) and folded into a fresh stable
+/// state, which the caller persists. This set-equality contract is
+/// what makes appended/edited old files impossible to double-count:
+/// an appended file's mtime moves it to the recent side AND breaks
+/// equality, so its stale contribution is rebuilt out.
+///
+/// The published snapshot is `emit(stable ⊕ fold(recent))`, sharing
+/// [`emit`]/[`fold`] with [`aggregate`] — the property tests pin the
+/// result byte-identical to a one-shot full scan of the same tree.
+///
+/// **Unchanged-snapshot short-circuit (issue #255).** When `prev` is
+/// the memo of the previous refresh and (a) the stable fingerprint set
+/// matches `stored.folded`, (b) the recent fingerprint set matches
+/// `prev.recent_present`, and (c) the uncached providers' output
+/// matches `prev.uncached_calls`, the snapshot is provably
+/// byte-identical to the previous one — fold/clone/absorb/emit are
+/// all skipped and `data` comes back `None` so the caller can skip
+/// the (multi-hundred-MB) republish too.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn scan_incremental(
+    roots: &ProviderRoots,
+    cache: &mut Option<crate::cache::UsageCache>,
+    stored: Option<StableAggregate>,
+    watermark_nanos: u64,
+    prev: Option<&RecentMemo>,
+    reporter: &mut ProgressReporter,
+) -> ScanOutcome {
+    // Pass 1: skip stable files, parse-or-cache recent ones.
+    let mut ctx = ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Skip);
+    let recent_calls = walk_cached_providers(roots, &mut ctx, reporter);
+    let uncached_calls = parse_uncached_providers(roots);
+    let mut counters = ctx.counters;
+    let mut stable_present = std::mem::take(&mut ctx.stable_present);
+    stable_present.sort_unstable();
+    let mut recent_present = std::mem::take(&mut ctx.recent_present);
+    recent_present.sort_unstable();
+
+    let stable_matches = stored.as_ref().is_some_and(|st| st.folded == stable_present);
+
+    // Short-circuit: nothing moved since the previous refresh — the
+    // snapshot is byte-identical, skip aggregation and tell the caller
+    // to skip the publish. Any stat failure disarms it: a file without
+    // a fingerprint can still contribute calls the memo can't see.
+    if let (true, 0, Some(prev)) = (stable_matches, ctx.stat_failures, prev) {
+        if prev.recent_present == recent_present && prev.uncached_calls == uncached_calls {
+            counters.stable_reused = true;
+            return ScanOutcome {
+                data: None,
+                counters,
+                stable: stored.expect("matched above"),
+                stable_rebuilt: false,
+                memo: RecentMemo {
+                    recent_present,
+                    uncached_calls,
+                },
+            };
+        }
+    }
+
+    let (stable, stable_rebuilt, recent_calls, recent_present) = if stable_matches {
+        counters.stable_reused = true;
+        (
+            stored.expect("matched above"),
+            false,
+            recent_calls,
+            recent_present,
+        )
+    } else {
+        // Rebuild pass: read stable files too (cache-served when
+        // warm) and fold a fresh rollup. Progress already ticked
+        // in pass 1, so this pass reports to a noop sink. The
+        // uncached providers are NOT re-parsed — pass 1's output is
+        // reused (they have no stable/recent partition).
+        let mut rebuild_ctx = ScanCtx::incremental(cache, watermark_nanos, StablePolicy::Collect);
+        let mut noop = ProgressReporter::noop();
+        let recent2 = walk_cached_providers(roots, &mut rebuild_ctx, &mut noop);
+        counters.files_statted += rebuild_ctx.counters.files_statted;
+        counters.parsed += rebuild_ctx.counters.parsed;
+        counters.cache_hits += rebuild_ctx.counters.cache_hits;
+        let mut folded = std::mem::take(&mut rebuild_ctx.stable_present);
+        folded.sort_unstable();
+        let mut recent_present2 = std::mem::take(&mut rebuild_ctx.recent_present);
+        recent_present2.sort_unstable();
+        let state = fold(std::mem::take(&mut rebuild_ctx.stable_calls));
+        (
+            StableAggregate {
+                watermark_nanos,
+                folded,
+                state,
+            },
+            true,
+            recent2,
+            recent_present2,
+        )
+    };
+
+    let mut merged = stable.state.clone();
+    let mut all_recent = recent_calls;
+    all_recent.extend(uncached_calls.iter().cloned());
+    merged.absorb(fold(all_recent));
+    let data = emit(merged);
+
+    ScanOutcome {
+        data: Some(data),
+        counters,
+        stable,
+        stable_rebuilt,
+        memo: RecentMemo {
+            recent_present,
+            uncached_calls,
+        },
+    }
 }
 
 /// Count `.jsonl` files in the Claude layout: `<root>/<project>/<session>.jsonl`.
@@ -324,13 +624,32 @@ fn count_jsonl_recursive(root: &Path) -> usize {
 }
 
 /// Pure aggregation: `Vec<ProviderCall>` → `UsageData`.
-#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
-    if calls.is_empty() {
-        return UsageData::default();
-    }
+///
+/// Implemented as [`fold`] (per-call accumulation) followed by [`emit`]
+/// (derive the sorted, deterministic snapshot). The incremental refresh
+/// path reuses the same two stages — it folds only recent calls, merges
+/// onto a persisted stable [`AggState`] via [`AggState::absorb`], and
+/// emits — so both paths share the exact code that determines the
+/// published bytes.
+pub fn aggregate(calls: Vec<ProviderCall>) -> UsageData {
+    emit(fold(calls))
+}
 
-    calls.sort_by_key(|c| c.timestamp);
+/// Fold stage: accumulate calls into mergeable per-dimension state.
+///
+/// Calls sort by `(timestamp, id)` — a total order (`id` is FNV-1a 64
+/// of `path:offset`, unique per call) — so the fold result is
+/// independent of input order and [`AggState::absorb`] reproduces
+/// exactly what one fold over the concatenated input would build.
+///
+/// Costs accumulate as integer nano-USD ([`usd_to_nanos`]) rather than
+/// `f64`: float addition is not associative, so summing in a different
+/// order (incremental merge vs one-shot fold) could drift in the last
+/// ulp and break the byte-identity contract. Integer addition is
+/// exact; [`emit`] materializes the `f64` once at the end.
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+pub(crate) fn fold(mut calls: Vec<ProviderCall>) -> AggState {
+    calls.sort_by_key(|c| (c.timestamp, c.id));
 
     let mut daily: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
     let mut weekly: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
@@ -342,9 +661,11 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
     let mut shell_commands: BTreeMap<String, usize> = BTreeMap::new();
     let mut model_project_counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut grand_total = TokenBucket::default();
+    let mut grand_cost_nanos: Option<i64> = None;
 
     for call in &calls {
         let bucket = call_bucket(call);
+        let cost = call.cost_usd.map(usd_to_nanos);
         let day = call.timestamp.date_naive();
         let week = week_start(day);
         let session_key = format!(
@@ -355,16 +676,23 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
         );
 
         merge(&mut grand_total, &bucket);
+        add_cost_nanos(&mut grand_cost_nanos, cost);
 
-        daily.entry(day).or_default().ingest(&bucket, &call.project, &session_key);
-        weekly.entry(week).or_default().ingest(&bucket, &call.project, &session_key);
-        models
-            .entry(call.model.clone())
+        daily.entry(day).or_default().ingest(&bucket, cost, &call.project, &session_key);
+        weekly
+            .entry(week)
             .or_default()
-            .ingest(&bucket, &call.project, &session_key);
+            .ingest(&bucket, cost, &call.project, &session_key);
+        models.entry(call.model.clone()).or_default().ingest(
+            &bucket,
+            cost,
+            &call.project,
+            &session_key,
+        );
         if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
             branches.entry(branch.to_string()).or_default().ingest(
                 &bucket,
+                cost,
                 &call.project,
                 &session_key,
             );
@@ -372,12 +700,16 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
 
         let project = projects.entry(call.project.clone()).or_insert_with(|| ProjectAccumulator {
             path: call.project_path.clone(),
+            last_path_key: (call.timestamp, call.id),
             bucket: TokenBucket::default(),
+            cost_nanos: None,
             sessions: HashSet::new(),
         });
         project.path = call.project_path.clone();
+        project.last_path_key = (call.timestamp, call.id);
         project.sessions.insert(session_key.clone());
         merge(&mut project.bucket, &bucket);
+        add_cost_nanos(&mut project.cost_nanos, cost);
 
         let session = sessions.entry(session_key.clone()).or_insert_with(|| SessionAccumulator {
             provider: call.provider,
@@ -386,6 +718,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             first_timestamp: call.timestamp,
             last_timestamp: call.timestamp,
             bucket: TokenBucket::default(),
+            cost_nanos: None,
         });
         if call.timestamp < session.first_timestamp {
             session.first_timestamp = call.timestamp;
@@ -394,6 +727,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             session.last_timestamp = call.timestamp;
         }
         merge(&mut session.bucket, &bucket);
+        add_cost_nanos(&mut session.cost_nanos, cost);
 
         for tool in &call.tools {
             *tools.entry(tool.clone()).or_insert(0) += 1;
@@ -408,9 +742,47 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .or_insert(0) += 1;
     }
 
+    AggState {
+        calls,
+        daily,
+        weekly,
+        projects,
+        sessions,
+        models,
+        branches,
+        tools,
+        shell_commands,
+        model_project_counts,
+        grand_total,
+        grand_cost_nanos,
+    }
+}
+
+/// Emit stage: derive the sorted, deterministic [`UsageData`] from a
+/// fold state. Shared verbatim by [`aggregate`] and the incremental
+/// merge path, so both produce byte-identical snapshots for the same
+/// underlying calls.
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+pub(crate) fn emit(state: AggState) -> UsageData {
+    let AggState {
+        calls,
+        daily,
+        weekly,
+        projects,
+        sessions,
+        models,
+        branches,
+        tools,
+        shell_commands,
+        model_project_counts,
+        mut grand_total,
+        grand_cost_nanos,
+    } = state;
+
     grand_total.call_count = calls.len();
     grand_total.session_count = sessions.len();
     grand_total.project_count = projects.len();
+    grand_total.cost_usd = grand_cost_nanos.map(nanos_to_usd);
 
     UsageData {
         daily: daily
@@ -418,6 +790,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .map(|(d, mut a)| {
                 a.bucket.session_count = a.sessions.len();
                 a.bucket.project_count = a.projects.len();
+                a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                 (d, a.bucket)
             })
             .collect(),
@@ -426,6 +799,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             .map(|(d, mut a)| {
                 a.bucket.session_count = a.sessions.len();
                 a.bucket.project_count = a.projects.len();
+                a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                 (d, a.bucket)
             })
             .collect(),
@@ -435,6 +809,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(name, mut p)| {
                     p.bucket.session_count = p.sessions.len();
                     p.bucket.project_count = 1;
+                    p.bucket.cost_usd = p.cost_nanos.map(nanos_to_usd);
                     ProjectUsage {
                         name,
                         path: p.path,
@@ -446,17 +821,20 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
             |p| p.bucket,
         ),
         grand_total,
-        calls: calls.clone(),
+        calls,
         sessions: sort_sessions_by_recency(
             sessions
                 .into_iter()
-                .map(|(_k, s)| SessionUsage {
-                    provider: s.provider,
-                    project: s.project,
-                    session_id: s.session_id,
-                    first_timestamp: s.first_timestamp,
-                    last_timestamp: s.last_timestamp,
-                    bucket: s.bucket,
+                .map(|(_k, mut s)| {
+                    s.bucket.cost_usd = s.cost_nanos.map(nanos_to_usd);
+                    SessionUsage {
+                        provider: s.provider,
+                        project: s.project,
+                        session_id: s.session_id,
+                        first_timestamp: s.first_timestamp,
+                        last_timestamp: s.last_timestamp,
+                        bucket: s.bucket,
+                    }
                 })
                 .collect(),
         ),
@@ -466,6 +844,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(model, mut a)| {
                     a.bucket.session_count = a.sessions.len();
                     a.bucket.project_count = a.projects.len();
+                    a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                     ModelUsage {
                         model,
                         bucket: a.bucket,
@@ -484,6 +863,7 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
                 .map(|(branch, mut a)| {
                     a.bucket.session_count = a.sessions.len();
                     a.bucket.project_count = a.projects.len();
+                    a.bucket.cost_usd = a.cost_nanos.map(nanos_to_usd);
                     BranchUsage {
                         branch,
                         bucket: a.bucket,
@@ -503,27 +883,181 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
     }
 }
 
-#[derive(Default)]
+/// Persisted stable (older-than-watermark) aggregate: the fold state
+/// of every file whose mtime predates the watermark, plus the exact
+/// fingerprint set it was built from.
+///
+/// Validity contract: the stored state is reusable on a refresh iff
+/// the walk's stable file set — every `(path, mtime, size)` older than
+/// the watermark — equals `folded` exactly. Any aged-in, deleted, or
+/// touched file breaks equality and forces a rebuild, which is what
+/// makes an edited-then-aged or appended file impossible to
+/// double-count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct StableAggregate {
+    /// `now - incremental_window_days` (Unix nanos) at build time.
+    /// Bookkeeping only — validity is decided by `folded` equality.
+    pub(crate) watermark_nanos: u64,
+    /// Sorted `(path, mtime_nanos, size)` of every folded file.
+    pub(crate) folded: Vec<(String, u64, u64)>,
+    /// The fold state of the folded files' calls.
+    pub(crate) state: AggState,
+}
+
+/// Mergeable fold state — the output of [`fold`], the input of
+/// [`emit`], and the unit the incremental path persists as the stable
+/// (older-than-watermark) aggregate.
+///
+/// Every field merges associatively in [`Self::absorb`]: token sums
+/// add, distinct-id sets union, session first/last take min/max, and
+/// costs add as integer nano-USD. Distinct counts are NOT stored here —
+/// [`emit`] derives them from the set sizes, which is what makes the
+/// merge exact where naive `session_count` addition would over-count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AggState {
+    /// All calls, sorted by `(timestamp, id)`.
+    pub(crate) calls: Vec<ProviderCall>,
+    daily: BTreeMap<NaiveDate, BucketAccumulator>,
+    weekly: BTreeMap<NaiveDate, BucketAccumulator>,
+    projects: BTreeMap<String, ProjectAccumulator>,
+    sessions: BTreeMap<String, SessionAccumulator>,
+    models: BTreeMap<String, BucketAccumulator>,
+    branches: BTreeMap<String, BucketAccumulator>,
+    tools: BTreeMap<String, usize>,
+    shell_commands: BTreeMap<String, usize>,
+    model_project_counts: BTreeMap<String, BTreeMap<String, usize>>,
+    grand_total: TokenBucket,
+    grand_cost_nanos: Option<i64>,
+}
+
+impl AggState {
+    /// Merge `other` into `self` so that
+    /// `emit(fold(a) ⊕ fold(b)) == emit(fold(a ++ b))` byte-for-byte.
+    ///
+    /// On key collisions buckets merge and sets union; for the
+    /// project-path last-write the side with the greater
+    /// `(timestamp, id)` wins, mirroring fold's iteration order.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        // Merge two (timestamp, id)-sorted call vecs; `self` first on
+        // (impossible-in-practice) equal keys to mirror stable sort.
+        let mut merged = Vec::with_capacity(self.calls.len() + other.calls.len());
+        let mut a = std::mem::take(&mut self.calls).into_iter().peekable();
+        let mut b = other.calls.into_iter().peekable();
+        loop {
+            match (a.peek(), b.peek()) {
+                (Some(x), Some(y)) => {
+                    if (x.timestamp, x.id) <= (y.timestamp, y.id) {
+                        merged.push(a.next().expect("peeked"));
+                    } else {
+                        merged.push(b.next().expect("peeked"));
+                    }
+                }
+                (Some(_), None) => merged.push(a.next().expect("peeked")),
+                (None, Some(_)) => merged.push(b.next().expect("peeked")),
+                (None, None) => break,
+            }
+        }
+        self.calls = merged;
+
+        for (k, v) in other.daily {
+            merge_bucket_acc(self.daily.entry(k).or_default(), v);
+        }
+        for (k, v) in other.weekly {
+            merge_bucket_acc(self.weekly.entry(k).or_default(), v);
+        }
+        for (k, v) in other.models {
+            merge_bucket_acc(self.models.entry(k).or_default(), v);
+        }
+        for (k, v) in other.branches {
+            merge_bucket_acc(self.branches.entry(k).or_default(), v);
+        }
+        for (k, v) in other.projects {
+            match self.projects.entry(k) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb(v),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+        for (k, v) in other.sessions {
+            match self.sessions.entry(k) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb(&v),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+        for (k, n) in other.tools {
+            *self.tools.entry(k).or_insert(0) += n;
+        }
+        for (k, n) in other.shell_commands {
+            *self.shell_commands.entry(k).or_insert(0) += n;
+        }
+        for (model, inner) in other.model_project_counts {
+            let mine = self.model_project_counts.entry(model).or_default();
+            for (project, n) in inner {
+                *mine.entry(project).or_insert(0) += n;
+            }
+        }
+        merge(&mut self.grand_total, &other.grand_total);
+        add_cost_nanos(&mut self.grand_cost_nanos, other.grand_cost_nanos);
+    }
+}
+
+fn merge_bucket_acc(into: &mut BucketAccumulator, from: BucketAccumulator) {
+    merge(&mut into.bucket, &from.bucket);
+    add_cost_nanos(&mut into.cost_nanos, from.cost_nanos);
+    into.sessions.extend(from.sessions);
+    into.projects.extend(from.projects);
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BucketAccumulator {
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
     sessions: HashSet<String>,
     projects: HashSet<String>,
 }
 
 impl BucketAccumulator {
-    fn ingest(&mut self, bucket: &TokenBucket, project: &str, session_key: &str) {
+    fn ingest(
+        &mut self,
+        bucket: &TokenBucket,
+        cost: Option<i64>,
+        project: &str,
+        session_key: &str,
+    ) {
         merge(&mut self.bucket, bucket);
+        add_cost_nanos(&mut self.cost_nanos, cost);
         self.sessions.insert(session_key.to_string());
         self.projects.insert(project.to_string());
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectAccumulator {
     path: String,
+    /// `(timestamp, id)` of the call that last wrote `path` — fold's
+    /// last-write-wins replayed exactly during [`AggState::absorb`].
+    last_path_key: (chrono::DateTime<chrono::Utc>, u64),
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
     sessions: HashSet<String>,
 }
 
+impl ProjectAccumulator {
+    fn absorb(&mut self, other: Self) {
+        if other.last_path_key >= self.last_path_key {
+            self.path = other.path;
+            self.last_path_key = other.last_path_key;
+        }
+        merge(&mut self.bucket, &other.bucket);
+        add_cost_nanos(&mut self.cost_nanos, other.cost_nanos);
+        self.sessions.extend(other.sessions);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionAccumulator {
     provider: Provider,
     project: String,
@@ -531,6 +1065,45 @@ struct SessionAccumulator {
     first_timestamp: chrono::DateTime<chrono::Utc>,
     last_timestamp: chrono::DateTime<chrono::Utc>,
     bucket: TokenBucket,
+    cost_nanos: Option<i64>,
+}
+
+impl SessionAccumulator {
+    fn absorb(&mut self, other: &Self) {
+        if other.first_timestamp < self.first_timestamp {
+            self.first_timestamp = other.first_timestamp;
+        }
+        if other.last_timestamp > self.last_timestamp {
+            self.last_timestamp = other.last_timestamp;
+        }
+        merge(&mut self.bucket, &other.bucket);
+        add_cost_nanos(&mut self.cost_nanos, other.cost_nanos);
+    }
+}
+
+/// Convert a per-call USD cost to integer nano-USD for exact,
+/// associative accumulation. Rounded once per call, so one-shot and
+/// incremental paths see identical integer inputs.
+fn usd_to_nanos(usd: f64) -> i64 {
+    (usd * 1e9).round() as i64
+}
+
+/// Materialize one accumulated nano-USD sum back to the published
+/// `f64`. Callers map over their `Option` cost.
+#[allow(clippy::cast_precision_loss)]
+fn nanos_to_usd(nanos: i64) -> f64 {
+    nanos as f64 / 1e9
+}
+
+/// `Option` cost addition with the same None-coalescing semantics as
+/// [`merge`]'s `cost_usd` arm: any `Some` survives, two `Some`s add.
+fn add_cost_nanos(into: &mut Option<i64>, from: Option<i64>) {
+    *into = match (*into, from) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
 }
 
 fn call_bucket(call: &ProviderCall) -> TokenBucket {
@@ -543,17 +1116,25 @@ fn call_bucket(call: &ProviderCall) -> TokenBucket {
         session_count: 0,
         project_count: 0,
         call_count: 1,
-        cost_usd: call.cost_usd,
+        // Cost rides the accumulators as integer nano-USD (see `fold`);
+        // the bucket's f64 is materialized once in `emit`.
+        cost_usd: None,
     }
 }
 
 fn merge(into: &mut TokenBucket, from: &TokenBucket) {
-    into.input_tokens += from.input_tokens;
-    into.cache_creation_tokens += from.cache_creation_tokens;
-    into.cache_read_tokens += from.cache_read_tokens;
-    into.output_tokens += from.output_tokens;
-    into.reasoning_tokens += from.reasoning_tokens;
-    into.call_count += from.call_count;
+    // Saturating sums: token counts come straight from on-disk JSONL
+    // (corruptible / hostile), and a debug-build overflow panic inside
+    // the blocking scan task would cost the plugin its cache handle.
+    // Unsigned saturating addition stays associative, so the
+    // byte-identity merge contract is unaffected.
+    into.input_tokens = into.input_tokens.saturating_add(from.input_tokens);
+    into.cache_creation_tokens =
+        into.cache_creation_tokens.saturating_add(from.cache_creation_tokens);
+    into.cache_read_tokens = into.cache_read_tokens.saturating_add(from.cache_read_tokens);
+    into.output_tokens = into.output_tokens.saturating_add(from.output_tokens);
+    into.reasoning_tokens = into.reasoning_tokens.saturating_add(from.reasoning_tokens);
+    into.call_count = into.call_count.saturating_add(from.call_count);
     into.cost_usd = match (into.cost_usd, from.cost_usd) {
         (Some(a), Some(b)) => Some(a + b),
         (Some(a), None) => Some(a),
@@ -597,6 +1178,126 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use std::sync::{Arc, Mutex};
+
+    /// Profiling harness for issue #255 — NOT a correctness test.
+    ///
+    /// Replays one steady-state incremental refresh phase by phase
+    /// against a copy of the real on-disk cache + the real `$HOME`
+    /// session data, printing wall-clock per phase. Run manually:
+    ///
+    /// ```sh
+    /// cargo test -p ainb-plugin-session-reader --release \
+    ///   profile_real_refresh_phases -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "profiling harness against real $HOME data — run manually"]
+    fn profile_real_refresh_phases() {
+        use std::time::Instant;
+
+        let Some(db) = crate::cache::default_db_path() else {
+            eprintln!("profile: no resolvable cache path; skipping");
+            return;
+        };
+        if !db.exists() {
+            eprintln!("profile: no real cache at {}; skipping", db.display());
+            return;
+        }
+        // Copy the live db (plus WAL/SHM so an in-flight write is
+        // recoverable) — never contend with a running plugin instance.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let copy = tmp.path().join("usage.sqlite");
+        std::fs::copy(&db, &copy).expect("copy db");
+        for sfx in ["-wal", "-shm"] {
+            let mut src = db.as_os_str().to_owned();
+            src.push(sfx);
+            let src = std::path::PathBuf::from(src);
+            if src.exists() {
+                let mut dst = copy.as_os_str().to_owned();
+                dst.push(sfx);
+                std::fs::copy(&src, std::path::PathBuf::from(dst)).expect("copy sidecar");
+            }
+        }
+        let mut cache = Some(crate::cache::UsageCache::open(&copy).expect("open copy"));
+
+        let t = Instant::now();
+        let stored = cache.as_ref().unwrap().load_stable().unwrap_or_default();
+        let load_stable_t = t.elapsed();
+        let Some(stored) = stored else {
+            eprintln!("profile: no stable rollup in cache; run a refresh first");
+            return;
+        };
+        eprintln!(
+            "load_stable: {load_stable_t:?} (folded={} stable_calls={})",
+            stored.folded.len(),
+            stored.state.calls.len()
+        );
+
+        // Reuse the rollup's own watermark so the stored fingerprint
+        // set stays valid (steady-state path, no rebuild pass).
+        let watermark = stored.watermark_nanos;
+        let roots = ProviderRoots::defaults();
+
+        let t = Instant::now();
+        let mut ctx = ScanCtx::incremental(&mut cache, watermark, StablePolicy::Skip);
+        let mut reporter = ProgressReporter::noop();
+        let recent_calls = walk_providers(&roots, &mut ctx, &mut reporter);
+        let walk_t = t.elapsed();
+        eprintln!(
+            "pass1 walk (stat + recent hydrate): {walk_t:?} \
+             (statted={} parsed={} cache_hits={} stable_skipped={} recent_calls={})",
+            ctx.counters.files_statted,
+            ctx.counters.parsed,
+            ctx.counters.cache_hits,
+            ctx.counters.stable_skipped,
+            recent_calls.len()
+        );
+        let mut stable_present = std::mem::take(&mut ctx.stable_present);
+        stable_present.sort_unstable();
+        eprintln!(
+            "stable set match: {} (walk={} stored={})",
+            stable_present == stored.folded,
+            stable_present.len(),
+            stored.folded.len()
+        );
+
+        let t = Instant::now();
+        let folded_recent = fold(recent_calls);
+        eprintln!("fold(recent): {:?}", t.elapsed());
+
+        let t = Instant::now();
+        // Deliberate clone: this measures exactly the clone the
+        // production merge path pays per refresh.
+        #[allow(clippy::redundant_clone)]
+        let mut merged = stored.state.clone();
+        eprintln!("stable.state.clone(): {:?}", t.elapsed());
+
+        let t = Instant::now();
+        merged.absorb(folded_recent);
+        eprintln!("absorb: {:?}", t.elapsed());
+
+        let t = Instant::now();
+        let data = emit(merged);
+        eprintln!("emit: {:?} (total_calls={})", t.elapsed(), data.calls.len());
+
+        let t = Instant::now();
+        let chunks = crate::plugin::chunk_usage_data(data, 0, false, 2 * 1024 * 1024);
+        eprintln!(
+            "chunk_usage_data: {:?} ({} chunks)",
+            t.elapsed(),
+            chunks.len()
+        );
+
+        let t = Instant::now();
+        let total: usize = chunks
+            .iter()
+            .map(|c| rmp_serde::to_vec_named(c).map(|b| b.len()).unwrap_or(0))
+            .sum();
+        eprintln!(
+            "final encode all chunks: {:?} ({} bytes)",
+            t.elapsed(),
+            total
+        );
+    }
 
     #[test]
     fn progress_reporter_emits_on_first_file() {
@@ -886,6 +1587,739 @@ mod tests {
         assert_eq!(
             evts[0].total, 3,
             "pre-walk set total to count of progress-aware files"
+        );
+    }
+
+    // ── merge ≡ aggregate property tests ────────────────────────────
+    //
+    // The byte-identity contract: folding a partition of the calls and
+    // absorbing the parts must emit EXACTLY the bytes a one-shot
+    // aggregate over all calls emits. Seeded xorshift PRNG instead of
+    // a proptest dependency — reproducible, zero new deps, hundreds of
+    // randomized cases per run.
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn random_call(rng: &mut u64, id: u64) -> ProviderCall {
+        let providers = [Provider::Claude, Provider::Codex, Provider::Gemini];
+        let projects = ["alpha", "beta", "gamma", "delta"];
+        let sessions = ["s1", "s2", "s3"];
+        let models = ["m-small", "m-big", "m-think"];
+        let tool_pool = ["Read", "Edit", "Bash", "Grep"];
+        let cmd_pool = ["ls", "cargo test"];
+        let branch_pool = [None, Some("main"), Some("dev"), Some("")];
+
+        // Narrow timestamp range (~4 days) so daily/weekly/session
+        // buckets collide across partitions; allow exact-duplicate
+        // timestamps to exercise the (timestamp, id) tiebreak.
+        let ts = 1_700_000_000 + i64::try_from(xorshift(rng) % 350_000).unwrap();
+        let cost = match xorshift(rng) % 3 {
+            0 => None,
+            // Adversarial float costs: tiny + huge magnitudes in one
+            // sum is exactly where f64 association order would leak.
+            1 => Some((xorshift(rng) % 1_000_000) as f64 / 1e6),
+            _ => Some((xorshift(rng) % 97) as f64 + 0.000_001),
+        };
+        let n_tools = (xorshift(rng) % 3) as usize;
+
+        ProviderCall {
+            id,
+            provider: providers[(xorshift(rng) % 3) as usize],
+            model: models[(xorshift(rng) % 3) as usize].into(),
+            session_id: sessions[(xorshift(rng) % 3) as usize].into(),
+            project: projects[(xorshift(rng) % 4) as usize].into(),
+            project_path: format!("/tmp/{}", projects[(xorshift(rng) % 4) as usize]),
+            timestamp: DateTime::<Utc>::from_timestamp(ts, 0).unwrap(),
+            input_tokens: xorshift(rng) % 10_000,
+            cache_creation_tokens: xorshift(rng) % 1_000,
+            cache_read_tokens: xorshift(rng) % 50_000,
+            output_tokens: xorshift(rng) % 5_000,
+            reasoning_tokens: xorshift(rng) % 2_000,
+            cost_usd: cost,
+            tools: tool_pool[..n_tools].iter().map(|s| (*s).into()).collect(),
+            bash_commands: cmd_pool[..(xorshift(rng) % 2) as usize]
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            user_message: String::new(),
+            branch: branch_pool[(xorshift(rng) % 4) as usize].map(Into::into),
+        }
+    }
+
+    fn encode(data: &UsageData) -> Vec<u8> {
+        rmp_serde::to_vec_named(data).expect("encode UsageData")
+    }
+
+    #[test]
+    fn absorb_of_random_two_way_partition_is_byte_identical_to_aggregate() {
+        let mut rng: u64 = 0x5EED_CAFE_F00D_0001;
+        for case in 0..300 {
+            let n = (xorshift(&mut rng) % 60) as usize;
+            let calls: Vec<ProviderCall> =
+                (0..n).map(|i| random_call(&mut rng, 1_000 + i as u64)).collect();
+
+            let (mut left, mut right) = (Vec::new(), Vec::new());
+            for c in &calls {
+                if xorshift(&mut rng) % 2 == 0 {
+                    left.push(c.clone());
+                } else {
+                    right.push(c.clone());
+                }
+            }
+
+            let oracle = aggregate(calls);
+            let mut merged = fold(left);
+            merged.absorb(fold(right));
+            let incremental = emit(merged);
+
+            assert_eq!(
+                encode(&incremental),
+                encode(&oracle),
+                "case {case}: merged partition must emit identical bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn absorb_is_associative_across_three_way_partition() {
+        let mut rng: u64 = 0xDEAD_BEEF_0BAD_F00D;
+        for case in 0..150 {
+            let n = (xorshift(&mut rng) % 45) as usize;
+            let calls: Vec<ProviderCall> =
+                (0..n).map(|i| random_call(&mut rng, 5_000 + i as u64)).collect();
+
+            let mut parts: [Vec<ProviderCall>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+            for c in &calls {
+                parts[(xorshift(&mut rng) % 3) as usize].push(c.clone());
+            }
+            let [a, b, c] = parts;
+
+            let oracle = encode(&aggregate(calls));
+
+            // (A ⊕ B) ⊕ C
+            let mut left = fold(a.clone());
+            left.absorb(fold(b.clone()));
+            left.absorb(fold(c.clone()));
+            // A ⊕ (B ⊕ C)
+            let mut right_inner = fold(b);
+            right_inner.absorb(fold(c));
+            let mut right = fold(a);
+            right.absorb(right_inner);
+
+            assert_eq!(encode(&emit(left)), oracle, "case {case}: left-assoc");
+            assert_eq!(encode(&emit(right)), oracle, "case {case}: right-assoc");
+        }
+    }
+
+    #[test]
+    fn absorb_empty_is_identity() {
+        let mut rng: u64 = 0x1234_5678_9ABC_DEF0;
+        let calls: Vec<ProviderCall> = (0..25).map(|i| random_call(&mut rng, 9_000 + i)).collect();
+        let oracle = encode(&aggregate(calls.clone()));
+
+        let mut left = fold(calls.clone());
+        left.absorb(fold(Vec::new()));
+        assert_eq!(encode(&emit(left)), oracle, "X ⊕ ∅ == X");
+
+        let mut right = fold(Vec::new());
+        right.absorb(fold(calls));
+        assert_eq!(encode(&emit(right)), oracle, "∅ ⊕ X == X");
+
+        let mut both = fold(Vec::new());
+        both.absorb(fold(Vec::new()));
+        assert_eq!(
+            encode(&emit(both)),
+            encode(&UsageData::default()),
+            "∅ ⊕ ∅ == default"
+        );
+    }
+
+    #[test]
+    fn aggregate_empty_still_returns_default_usage_data() {
+        assert_eq!(aggregate(Vec::new()), UsageData::default());
+    }
+
+    // ── incremental scan integration (L1 counters + L2 oracle) ──────
+    //
+    // Every scenario asserts the incremental snapshot is byte-identical
+    // to a cache-less full scan (`scan`) of the SAME tree state — the
+    // legacy path is the oracle — plus the counter facts that prove
+    // what the scan actually did.
+
+    use tempfile::TempDir;
+
+    fn claude_line(ts: &str, session: &str, input: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"{session}","cwd":"/tmp/proj","gitBranch":"main","message":{{"model":"claude-3-5-sonnet","content":[{{"type":"text","text":"hi"}},{{"type":"tool_use","name":"Read"}}],"usage":{{"input_tokens":{input},"output_tokens":{output},"cache_read_input_tokens":7}}}}}}"#
+        )
+    }
+
+    struct IncrFixture {
+        _tmp: TempDir,
+        claude_root: PathBuf,
+        roots: ProviderRoots,
+        cache_dir: TempDir,
+    }
+
+    impl IncrFixture {
+        fn new() -> Self {
+            let tmp = TempDir::new().expect("tempdir");
+            let claude_root = tmp.path().join("claude/projects");
+            std::fs::create_dir_all(&claude_root).expect("mkdir");
+            let roots = ProviderRoots {
+                claude_projects: Some(claude_root.clone()),
+                ..ProviderRoots::default()
+            };
+            let cache_dir = TempDir::new().expect("cache dir");
+            Self {
+                _tmp: tmp,
+                claude_root,
+                roots,
+                cache_dir,
+            }
+        }
+
+        fn write_file(&self, project: &str, name: &str, lines: &[String]) {
+            let dir = self.claude_root.join(project);
+            std::fs::create_dir_all(&dir).expect("mkdir project");
+            std::fs::write(dir.join(name), lines.join("\n")).expect("write jsonl");
+        }
+
+        fn open_cache(&self) -> Option<crate::cache::UsageCache> {
+            Some(
+                crate::cache::UsageCache::open(&self.cache_dir.path().join("usage.sqlite"))
+                    .expect("open cache"),
+            )
+        }
+
+        fn oracle_bytes(&self) -> Vec<u8> {
+            encode(&scan(&self.roots))
+        }
+    }
+
+    fn now_nanos() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    /// Sleep long enough for the filesystem mtime clock to tick past
+    /// `now` so a watermark captured between writes cleanly splits them.
+    fn tick() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn incremental_cold_rebuild_matches_full_scan_oracle() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let out = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        assert!(out.stable_rebuilt, "no stored stable => rebuild");
+        assert!(!out.counters.stable_reused);
+        assert_eq!(out.stable.folded.len(), 1, "old.jsonl folded");
+        assert_eq!(
+            encode(out.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_no_change_refresh_parses_zero_and_reuses_stable() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        // Second refresh, nothing changed on disk: the CPU-fix gate.
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            None,
+            &mut reporter,
+        );
+
+        assert!(
+            second.counters.stable_reused,
+            "stable set unchanged => reuse"
+        );
+        assert!(!second.stable_rebuilt);
+        assert_eq!(
+            second.counters.parsed, 0,
+            "no-change refresh parses ZERO files"
+        );
+        assert_eq!(
+            second.counters.stable_skipped, 1,
+            "old file skipped entirely"
+        );
+        assert_eq!(
+            second.counters.cache_hits, 1,
+            "recent file served from cache"
+        );
+        assert_eq!(
+            encode(second.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    // ── unchanged-snapshot short-circuit (issue #255) ───────────────
+
+    #[test]
+    fn unchanged_refresh_short_circuits_with_memo() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert!(first.data.is_some(), "first refresh always publishes");
+        assert_eq!(
+            first.memo.recent_present.len(),
+            1,
+            "one recent file fingerprinted"
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert!(
+            second.data.is_none(),
+            "unchanged refresh skips aggregation entirely"
+        );
+        assert!(second.counters.stable_reused);
+        assert!(!second.stable_rebuilt);
+        assert_eq!(second.counters.parsed, 0);
+        assert_eq!(second.memo, first.memo, "memo carries forward unchanged");
+
+        // The short-circuit re-arms from its own returned memo.
+        let third = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(second.stable),
+            watermark,
+            Some(&second.memo),
+            &mut reporter,
+        );
+        assert!(third.data.is_none(), "still unchanged on the third refresh");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_recent_file_changes() {
+        let fx = IncrFixture::new();
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[
+                claude_line("2026-06-01T10:00:00Z", "s2", 10, 20),
+                claude_line("2026-06-01T11:00:00Z", "s2", 1, 2),
+            ],
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        let data = second.data.as_ref().expect("changed file must re-publish");
+        assert_eq!(data.grand_total.call_count, 2);
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
+        assert_ne!(second.memo, first.memo, "memo reflects the new fingerprint");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_recent_file_deleted() {
+        // Deletion is the trap a naive `parsed == 0` check would miss:
+        // nothing parses, the stable set is untouched, but the snapshot
+        // must shrink — the recent fingerprint set is what catches it.
+        let fx = IncrFixture::new();
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "keep.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+        fx.write_file(
+            "proj-b",
+            "gone.jsonl",
+            &[claude_line("2026-06-02T10:00:00Z", "s3", 30, 40)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert_eq!(
+            first.data.as_ref().expect("publishes").grand_total.call_count,
+            2
+        );
+
+        std::fs::remove_file(fx.claude_root.join("proj-b/gone.jsonl")).expect("delete");
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert_eq!(second.counters.parsed, 0, "nothing re-parses on a delete");
+        let data = second.data.as_ref().expect("deletion must re-publish");
+        assert_eq!(
+            data.grand_total.call_count, 1,
+            "deleted file's call is gone"
+        );
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
+    }
+
+    #[test]
+    fn short_circuit_disarms_when_stable_file_touched() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        // Rewrite the stable file: its mtime moves it to the recent
+        // side AND breaks the stable fingerprint set.
+        tick();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[
+                claude_line("2026-05-01T10:00:00Z", "s1", 100, 200),
+                claude_line("2026-05-01T11:00:00Z", "s1", 5, 6),
+            ],
+        );
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            Some(&first.memo),
+            &mut reporter,
+        );
+        assert!(
+            second.stable_rebuilt,
+            "touched stable file forces a rebuild"
+        );
+        let data = second.data.as_ref().expect("stable change must re-publish");
+        assert_eq!(data.grand_total.call_count, 3);
+        assert_eq!(encode(data), fx.oracle_bytes(), "matches full-scan oracle");
+    }
+
+    #[test]
+    fn incremental_new_recent_file_parses_only_it() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+
+        fx.write_file(
+            "proj-b",
+            "new2.jsonl",
+            &[claude_line("2026-06-02T11:00:00Z", "s3", 5, 5)],
+        );
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            None,
+            &mut reporter,
+        );
+
+        assert!(second.counters.stable_reused, "stable side untouched");
+        assert_eq!(second.counters.parsed, 1, "only the new file parses");
+        assert_eq!(
+            encode(second.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_aged_out_file_rebuilds_without_double_count() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "a.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let wm1 = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-b",
+            "b.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "s2", 10, 20)],
+        );
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, wm1, None, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 1);
+
+        // The watermark advances past b.jsonl — it ages into the
+        // stable set, breaking fingerprint equality.
+        let wm2 = now_nanos();
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            wm2,
+            None,
+            &mut reporter,
+        );
+
+        assert!(second.stable_rebuilt, "aged-in file forces rebuild");
+        assert_eq!(second.stable.folded.len(), 2, "both files folded now");
+        assert_eq!(
+            second.counters.parsed, 0,
+            "rebuild is cache-served, no reparse"
+        );
+        assert_eq!(
+            encode(second.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches full-scan oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_deleted_old_file_drops_its_contribution() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "doomed.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        fx.write_file(
+            "proj-a",
+            "keeper.jsonl",
+            &[claude_line("2026-05-02T10:00:00Z", "s9", 1, 1)],
+        );
+        tick();
+        let watermark = now_nanos();
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 2);
+
+        std::fs::remove_file(fx.claude_root.join("proj-a/doomed.jsonl")).expect("rm");
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            None,
+            &mut reporter,
+        );
+
+        assert!(
+            second.stable_rebuilt,
+            "deletion breaks fingerprint equality"
+        );
+        assert_eq!(
+            second.stable.folded.len(),
+            1,
+            "only the keeper remains folded"
+        );
+        assert_eq!(
+            encode(second.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches post-delete oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_appended_old_file_moves_to_recent_without_double_count() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "grow.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "s1", 100, 200)],
+        );
+        tick();
+        let watermark = now_nanos();
+
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let first = scan_incremental(&fx.roots, &mut cache, None, watermark, None, &mut reporter);
+        assert_eq!(first.stable.folded.len(), 1, "grow.jsonl folded as stable");
+
+        // Append a line: mtime bumps past the watermark, so the file
+        // flips to the recent side AND vanishes from the stable set —
+        // its old contribution must be rebuilt out, not double-counted.
+        let path = fx.claude_root.join("proj-a/grow.jsonl");
+        let mut content = std::fs::read_to_string(&path).expect("read");
+        content.push('\n');
+        content.push_str(&claude_line("2026-05-01T10:05:00Z", "s1", 11, 22));
+        std::fs::write(&path, content).expect("append");
+
+        let second = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            Some(first.stable),
+            watermark,
+            None,
+            &mut reporter,
+        );
+
+        assert!(second.stable_rebuilt, "stable set lost the appended file");
+        assert!(second.stable.folded.is_empty(), "nothing stable remains");
+        assert_eq!(
+            second.data.as_ref().expect("changed scan publishes").grand_total.call_count,
+            2,
+            "old + appended call, counted once each"
+        );
+        assert_eq!(
+            encode(second.data.as_ref().expect("changed scan publishes")),
+            fx.oracle_bytes(),
+            "matches post-append oracle"
+        );
+    }
+
+    #[test]
+    fn incremental_without_stored_stable_on_empty_tree_is_default() {
+        let fx = IncrFixture::new();
+        let mut cache = fx.open_cache();
+        let mut reporter = ProgressReporter::noop();
+        let out = scan_incremental(
+            &fx.roots,
+            &mut cache,
+            None,
+            now_nanos(),
+            None,
+            &mut reporter,
+        );
+        assert_eq!(
+            encode(out.data.as_ref().expect("changed scan publishes")),
+            encode(&UsageData::default())
+        );
+        assert!(out.stable.folded.is_empty());
+    }
+
+    #[test]
+    fn agg_state_roundtrips_through_bincode() {
+        // P3 persists AggState as the stable aggregate blob — prove the
+        // serde derives round-trip through the same codec the cache uses.
+        let mut rng: u64 = 0xFEED_FACE_CAFE_BEEF;
+        let calls: Vec<ProviderCall> = (0..30).map(|i| random_call(&mut rng, 7_000 + i)).collect();
+        let state = fold(calls);
+        let bytes = bincode::serialize(&state).expect("serialize AggState");
+        let back: AggState = bincode::deserialize(&bytes).expect("deserialize AggState");
+        assert_eq!(
+            encode(&emit(back)),
+            encode(&emit(state)),
+            "round-tripped state emits identical bytes"
         );
     }
 }

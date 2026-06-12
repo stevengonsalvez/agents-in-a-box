@@ -31,7 +31,7 @@ pub mod server;
 
 pub use error::{Result, SdkError};
 pub use host_client::HostClient;
-pub use plugin::{CliOutput, Plugin};
+pub use plugin::{CliOutput, InitContext, Plugin};
 pub use server::Server;
 
 // Re-export wire types so plugin authors only need this crate.
@@ -46,14 +46,16 @@ pub use ainb_plugin_protocol::{
         ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
         EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
         FsDirEntry, FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult,
-        HandleEventParams, HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT,
-        KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel, LogParams, NetworkFetchParams,
-        NetworkFetchResult, PluginInitParams, PluginInitResult, PluginShutdownParams,
-        PluginShutdownResult, RenderParams, RenderResult, SecretStoreGetParams,
-        SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-        SnapshotSubscribeParams, SnapshotSubscribeResult, SpawnManagedSubprocessParams,
-        SpawnManagedSubprocessResult, UnixSocketCloseParams, UnixSocketDialParams,
-        UnixSocketDialResult, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams, Viewport,
+        HandleEventParams, HandleKeyParams, HandleMouseParams, KEY_MOD_ALT, KEY_MOD_CTRL,
+        KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel, LogParams, MouseButton,
+        MouseEvent, MouseKind, NetworkFetchParams, NetworkFetchResult, PluginInitParams,
+        PluginInitResult, PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
+        SecretStoreGetParams, SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult,
+        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
+        SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
+        UnixSocketDialParams, UnixSocketDialResult, UnixSocketEvent, UnixSocketEventKind,
+        UnixSocketSendParams, Viewport,
     },
+    topics,
     wire_buffer::{Cell, Color, Coord, WireBuffer},
 };

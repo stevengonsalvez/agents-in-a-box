@@ -125,6 +125,12 @@ pub struct UsageReportArgs {
     /// Bypass the persistent usage cache and force a full re-parse.
     #[arg(long)]
     pub no_cache: bool,
+    /// Hard refresh: wipe the parse cache and stable rollup, then
+    /// rebuild everything from source before reporting. CPU-heavy on
+    /// large histories; the flag itself is the explicit opt-in (no
+    /// interactive prompt, safe for pipes/scripts).
+    #[arg(long)]
+    pub hard: bool,
     // ---- Cross-filter knobs (mirrors of the TUI dashboard pivot) ----
     // All four are repeatable; multiple values for the same filter
     // are OR-combined, and different filters AND together. They layer

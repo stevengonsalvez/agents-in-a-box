@@ -94,6 +94,8 @@ export default defineConfig({
                 { label: 'burndown', slug: 'plugins/burndown' },
                 { label: 'session-reader', slug: 'plugins/session-reader' },
                 { label: 'witr', slug: 'plugins/witr' },
+                { label: 'learnings', slug: 'plugins/learnings' },
+                { label: 'abtop', slug: 'plugins/abtop' },
               ],
             },
             { label: 'Changelog', slug: 'plugins/changelog' },

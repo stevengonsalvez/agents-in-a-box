@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (17 axes)"
+description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (18 axes + read_paths/[config], mouse forwarding, and the redraw hint)"
 categories = ["development-tools::testing"]
 keywords = ["ainb", "plugin", "cts", "conformance"]
 
@@ -34,6 +34,9 @@ base64 = "0.22"
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
 tokio = { workspace = true }
+serde_json = { workspace = true }
+# A18 host-side golden stages secrets/state under a per-test temp dir.
+tempfile = { workspace = true }
 # A18 host-side golden injects an in-memory `SecretBackend` via the runtime's
 # DI seam so the `host/secret_store_get` golden is platform-independent and
 # never touches the real login Keychain. The real-keychain end-to-end path is
@@ -153,7 +156,25 @@ path = "tests/canaries/a18_secret_store_get/main.rs"
 test = false
 doc = false
 
-# --- Host-side test harness (all axes) ---
+[[bin]]
+name = "cts-read-paths-config"
+path = "tests/canaries/read_paths_config/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-mouse-forward"
+path = "tests/canaries/mouse_forward/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-redraw-hint"
+path = "tests/canaries/redraw_hint/main.rs"
+test = false
+doc = false
+
+# --- Host-side test harness (all 18 axes + read_paths/[config] + mouse + redraw hint) ---
 
 [[test]]
 name = "axes"

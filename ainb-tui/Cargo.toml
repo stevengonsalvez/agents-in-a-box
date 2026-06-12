@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ainb-core",
     "crates/ainb-plugin-burndown",
+    "crates/ainb-plugin-learnings",
     "crates/ainb-plugin-notifyd",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
@@ -12,6 +13,7 @@ members = [
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
     "crates/ainb-plugin-witr",
+    "crates/ainb-plugin-abtop",
     "crates/ainb-hangar-core",
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",
@@ -27,7 +29,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"

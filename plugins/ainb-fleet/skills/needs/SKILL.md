@@ -74,9 +74,38 @@ Each row in the output array:
     "marker": "WAITING:",
     "text": "…the post-marker text…"
   },
-  "route_hint": "broker" | "tmux" | "none"
+  "route_hint": "tmux" | "broker" | "none"   // advisory; send is tmux-first
 }
 ```
+
+## Enrich — token-efficient (cache-aware)
+
+Each row also carries three enrich fields:
+
+| field | meaning |
+|---|---|
+| `enrich_key` | content hash of the card; the producer's cache key |
+| `enriched` | a **fresh cached** suggestion (free) — render it as-is |
+| `need_enrich` | `true` only when there is no cache entry and enrichment is on |
+
+Draft the missing ones by COUNT, never one subagent per session:
+
+```
+stale = rows where need_enrich == true
+  stale == 0  ─▶ render cached/snippet only         (0 tokens)
+  stale ≤ 6   ─▶ draft inline in THIS session        (0 subagents)
+  stale  > 6  ─▶ /ainb-fleet:fleet-needs workflow     (1 batched agent)
+```
+
+Cutoff: `AINB_FLEET_ENRICH_INLINE_MAX` (default 6). When you draft inline,
+persist each so the next read is free:
+
+```bash
+ainb fleet enrich-cache put --key "<enrich_key>" --suggestion "<text>"
+```
+
+`ainb fleet needs --no-enrich` (or `AINB_FLEET_ENRICH=0`) skips all of this —
+cached suggestions still render, nothing new is drafted, 0 tokens.
 
 ## Render template — Jarvis HUD
 
@@ -128,15 +157,26 @@ options so the user can click rather than type.
 
 ## Route the answers back
 
-Once Stevie answers each, route via the existing send-route:
+Writes are **tmux-first**. Prefer driving the target pane directly — it lands
+reliably and is verifiable with `capture-pane`:
+
+```bash
+# default, most reliable: write keystrokes straight to the pane
+tmux send-keys -t "<tmux_session>" -l "<answer>"
+tmux send-keys -t "<tmux_session>" Enter
+# verify it landed
+tmux capture-pane -t "<tmux_session>" -p -S -40 | grep -F "<answer>" && echo "✓"
+```
+
+Or go through the verb, which honours `AINB_FLEET_TRANSPORT` (tmux-first):
 
 ```bash
 ainb fleet broadcast "<answer>" --filter "<exact tmux_session>"
 ```
 
-`route_hint` tells you what'll happen:
-- `broker` — clean send through claude-peers HTTP
-- `tmux` — `tmux send-keys -l` literal mode (works for any tmux pane)
+`route_hint` is advisory — it mirrors the default tmux-first order:
+- `tmux` — a live tmux pane exists → `tmux send-keys -l` (the normal case)
+- `broker` — no tmux pane, but a healthy broker peer → claude-peers HTTP fallback
 - `none` — bg job or no targets; can't auto-route; tell user manually
 
 ## Composition example

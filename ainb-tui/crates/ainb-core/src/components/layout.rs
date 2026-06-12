@@ -91,7 +91,7 @@ impl LayoutComponent {
                 Constraint::Length(3), // Top status bar
                 Constraint::Min(0),    // Main content area
                 Constraint::Length(3), // Session info (single line + borders)
-                Constraint::Length(5), // Bottom menu bar (3 lines + borders)
+                Constraint::Length(6), // Bottom menu bar (4 lines + borders)
             ])
             .split(frame.size());
 
@@ -210,7 +210,29 @@ impl LayoutComponent {
         frame.render_widget(rail, area);
     }
 
+    /// Bottom shortcut legend. Two presentations share the same key set:
+    ///   - **Two-column** (wide terminals): session actions on the left,
+    ///     panels/views on the right, split by a vertical divider. Reclaims
+    ///     the horizontal space the old centred stack wasted.
+    ///   - **Stacked** (narrow terminals, < `TWO_COL_MIN_WIDTH`): the original
+    ///     four centred lines, which the 80-col truncation test still pins.
+    ///
+    /// The dispatch is width-only so the layout degrades predictably and the
+    /// `menu_bar_keys_not_truncated_at_80_cols` test exercises the stacked
+    /// path unchanged.
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        // Below this width the two-column split can't hold the widest
+        // session-action line (~41 cols) plus the panels column without
+        // clipping, so fall back to the stacked legend.
+        const TWO_COL_MIN_WIDTH: u16 = 100;
+        if area.width >= TWO_COL_MIN_WIDTH {
+            self.render_menu_bar_two_col(frame, area, state);
+        } else {
+            self.render_menu_bar_stacked(frame, area, state);
+        }
+    }
+
+    fn render_menu_bar_stacked(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         // Pure decision for which restart-shaped affordance to surface.
         // See test below for the truth table.
         // The session-action group's restart-shaped affordance is split
@@ -233,11 +255,11 @@ impl LayoutComponent {
         let sep = || Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER));
         let red = Color::Rgb(230, 100, 100);
 
-        // Line 1: Navigation + selection + inbox. The inbox shortcut lives
-        // here because line 1 has the most slack; its unread badge can grow
-        // and must not push the bar past the 80-col minimum (see the
+        // Line 1: Navigation + selection. Panel shortcuts (inbox/stats/
+        // witr/skills) moved to line 4 so the unread badge can grow
+        // without pushing this line past the 80-col minimum (see the
         // `menu_bar_keys_not_truncated_at_80_cols` test).
-        let mut line1_spans = vec![
+        let line1_spans = vec![
             key("n", GOLD),
             desc("ew "),
             key("E", GOLD),
@@ -256,27 +278,6 @@ impl LayoutComponent {
             key("s", GOLD),
             desc("tar"),
         ];
-
-        // ainb-hooks inbox shortcut on the menu bar. Always shown so users
-        // can discover the Inbox screen even on a fresh install with zero
-        // events. When the store reports unread + non-dismissed rows, a
-        // `● N` glyph is rendered alongside the `b inbox` hint. The count is
-        // capped at `99+` so a large backlog can't widen the bar unbounded.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
-        line1_spans.push(sep());
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            line1_spans.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
-        line1_spans.push(key("b", GOLD));
-        line1_spans.push(desc(" inbox"));
 
         // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
         let line2_spans = vec![
@@ -299,7 +300,7 @@ impl LayoutComponent {
             desc(" commit"),
         ];
 
-        // Line 3: Tools + System
+        // Line 3: Tools
         let line3_spans = vec![
             key("c", WARNING_ORANGE),
             desc("laude "),
@@ -311,17 +312,55 @@ impl LayoutComponent {
             desc(" cleanup"),
             sep(),
             key("A", MUTED_GRAY),
-            desc(" re-auth "),
+            desc(" re-auth"),
+        ];
+
+        // Line 4: Panels + System. Every panel screen mirrors its
+        // home-menu letter here (the session-list key handler binds the
+        // same set), and closing a panel returns to this screen. The
+        // inbox hint is always shown so users can discover the Inbox
+        // screen even on a fresh install with zero events. When the
+        // store reports unread + non-dismissed rows, a `● N` glyph is
+        // rendered alongside the `b inbox` hint, capped at `99+` so a
+        // large backlog can't widen the bar unbounded.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut line4_spans = Vec::new();
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            line4_spans.push(Span::styled(
+                badge,
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        line4_spans.extend([
+            key("b", GOLD),
+            desc(" inbox "),
+            key("i", GOLD),
+            desc(" stats "),
+            key("w", GOLD),
+            desc(" witr "),
+            key("k", GOLD),
+            desc(" skills "),
+            key("m", GOLD),
+            desc(" memory "),
+            key("t", GOLD),
+            desc(" abtop"),
+            sep(),
             key("?/H", CORNFLOWER_BLUE),
             desc(" help "),
             key("q", CORNFLOWER_BLUE),
             desc(" home"),
-        ];
+        ]);
 
         let menu_lines = vec![
             Line::from(line1_spans),
             Line::from(line2_spans),
             Line::from(line3_spans),
+            Line::from(line4_spans),
         ];
 
         let menu = Paragraph::new(menu_lines)
@@ -335,6 +374,193 @@ impl LayoutComponent {
             .alignment(Alignment::Center);
 
         frame.render_widget(menu, area);
+    }
+
+    /// Wide-terminal legend: two columns separated by a vertical rule. The
+    /// left column is everything that acts on a session/workspace; the right
+    /// column is the panels, views, and navigation. Two of the keys are
+    /// mode-specific — `x cleanup` only applies to Boss/container sessions and
+    /// `F filter` only to normal interactive sessions — so the inactive one is
+    /// dimmed based on the highlighted row (see `mode_dim_flags`).
+    fn render_menu_bar_two_col(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        use ratatui::widgets::block::Title;
+
+        let (restart_key, restart_label) = restart_affordance(state.selected_session());
+        let (dim_filter, dim_cleanup) = mode_dim_flags(state.selected_session());
+
+        let key = |k: &'static str, color: Color| {
+            Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        };
+        let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+        let red = Color::Rgb(230, 100, 100);
+        // A mode key that doesn't apply to the highlighted session renders in
+        // the border colour so it reads as present-but-inactive rather than
+        // disappearing (which would make the bar twitch as the cursor moves).
+        let dim = |s: &'static str| Span::styled(s, Style::default().fg(SUBDUED_BORDER));
+
+        // `F filter` (normal-only) and `x cleanup` (Boss-only) dim when the
+        // highlighted session is the other mode — see `mode_dim_flags`.
+        let (filter_key, filter_desc) = if dim_filter {
+            (dim("F"), dim(" filter  "))
+        } else {
+            (key("F", WARNING_ORANGE), desc(" filter  "))
+        };
+        let (cleanup_key, cleanup_desc) = if dim_cleanup {
+            (dim("x"), dim(" cleanup  "))
+        } else {
+            (key("x", WARNING_ORANGE), desc(" cleanup  "))
+        };
+
+        // ── Left column: session & workspace actions ──────────────────────
+        let left_lines = vec![
+            Line::from(vec![
+                key("n", GOLD),
+                desc("ew  "),
+                key("a", SELECTION_GREEN),
+                desc("ttach  "),
+                key("1-9", SELECTION_GREEN),
+                desc(" quick  "),
+                key("Space", SELECTION_GREEN),
+                desc(" select"),
+            ]),
+            Line::from(vec![
+                key(restart_key, SELECTION_GREEN),
+                desc(restart_label),
+                key("d", red),
+                desc("elete  "),
+                key("D", red),
+                desc(" del-sel  "),
+                key("s", GOLD),
+                desc("tar"),
+            ]),
+            Line::from(vec![
+                key("o", SELECTION_GREEN),
+                desc(" editor  "),
+                key("$", GOLD),
+                desc(" shell  "),
+                key("p", CORNFLOWER_BLUE),
+                desc(" commit  "),
+                key("F2", SELECTION_GREEN),
+                desc(" rename"),
+            ]),
+            Line::from(vec![
+                key("f", WARNING_ORANGE),
+                desc(" refresh  "),
+                filter_key,
+                filter_desc,
+                cleanup_key,
+                cleanup_desc,
+                key("A", MUTED_GRAY),
+                desc(" re-auth"),
+            ]),
+        ];
+
+        // ── Right column: panels, views & navigation ─────────────────────
+        // The inbox unread badge keeps its place ahead of `b inbox`, capped at
+        // `99+` so a backlog can't widen the column past the divider.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut row1 = Vec::new();
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            row1.push(Span::styled(
+                badge,
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        row1.extend([
+            key("b", GOLD),
+            desc(" inbox  "),
+            key("i", GOLD),
+            desc(" stats  "),
+            key("w", GOLD),
+            desc(" witr"),
+        ]);
+        let right_lines = vec![
+            Line::from(row1),
+            Line::from(vec![
+                key("k", GOLD),
+                desc(" skills  "),
+                key("m", GOLD),
+                desc(" memory  "),
+                key("t", GOLD),
+                desc(" abtop"),
+            ]),
+            Line::from(vec![
+                key("g", CORNFLOWER_BLUE),
+                desc("it  "),
+                key("c", WARNING_ORANGE),
+                desc("laude  "),
+                key("E", GOLD),
+                desc("xpand"),
+            ]),
+            Line::from(vec![
+                key("Tab", GOLD),
+                desc(" focus  "),
+                key("?/H", CORNFLOWER_BLUE),
+                desc(" help  "),
+                key("q", CORNFLOWER_BLUE),
+                desc(" home"),
+            ]),
+        ];
+
+        // Outer frame carries the two section headers on its top border so
+        // they cost no inner row — the four content rows mirror the stacked
+        // legend's height exactly (menu area stays `Length(6)`).
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .style(Style::default().bg(PANEL_BG))
+            .title(
+                Title::from(Line::from(vec![
+                    Span::styled(" ⌨ ", Style::default().fg(GOLD)),
+                    Span::styled(
+                        "Session actions ",
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .alignment(Alignment::Left),
+            )
+            .title(
+                Title::from(Line::from(vec![Span::styled(
+                    " Panels & views ",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                )]))
+                .alignment(Alignment::Right),
+            );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Split the body into [left | divider | right]. The columns are
+        // centred within their halves so the legend spreads across the bar
+        // instead of huddling in the middle the way the old stack did.
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        frame.render_widget(
+            Paragraph::new(left_lines).alignment(Alignment::Center),
+            cols[0],
+        );
+
+        let divider: Vec<Line> = (0..inner.height)
+            .map(|_| Line::from(Span::styled("│", Style::default().fg(SUBDUED_BORDER))))
+            .collect();
+        frame.render_widget(Paragraph::new(divider), cols[1]);
+
+        frame.render_widget(
+            Paragraph::new(right_lines).alignment(Alignment::Center),
+            cols[2],
+        );
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
@@ -672,6 +898,23 @@ fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static st
         ("r", " resume ")
     } else {
         ("e", " recreate ")
+    }
+}
+
+/// Decide which mode-specific legend keys to dim for the highlighted session.
+///
+/// Two keys only apply to one mode: `F filter` cycles the *normal interactive*
+/// session filter, and `x cleanup` reaps orphaned *Boss/container* sessions.
+/// Returns `(dim_filter, dim_cleanup)` — when a Boss session is selected the
+/// normal-only `filter` is dimmed, and when an Interactive session is selected
+/// the Boss-only `cleanup` is dimmed. With no selection (or any other row type)
+/// neither is dimmed, since both actions are still reachable.
+fn mode_dim_flags(selected: Option<&crate::models::Session>) -> (bool, bool) {
+    use crate::models::SessionMode;
+    match selected.map(|s| &s.mode) {
+        Some(SessionMode::Boss) => (true, false),
+        Some(SessionMode::Interactive) => (false, true),
+        None => (false, false),
     }
 }
 
@@ -1055,7 +1298,7 @@ mod menu_bar_tests {
 
     /// Render the menu bar at the conventional 80-column minimum and assert
     /// every advertised key token survives — i.e. nothing is silently
-    /// truncated off either end of the centered three-line bar. This guards
+    /// truncated off either end of the centered four-line bar. This guards
     /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
     /// inbox) overflowed 80 cols and clipped the inbox shortcut.
     #[test]
@@ -1066,7 +1309,7 @@ mod menu_bar_tests {
 
         let layout = LayoutComponent::new();
         let state = AppState::default();
-        let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
         terminal
             .draw(|f| {
                 let area = f.size();
@@ -1101,6 +1344,11 @@ mod menu_bar_tests {
             "?/H",      // help
             "home",     // q
             "inbox",    // b
+            "stats",    // i — analytics panel
+            "witr",     // w — process-causality browser
+            "skills",   // k — skills browser
+            "memory",   // m — learnings KB browser
+            "abtop",    // t — top-for-agents monitor
         ] {
             assert!(
                 rendered.contains(token),
@@ -1109,18 +1357,156 @@ mod menu_bar_tests {
         }
 
         // Stronger guard: the centered Paragraph truncates from both ends when
-        // a line is wider than the inner area. Each of the 3 content rows
-        // (rows 1..=3; rows 0 and 4 are the rounded border) must therefore
+        // a line is wider than the inner area. Each of the 4 content rows
+        // (rows 1..=4; rows 0 and 5 are the rounded border) must therefore
         // keep at least one space of padding against both inner edges — if a
         // row filled edge-to-edge it would mean content was clipped.
         let buf = terminal.backend().buffer();
-        for y in 1..=3u16 {
+        for y in 1..=4u16 {
             let left = buf.get(1, y).symbol().to_string();
             let right = buf.get(78, y).symbol().to_string();
             assert!(
                 left == " " && right == " ",
                 "menu row {y} fills the bar edge-to-edge (clipped). \
                  left={left:?} right={right:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_filter_for_boss() {
+        // Boss/container row → the normal-only `F filter` is the inactive key.
+        let s = stopped_boss();
+        assert_eq!(super::mode_dim_flags(Some(&s)), (true, false));
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_cleanup_for_interactive() {
+        // Interactive row → the Boss-only `x cleanup` is the inactive key.
+        let s = running_interactive();
+        assert_eq!(super::mode_dim_flags(Some(&s)), (false, true));
+    }
+
+    #[test]
+    fn mode_dim_flags_dims_nothing_without_selection() {
+        // No highlighted session → both mode actions stay reachable, so
+        // neither is dimmed.
+        assert_eq!(super::mode_dim_flags(None), (false, false));
+    }
+
+    /// On a wide terminal the legend switches to the two-column split. Assert
+    /// the divider and both section headers render (proving we took the split
+    /// path, not the stacked fallback) and that every advertised key survives
+    /// — the wide analogue of `menu_bar_keys_not_truncated_at_80_cols`.
+    #[test]
+    fn menu_bar_two_col_keeps_every_key_and_draws_divider() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        // Comfortably above TWO_COL_MIN_WIDTH so the split path renders.
+        let mut terminal = Terminal::new(TestBackend::new(140, 6)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                layout.render_menu_bar(f, area, &state);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        // Vertical divider proves the two-column path (stacked has none).
+        assert!(
+            rendered.contains('│'),
+            "two-column divider missing:\n{rendered}"
+        );
+        // Section headers ride the top border.
+        assert!(
+            rendered.contains("Session actions"),
+            "left header missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Panels & views"),
+            "right header missing:\n{rendered}"
+        );
+
+        for token in [
+            "ew",       // new
+            "ttach",    // attach
+            "1-9",      // quick attach
+            "Space",    // multi-select
+            "tar",      // star
+            "recreate", // e — Boss/Docker recreate (no selection)
+            "del-sel",  // D bulk delete
+            "editor",   // o
+            "shell",    // $
+            "F2",       // rename
+            "commit",   // p
+            "refresh",  // f
+            "filter",   // F (dimmed when a Boss row is selected, still present)
+            "cleanup",  // x (dimmed when an Interactive row is selected)
+            "re-auth",  // A
+            "inbox",    // b
+            "stats",    // i
+            "witr",     // w
+            "skills",   // k
+            "memory",   // m
+            "abtop",    // t
+            "git",      // g
+            "claude",   // c
+            "xpand",    // E expand
+            "focus",    // Tab focus
+            "?/H",      // help
+            "home",     // q
+        ] {
+            assert!(
+                rendered.contains(token),
+                "menu token {token:?} missing in two-col legend.\nRendered:\n{rendered}"
+            );
+        }
+    }
+
+    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (100),
+    /// which is also where its columns are narrowest and clipping would first
+    /// bite. Render at the boundary and assert the longest token in each column
+    /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
+    /// content rows keep their edge padding — the centred Paragraphs would eat
+    /// both ends if a line overflowed its half.
+    #[test]
+    fn menu_bar_two_col_no_clip_at_threshold_width() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        // Took the split path, not the stacked fallback.
+        assert!(
+            rendered.contains('│'),
+            "no divider at threshold:\n{rendered}"
+        );
+        for token in ["re-auth", "recreate", "del-sel", "abtop", "home", "witr"] {
+            assert!(
+                rendered.contains(token),
+                "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
+            );
+        }
+        // Inner edges (cols 1 and 98) must stay blank on every content row.
+        for y in 1..=4u16 {
+            let left = buf.get(1, y).symbol().to_string();
+            let right = buf.get(98, y).symbol().to_string();
+            assert!(
+                left == " " && right == " ",
+                "menu row {y} clipped to the edge at width 100. left={left:?} right={right:?}"
             );
         }
     }

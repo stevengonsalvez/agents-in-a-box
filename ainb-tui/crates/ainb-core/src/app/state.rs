@@ -682,6 +682,9 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
+    OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
+    DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
@@ -1274,6 +1277,82 @@ impl ConfigValue {
     }
 }
 
+/// Render a TOML scalar from a `[plugins.<name>]` value table as the plain
+/// string the Settings widgets edit. Non-scalar values (tables/arrays) can't
+/// appear under the flat-scalars-only plugin config schema, so they fall back
+/// to their TOML debug form rather than panicking.
+fn toml_scalar_to_string(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Map a plugin's [`ConfigField`](ainb_plugin_protocol::manifest::ConfigField)
+/// to the [`ConfigValue`] widget the Settings screen renders, seeding it from
+/// `saved` (the persisted `[plugins.<name>].<key>` value) when present, else
+/// the schema `default`. The kind drives the widget:
+/// `path`/`string` → [`ConfigValue::Text`], `bool` → [`ConfigValue::Bool`],
+/// `enum` → [`ConfigValue::Choice`], `int` → [`ConfigValue::Number`].
+fn config_value_for_field(
+    field: &ainb_plugin_protocol::manifest::ConfigField,
+    saved: Option<&str>,
+) -> ConfigValue {
+    use ainb_plugin_protocol::manifest::ConfigKind;
+
+    let raw = saved.unwrap_or(field.default.as_str());
+    match field.kind {
+        ConfigKind::Path | ConfigKind::String => ConfigValue::Text(raw.to_string()),
+        ConfigKind::Bool => ConfigValue::Bool(raw.eq_ignore_ascii_case("true")),
+        ConfigKind::Int => {
+            // A non-numeric stored value (corrupt config.toml) would otherwise be
+            // silently coerced to 0; warn so the bad value surfaces in the logs
+            // rather than vanishing on reset.
+            let n = raw.trim().parse().unwrap_or_else(|_| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "non-integer value for int config field; falling back to 0"
+                );
+                0
+            });
+            ConfigValue::Number(n)
+        }
+        ConfigKind::Enum => {
+            // An unknown stored choice (corrupt config.toml or a renamed enum
+            // variant) would otherwise be silently coerced to the first choice;
+            // warn so the bad value surfaces in the logs.
+            let idx = field.choices.iter().position(|c| c == raw).unwrap_or_else(|| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "unknown choice for enum config field; falling back to first option"
+                );
+                0
+            });
+            ConfigValue::Choice(field.choices.clone(), idx)
+        }
+    }
+}
+
+/// Convert an edited [`ConfigValue`] back into the TOML scalar persisted under
+/// `[plugins.<name>].<key>`. Bool/enum/int keep their native TOML type;
+/// `Text`/`Secret` serialize as strings. (`Secret` never appears in a plugin
+/// `[[config]]` schema today, but is handled for totality.)
+fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
+    match value {
+        ConfigValue::Text(s) | ConfigValue::Secret(s) => toml::Value::String(s.clone()),
+        ConfigValue::Bool(b) => toml::Value::Boolean(*b),
+        ConfigValue::Number(n) => toml::Value::Integer(*n),
+        ConfigValue::Choice(options, idx) => {
+            toml::Value::String(options.get(*idx).cloned().unwrap_or_default())
+        }
+    }
+}
+
 /// Tracks which pane has focus in the config screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigPane {
@@ -1782,64 +1861,77 @@ impl ConfigScreenState {
         state
     }
 
-    /// Convert ConfigScreenState back to AppConfig for saving
-    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
-        // Apply Workspace settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Workspace) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "default_workspace" => {
-                        if let ConfigValue::Text(path) = &setting.value {
-                            let expanded = if path.starts_with("~/") {
-                                dirs::home_dir()
-                                    .map(|h| h.join(&path[2..]))
-                                    .unwrap_or_else(|| std::path::PathBuf::from(path))
-                            } else {
-                                std::path::PathBuf::from(path)
-                            };
-                            // "Default Workspace" is surfaced as
-                            // `workspace_scan_paths.first()` in `from_app_config`,
-                            // so it must be written back as the *primary* entry.
-                            // The old code pushed to the end, leaving `first()`
-                            // pointing at the stale path — editing the field then
-                            // appeared to do nothing on reopen.
-                            //
-                            // Rebuild as: edited path first, then every other
-                            // distinct scan dir. This replaces the old primary
-                            // (index 0), de-dups the edited path, and — crucially
-                            // — preserves the remaining scan dirs even on a no-op
-                            // confirm (drop the old primary, never the tail).
-                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
-                            let tail: Vec<std::path::PathBuf> =
-                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
-                            paths.clear();
-                            paths.push(expanded);
-                            paths.extend(tail);
-                        }
-                    }
-                    "branch_prefix" => {
-                        if let ConfigValue::Text(prefix) = &setting.value {
-                            config.workspace_defaults.branch_prefix = prefix.clone();
-                        }
-                    }
-                    "exclude_paths" => {
-                        if let ConfigValue::Text(paths) = &setting.value {
-                            config.workspace_defaults.exclude_paths = paths
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                    }
-                    "max_repositories" => {
-                        if let ConfigValue::Number(max) = &setting.value {
-                            config.workspace_defaults.max_repositories = *max as usize;
-                        }
-                    }
-                    _ => {}
-                }
+    /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin
+    /// `[[config]]` field (vs. the static enable/disable placeholder rows).
+    /// The row key is `plugin:<plugin_name>:<field_key>` — unique across
+    /// plugins that share a field name, and reversible in
+    /// [`apply_to_app_config`](Self::apply_to_app_config) so the edit lands
+    /// under `plugins.values[plugin_name][field_key]`.
+    const PLUGIN_ROW_PREFIX: &'static str = "plugin:";
+
+    /// Compose the Plugins-category row key for a plugin's config field.
+    fn plugin_row_key(plugin: &str, field_key: &str) -> String {
+        format!("{}{plugin}:{field_key}", Self::PLUGIN_ROW_PREFIX)
+    }
+
+    /// Split a Plugins-category row key back into `(plugin_name, field_key)`,
+    /// or `None` for the static placeholder rows. The plugin name and the
+    /// field key are joined by the *first* `:` after the prefix, so plugin
+    /// names never contain `:` but field keys may.
+    fn parse_plugin_row_key(key: &str) -> Option<(&str, &str)> {
+        let rest = key.strip_prefix(Self::PLUGIN_ROW_PREFIX)?;
+        rest.split_once(':')
+    }
+
+    /// Append per-plugin `[[config]]` rows to the Plugins category from the
+    /// loaded plugin manifests, keeping the existing enable/disable rows.
+    ///
+    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the
+    /// field `kind` to the matching [`ConfigValue`] widget
+    /// (`path`/`string` → `Text`, `bool` → `Bool`, `enum` → `Choice`,
+    /// `int` → `Number`). The displayed value defaults from
+    /// `plugins.values[plugin][key]` when present, else the schema `default`.
+    ///
+    /// Idempotent: re-invoking it (e.g. after the plugin runtime finishes
+    /// discovery) rebuilds the per-plugin rows from scratch rather than
+    /// duplicating them — only the static placeholder rows are retained.
+    pub fn apply_plugin_manifests(
+        &mut self,
+        manifests: &[ainb_plugin_protocol::manifest::Manifest],
+        plugins_cfg: &crate::config::PluginsConfig,
+    ) {
+        let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
+        // Drop any previously-appended plugin rows so repeated calls are
+        // idempotent; keep the static enable/disable placeholders.
+        rows.retain(|s| Self::parse_plugin_row_key(&s.key).is_none());
+
+        for manifest in manifests {
+            let plugin = manifest.plugin.name.as_str();
+            // The resolved [plugins.<name>] value table, if the user has set
+            // any keys — drives the displayed default ahead of the schema's.
+            let saved = plugins_cfg.values.get(plugin).and_then(toml::Value::as_table);
+
+            for field in &manifest.config {
+                // Saved string value (config.toml only stores TOML scalars; we
+                // render every kind from its string form for the widget).
+                let saved_str = saved.and_then(|t| t.get(&field.key)).map(toml_scalar_to_string);
+                let value = config_value_for_field(field, saved_str.as_deref());
+
+                rows.push(ConfigSetting {
+                    key: Self::plugin_row_key(plugin, &field.key),
+                    label: field.label.clone(),
+                    value,
+                    description: format!("{} · plugin: {}", field.label, plugin),
+                });
             }
         }
+    }
+
+    /// Convert ConfigScreenState back to AppConfig for saving
+    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
+        // Apply Workspace settings (extracted to keep this method under the
+        // clippy `too_many_lines` threshold).
+        self.apply_workspace_rows(config);
 
         // Apply Docker settings
         if let Some(settings) = self.settings.get(&ConfigCategory::Docker) {
@@ -1915,6 +2007,102 @@ impl ConfigScreenState {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Apply per-plugin [[config]] edits (extracted to keep this method under
+        // the clippy `too_many_lines` threshold).
+        self.apply_plugin_rows(config);
+    }
+
+    /// Route the Workspace-category rows (`default_workspace`, `branch_prefix`,
+    /// `exclude_paths`, `max_repositories`) back into `config.workspace_defaults`.
+    fn apply_workspace_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Workspace) else {
+            return;
+        };
+        for setting in settings {
+            match setting.key.as_str() {
+                "default_workspace" => {
+                    if let ConfigValue::Text(path) = &setting.value {
+                        let expanded = if path.starts_with("~/") {
+                            dirs::home_dir()
+                                .map(|h| h.join(&path[2..]))
+                                .unwrap_or_else(|| std::path::PathBuf::from(path))
+                        } else {
+                            std::path::PathBuf::from(path)
+                        };
+                        // "Default Workspace" is surfaced as
+                        // `workspace_scan_paths.first()` in `from_app_config`, so
+                        // it must be written back as the *primary* entry. The old
+                        // code pushed to the end, leaving `first()` pointing at the
+                        // stale path — editing the field then appeared to do
+                        // nothing on reopen.
+                        //
+                        // Rebuild as: edited path first, then every other distinct
+                        // scan dir. This replaces the old primary (index 0),
+                        // de-dups the edited path, and — crucially — preserves the
+                        // remaining scan dirs even on a no-op confirm (drop the old
+                        // primary, never the tail).
+                        let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                        let tail: Vec<std::path::PathBuf> =
+                            paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                        paths.clear();
+                        paths.push(expanded);
+                        paths.extend(tail);
+                    }
+                }
+                "branch_prefix" => {
+                    if let ConfigValue::Text(prefix) = &setting.value {
+                        config.workspace_defaults.branch_prefix = prefix.clone();
+                    }
+                }
+                "exclude_paths" => {
+                    if let ConfigValue::Text(paths) = &setting.value {
+                        config.workspace_defaults.exclude_paths = paths
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                "max_repositories" => {
+                    if let ConfigValue::Number(max) = &setting.value {
+                        config.workspace_defaults.max_repositories = *max as usize;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Route every Plugins-category row whose key is `plugin:<name>:<field_key>`
+    /// (see [`Self::plugin_row_key`]) into `config.plugins.values[<name>]
+    /// [<field_key>]` — NOT a top-level field. The static enable/disable
+    /// placeholder rows have no such prefix and are skipped. The serialized
+    /// `[plugins.<name>]` table round-trips through the existing
+    /// `AppConfig::save()` pipeline.
+    fn apply_plugin_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
+            return;
+        };
+        for setting in settings {
+            let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
+                continue;
+            };
+            let toml_value = config_value_to_toml(&setting.value);
+            let entry = config
+                .plugins
+                .values
+                .entry(plugin.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+            // Coerce a non-table entry (shouldn't happen for a well-formed
+            // config) into a table so the write always lands somewhere sane.
+            if !entry.is_table() {
+                *entry = toml::Value::Table(toml::value::Table::new());
+            }
+            if let Some(table) = entry.as_table_mut() {
+                table.insert(field_key.to_string(), toml_value);
             }
         }
     }
@@ -2303,6 +2491,13 @@ pub struct AppState {
     pub git_view_state: Option<crate::components::GitViewState>,
     // Previous view for navigation (e.g., to return from GitView)
     pub previous_screen: Option<ScreenId>,
+    /// Last `ui.close_request` snapshot version consumed by
+    /// `tick_panel_close_requests`. The poll acts at most once per
+    /// plugin publish: a version is consumed (recorded here) on first
+    /// sight whether or not it triggered a navigation, so a close
+    /// request that arrives while the user is on a different screen is
+    /// absorbed instead of firing later.
+    pub last_panel_close_version: Option<u64>,
     // Notification system
     pub notifications: Vec<Notification>,
     // Pending event to be processed in next loop iteration
@@ -2378,6 +2573,13 @@ pub struct AppState {
     pub pending_plugin_renders:
         std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
 
+    /// Cache of workspace paths that are currently favorited (starred).
+    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
+    /// list or the favorites store changes — NOT in the render path. The
+    /// session-list render reads this set with an O(1) lookup, so it never
+    /// re-parses `favorites.yaml` or opens a git repo per frame.
+    pub favorite_workspace_paths: HashSet<PathBuf>,
+
     /// Last `(width, height)` `PluginScreen::render` was handed for each
     /// screen id. `tick_plugin_renders` reads this and forwards it to
     /// `handle.render(..)` so the plugin paints at the actual allocated
@@ -2385,6 +2587,15 @@ pub struct AppState {
     /// stale is fine — the first frame still uses the plugin's fallback,
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
+    /// Top-left `(x, y)` origin `PluginScreen::render` painted each screen
+    /// id at, stashed alongside `plugin_render_areas`. The mouse forwarder
+    /// (`forward_mouse_to_focused_plugin`) subtracts this from the absolute
+    /// terminal click coordinates so the plugin receives a click in its own
+    /// viewport space (`(0, 0)` = top-left of its buffer). Separate from
+    /// `plugin_render_areas` to keep that tuple's `(width, height)` meaning
+    /// unchanged for the render-tick loop.
+    pub plugin_render_origins: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
     /// Viewport `(width, height)` the last `plugin/render` kick used for
     /// each screen id. `tick_plugin_renders` forces a fresh render kick
@@ -2457,6 +2668,13 @@ pub struct AppState {
 
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
     pub last_preview_update: Option<Instant>,
+
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview — one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
 
     // Background workspace loading state
     pub is_loading_workspaces: bool,
@@ -2739,6 +2957,8 @@ pub enum AsyncAction {
     CleanupOrphaned,                       // Clean up orphaned containers without worktrees
     AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -2804,6 +3024,7 @@ impl Default for AppState {
             log_sender: None,
             git_view_state: None,
             previous_screen: None,
+            last_panel_close_version: None,
             notifications: Vec::new(),
             pending_event: None,
 
@@ -2861,7 +3082,9 @@ impl Default for AppState {
             inbox_state: crate::components::inbox::InboxState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
+            favorite_workspace_paths: HashSet::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 
@@ -2882,6 +3105,7 @@ impl Default for AppState {
 
             // Throttled tmux preview updates
             last_preview_update: None,
+            last_status_check: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -3668,6 +3892,12 @@ impl AppState {
                             self.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
+                            // Resolve favorite status once per workspace now
+                            // that the list changed, so the session-list render
+                            // never opens a git repo or parses favorites.yaml
+                            // per frame (perf: bead 9ov + 8rn).
+                            self.recompute_favorite_workspaces();
+
                             // Populate tmux_sessions HashMap for Interactive mode sessions
                             // This is needed for update_tmux_previews() to capture pane content
                             for workspace in &self.workspaces {
@@ -3786,6 +4016,59 @@ impl AppState {
             }
         }
         false
+    }
+
+    /// Recompute which workspaces are favorited and cache the result in
+    /// `favorite_workspace_paths`. Loads `favorites.yaml` ONCE and resolves
+    /// each workspace's favorite status (by local path or git remote) here,
+    /// off the render path. Call after the workspace list changes or a
+    /// favorite is toggled — never per frame. (perf: beads 9ov + 8rn)
+    pub fn recompute_favorite_workspaces(&mut self) {
+        let favorites = crate::config::FavoritesStore::load();
+        let mut starred: HashSet<PathBuf> = HashSet::new();
+        for workspace in &self.workspaces {
+            if Self::workspace_is_favorite(&workspace.path, &favorites) {
+                starred.insert(workspace.path.clone());
+            }
+        }
+        self.favorite_workspace_paths = starred;
+    }
+
+    /// True if `path` is favorited, by local-path match or by the repo's git
+    /// remote (owner/repo shorthand or full URL). The git remote lookup is the
+    /// expensive part (libgit2 open + config read), so this MUST stay out of
+    /// the render path — it runs only from `recompute_favorite_workspaces`.
+    fn workspace_is_favorite(
+        path: &std::path::Path,
+        favorites: &crate::config::FavoritesStore,
+    ) -> bool {
+        let path_str = path.display().to_string();
+        if favorites.favorites.iter().any(|f| f.source == path_str) {
+            return true;
+        }
+        // Fall back to the repo's `origin` remote. `from_input` is deprecated
+        // for free-form input, but the URL comes from `get_remote_url()` so the
+        // legacy contract holds.
+        crate::perf::record_git_resolve();
+        let Ok(git_repo) = crate::git::RepositoryManager::open(path) else {
+            return false;
+        };
+        let Ok(Some(remote_url)) = git_repo.get_remote_url() else {
+            return false;
+        };
+        #[allow(deprecated)]
+        let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url) else {
+            return false;
+        };
+        if let Ok(parsed) = repo_source.parse_components() {
+            let shorthand = format!("{}/{}", parsed.owner, parsed.repo_name);
+            favorites
+                .favorites
+                .iter()
+                .any(|f| f.source == shorthand || f.source == remote_url)
+        } else {
+            favorites.favorites.iter().any(|f| f.source == remote_url)
+        }
     }
 
     /// Kick off a background scan of ~/.claude/skills and ~/.claude/agents.
@@ -5512,6 +5795,62 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    /// `true` if ainb should offer to run `abtop --setup` (the Claude
+    /// rate-limit StatusLine hook) before opening abtop for the first time.
+    /// Offered until the hook has run (its `~/.claude/abtop-rate-limits.json`
+    /// exists) or the user chose "don't ask again".
+    #[must_use]
+    pub fn should_offer_abtop_setup(&self) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let already_done = home.join(".claude").join("abtop-rate-limits.json").exists();
+        let dismissed = home.join(".agents-in-a-box").join("abtop-setup-dismissed").exists();
+        !already_done && !dismissed
+    }
+
+    /// Persist the user's "don't ask again" choice for the abtop setup offer.
+    pub fn dismiss_abtop_setup(&self) {
+        if let Some(home) = dirs::home_dir() {
+            let dir = home.join(".agents-in-a-box");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("abtop-setup-dismissed"), b"1");
+        }
+    }
+
+    /// One-time consent dialog offering `abtop --setup` (Claude rate-limit
+    /// tracking) the first time the user opens abtop. Every option proceeds to
+    /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
+    /// suppresses the offer permanently.
+    pub fn show_abtop_setup_prompt(&mut self) {
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Enable abtop rate-limit tracking?".to_string(),
+            message: "abtop can show Claude rate-limit usage (5-hour + weekly \
+                      windows). This installs a StatusLine hook into \
+                      ~/.claude/settings.json via `abtop --setup`. abtop works \
+                      without it — the rate-limit panel just stays empty."
+                .to_string(),
+            confirm_action: ConfirmAction::SetupAbtopRateLimits,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: "Enable".to_string(),
+                    action: ConfirmAction::SetupAbtopRateLimits,
+                },
+                DialogOption {
+                    label: "Just open abtop".to_string(),
+                    action: ConfirmAction::OpenAbtopSkipSetup,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissAbtopSetup,
+                },
+            ]),
+            selected_index: 0,
+        });
     }
 
     /// Show confirmation dialog for killing an "other" tmux session
@@ -7945,6 +8284,14 @@ impl AppState {
                     debug!("AttachWitr action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
+                action @ AsyncAction::AttachAbtop => {
+                    debug!("AttachAbtop action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::SetupAbtopRateLimits => {
+                    debug!("SetupAbtopRateLimits action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
                     self.pending_async_action = Some(action);
@@ -8884,6 +9231,19 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
+        // Non-selected sessions only need a status (running/idle) refresh, which
+        // is not time-critical — sweep them on a longer cadence so we don't
+        // spawn one `capture-pane` per non-selected session on every 5s preview
+        // refresh. (perf: bead 9pb)
+        const STATUS_INTERVAL_SECS: u64 = 20;
+        let do_status_check = match self.last_status_check {
+            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
+            None => true,
+        };
+        if do_status_check {
+            self.last_status_check = Some(now);
+        }
+
         // updates: (session_id, content, claude_running) for the selected session.
         // Attention markers are derived separately from hook events in
         // `refresh_attention_markers`, not from live pane state.
@@ -8929,9 +9289,10 @@ impl AppState {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
                     }
                 }
-            } else {
-                // Non-selected sessions: only capture visible area for status detection
-                // Much cheaper — just the last screenful (~50 lines)
+            } else if do_status_check {
+                // Non-selected sessions: only capture visible area for status
+                // detection, and only on the longer status cadence. Much
+                // cheaper — just the last screenful (~50 lines). (perf: 9pb)
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
@@ -9124,6 +9485,76 @@ impl AppState {
         }
         None
     }
+
+    /// Consume pending `ui.close_request` publishes from plugins.
+    ///
+    /// A plugin publishes this topic when it receives an `Esc` with no
+    /// internal state left to pop (its root view — see the burndown
+    /// plugin's Esc handler). The snapshot store stamps every publish
+    /// with a monotonic version, so polling by version honours each
+    /// request at most once; the version is consumed on sight whether
+    /// or not it triggers navigation, so a request observed while the
+    /// user is on a different screen is absorbed instead of firing
+    /// later. A matching request navigates back to the screen the
+    /// panel was opened from (same pop as `AppEvent::PanelBack`).
+    ///
+    /// Called from `App::tick_plugin_renders`, which already holds a
+    /// cloned runtime `handle`, so it's passed in rather than re-cloned
+    /// per render tick.
+    pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
+        let Some((payload, version, publisher)) =
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
+        else {
+            return;
+        };
+        if self.last_panel_close_version == Some(version) {
+            return;
+        }
+        self.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
+            return;
+        }
+        let target = self
+            .previous_screen
+            .take()
+            .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
+        tracing::info!(
+            from = %self.current_screen,
+            to = %target,
+            "ui.close_request: closing plugin panel"
+        );
+        self.current_screen = target;
+        self.ui_needs_refresh = true;
+    }
+}
+
+/// `true` when a `ui.close_request` payload names the currently-focused
+/// plugin screen AND was published by the plugin that owns it. Rejects:
+/// requests while a non-plugin screen is focused (a plugin can't close
+/// the session list out from under the user), publishes from any plugin
+/// other than the focused screen's owner (the publisher stamp comes
+/// from the wire connection, not the payload, so it can't be forged),
+/// and malformed payloads.
+fn panel_close_matches(current_screen: &str, payload: &[u8], publisher: &str) -> bool {
+    let Some(owner) = crate::app::screens::builtin::plugin_id_for_screen(current_screen) else {
+        return false;
+    };
+    if publisher != owner {
+        tracing::warn!(
+            publisher,
+            owner,
+            screen = %current_screen,
+            "ui.close_request: publisher does not own the focused screen — ignoring"
+        );
+        return false;
+    }
+    match serde_json::from_slice::<ainb_plugin_runtime::topics::UiCloseRequest>(payload) {
+        Ok(req) => req.screen_id == current_screen,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui.close_request: malformed payload — ignoring");
+            false
+        }
+    }
 }
 
 pub struct App {
@@ -9175,13 +9606,21 @@ impl App {
     /// burndown + session-reader as Rust subprocess binaries). Loop is
     /// no-op when discovery returned empty; once 7c lands, the screen
     /// routing table below populates again.
-    pub fn tick_plugin_renders(&mut self) {
+    /// Drive plugin-owned screens. Returns `true` if a fresh plugin frame was
+    /// drained into `pending_plugin_renders` this tick, so the render loop can
+    /// treat that as a reason to repaint (perf: bead `wai` dirty-gate).
+    pub fn tick_plugin_renders(&mut self) -> bool {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
         let Some(handle) = self.state.plugin_runtime.clone() else {
-            return;
+            return false;
         };
+        let mut drained = false;
+
+        // Honour any pending plugin close request (root-view Esc) before
+        // kicking renders — a closed screen shouldn't get another paint.
+        self.state.tick_panel_close_requests(&handle);
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -9189,6 +9628,8 @@ impl App {
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
+            (crate::app::screens::ids::LEARNINGS, "learnings"),
+            (crate::app::screens::ids::ABTOP, "abtop"),
             (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
 
@@ -9204,9 +9645,37 @@ impl App {
             // Drain the cached frame (if any) into the screen map. The
             // plugin task pushes a fresh frame each time it returns from
             // `plugin/render`; `try_recv_render` is the non-blocking
-            // hand-off the render thread relies on.
+            // hand-off the render thread relies on. Unconditional (no
+            // visibility gate): a frame that completed just before the
+            // user navigated away must still land in the cache so the
+            // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+                drained = true;
+            }
+
+            // Visibility gate: only the plugin owning the focused screen
+            // gets render kicks. `LayoutComponent::render` dispatches
+            // exactly `state.current_screen` through the screen registry,
+            // so a hidden screen's buffer is never painted — kicking its
+            // renders only burns CPU. Concretely this stops (a) a
+            // self-animating plugin (search spinner returning
+            // `redraw=true`, which re-marks the dirty flag each frame)
+            // from re-rendering an invisible screen at tick cadence, and
+            // (b) the startup storm where the registration-seeded dirty
+            // flag kicked all five screen plugins on the first tick —
+            // `Command::Render` lazy-spawns the subprocess via
+            // `ensure_running`, so that defeated `spawn = "lazy"`. Eager
+            // plugins are unaffected: registration pokes them with
+            // `EnsureSpawned` (see `register_kept` in the runtime), not
+            // this loop.
+            //
+            // MUST stay above `take_render_dirty`: the gate skips the
+            // consume, so a hidden plugin's dirty flag survives until the
+            // user opens the screen and the first tick after the switch
+            // kicks the deferred paint.
+            if self.state.current_screen != *screen_id {
+                continue;
             }
 
             // Viewport comes from the previous frame's allocated area
@@ -9257,6 +9726,7 @@ impl App {
             // pickup happens via `try_recv_render` next tick.
             let _ = handle.render(&pid, viewport, 0);
         }
+        drained
     }
 
     pub async fn init(&mut self) {
@@ -9273,6 +9743,27 @@ impl App {
                 }
                 self.plugin_runtime_owner = Some(runtime);
                 self.state.plugin_runtime = Some(handle.clone());
+
+                // Surface each loaded plugin's `[[config]]` schema in the
+                // Settings ▸ Plugins category. `from_app_config` built the
+                // config screen before discovery ran (the handle is `None` at
+                // `AppState` construction), so we backfill the per-plugin rows
+                // here now that the manifests are known. Defaults resolve from
+                // the persisted `[plugins.<name>]` table first, else the
+                // schema default. Idempotent — only the plugin rows are
+                // rebuilt; the static enable/disable rows are kept.
+                let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
+                    handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
+                self.state
+                    .config_screen_state
+                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+
+                // A fresh runtime means a fresh snapshot store whose
+                // version counter restarts at 0 — drop any version
+                // watermark from a previous runtime so an equal-valued
+                // version can't mask a new close request. Init runs once
+                // today; this keeps any future runtime-restart path safe.
+                self.state.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -9655,3 +10146,207 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod plugin_render_gate_tests {
+    //! Visibility gate on the render-tick loop: only the plugin owning
+    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
+    //! only after the screen check) so the deferred first paint happens
+    //! on the first tick after the user opens the screen.
+
+    use std::path::PathBuf;
+
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    };
+    use ainb_plugin_runtime::{PluginId, RegisteredPlugin, Runtime};
+
+    use super::App;
+    use crate::app::screens::ids;
+
+    fn lazy_manifest(name: &str) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities::default(),
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: Vec::new(),
+        }
+    }
+
+    /// Real runtime + an `App` wired to it, with the named lazy plugins
+    /// registered. The binary path is deliberately nonexistent — these
+    /// tests assert host-side kick bookkeeping only; an actual spawn
+    /// attempt would fail harmlessly on the runtime's executor.
+    fn app_with_plugins(names: &[&str]) -> (Runtime, App) {
+        let (runtime, handle) = Runtime::new().expect("runtime constructs without plugins");
+        for name in names {
+            runtime.register(RegisteredPlugin::new(
+                lazy_manifest(name),
+                PathBuf::from("/nonexistent/plugin-binary"),
+                PathBuf::from("/nonexistent/manifest.toml"),
+            ));
+        }
+        let mut app = App::new();
+        app.state.plugin_runtime = Some(handle);
+        (runtime, app)
+    }
+
+    #[test]
+    fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+        app.tick_plugin_renders();
+
+        // No kick: `plugin_last_render_viewport` is only written when a
+        // render is dispatched.
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "hidden screen must not receive a render kick"
+        );
+        // The registration-seeded dirty flag survived both ticks, so the
+        // deferred first paint still happens when the screen opens.
+        assert!(
+            handle.take_render_dirty(&pid),
+            "hidden plugin's dirty flag must survive the gated ticks"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn dirty_plugin_kicks_on_first_tick_after_screen_switch() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        // Ticks while hidden: gated, dirty preserved (proved above).
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+
+        // User opens the learnings screen → first tick kicks the render.
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert_eq!(
+            app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
+            Some(&(0, 0)),
+            "first tick after the switch must kick a render at the seed viewport"
+        );
+        assert!(
+            !handle.take_render_dirty(&pid),
+            "the kick must consume the dirty flag"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn only_the_focused_plugin_screen_is_kicked() {
+        let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert!(
+            app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "focused plugin screen must be kicked"
+        );
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            "unfocused plugin screen must not be kicked"
+        );
+        assert!(
+            handle.take_render_dirty(&PluginId::from("burndown")),
+            "unfocused plugin must stay dirty for its deferred first paint"
+        );
+
+        runtime.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod panel_close_tests {
+    use super::panel_close_matches;
+    use crate::app::screens::ids;
+
+    /// Plugin id owning the analytics screen (see `PLUGIN_SCREENS`).
+    const BURNDOWN: &str = "burndown";
+
+    fn payload(screen: &str) -> Vec<u8> {
+        serde_json::to_vec(&ainb_plugin_runtime::topics::UiCloseRequest {
+            screen_id: screen.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn matches_when_owning_plugin_names_focused_screen() {
+        assert!(panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_request_for_a_different_screen() {
+        // A stale close request for analytics must not close the witr
+        // screen the user has since navigated to.
+        assert!(!panel_close_matches(
+            ids::WITR,
+            &payload(ids::ANALYTICS),
+            "witr"
+        ));
+    }
+
+    #[test]
+    fn rejects_when_focused_screen_is_not_plugin_owned() {
+        // A plugin can't close the session list (or any host screen)
+        // out from under the user, even if it names it.
+        assert!(!panel_close_matches(
+            ids::SESSION_LIST,
+            &payload(ids::SESSION_LIST),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_publish_from_plugin_that_does_not_own_screen() {
+        // The payload alone is forgeable — any plugin can serialize
+        // {"screen_id":"analytics"}. The publisher stamp (taken from
+        // the wire connection, not the payload) is not: a publish from
+        // session-reader naming burndown's screen must be ignored.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "session-reader"
+        ));
+        // The reserved host id doesn't own plugin screens either.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "host"
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_payload() {
+        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}

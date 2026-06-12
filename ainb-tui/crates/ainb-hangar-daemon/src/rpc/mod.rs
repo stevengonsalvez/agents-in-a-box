@@ -246,8 +246,21 @@ async fn serve_conn(
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Idle read timeout so an abandoned / half-open client connection cannot pin
+    // this per-connection task (and its fd) forever. The RPC is request/response
+    // and clients reconnect per request, so a generous idle window only reclaims
+    // dead connections — it never interrupts an in-flight exchange.
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let served: std::io::Result<()> = async {
-        while let Some(body) = read_frame(&mut reader).await? {
+        while let Some(body) =
+            match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
+                Ok(frame_result) => frame_result?,
+                Err(_elapsed) => {
+                    tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
+                    None
+                }
+            }
+        {
             let req = serde_json::from_slice::<RpcRequest>(&body);
             let resp = match &req {
                 Ok(req) => dispatch(&pool, req, &health, &events).await,

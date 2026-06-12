@@ -52,6 +52,10 @@ For EACH journey (define them first — see `references/journeys.md`):
 3. **READ the frames** (open the PNGs) and assert the EXACT outcome for that journey — the right diff content, the right file list, word-emphasis on the changed token, the active tab actually changed, Esc landed on the main screen. Recipe + anti-patterns: `references/frame-truth.md`.
 4. Keep the `<journey>.gif` (for the explainer) and `<journey>.mp4`.
 
+**Recording-seed gotchas (frames stuck on onboarding / the install modal = a bad seed, not a bad feature):**
+- The isolated `HOME` needs BOTH a version-matched `onboarding.toml` AND a **complete** notify `install.json`. A partial `{"prompt_dismissed": true}` fails to deserialize into `InstallRecord` (which also requires `agents`, `hook_script`, …), is silently dropped, and the "Get notified when a session needs you?" modal re-appears on top of HomeScreen and **swallows your keystrokes**. A fixed-timing `.tape` can't poll-and-resend like a tripwire, so the whole journey then records against the wrong screen. Mirror the tripwire's `ainb_plugin_notifyd::dismiss_prompt()` shape, or write the full record: `{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}`.
+- vhs `Output` and `Screenshot` paths MUST be **quoted** when they contain `/` or `-` (e.g. any `/tmp/ainb-...` path) — otherwise vhs's parser splits on them and the tape fails to compile. `Key@500ms` repeat-with-delay syntax is `Type`-only; for nav keys use `Down` + `Sleep`.
+
 A journey is unverified until a human-or-agent has *read its frames* and confirmed the content. "Non-blank == pass" is a failure of this gate.
 
 ### G4 — Fix loop

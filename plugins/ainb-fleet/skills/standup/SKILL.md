@@ -3,9 +3,10 @@ name: ainb-fleet:standup
 description: |
   Show fleet status — every claude session running on the host, merged
   across ainb + claude-peers broker + background jobs. Use when you need
-  to enumerate sessions before composing an action, see which sessions
-  have a peer registered (broker-routable) vs tmux-only, check the
-  `summary` of each session, or pipe the list into jq for filtering.
+  to enumerate sessions before composing an action, check the `summary`
+  of each session, or pipe the list into jq for filtering. (Writes go
+  via tmux by default; a `peer_id` is just an extra discovery signal /
+  fallback channel, not a routing requirement.)
   Default output: text table. Pass --format json for LLM consumption.
 version: "0.1.0"
 user-invocable: true
@@ -29,7 +30,12 @@ by cwd.
 ```bash
 ainb fleet standup                       # text table (default)
 ainb fleet --format json standup         # JSON for piping
+ainb fleet standup --no-enrich           # 0-token roster (env AINB_FLEET_ENRICH=0)
 ```
+
+The workflow-backed briefing (`/ainb-fleet:hangar` verb=standup) drafts the
+per-session "what it's doing" lines in a **single batched agent**, not one per
+session. `--no-enrich` skips that entirely.
 
 ## Output fields (JSON)
 
@@ -58,7 +64,12 @@ ainb fleet --format json standup | jq -r '.[].tmux_session // .workspace_name'
 ainb fleet --format json standup | jq '.[] | select(.cwd | contains("shotclubhouse"))'
 ```
 
-**Only sessions with peer registration (broker-routable):**
+**Sessions reachable by the default tmux transport:**
+```bash
+ainb fleet --format json standup | jq '.[] | select(.tmux_session != null)'
+```
+
+**Sessions with a broker peer (fallback-routable):**
 ```bash
 ainb fleet --format json standup | jq '.[] | select(.peer_id != null)'
 ```

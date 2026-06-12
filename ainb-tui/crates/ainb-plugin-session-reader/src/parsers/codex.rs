@@ -62,7 +62,9 @@ struct CodexTokenUsage {
 pub fn parse_dir(sessions_root: &Path) -> Vec<ProviderCall> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        parse_dir_cached(sessions_root, &mut None)
+        let mut cache = None;
+        let mut ctx = crate::scanner::ScanCtx::full(&mut cache);
+        parse_dir_cached(sessions_root, &mut ctx)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -77,10 +79,10 @@ pub fn parse_dir(sessions_root: &Path) -> Vec<ProviderCall> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_dir_cached(
     sessions_root: &Path,
-    cache: &mut Option<crate::cache::UsageCache>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
 ) -> Vec<ProviderCall> {
     let mut reporter = crate::scanner::ProgressReporter::noop();
-    parse_dir_cached_with_progress(sessions_root, cache, &mut reporter)
+    parse_dir_cached_with_progress(sessions_root, ctx, &mut reporter)
 }
 
 /// Cache + progress-aware walk. Drives `reporter.note_file` once per
@@ -90,7 +92,7 @@ pub fn parse_dir_cached(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_dir_cached_with_progress(
     sessions_root: &Path,
-    cache: &mut Option<crate::cache::UsageCache>,
+    ctx: &mut crate::scanner::ScanCtx<'_>,
     reporter: &mut crate::scanner::ProgressReporter,
 ) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
@@ -146,7 +148,7 @@ pub fn parse_dir_cached_with_progress(
                     }
                     let path_str = path.to_string_lossy().into_owned();
                     reporter.note_file(&day_label);
-                    let file_calls = super::read_file_cached(&path, cache, |content| {
+                    let file_calls = super::read_file_cached(&path, ctx, |content| {
                         if !is_valid_codex_session(content) {
                             return Vec::new();
                         }

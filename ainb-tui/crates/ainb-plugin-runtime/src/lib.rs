@@ -53,7 +53,8 @@ pub use types::{
 // crate directly. Single source of truth still lives in the protocol
 // crate — these are passthrough only.
 pub use ainb_plugin_protocol::params::{
-    HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent,
-    KeyKind, Viewport,
+    HandleKeyParams, HandleMouseParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER,
+    KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Viewport,
 };
+pub use ainb_plugin_protocol::topics;
 pub use ainb_plugin_protocol::wire_buffer::WireBuffer;

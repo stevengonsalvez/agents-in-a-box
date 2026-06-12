@@ -18,8 +18,8 @@
 //! - `count`  → prints the number of stream events received.
 
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Coord, HandleEventParams, HostClient, LogLevel, Plugin, RenderParams, Result,
-    Server, WireBuffer,
+    Cell, CliOutput, Coord, HandleEventParams, HostClient, InitContext, LogLevel, Plugin,
+    RenderParams, Result, Server, WireBuffer,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ impl Plugin for A15 {
         )
     }
 
-    async fn on_init(&mut self, host: &HostClient, _caps: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // Unique topic per process so parallel canaries never collide.
         let topic = format!("workspace:cts-canary-{}", std::process::id());
         // Tolerate a denied subscribe: the cap-omitted host-test variant

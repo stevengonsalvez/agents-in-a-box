@@ -79,6 +79,11 @@ pub(crate) struct HandleInner {
     /// sequence works regardless of which `RuntimeHandle` queued the
     /// keystroke.
     pub(crate) key_generation: Arc<AtomicU64>,
+    /// Monotonic counter the host bumps once per `send_mouse` call.
+    /// Parallel to [`Self::key_generation`]; stamped into
+    /// `HandleMouseParams.generation` as the same kind of freshness
+    /// witness for forwarded mouse events.
+    pub(crate) mouse_generation: Arc<AtomicU64>,
 }
 
 /// Send + Clone runtime façade. The TUI thread should hold one of
@@ -252,6 +257,21 @@ impl RuntimeHandle {
         self.inner.snapshots.payload(&Topic::from(topic))
     }
 
+    /// Read a snapshot payload plus its monotonic store version and the
+    /// publisher's plugin id.
+    ///
+    /// The version lets pollers act once per publish — track the last
+    /// version seen and only react when it advances. The publisher is
+    /// the id the per-plugin task stamped at publish time (never
+    /// payload-self-reported), so consumers of host-semantic topics can
+    /// reject publishes from plugins that don't own the resource named
+    /// in the payload. Used by the host's event loop to consume
+    /// `ui.close_request` publishes without a subscriber channel.
+    #[must_use]
+    pub fn snapshot_get_versioned(&self, topic: &str) -> Option<(Bytes, u64, PluginId)> {
+        self.inner.snapshots.get(&Topic::from(topic))
+    }
+
     /// Forward a single normalized key event to the plugin owning the
     /// focused screen. Non-blocking — the per-plugin tokio task picks
     /// the command up off its mpsc inbox and writes the
@@ -292,11 +312,50 @@ impl RuntimeHandle {
         handle.key_inbox.send(params).is_ok()
     }
 
+    /// Forward a single normalized mouse event to the plugin owning the
+    /// focused screen. Non-blocking — mirrors [`Self::send_key`]: the
+    /// per-plugin tokio task picks it off the priority mouse inbox and
+    /// writes the `plugin/handle_mouse` notification frame.
+    ///
+    /// `mouse.col`/`mouse.row` MUST already be translated into the
+    /// plugin's viewport coordinate space by the caller (the host's
+    /// mouse forwarder subtracts the screen origin).
+    ///
+    /// Returns `false` if the plugin is unknown or the task is gone; the
+    /// event is dropped in either case (mouse events, like keys, tolerate
+    /// loss).
+    pub fn send_mouse(
+        &self,
+        plugin_id: &PluginId,
+        screen_id: impl Into<String>,
+        mouse: ainb_plugin_protocol::params::MouseEvent,
+    ) -> bool {
+        let Some(handle) = self.lookup(plugin_id) else {
+            return false;
+        };
+        let generation = self.inner.mouse_generation.fetch_add(1, Ordering::Relaxed);
+        let params = ainb_plugin_protocol::params::HandleMouseParams {
+            screen_id: screen_id.into(),
+            mouse,
+            generation,
+        };
+        // Mark dirty BEFORE enqueue (same race-avoidance as `send_key`).
+        handle.render_dirty.store(true, Ordering::Release);
+        handle.mouse_inbox.send(params).is_ok()
+    }
+
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
-    /// fan-out happens on the tokio runtime.
+    /// fan-out happens on the tokio runtime. Stamped with the reserved
+    /// [`crate::snapshot::HOST_PUBLISHER`] id — both discovery and
+    /// `Runtime::register` refuse a plugin named `host`, so the stamp is
+    /// unforgeable on every registration path.
     pub fn publish_snapshot(&self, topic: &str, payload: Bytes) -> u64 {
         let topic_owned = Topic::from(topic);
-        let v = self.inner.snapshots.publish(topic_owned.clone(), payload.clone());
+        let v = self.inner.snapshots.publish(
+            topic_owned.clone(),
+            payload.clone(),
+            PluginId::from(crate::snapshot::HOST_PUBLISHER),
+        );
         let subs = self.inner.snapshots.subscribers(&topic_owned);
         if subs.is_empty() {
             return v;
@@ -409,49 +468,84 @@ impl RuntimeHandle {
     where
         F: Fn(&RegisteredPlugin) -> bool,
     {
+        self.discover_filtered_with_config(root, filter, |_| serde_json::Value::Null)
+    }
+
+    /// Like [`Self::discover_filtered`], but resolves each kept plugin's
+    /// per-plugin config via `config_for` (the host maps `plugins.values[id]`
+    /// → JSON) and stamps it onto the [`RegisteredPlugin`] before registration.
+    /// The runtime forwards that config into `PluginInitParams.config` at
+    /// `plugin/init`. Plugins for which `config_for` returns JSON `null` behave
+    /// exactly as before — this is a strict superset of `discover_filtered`.
+    pub fn discover_filtered_with_config<F, C>(
+        &self,
+        root: &Path,
+        filter: F,
+        mut config_for: C,
+    ) -> Result<Vec<RegisteredPlugin>, RuntimeError>
+    where
+        F: Fn(&RegisteredPlugin) -> bool,
+        C: FnMut(&RegisteredPlugin) -> serde_json::Value,
+    {
         let discovered = crate::registry::discover(root)?;
-        let kept: Vec<RegisteredPlugin> = discovered.into_iter().filter(&filter).collect();
+        let kept: Vec<RegisteredPlugin> = discovered
+            .into_iter()
+            .filter(&filter)
+            .map(|p| {
+                let config = config_for(&p);
+                p.with_config(config)
+            })
+            .collect();
         for p in &kept {
-            self.inner.channels.register(p.clone());
-            let arc = Arc::new(p.clone());
-            let eager = matches!(
-                arc.manifest.lifecycle.spawn,
-                ainb_plugin_protocol::manifest::SpawnMode::Eager
-            );
-            let (inbox, key_inbox, cache, state) = crate::plugin_task::spawn(
-                arc.clone(),
-                self.inner.snapshots.clone(),
-                self.inner.inboxes.clone(),
-                self.inner.dirty.clone(),
-                self.inner.event_streams.clone(),
-                self.inner.managed_subprocess.clone(),
-                self.inner.unix_sockets.clone(),
-                self.inner.secret_backend.clone(),
-                self.inner.workspace_store.clone(),
-                self.inner.log_tap.clone(),
-                self.inner.config,
-                &self.inner.tokio,
-            );
-            if eager {
-                let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
-            }
-            self.inner.inboxes.write().insert(arc.id.clone(), inbox.clone());
-            // Start dirty so the first paint after registration kicks a render.
-            let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            self.inner.dirty.write().insert(arc.id.clone(), render_dirty.clone());
-            self.inner.plugins.write().insert(
-                arc.id.clone(),
-                Arc::new(PluginHandle {
-                    inbox,
-                    key_inbox,
-                    cache,
-                    state,
-                    plugin: arc,
-                    render_dirty,
-                }),
-            );
+            self.register_kept(p.clone());
         }
         Ok(kept)
+    }
+
+    /// Register one already-discovered (and config-stamped) plugin: route its
+    /// actions, spawn its per-plugin task, wire its inbox + dirty flag, and
+    /// store its [`PluginHandle`]. Shared by every discovery entry point so the
+    /// registration contract has a single definition.
+    fn register_kept(&self, plugin: RegisteredPlugin) {
+        self.inner.channels.register(plugin.clone());
+        let arc = Arc::new(plugin);
+        let eager = matches!(
+            arc.manifest.lifecycle.spawn,
+            ainb_plugin_protocol::manifest::SpawnMode::Eager
+        );
+        let (inbox, key_inbox, mouse_inbox, cache, state) = crate::plugin_task::spawn(
+            arc.clone(),
+            self.inner.snapshots.clone(),
+            self.inner.inboxes.clone(),
+            self.inner.dirty.clone(),
+            self.inner.event_streams.clone(),
+            self.inner.managed_subprocess.clone(),
+            self.inner.unix_sockets.clone(),
+            self.inner.secret_backend.clone(),
+            self.inner.workspace_store.clone(),
+            self.inner.log_tap.clone(),
+            self.inner.config,
+            &self.inner.tokio,
+        );
+        if eager {
+            let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
+        }
+        self.inner.inboxes.write().insert(arc.id.clone(), inbox.clone());
+        // Start dirty so the first paint after registration kicks a render.
+        let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.inner.dirty.write().insert(arc.id.clone(), render_dirty.clone());
+        self.inner.plugins.write().insert(
+            arc.id.clone(),
+            Arc::new(PluginHandle {
+                inbox,
+                key_inbox,
+                mouse_inbox,
+                cache,
+                state,
+                plugin: arc,
+                render_dirty,
+            }),
+        );
     }
 
     /// Reload (clear quarantine + failure history).

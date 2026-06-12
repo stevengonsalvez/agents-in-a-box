@@ -20,11 +20,17 @@ cd "$(dirname "$0")/.."
 
 PROFILE="dev"
 PROFILE_DIR="debug"
+TARGET=""
 for arg in "$@"; do
     case "$arg" in
         --release)
             PROFILE="release"
             PROFILE_DIR="release"
+            ;;
+        --target=*)
+            # Cross-compile triple (e.g. x86_64-apple-darwin). Cargo
+            # writes to target/<triple>/<profile> when set.
+            TARGET="${arg#*=}"
             ;;
         *)
             printf 'unknown arg: %s\n' "$arg" >&2
@@ -50,14 +56,15 @@ build_plugin() {
     local crate="$1"
     local plugin_id="$2"
 
-    cargo build -p "$crate" --profile "$PROFILE"
+    cargo build -p "$crate" --profile "$PROFILE" ${TARGET:+--target "$TARGET"}
 
     local out_dir="dist/plugins/$plugin_id"
     mkdir -p "$out_dir"
 
     # Cargo binary name == crate name. Staged binary name == plugin id
-    # (the runtime probes <root>/<id>/<id>).
-    cp "target/$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
+    # (the runtime probes <root>/<id>/<id>). Cross-compiles land under
+    # target/<triple>/<profile>.
+    cp "target/${TARGET:+$TARGET/}$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
     resign_macos "$out_dir/$plugin_id"
 
     # The manifest lives next to the crate. Most plugin crates are under
@@ -89,6 +96,8 @@ build_plugin() {
 build_plugin ainb-plugin-burndown burndown
 build_plugin ainb-plugin-session-reader session-reader
 build_plugin ainb-plugin-witr witr
+build_plugin ainb-plugin-learnings learnings
+build_plugin ainb-plugin-abtop abtop
 # The Hangar control-plane plugin (P4.10). The crate is `ainb-plugin-hangar`
 # but its manifest `[plugin].name` — and therefore the discovered plugin id and
 # the host `PLUGIN_SCREENS` routing entry — is `hangar-tui`, so it stages under
