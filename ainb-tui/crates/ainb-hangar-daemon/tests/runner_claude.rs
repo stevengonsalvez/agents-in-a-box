@@ -132,6 +132,58 @@ async fn exec_captures_exit_code() {
 }
 
 #[tokio::test]
+async fn exec_captures_usage_from_result_line() {
+    // e38.35: the runner parses the final `{"type":"result",...}` JSONL line's
+    // `usage` (input/output tokens) + `total_cost_usd` so the usage dashboard can
+    // roll them up. A run that reports usage lands a `Some(ProviderUsage)` on the
+    // captured result; a run with no result-usage lands `None`.
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-claude.sh",
+        r#"echo '{"type":"system","session_id":"abc-123"}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0231,"usage":{"input_tokens":1200,"output_tokens":340}}'
+exit 0"#,
+    );
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let usage = outcome.result().usage.clone().expect("usage captured from result line");
+    assert_eq!(usage.input_tokens, 1200);
+    assert_eq!(usage.output_tokens, 340);
+    assert!((usage.cost_usd - 0.0231).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn exec_no_result_usage_leaves_usage_none() {
+    // A provider run whose result line carries no `usage` (or no result line at
+    // all) leaves `usage` as `None` — the dashboard simply records nothing for it.
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = fake_claude_happy(tmp.path());
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    assert!(
+        outcome.result().usage.is_none(),
+        "a result line without usage leaves usage None"
+    );
+}
+
+#[tokio::test]
 async fn exec_nonzero_exit_marks_agent_error() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());

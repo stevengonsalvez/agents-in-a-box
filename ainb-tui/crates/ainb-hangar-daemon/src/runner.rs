@@ -122,14 +122,38 @@ pub struct RunnerConfig {
     pub sandbox: bool,
 }
 
+/// Token/cost usage parsed from a provider's final `result` JSONL line (e38.35).
+///
+/// The agent CLI (claude / codex) emits a terminal `{"type":"result",…}` line
+/// carrying a `usage` object (input/output tokens) and `total_cost_usd`. The
+/// runner pins it the way it pins `session_id`, so the daemon can persist it at
+/// the finalize seam and the usage dashboard can roll it up. A run that reports
+/// no result-usage leaves [`RunnerResult::usage`] as `None`.
+///
+/// Carries an `f64` cost, so it is `PartialEq` only (no `Eq`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderUsage {
+    /// Prompt/input tokens the provider reported.
+    pub input_tokens: i64,
+    /// Completion/output tokens the provider reported.
+    pub output_tokens: i64,
+    /// Total cost in US dollars the provider reported (0 when none reported).
+    pub cost_usd: f64,
+}
+
 /// The captured result of one provider run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Holds an `f64` cost via [`ProviderUsage`], so it is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunnerResult {
     /// Process exit code, or `None` if the process was killed by signal/timeout.
     pub exit_code: Option<i32>,
     /// The first `session_id` parsed from a `{"type":"system",...}` JSONL line,
     /// or `None` if the provider emitted none.
     pub session_id: Option<String>,
+    /// Token/cost usage parsed from the final `{"type":"result",...}` JSONL line,
+    /// or `None` if the provider reported none (e38.35).
+    pub usage: Option<ProviderUsage>,
     /// Trailing stdout lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
     pub stdout_tail: String,
     /// Trailing stderr lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
@@ -137,7 +161,9 @@ pub struct RunnerResult {
 }
 
 /// How a provider run finished, ready for the daemon to map onto the task FSM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Holds an `f64` cost via [`RunnerResult`], so it is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
 pub enum RunOutcome {
     /// The provider exited cleanly (code 0). The daemon should `CompleteTask`.
     Success(RunnerResult),
@@ -169,6 +195,31 @@ struct SystemLine {
     kind: String,
     #[serde(default)]
     session_id: Option<String>,
+}
+
+/// A `result`-type JSONL line, decoded to pin token/cost usage (e38.35).
+///
+/// The agent CLI's terminal `{"type":"result",…}` line carries a `usage` object
+/// and `total_cost_usd`. Every field is `#[serde(default)]` so a result line that
+/// omits usage (or a future shape change) decodes to zeros rather than failing
+/// the whole run.
+#[derive(Debug, Deserialize)]
+struct ResultLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    total_cost_usd: f64,
+    #[serde(default)]
+    usage: Option<UsageBlock>,
+}
+
+/// The `usage` sub-object of a [`ResultLine`]: the token tallies (e38.35).
+#[derive(Debug, Default, Deserialize)]
+struct UsageBlock {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
 }
 
 /// Which provider exec path the daemon routes a task to (e38.16).
@@ -525,7 +576,7 @@ impl Runner {
             }
         };
 
-        let (session_id, stdout_tail) = stdout_task
+        let (session_id, usage, stdout_tail) = stdout_task
             .await
             .map_err(|e| std::io::Error::other(format!("stdout task join: {e}")))??;
         let stderr_tail = stderr_task
@@ -545,6 +596,7 @@ impl Runner {
         let result = RunnerResult {
             exit_code,
             session_id,
+            usage,
             stdout_tail,
             stderr_tail,
         };
@@ -583,18 +635,22 @@ impl Runner {
 }
 
 /// Read the child's stdout line-by-line, appending each line to `log_file`,
-/// pinning the first `system` line's `session_id`, and retaining a bounded tail.
+/// pinning the first `system` line's `session_id` and the last `result` line's
+/// token/cost `usage` (e38.35), and retaining a bounded tail.
 ///
-/// Returns `(first_session_id, stdout_tail)`.
+/// Returns `(first_session_id, last_usage, stdout_tail)`. The usage is taken from
+/// the LAST `result` line (a multi-result stream's final tally wins), mirroring
+/// how `session_id` takes the FIRST `system` line.
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
     mut log_file: std::fs::File,
     tail_lines: usize,
-) -> std::io::Result<(Option<String>, String)> {
+) -> std::io::Result<(Option<String>, Option<ProviderUsage>, String)> {
     use std::io::Write;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut session_id: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     while let Some(line) = reader.next_line().await? {
@@ -608,10 +664,30 @@ async fn stream_stdout(
                 }
             }
         }
+        // Pin token/cost usage from a `result` line. The last result line wins so
+        // a stream that ends with a corrected tally reflects the final figure. A
+        // result line that reports neither tokens nor cost (e.g. a bare
+        // `{"type":"result","content":"ok"}`) carries nothing to record, so it
+        // leaves `usage` as `None`.
+        if let Ok(parsed) = serde_json::from_str::<ResultLine>(&line) {
+            if parsed.kind == "result" {
+                let block = parsed.usage.unwrap_or_default();
+                let reported = block.input_tokens != 0
+                    || block.output_tokens != 0
+                    || parsed.total_cost_usd != 0.0;
+                if reported {
+                    usage = Some(ProviderUsage {
+                        input_tokens: block.input_tokens,
+                        output_tokens: block.output_tokens,
+                        cost_usd: parsed.total_cost_usd,
+                    });
+                }
+            }
+        }
         push_tail(&mut tail, line, tail_lines);
     }
     log_file.flush()?;
-    Ok((session_id, join_tail(tail)))
+    Ok((session_id, usage, join_tail(tail)))
 }
 
 /// Read a child pipe to EOF, retaining only a bounded trailing tail.
