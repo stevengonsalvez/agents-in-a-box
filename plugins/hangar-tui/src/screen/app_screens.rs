@@ -17,7 +17,7 @@ use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, Task
 use ainb_hangar_proto::settings::{
     DaemonHealthSnapshot, HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow,
 };
-use ainb_hangar_proto::snapshots::MemberWireRow;
+use ainb_hangar_proto::snapshots::{MemberWireRow, UsageRollupResult};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{
@@ -37,6 +37,7 @@ use super::skill_manager::{
     reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
 };
 use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailIntent, TaskDetailState};
+use super::usage_dashboard::UsageState;
 use super::{AppState, Screen};
 
 /// A deferred host-cap action raised by the Settings Workspace pane (P5.5).
@@ -194,6 +195,8 @@ pub struct ScreenStates {
     pub kanban: KanbanState,
     /// Daemon-health screen cache (P8.5), built from `hangar/daemon_health`.
     pub daemon_health: DaemonHealthState,
+    /// Usage-dashboard screen cache (e38.35), built from `hangar/usage_rollup`.
+    pub usage: UsageState,
     /// Logs-tail screen cache (P8.6), filled by reading the newest `daemon.*`
     /// structured-log file directly from disk (no daemon RPC).
     pub logs: LogsState,
@@ -295,6 +298,12 @@ impl ScreenStates {
     /// (P8.5).
     pub fn set_daemon_health(&mut self, snap: DaemonHealthSnapshot) {
         self.daemon_health = DaemonHealthState::from_snapshot(snap);
+    }
+
+    /// Rebuild the usage dashboard from a `hangar/usage_rollup` snapshot
+    /// (e38.35).
+    pub fn set_usage(&mut self, rollup: UsageRollupResult) {
+        self.usage = UsageState::from_rollup(rollup);
     }
 
     /// Replace the logs-tail rows from a fresh read of the `daemon.*` file
@@ -517,6 +526,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::DaemonHealth => {
             super::daemon_health::render_daemon_health(buf, w, top, bottom, &states.daemon_health);
+        }
+        Screen::Usage => {
+            super::usage_dashboard::render_usage(buf, w, top, bottom, &states.usage);
         }
         Screen::Logs => {
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
@@ -742,9 +754,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             None
         }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
-        // pane (P8.5) and the help overlay (the `D`/`?` tab-switch + global keys
-        // are handled by the router before reaching here).
-        Screen::DaemonHealth | Screen::Help => None,
+        // pane (P8.5), the usage dashboard (e38.35), and the help overlay (the
+        // `D`/`U`/`?` tab-switch + global keys are handled by the router before
+        // reaching here).
+        Screen::DaemonHealth | Screen::Usage | Screen::Help => None,
     }
 }
 

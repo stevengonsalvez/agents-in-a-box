@@ -52,6 +52,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'K' => switch_tab(state, Screen::Kanban),
         // `D` (capital) opens the daemon-health pane from anywhere (P8.5).
         'D' => switch_tab(state, Screen::DaemonHealth),
+        // `U` (capital) opens the usage dashboard from anywhere (e38.35).
+        'U' => switch_tab(state, Screen::Usage),
         // `L` (capital) opens the logs-tail pane from anywhere (P8.6).
         'L' => switch_tab(state, Screen::Logs),
         // `I` (capital) opens the notification inbox from anywhere (e38.14).

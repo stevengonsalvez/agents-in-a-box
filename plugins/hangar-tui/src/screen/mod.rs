@@ -27,6 +27,7 @@ mod router;
 pub mod settings;
 pub mod skill_manager;
 pub mod task_detail;
+pub mod usage_dashboard;
 
 pub use app_screens::{
     render_body, route_key, AutopilotAction, IssueAssignAction, IssueCommentAction,
@@ -61,6 +62,9 @@ pub enum Screen {
     /// Daemon health (hotkey `D`) — runtimes, claim cache, concurrency, and the
     /// dual-dim throughput sparkline (P8.5).
     DaemonHealth,
+    /// Usage dashboard (hotkey `U`) — total token/cost + a per-agent rollup,
+    /// backed by `hangar/usage_rollup` (e38.35).
+    Usage,
     /// Logs tail (hotkey `L`) — a read-only, level-filterable view over the
     /// daemon's structured JSON log file (P8.6).
     Logs,
@@ -90,6 +94,7 @@ impl Screen {
             Self::Autopilots => "Autopilots",
             Self::Kanban => "Kanban",
             Self::DaemonHealth => "Daemon",
+            Self::Usage => "Usage",
             Self::Logs => "Logs",
             Self::Inbox => "Inbox",
             Self::Settings => "Settings",
