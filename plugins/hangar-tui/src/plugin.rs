@@ -118,6 +118,9 @@ const INBOX_MARK_READ_REQ_ID: i64 = 30;
 /// JSON-RPC id for a `hangar/search` request raised by the command palette
 /// (e38.13).
 const SEARCH_REQ_ID: i64 = 31;
+/// JSON-RPC id for the `hangar/usage_rollup` snapshot request feeding the usage
+/// dashboard (e38.35).
+const USAGE_ROLLUP_REQ_ID: i64 = 32;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -524,6 +527,7 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
+            RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
@@ -658,6 +662,19 @@ impl HangarPlugin {
         }
     }
 
+    /// Populate the usage dashboard from a `hangar/usage_rollup` result (e38.35):
+    /// the grand token/cost totals + the per-agent breakdown.
+    fn apply_usage(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(rollup) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::UsageRollupResult,
+            >(result.clone())
+            {
+                self.screens.set_usage(rollup);
+            }
+        }
+    }
+
     /// Re-read the daemon's structured-log file into the logs pane (P8.6).
     ///
     /// Resolves the log dir the same way the daemon writes it
@@ -780,9 +797,10 @@ impl HangarPlugin {
         }
     }
 
-    /// Fire the four `hangar/*` snapshot requests over the daemon stream, framed
-    /// for the cap. A send failure is logged but non-fatal — the screens simply
-    /// stay empty until the next subscribe.
+    /// Fire every `hangar/*` snapshot request over the daemon stream, framed for
+    /// the cap (one per landing screen — issues, agents, skills, autopilots,
+    /// tasks, daemon-health, usage, members, health). A send failure is logged but
+    /// non-fatal — the screens simply stay empty until the next subscribe.
     async fn fetch_snapshots(&mut self, host: &HostClient) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
@@ -818,6 +836,11 @@ impl HangarPlugin {
             (
                 DAEMON_HEALTH_REQ_ID,
                 daemon_methods::HANGAR_DAEMON_HEALTH,
+                scoped.clone(),
+            ),
+            (
+                USAGE_ROLLUP_REQ_ID,
+                daemon_methods::HANGAR_USAGE_ROLLUP,
                 scoped.clone(),
             ),
             (

@@ -107,10 +107,11 @@ where
         host_write
             .write_all(&host_frame(&serde_json::json!({
                 "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
-                // 120 cols so the right-cluster presence dot fits alongside the
-                // six-tab strip (P8.4 added the Kanban tab); at the 80-col floor
-                // the cluster yields to the tabs and `online` would not render.
-                "params": { "viewport": {"width": 120, "height": 24}, "generation": 0 }
+                // 140 cols so the right-cluster presence dot fits alongside the
+                // ten-tab strip (e38.35 added the Usage tab, ~108 cols); the tabs
+                // win width contention, so at a narrower width the cluster yields
+                // to the tabs and `online` would not render.
+                "params": { "viewport": {"width": 140, "height": 24}, "generation": 0 }
             })))
             .await
             .unwrap();
