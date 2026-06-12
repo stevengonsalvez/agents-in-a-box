@@ -163,6 +163,20 @@ pub struct HangarPlugin {
     /// [`RecordingOpener`] for the tmux tripwire — see [`crate::shell`]). Held as
     /// a trait object so tests can inject a recording opener.
     opener: Box<dyn crate::shell::Opener>,
+    /// The host-shell daemon starter used by the offline `[s]` action (e38.36).
+    /// Defaults to the real [`SystemDaemonStarter`](crate::shell::SystemDaemonStarter)
+    /// (or, when `$HANGAR_DAEMON_START_PROBE_FILE` is set, a
+    /// [`RecordingDaemonStarter`](crate::shell::RecordingDaemonStarter)). Held as
+    /// a trait object so tests can inject a recording/failing starter.
+    daemon_starter: Box<dyn crate::shell::DaemonStarter>,
+    /// Set when the user pressed `[s]` while the daemon link was offline (e38.36).
+    /// The host-shell start + re-dial can't run inline in `handle_key` (it would
+    /// deadlock the reader loop), so it is deferred and drained in `render`.
+    start_daemon_pending: bool,
+    /// The message from the last failed `[s]` start attempt (e38.36), surfaced in
+    /// the offline empty-state so a start failure is visible rather than silent.
+    /// `None` once a start succeeds or while none has been attempted.
+    daemon_start_error: Option<String>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -193,6 +207,9 @@ impl Default for HangarPlugin {
             pending_detail_slug: None,
             pending_runs_autopilot: None,
             opener: crate::shell::default_opener(),
+            daemon_starter: crate::shell::default_daemon_starter(),
+            start_daemon_pending: false,
+            daemon_start_error: None,
         }
     }
 }
@@ -212,6 +229,20 @@ impl HangarPlugin {
     pub fn with_opener(opener: Box<dyn crate::shell::Opener>) -> Self {
         Self {
             opener,
+            ..Self::default()
+        }
+    }
+
+    /// Construct a plugin with a custom
+    /// [`DaemonStarter`](crate::shell::DaemonStarter) for the offline `[s]`
+    /// action (e38.36). Used by tests to inject a
+    /// [`RecordingDaemonStarter`](crate::shell::RecordingDaemonStarter) /
+    /// [`FailingDaemonStarter`](crate::shell::FailingDaemonStarter) so the start
+    /// is observable without launching a real daemon.
+    #[must_use]
+    pub fn with_daemon_starter(daemon_starter: Box<dyn crate::shell::DaemonStarter>) -> Self {
+        Self {
+            daemon_starter,
             ..Self::default()
         }
     }
@@ -238,6 +269,58 @@ impl HangarPlugin {
             | ConnState::Dialing
             | ConnState::Handshake
             | ConnState::Error(_) => Presence::Offline,
+        }
+    }
+
+    /// Whether the offline empty-state + `[s]` start action apply (e38.36).
+    ///
+    /// True only for the genuinely-down link states (`Disconnected` / `Error`),
+    /// NOT the transient `Dialing` / `Handshake` mid-connect states: showing the
+    /// "daemon offline, press [s]" panel while a dial is in flight would flicker
+    /// the guidance over a link that is about to come up. The presence DOT still
+    /// reads offline during those transients (via [`Self::presence`]); only the
+    /// full-screen guidance panel + the `[s]` binding are gated on this stricter
+    /// "really down" predicate.
+    const fn is_offline(state: &ConnState) -> bool {
+        matches!(state, ConnState::Disconnected | ConnState::Error(_))
+    }
+
+    /// Shell `ainb hangar daemon start` via the
+    /// [`DaemonStarter`](crate::shell::DaemonStarter) seam (e38.36).
+    ///
+    /// Returns `true` when the start succeeded (the caller should then re-dial),
+    /// `false` on a spawn failure — in which case the error is recorded in
+    /// `daemon_start_error` (surfaced in the empty-state) so it is visible rather
+    /// than silent. Host-free so the start dispatch is unit-testable; the re-dial
+    /// (which needs the [`HostClient`]) is the caller's concern.
+    fn try_start_daemon(&mut self) -> bool {
+        match self.daemon_starter.start() {
+            Ok(()) => {
+                self.daemon_start_error = None;
+                true
+            }
+            Err(e) => {
+                self.daemon_start_error = Some(format!("start failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Run the deferred offline `[s]` start: shell `ainb hangar daemon start`,
+    /// then re-dial so the link flips online once the socket appears (e38.36).
+    ///
+    /// On a spawn failure the re-dial is skipped (the error is already recorded by
+    /// [`Self::try_start_daemon`]) — best-effort, never a panic. On success the
+    /// prior error is cleared and `connect` re-runs the dial/auth/subscribe
+    /// handshake.
+    async fn start_daemon_and_redial(&mut self, host: &HostClient) {
+        if self.try_start_daemon() {
+            let _ = host
+                .log_info("hangar: [s] started daemon, re-dialing")
+                .await;
+            self.connect(host).await;
+        } else if let Some(msg) = &self.daemon_start_error {
+            let _ = host.log_info(format!("hangar: {msg}")).await;
         }
     }
 
@@ -1067,6 +1150,57 @@ impl HangarPlugin {
         self.screens.set_workspaces(rows);
     }
 
+    /// Compose the full render frame into a fresh [`WireBuffer`] (the pure,
+    /// host-free tail of [`Plugin::render`]).
+    ///
+    /// Paints the shared chrome (top bar + body + footer), then overlays the
+    /// e38.36 offline empty-state when the daemon link is genuinely down, then the
+    /// P5.6 first-run danger modal (top-most). Split out so the offline-overlay
+    /// branch is unit-testable without a [`HostClient`] — the async `render` only
+    /// drains deferred host IO and then delegates here.
+    fn compose_frame(&mut self, w: u16, h: u16) -> WireBuffer {
+        let mut buf = WireBuffer::new(w, h);
+
+        // Shared chrome (P4.1): top tab bar on row 0, contextual footer on the
+        // last row. The active screen body (rows 1..h-1) is filled by the
+        // per-screen renderers (P4.3..P4.7) dispatched via `render_body`.
+        let presence = Self::presence(self.conn.state());
+        let app = self.app_state().clone();
+        // Display the active workspace's slug, not its raw ULID id: after a
+        // switch `ws_id` holds the ULID, so resolve it back to the slug via the
+        // cached workspace catalogue (falling back to the id when unknown).
+        let ws_slug = self
+            .screens
+            .workspace_rows
+            .iter()
+            .find(|r| r.id == app.ws_id.as_str())
+            .map_or_else(|| app.ws_id.as_str().to_string(), |r| r.slug.clone());
+        render_top_bar(&mut buf, w, &app.screen, &ws_slug, presence);
+        render_body(&mut buf, w, h, &app, &self.screens);
+        render_footer(&mut buf, w, h, &app.screen);
+        // e38.36: when the daemon link is genuinely down (Disconnected/Error) the
+        // body is an empty void (all-zero counts, no rows). Overlay the offline
+        // empty-state panel so the landing explains the daemon is offline and
+        // offers BOTH the one-key `[s] start daemon` action AND the literal
+        // `ainb hangar daemon start` command, instead of reading as broken. The
+        // panel sits ABOVE the body but BELOW the first-run modal (which stays the
+        // top-most overlay on a fresh machine).
+        if Self::is_offline(self.conn.state()) {
+            crate::widgets::offline_empty_state::render_offline_empty_state(
+                &mut buf,
+                w,
+                h,
+                self.daemon_start_error.as_deref(),
+            );
+        }
+        // P5.6: the first-run danger-full-access modal overlays everything (last
+        // write wins on the sparse buffer) until the user accepts.
+        if self.first_run.is_showing() {
+            crate::widgets::danger_access_modal::render_danger_access_modal(&mut buf, w, h);
+        }
+        buf
+    }
+
     /// Fold a forwarded key: tab-switch / modal keys go through the routing
     /// reducer ([`crate::screen::reduce`]); everything else routes to the active
     /// screen's reducer via [`route_key`], whose cross-screen [`NavIntent`]s
@@ -1089,6 +1223,18 @@ impl HangarPlugin {
                     self.first_run_ack_pending = true;
                 }
             }
+            return;
+        }
+
+        // e38.36: while the daemon link is genuinely down (Disconnected/Error) the
+        // body is the offline empty-state, not a real screen. `[s]` arms the
+        // deferred daemon-start (drained in `render`, where host IO is safe). This
+        // is intercepted BEFORE per-screen routing so it never shadows an online
+        // `s` binding (the Settings/Skills `s` keys are only reachable online); a
+        // held-key repeat is already filtered out by `handle_key`. Every other key
+        // falls through so global nav (tab switches, `q`) still works while offline.
+        if Self::is_offline(self.conn.state()) && key.code == (KeyCode::Char { ch: 's' }) {
+            self.start_daemon_pending = true;
             return;
         }
 
@@ -1303,6 +1449,12 @@ impl Plugin for HangarPlugin {
         if self.screens.take_pending_inbox_mark_read() {
             self.mark_inbox_read(host).await;
         }
+        // e38.36: drain a deferred offline `[s]` daemon-start (armed in
+        // `handle_key`). `render` runs on a spawned task, so the host-shell start
+        // + re-dial handshake (awaiting host caps) can't deadlock the reader loop.
+        if std::mem::take(&mut self.start_daemon_pending) {
+            self.start_daemon_and_redial(host).await;
+        }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
         // skips the warning. An IO fault is logged, not fatal.
@@ -1320,31 +1472,7 @@ impl Plugin for HangarPlugin {
         } else {
             (params.viewport.width, params.viewport.height)
         };
-        let mut buf = WireBuffer::new(w, h);
-
-        // Shared chrome (P4.1): top tab bar on row 0, contextual footer on the
-        // last row. The active screen body (rows 1..h-1) is filled by the
-        // per-screen renderers (P4.3..P4.7) dispatched via `render_body`.
-        let presence = Self::presence(self.conn.state());
-        let app = self.app_state().clone();
-        // Display the active workspace's slug, not its raw ULID id: after a
-        // switch `ws_id` holds the ULID, so resolve it back to the slug via the
-        // cached workspace catalogue (falling back to the id when unknown).
-        let ws_slug = self
-            .screens
-            .workspace_rows
-            .iter()
-            .find(|r| r.id == app.ws_id.as_str())
-            .map_or_else(|| app.ws_id.as_str().to_string(), |r| r.slug.clone());
-        render_top_bar(&mut buf, w, &app.screen, &ws_slug, presence);
-        render_body(&mut buf, w, h, &app, &self.screens);
-        render_footer(&mut buf, w, h, &app.screen);
-        // P5.6: the first-run danger-full-access modal overlays everything (last
-        // write wins on the sparse buffer) until the user accepts.
-        if self.first_run.is_showing() {
-            crate::widgets::danger_access_modal::render_danger_access_modal(&mut buf, w, h);
-        }
-        Ok(buf)
+        Ok(self.compose_frame(w, h))
     }
 
     async fn cli_dispatch(
@@ -1517,5 +1645,161 @@ mod tests {
         };
         p.on_socket_event(&eof);
         assert_eq!(*p.conn.state(), ConnState::Disconnected);
+    }
+
+    // ----- e38.36: offline empty-state + [s] start-daemon -----
+
+    /// Build a `Press` key event for `ch`.
+    fn char_press(ch: char) -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    /// Read the whole composed buffer back to text for assertions.
+    fn buf_text(buf: &WireBuffer, w: u16, h: u16) -> String {
+        let mut grid = vec![vec![' '; w as usize]; h as usize];
+        for (coord, cell) in &buf.cells {
+            if coord.x < w && coord.y < h {
+                if let Some(ch) = cell.symbol.chars().next() {
+                    grid[coord.y as usize][coord.x as usize] = ch;
+                }
+            }
+        }
+        grid.into_iter()
+            .map(|r| r.into_iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// USER-VISIBLE PROOF (render): when the daemon link is offline the composed
+    /// frame shows the offline empty-state — the explanation, the `[s]` hint, and
+    /// the literal `ainb hangar daemon start` command — on the REAL offline
+    /// render branch (`compose_frame`, the host-free tail of `render`).
+    #[test]
+    fn offline_compose_frame_shows_empty_state_panel() {
+        let mut p = HangarPlugin::new();
+        // Default state is Disconnected → offline.
+        assert!(HangarPlugin::is_offline(p.conn.state()));
+        let buf = p.compose_frame(100, 30);
+        let text = buf_text(&buf, 100, 30);
+        assert!(
+            text.contains("daemon offline"),
+            "missing panel title:\n{text}"
+        );
+        assert!(text.contains("[s]"), "missing [s] hint:\n{text}");
+        assert!(
+            text.contains("ainb hangar daemon start"),
+            "missing literal command:\n{text}"
+        );
+        assert!(text.contains("not running"), "missing explanation:\n{text}");
+    }
+
+    /// A failed `[s]` start surfaces the error line in the composed offline frame
+    /// rather than being silent.
+    #[test]
+    fn offline_frame_shows_start_error_when_present() {
+        let mut p = HangarPlugin::new();
+        p.daemon_start_error = Some("start failed: boom".to_string());
+        let buf = p.compose_frame(100, 30);
+        let text = buf_text(&buf, 100, 30);
+        assert!(
+            text.contains("start failed: boom"),
+            "missing error:\n{text}"
+        );
+    }
+
+    /// When CONNECTED the composed frame renders the normal body, NOT the offline
+    /// panel — the panel is strictly gated on the offline branch.
+    #[test]
+    fn connected_compose_frame_omits_empty_state_panel() {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        assert!(p.conn.is_connected());
+        let buf = p.compose_frame(100, 30);
+        let text = buf_text(&buf, 100, 30);
+        assert!(
+            !text.contains("daemon offline"),
+            "panel must not show when connected:\n{text}"
+        );
+    }
+
+    /// The transient mid-connect states keep the panel hidden — only genuinely
+    /// down links (`Disconnected`/`Error`) show it, so a dial-in-flight doesn't
+    /// flicker the guidance.
+    #[test]
+    fn transient_states_do_not_trigger_panel() {
+        assert!(!HangarPlugin::is_offline(&ConnState::Dialing));
+        assert!(!HangarPlugin::is_offline(&ConnState::Handshake));
+        assert!(HangarPlugin::is_offline(&ConnState::Disconnected));
+        assert!(HangarPlugin::is_offline(&ConnState::Error("x".into())));
+    }
+
+    /// USER-VISIBLE PROOF (key dispatch): an `[s]` press while OFFLINE arms the
+    /// deferred daemon-start (the action seam drained in `render`).
+    #[test]
+    fn offline_s_key_arms_start_daemon() {
+        let mut p = HangarPlugin::new();
+        assert!(HangarPlugin::is_offline(p.conn.state()));
+        assert!(!p.start_daemon_pending);
+        p.on_key(&char_press('s'));
+        assert!(
+            p.start_daemon_pending,
+            "[s] while offline must arm the daemon-start"
+        );
+    }
+
+    /// When ONLINE, `s` is NOT the start action — it must not arm the daemon-start
+    /// (so it can't shadow the online Settings/Skills `s` bindings).
+    #[test]
+    fn online_s_key_does_not_arm_start_daemon() {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        assert!(p.conn.is_connected());
+        p.on_key(&char_press('s'));
+        assert!(
+            !p.start_daemon_pending,
+            "online `s` must not arm the daemon-start"
+        );
+    }
+
+    /// The armed start actually dispatches to the `DaemonStarter` seam: with a
+    /// recording starter, draining the pending start writes the probe marker
+    /// (proving the `[s]` action reaches the real spawn path) and clears any prior
+    /// error.
+    #[test]
+    fn try_start_daemon_dispatches_to_starter() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("started.txt");
+        let mut p = HangarPlugin::with_daemon_starter(Box::new(
+            crate::shell::RecordingDaemonStarter::new(&probe),
+        ));
+        let ok = p.try_start_daemon();
+        assert!(ok, "recording starter must succeed");
+        let written = std::fs::read_to_string(&probe).expect("probe written");
+        assert_eq!(written, "hangar daemon start");
+        assert!(p.daemon_start_error.is_none());
+    }
+
+    /// A start failure is recorded (not panicked) so the empty-state can show it,
+    /// and `try_start_daemon` reports `false` so the re-dial is skipped.
+    #[test]
+    fn try_start_daemon_records_error_on_failure() {
+        let mut p = HangarPlugin::with_daemon_starter(Box::new(crate::shell::FailingDaemonStarter));
+        let ok = p.try_start_daemon();
+        assert!(!ok, "failing starter must report failure");
+        assert!(
+            p.daemon_start_error
+                .as_deref()
+                .is_some_and(|m| m.contains("start failed")),
+            "failure must be recorded for the empty-state, got {:?}",
+            p.daemon_start_error
+        );
     }
 }

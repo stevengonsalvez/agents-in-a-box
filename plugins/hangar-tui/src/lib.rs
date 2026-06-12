@@ -33,5 +33,8 @@ pub use screen::kanban::{
     KanbanState,
 };
 pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
-pub use shell::{default_opener, Opener, RecordingOpener, SystemOpener};
+pub use shell::{
+    default_daemon_starter, default_opener, DaemonStarter, FailingDaemonStarter, Opener,
+    RecordingDaemonStarter, RecordingOpener, SystemDaemonStarter, SystemOpener,
+};
 pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};
