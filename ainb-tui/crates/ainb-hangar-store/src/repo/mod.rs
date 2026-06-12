@@ -21,4 +21,5 @@ pub mod skill;
 pub mod squad;
 pub mod task;
 pub mod token;
+pub mod usage;
 pub mod workspace;
