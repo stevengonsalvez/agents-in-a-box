@@ -3541,19 +3541,34 @@ impl AppState {
         self.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
-    /// Complete the onboarding process
-    pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Map a finished wizard `OnboardingState` onto the persisted
+    /// `OnboardingConfig`.
+    ///
+    /// This is the take-effect seam for the first-run questionnaire: it copies
+    /// the user's source/role/use-case selections (plus git directories and
+    /// skipped dependencies) into the config that `complete_onboarding` writes
+    /// to disk. Kept as a pure function so the mapping can be exercised in
+    /// isolation without touching the real `~/.agents-in-a-box` directory.
+    fn onboarding_config_from_state(
+        state: &crate::components::onboarding::OnboardingState,
+    ) -> crate::config::OnboardingConfig {
         use crate::config::OnboardingConfig;
 
+        let mut config = OnboardingConfig::default();
+        config.mark_completed();
+        config.git_directories = state.get_valid_directories();
+        config.skipped_dependencies = state.skipped_dependencies.clone();
+        config.source = state.selected_source();
+        config.role = state.selected_role();
+        config.use_case = state.selected_use_case();
+        config
+    }
+
+    /// Complete the onboarding process
+    pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(state) = &self.onboarding_state {
             // Save onboarding config
-            let mut config = OnboardingConfig::default();
-            config.mark_completed();
-            config.git_directories = state.get_valid_directories();
-            config.skipped_dependencies = state.skipped_dependencies.clone();
-            config.source = state.selected_source();
-            config.role = state.selected_role();
-            config.use_case = state.selected_use_case();
+            let config = Self::onboarding_config_from_state(state);
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
 
             // Update app config with git directories
