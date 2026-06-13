@@ -416,6 +416,23 @@ pub const HANGAR_DAEMON_HEALTH: &str = "hangar/daemon_health";
 /// rejection — mirrors `inbox_list`).
 pub const HANGAR_USAGE_ROLLUP: &str = "hangar/usage_rollup";
 
+/// `hangar/pr_status_refresh` — fetch the CI + merge status of an issue's bound
+/// PR and auto-move the issue to Done on merge (e38.34).
+///
+/// Params: [`crate::snapshots::PrStatusRefreshParams`] (`{ workspace_id,
+/// issue_id }`). Result: [`crate::snapshots::PrStatusRefreshResult`] — the fetched
+/// [`crate::pr_status::PrStatus`] (CI rollup + mergeable + merge state) plus
+/// `transitioned_to_done`. The daemon resolves the issue's latest task
+/// `result.pr_url`, shells `gh pr view --json statusCheckRollup,mergeable,state`
+/// behind an injectable seam (degrading to an all-unknown status when `gh` is
+/// absent / unauthenticated — never a panic), and — only when the PR is `merged`
+/// and the issue is not already `done` — moves the issue to `done` via
+/// `IssueRepo::update_state` and pushes an `IssueUpdated` event. Mutating +
+/// workspace-scoped: a mistyped workspace is rejected with `INVALID_PARAMS`; an
+/// issue with no bound PR answers an all-unknown status + no transition (never an
+/// error).
+pub const HANGAR_PR_STATUS_REFRESH: &str = "hangar/pr_status_refresh";
+
 /// `hangar/inbox_list` — snapshot the aggregated notification inbox of a
 /// workspace (e38.14).
 ///
@@ -496,6 +513,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     HANGAR_USAGE_ROLLUP,
+    HANGAR_PR_STATUS_REFRESH,
     HANGAR_INBOX_LIST,
     HANGAR_INBOX_MARK_READ,
     AUTH_HELLO,
@@ -571,6 +589,7 @@ mod tests {
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
+            HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
         ] {
@@ -622,6 +641,7 @@ mod tests {
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
+            HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
             AUTH_HELLO,

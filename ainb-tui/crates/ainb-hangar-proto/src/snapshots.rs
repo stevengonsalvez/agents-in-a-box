@@ -361,6 +361,39 @@ pub struct UsageRollupResult {
     pub agents: Vec<AgentUsageRow>,
 }
 
+/// Params for [`crate::methods::HANGAR_PR_STATUS_REFRESH`] (e38.34): refresh the
+/// CI + merge status of one issue's bound PR.
+///
+/// `workspace_id` is the tenant guard (a foreign-tenant issue id touches
+/// nothing); `issue_id` is the issue whose latest task `result.pr_url` the daemon
+/// resolves before shelling `gh`. An issue with no bound PR answers an all-unknown
+/// status + no transition (a read, never an error).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PrStatusRefreshParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose bound PR to refresh (`issue.id`).
+    pub issue_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_PR_STATUS_REFRESH`] (e38.34): the freshly
+/// fetched [`crate::pr_status::PrStatus`] plus whether the refresh moved the
+/// backing issue to Done.
+///
+/// `transitioned_to_done` is `true` only when the fetched PR was `merged` AND the
+/// issue was not already `done` — the side effect the auto-move performs. The
+/// plugin uses it to optimistically reflect the column move; subscribers also see
+/// the pushed `IssueUpdated` event. A degrade fetch (no PR, `gh` absent) answers
+/// the all-unknown status + `transitioned_to_done: false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PrStatusRefreshResult {
+    /// The fetched CI + merge status (all-unknown on a degrade fetch).
+    pub status: crate::pr_status::PrStatus,
+    /// `true` when this refresh moved the issue to Done (a merged PR).
+    #[serde(default)]
+    pub transitioned_to_done: bool,
+}
+
 /// Params for [`crate::methods::HANGAR_TASK_TRANSITION`]: the workspace (tenant
 /// guard), the task to move, and the target status (P8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1054,6 +1087,50 @@ mod tests {
         // The empty-dashboard state is the type default (all-zero, no agents).
         assert_eq!(UsageRollupResult::default().agents.len(), 0);
         assert_eq!(UsageRollupResult::default().total_runs, 0);
+    }
+
+    /// The PR-status refresh params + result round-trip through JSON, and the
+    /// result's `transitioned_to_done` defaults to `false` when absent (e38.34).
+    #[test]
+    fn e38_pr_status_refresh_roundtrips() {
+        use crate::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
+
+        let params = PrStatusRefreshParams {
+            workspace_id: "ws-1".into(),
+            issue_id: "issue-1".into(),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PrStatusRefreshParams>(&s).unwrap(),
+            params
+        );
+
+        let result = PrStatusRefreshResult {
+            status: PrStatus {
+                ci: CiRollup::Pass,
+                mergeable: Mergeable::Mergeable,
+                state: MergeState::Merged,
+            },
+            transitioned_to_done: true,
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PrStatusRefreshResult>(&s).unwrap(),
+            result
+        );
+
+        // An old-reader result (just the status, no flag) defaults the flag.
+        let back: PrStatusRefreshResult = serde_json::from_str(
+            r#"{"status":{"ci":"unknown","mergeable":"unknown","state":"unknown"}}"#,
+        )
+        .unwrap();
+        assert!(!back.transitioned_to_done);
+        // The all-unknown degrade result is the type default.
+        assert_eq!(
+            PrStatusRefreshResult::default(),
+            PrStatusRefreshResult::default()
+        );
+        assert!(!PrStatusRefreshResult::default().transitioned_to_done);
     }
 
     /// A pre-priority snapshot (no `priority` key) still decodes: the field
