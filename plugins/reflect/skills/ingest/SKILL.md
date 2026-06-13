@@ -210,7 +210,7 @@ entities:
 relationships:
   - source: "{entity A name}"                        # NOT 'from'
     target: "{entity B name}"                        # NOT 'to'
-    type: caused_by | solves | requires | relates_to
+    type: caused_by | causes | enables | prevents | contradicts | supersedes | part_of | uses | solves | requires | relates_to | implements | configures | triggers
     description: "{how they relate}"                 # REQUIRED
     strength: 1-10                                   # optional, default 5
 ```
@@ -226,6 +226,9 @@ Relationship hints by memory kind:
 - feedback: `solves` or `relates_to`
 - project: `requires` or `relates_to`
 - reference: `relates_to` to external resources
+- when the direction of effect is known, prefer a typed causal link (S2) —
+  `caused_by` / `causes` / `enables` / `prevents` / `contradicts` /
+  `supersedes` / `part_of` / `uses` — over flat `relates_to`
 
 Validate before writing:
 ```bash

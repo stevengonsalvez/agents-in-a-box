@@ -16,6 +16,7 @@ Exit 0 = valid, 1 = invalid (with specific errors on stderr).
 Usage:
     python3 validate_sidecar.py path/to/doc.entities.yaml
     python3 validate_sidecar.py --strict path/to/doc.entities.yaml
+    python3 validate_sidecar.py --backfill path/to/doc.entities.yaml
 """
 
 from __future__ import annotations
@@ -33,7 +34,29 @@ except ImportError:
 
 
 ENTITY_TYPES = {"technology", "error", "pattern", "function", "concept", "tool"}
-RELATIONSHIP_TYPES = {"caused_by", "solves", "requires", "relates_to"}
+
+# S2: typed causal links (Hindsight memory_links shape — causes/caused_by/
+# enables/prevents — extended with contradicts/supersedes/part_of/uses for
+# learning-to-learning semantics). Graph queries gain meaning: "what enabled
+# this fix?" / "what does this rule prevent?" are answerable from sidecars.
+TYPED_CAUSAL_LINK_TYPES = {
+    "caused_by", "causes", "enables", "prevents",
+    "contradicts", "supersedes", "part_of", "uses",
+}
+# Pre-S2 types already present in existing sidecars and emitted by the
+# engine's heuristic extractor (entity_store._infer_relationship_type).
+# They stay valid so old sidecars never fail validation; `relates_to` is
+# the backfill default for edges with a missing/unknown type.
+LEGACY_RELATIONSHIP_TYPES = {
+    "solves", "requires", "relates_to",
+    "implements", "configures", "triggers",
+}
+# The closed enum. Must stay in sync with
+# reflect-kb/src/reflect_kb/cli/entity_store.py::RELATIONSHIP_TYPES and
+# references/knowledge_format.md.
+RELATIONSHIP_TYPES = TYPED_CAUSAL_LINK_TYPES | LEGACY_RELATIONSHIP_TYPES
+
+BACKFILL_DEFAULT_TYPE = "relates_to"
 
 REQUIRED_ENTITY_FIELDS = {"name", "type", "description"}
 REQUIRED_RELATIONSHIP_FIELDS = {"source", "target", "type", "description"}
@@ -126,6 +149,42 @@ def validate(path: Path, *, strict: bool = False) -> list[str]:
     return errors
 
 
+def backfill(path: Path) -> int:
+    """S2 backfill: rewrite relationships with a missing or unknown `type`
+    to the flat ``relates_to`` default, in place.
+
+    Pre-S2 sidecars (or LLM drift) may carry edges whose type is absent or
+    outside the closed enum; rather than failing validation forever, they
+    are normalized to the weakest valid edge type. Typed edges are never
+    touched. Returns the number of rewritten relationships (0 = no-op;
+    file is not rewritten when nothing changed).
+    """
+    if not path.exists():
+        return 0
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+
+    rels = data.get("relationships")
+    if not isinstance(rels, list):
+        return 0
+
+    changed = 0
+    for r in rels:
+        if isinstance(r, dict) and r.get("type") not in RELATIONSHIP_TYPES:
+            r["type"] = BACKFILL_DEFAULT_TYPE
+            changed += 1
+
+    if changed:
+        path.write_text(
+            yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        )
+    return changed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("paths", nargs="+", type=Path,
@@ -133,10 +192,18 @@ def main() -> int:
     ap.add_argument("--strict", action="store_true",
                     help="also check recommended fields + strength bounds + "
                          "source/target referential integrity")
+    ap.add_argument("--backfill", action="store_true",
+                    help="rewrite relationships with missing/unknown `type` "
+                         f"to '{BACKFILL_DEFAULT_TYPE}' in place, then validate")
     args = ap.parse_args()
 
     total_errors = 0
     for p in args.paths:
+        if args.backfill:
+            n = backfill(p)
+            if n:
+                print(f"{p}: backfilled {n} relationship type(s) to "
+                      f"'{BACKFILL_DEFAULT_TYPE}'")
         errs = validate(p, strict=args.strict)
         if errs:
             total_errors += len(errs)
