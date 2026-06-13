@@ -121,6 +121,9 @@ const SEARCH_REQ_ID: i64 = 31;
 /// JSON-RPC id for the `hangar/usage_rollup` snapshot request feeding the usage
 /// dashboard (e38.35).
 const USAGE_ROLLUP_REQ_ID: i64 = 32;
+/// JSON-RPC id for the `hangar/pr_status_refresh` request raised when a
+/// task-detail screen with a bound PR opens (e38.34).
+const PR_STATUS_REFRESH_REQ_ID: i64 = 33;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -183,6 +186,11 @@ pub struct HangarPlugin {
     /// the offline empty-state so a start failure is visible rather than silent.
     /// `None` once a start succeeds or while none has been attempted.
     daemon_start_error: Option<String>,
+    /// The issue id of a task-detail screen with a bound PR that just opened
+    /// (e38.34), so `render` can fire `hangar/pr_status_refresh` for it (the
+    /// socket send can't run inline in the `apply_nav` key path). `None` when no
+    /// refresh is armed; consumed (taken) once fired.
+    pending_pr_status_refresh: Option<String>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -216,6 +224,7 @@ impl Default for HangarPlugin {
             daemon_starter: crate::shell::default_daemon_starter(),
             start_daemon_pending: false,
             daemon_start_error: None,
+            pending_pr_status_refresh: None,
         }
     }
 }
@@ -528,6 +537,7 @@ impl HangarPlugin {
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
+            RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
@@ -1038,6 +1048,51 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
+    /// task-detail's issue (e38.34).
+    ///
+    /// Requests the issue's bound PR status, framed over the socket cap. The reply
+    /// ([`Self::apply_pr_status`]) folds the CI + merge status onto the badge; when
+    /// the PR is merged the daemon also auto-moves the issue to Done and pushes
+    /// `IssueUpdated`, so a subscribed board reflects the column move without a
+    /// separate re-pull. A send failure is logged but non-fatal — the badge simply
+    /// keeps its prior (unknown) status.
+    async fn fire_pr_status_refresh(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            PR_STATUS_REFRESH_REQ_ID,
+            daemon_methods::HANGAR_PR_STATUS_REFRESH,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: pr status refresh send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fold a `hangar/pr_status_refresh` reply onto the open task-detail badge
+    /// (e38.34): apply the fetched CI + merge status. A merged-PR transition was
+    /// already performed daemon-side (and announced via `IssueUpdated`), so the
+    /// plugin only mirrors the status here. A malformed / error reply is ignored
+    /// (the badge keeps its prior status).
+    fn apply_pr_status(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(reply) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::PrStatusRefreshResult,
+            >(result.clone())
+            {
+                self.screens.set_task_detail_pr_status(reply.status);
+            }
+        }
+    }
+
     /// Fire a deferred issue-create RPC raised by the issue-list inline create
     /// flow (e38.29).
     ///
@@ -1372,6 +1427,14 @@ impl HangarPlugin {
                     .unwrap_or_else(|_| {
                         ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
                     });
+                    // e38.34: a task-detail screen on an issue with a captured PR
+                    // arms a `hangar/pr_status_refresh` so the badge surfaces the
+                    // CI + merge status (and a merged PR auto-moves to Done). The
+                    // socket send can't run inline here, so it is deferred to
+                    // `render`. No PR → no refresh (the badge stays absent).
+                    if issue.pr_url.is_some() {
+                        self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
+                    }
                     self.screens.open_task_detail(task_id.clone(), issue);
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
@@ -1575,6 +1638,13 @@ impl Plugin for HangarPlugin {
             self.screens.take_pending_palette_action()
         {
             self.run_palette_search(host, query).await;
+        }
+        // e38.34: drain a deferred PR-status refresh (armed when a task-detail
+        // screen with a bound PR opened) and fire `hangar/pr_status_refresh`. The
+        // reply folds the CI + merge status onto the badge; a merged PR is
+        // auto-moved to Done daemon-side (announced via `IssueUpdated`).
+        if let Some(issue_id) = self.pending_pr_status_refresh.take() {
+            self.fire_pr_status_refresh(host, issue_id).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active
