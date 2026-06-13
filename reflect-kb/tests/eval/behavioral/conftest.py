@@ -81,6 +81,10 @@ def _doc_md(d: dict) -> str:
         f"confidence: {d.get('confidence', 'medium')}",
         f'created: "{d.get("created", "2026-01-01")}"',
         f'key_insight: "{d.get("key_insight", "")}"',
+        # R16: optional project scope. Emitted only when the seed declares it so
+        # every existing proof's frontmatter is byte-identical to before; recall.py
+        # reads this key (Learning.project_id) for the project-affinity boost.
+        *([f"project_id: {d['project_id']}"] if d.get("project_id") else []),
         "---",
         "",
     ]
