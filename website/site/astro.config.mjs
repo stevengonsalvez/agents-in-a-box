@@ -55,6 +55,7 @@ export default defineConfig({
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
+            { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
             { label: 'CLI reference', slug: 'tui/cli' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
