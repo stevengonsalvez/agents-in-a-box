@@ -163,6 +163,8 @@ class Prep:
     proof_bumped: int = 0          # S4: learnings whose proof_count we bumped
     related_count: int = 0         # S5: related learnings embedded for revision
     observation_count: int = 0     # O1: existing observations embedded for the second pass
+    chunks_total: int = 0          # S7: signal-window chunks in the raw slice
+    chunks_skipped: int = 0        # S7: chunks dropped as already-reflected (delta retain)
 
 
 def _est_tokens(text: str) -> int:
@@ -213,6 +215,46 @@ def _record_proof_for_hash(signal_hash: str, source_memory_id: str) -> int:
         return bumped
     except Exception:
         return 0
+
+
+def _delta_retain_chunks(sliced: str, source_memory_id: str) -> tuple[str, int, int]:
+    """S7 delta retain: drop slice chunks already reflected on a prior drain.
+
+    Hashes each signal-window chunk (Hindsight ``_classify_chunk_diff`` /
+    ``_try_delta_retain``: a content-hash key per chunk). Chunks whose hash is
+    already in ``chunk_hashes`` were handed to a drain before, so they are
+    removed from the slice; the surviving (new) chunks have their hashes
+    recorded so the *next* re-run skips them too. The hash table is TTL'd
+    (``prune_chunk_hashes``) so a stale skip can never wedge a chunk out of
+    re-reflection forever.
+
+    Returns ``(filtered_slice, chunks_total, chunks_skipped)``. Best-effort:
+    on any DB error the original slice passes through unchanged (fail-open to
+    reflect — never silently drop a learning because dedup bookkeeping broke).
+    """
+    chunks = split_slice_chunks(sliced)
+    total = len(chunks)
+    if total == 0:
+        return sliced, 0, 0
+    try:
+        import reflect_db
+        reflect_db.prune_chunk_hashes()
+        hashes = [reflect_db.compute_chunk_hash(c) for c in chunks]
+        seen = reflect_db.get_seen_chunk_hashes(hashes)
+        kept: list[str] = []
+        fresh: list[str] = []
+        for chunk, h in zip(chunks, hashes):
+            if h in seen:
+                continue
+            kept.append(chunk)
+            fresh.append(h)
+        skipped = total - len(kept)
+        if fresh:
+            reflect_db.record_chunk_hashes(fresh, source_memory_id=source_memory_id)
+        filtered = "\n…\n".join(kept) if kept else ""
+        return filtered, total, skipped
+    except Exception:
+        return sliced, total, 0
 
 
 def _content_tokens(text: str) -> set[str]:
@@ -1020,6 +1062,26 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
     return summary
 
 
+def split_slice_chunks(sliced: str) -> list[str]:
+    """Split a sliced dialogue into its individual signal-window chunks.
+
+    ``slice_dialogue`` joins kept windows with a ``…`` gap marker (and a
+    ``… [slice truncated]`` tail when capped). Splitting on those markers
+    recovers the per-window chunks the S7 delta-retain dedup hashes
+    independently — a transcript that grew by one new exchange re-reflects
+    only the new chunk, not the windows already captured last run.
+    """
+    if not sliced:
+        return []
+    chunks: list[str] = []
+    for raw in sliced.split("…"):
+        chunk = raw.strip()
+        if not chunk or chunk.startswith("[slice truncated]"):
+            continue
+        chunks.append(chunk)
+    return chunks
+
+
 def slice_dialogue(text: str, signals, context_lines: int = _DEFAULT_CONTEXT_LINES,
                    max_chars: int = _MAX_SLICE_CHARS) -> str:
     """Keep only windows of ±context_lines around each signal line; merge
@@ -1078,6 +1140,22 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
     if not sliced.strip():
         sliced = dialogue[:_MAX_SLICE_CHARS]  # fail-safe: never hand empty input
 
+    # S7 delta retain: drop signal-window chunks already reflected on a prior
+    # drain (re-running drain on an identical transcript yields 0 new chunks ->
+    # 0 new learnings). When every chunk is a known re-run, skip the whole
+    # transcript instead of handing the drain an empty slice.
+    sliced, chunks_total, chunks_skipped = _delta_retain_chunks(sliced, str(p))
+    if chunks_total and chunks_skipped == chunks_total:
+        return Prep("skip", "dup-chunk-hash", len(signals), orig_tokens, 0,
+                    signal_hash=signal_hash, chunks_total=chunks_total,
+                    chunks_skipped=chunks_skipped)
+    if not sliced.strip():
+        # All chunks deduped but the counter disagreed (defensive) — never hand
+        # the drain an empty slice.
+        return Prep("skip", "dup-chunk-hash", len(signals), orig_tokens, 0,
+                    signal_hash=signal_hash, chunks_total=chunks_total,
+                    chunks_skipped=chunks_skipped)
+
     # S5: recall existing learnings related to the signal set so the drain
     # writer can revise beliefs (UPDATE/DELETE) instead of always creating.
     related = recall_related_learnings(signals)
@@ -1090,6 +1168,8 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
         slice_tokens=_est_tokens(sliced),
         signal_hash=signal_hash,
         related_count=len(related),
+        chunks_total=chunks_total,
+        chunks_skipped=chunks_skipped,
     )
 
     if out_path is None:

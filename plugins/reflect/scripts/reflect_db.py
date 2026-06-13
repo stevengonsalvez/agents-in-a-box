@@ -36,9 +36,9 @@ import re
 import sqlite3
 import subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from domain.enums import (
     ArtifactStatus,
@@ -442,6 +442,21 @@ CREATE TABLE IF NOT EXISTS conventions_docs (
 );
 """
 
+# S7: chunk-hash dedup table (Hindsight delta-retain shape,
+# engine/retain/orchestrator.py _classify_chunk_diff/_try_delta_retain). One
+# row per transcript SLICE the cascade has already handed to a drain; a re-run
+# whose chunks all hash to rows here produces 0 new learnings. The table is
+# TTL'd (rows older than the retention window are pruned) so a stale skip can
+# never wedge a chunk out of re-reflection forever — belt-and-braces, not a
+# permanent ledger.
+_CHUNK_HASHES_DDL = """
+CREATE TABLE IF NOT EXISTS chunk_hashes (
+    chunk_hash          TEXT PRIMARY KEY,
+    source_memory_id    TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -468,6 +483,8 @@ CREATE INDEX IF NOT EXISTS idx_observation_history_observation_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
+CREATE INDEX IF NOT EXISTS idx_chunk_hashes_created_at
+    ON chunk_hashes(created_at);
 """
 
 _SCHEMA_DDL = (
@@ -487,6 +504,7 @@ _SCHEMA_DDL = (
     + _OBSERVATIONS_DDL
     + _OBSERVATION_HISTORY_DDL
     + _CONVENTIONS_DOCS_DDL
+    + _CHUNK_HASHES_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -834,6 +852,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_OBSERVATIONS_DDL)
         conn.execute(_OBSERVATION_HISTORY_DDL)
         conn.execute(_CONVENTIONS_DOCS_DDL)
+        conn.execute(_CHUNK_HASHES_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -903,6 +922,110 @@ def get_known_content_hashes(*, conn: Optional[sqlite3.Connection] = None) -> se
         "SELECT DISTINCT content_hash FROM learnings WHERE content_hash != ''"
     ).fetchall()
     return {r["content_hash"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# S7: chunk-hash dedup (Hindsight delta-retain — skip re-reflecting unchanged
+# transcript slices across drain re-runs). The cascade hashes each slice it is
+# about to hand a drain; a hash already present here means that exact slice was
+# reflected before, so the cascade drops it. Rows are TTL'd by ``created_at``
+# so a skip can never wedge a chunk out forever.
+# ---------------------------------------------------------------------------
+
+# Default retention for chunk-hash dedup rows (days). A re-run within the
+# window skips identical chunks; after it, the chunk is eligible to reflect
+# again (belt-and-braces — the KB's own content-hash dedup remains the
+# durable guard against duplicate learnings).
+CHUNK_HASH_TTL_DAYS = 30
+
+
+def compute_chunk_hash(text: str) -> str:
+    """Stable 16-hex-char content hash of a single transcript slice/chunk.
+
+    Whitespace at the edges is stripped so cosmetic re-slicing (an extra
+    trailing newline across drain re-runs) still collapses to one hash.
+    """
+    return _stable_text_hash((text or "").strip())
+
+
+def get_seen_chunk_hashes(
+    hashes: Optional[Iterable[str]] = None,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> set[str]:
+    """Return which of *hashes* are already recorded (empty arg = all of them).
+
+    Best-effort membership check for the cascade's chunk-level dedup
+    fast-path. Passing the candidate set keeps the query bounded.
+    """
+    conn = conn or get_conn()
+    if hashes is None:
+        rows = conn.execute("SELECT chunk_hash FROM chunk_hashes").fetchall()
+        return {r["chunk_hash"] for r in rows}
+    wanted = [h for h in {h for h in hashes if h}]
+    if not wanted:
+        return set()
+    seen: set[str] = set()
+    # Chunk the IN-list to stay under SQLite's parameter ceiling.
+    for i in range(0, len(wanted), 500):
+        batch = wanted[i : i + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            f"SELECT chunk_hash FROM chunk_hashes WHERE chunk_hash IN ({placeholders})",
+            batch,
+        ).fetchall()
+        seen.update(r["chunk_hash"] for r in rows)
+    return seen
+
+
+def record_chunk_hashes(
+    hashes: Iterable[str],
+    *,
+    source_memory_id: str = "",
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Record *hashes* as seen; returns the count of newly inserted rows.
+
+    Idempotent: re-recording an existing hash is a no-op (INSERT OR IGNORE on
+    the PRIMARY KEY). The ``created_at`` of the first sighting is preserved so
+    the TTL clock starts when a chunk was first reflected, not last seen.
+    """
+    conn = conn or get_conn()
+    ts = _coerce_now(now).isoformat()
+    inserted = 0
+    with conn:
+        for h in {h for h in hashes if h}:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO chunk_hashes "
+                "(chunk_hash, source_memory_id, created_at) VALUES (?, ?, ?)",
+                (h, source_memory_id, ts),
+            )
+            inserted += cur.rowcount
+    return inserted
+
+
+def prune_chunk_hashes(
+    *,
+    ttl_days: int = CHUNK_HASH_TTL_DAYS,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Delete chunk-hash rows older than *ttl_days*; returns rows removed.
+
+    The TTL is the belt-and-braces guarantee from the acceptance criteria: a
+    stale dedup entry can never permanently exclude a chunk from
+    re-reflection. ``ttl_days <= 0`` disables pruning (keep forever).
+    """
+    if ttl_days <= 0:
+        return 0
+    conn = conn or get_conn()
+    cutoff = (_coerce_now(now) - timedelta(days=ttl_days)).isoformat()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM chunk_hashes WHERE created_at < ?", (cutoff,)
+        )
+    return cur.rowcount
 
 
 def get_events_by_type(
