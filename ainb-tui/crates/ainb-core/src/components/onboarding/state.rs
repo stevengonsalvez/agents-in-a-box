@@ -9,11 +9,80 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
     Welcome,
+    /// How did you find ainb? (questionnaire)
+    Source,
+    /// What is your role? (questionnaire)
+    Role,
+    /// What do you want to do with ainb? (questionnaire)
+    UseCase,
     DependencyCheck,
     GitDirectories,
     Authentication,
     EditorSelection,
     Summary,
+}
+
+/// A single-select questionnaire step in the onboarding wizard.
+///
+/// Each variant maps to one [`OnboardingStep`] that renders a choice list,
+/// records the user's selection, and persists it to the onboarding config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionnaireKind {
+    Source,
+    Role,
+    UseCase,
+}
+
+impl QuestionnaireKind {
+    /// Resolve the questionnaire kind for a step, if it is a questionnaire step.
+    pub const fn for_step(step: OnboardingStep) -> Option<Self> {
+        match step {
+            OnboardingStep::Source => Some(Self::Source),
+            OnboardingStep::Role => Some(Self::Role),
+            OnboardingStep::UseCase => Some(Self::UseCase),
+            _ => None,
+        }
+    }
+
+    /// The prompt rendered above the choice list.
+    pub const fn prompt(&self) -> &'static str {
+        match self {
+            Self::Source => "How did you hear about Agents in a Box?",
+            Self::Role => "Which best describes your role?",
+            Self::UseCase => "What do you want to do with ainb?",
+        }
+    }
+
+    /// The selectable choices for this questionnaire step.
+    pub const fn choices(&self) -> &'static [&'static str] {
+        match self {
+            Self::Source => &[
+                "Search engine",
+                "Social media",
+                "Friend or colleague",
+                "Blog or article",
+                "Conference or talk",
+                "Other",
+            ],
+            Self::Role => &[
+                "Software engineer",
+                "Engineering manager",
+                "Product manager",
+                "Researcher",
+                "Designer",
+                "Student",
+                "Other",
+            ],
+            Self::UseCase => &[
+                "Build features end-to-end",
+                "Automate repetitive tasks",
+                "Review and refactor code",
+                "Explore and learn a codebase",
+                "Orchestrate multiple agents",
+                "Other",
+            ],
+        }
+    }
 }
 
 /// Available editor option for selection
@@ -32,6 +101,9 @@ impl OnboardingStep {
     pub fn all() -> &'static [OnboardingStep] {
         &[
             Self::Welcome,
+            Self::Source,
+            Self::Role,
+            Self::UseCase,
             Self::DependencyCheck,
             Self::GitDirectories,
             Self::Authentication,
@@ -44,23 +116,29 @@ impl OnboardingStep {
     pub fn number(&self) -> usize {
         match self {
             Self::Welcome => 1,
-            Self::DependencyCheck => 2,
-            Self::GitDirectories => 3,
-            Self::Authentication => 4,
-            Self::EditorSelection => 5,
-            Self::Summary => 6,
+            Self::Source => 2,
+            Self::Role => 3,
+            Self::UseCase => 4,
+            Self::DependencyCheck => 5,
+            Self::GitDirectories => 6,
+            Self::Authentication => 7,
+            Self::EditorSelection => 8,
+            Self::Summary => 9,
         }
     }
 
     /// Get the total number of steps
     pub fn total() -> usize {
-        6
+        Self::all().len()
     }
 
     /// Get display title for this step
     pub fn title(&self) -> &'static str {
         match self {
             Self::Welcome => "Welcome",
+            Self::Source => "Source",
+            Self::Role => "Role",
+            Self::UseCase => "Use Case",
             Self::DependencyCheck => "Dependencies",
             Self::GitDirectories => "Git Directories",
             Self::Authentication => "Authentication",
@@ -73,6 +151,9 @@ impl OnboardingStep {
     pub fn description(&self) -> &'static str {
         match self {
             Self::Welcome => "Let's get you set up with AINB",
+            Self::Source => "How did you find us?",
+            Self::Role => "Tell us a bit about yourself",
+            Self::UseCase => "What do you want to do?",
             Self::DependencyCheck => "Checking required tools",
             Self::GitDirectories => "Where are your projects?",
             Self::Authentication => "Set up AI agent authentication",
@@ -84,7 +165,9 @@ impl OnboardingStep {
     /// Can we go to the next step?
     pub fn can_advance(&self, state: &OnboardingState) -> bool {
         match self {
-            Self::Welcome => true,
+            // Welcome plus the questionnaire steps (Source/Role/UseCase)
+            // always have a valid selection, so they can always advance.
+            Self::Welcome | Self::Source | Self::Role | Self::UseCase => true,
             Self::DependencyCheck => {
                 // Can advance if mandatory deps are met
                 state.dependency_status.as_ref().map(|s| s.mandatory_met).unwrap_or(false)
@@ -111,7 +194,10 @@ impl OnboardingStep {
     /// Get the next step, if any
     pub fn next(&self) -> Option<Self> {
         match self {
-            Self::Welcome => Some(Self::DependencyCheck),
+            Self::Welcome => Some(Self::Source),
+            Self::Source => Some(Self::Role),
+            Self::Role => Some(Self::UseCase),
+            Self::UseCase => Some(Self::DependencyCheck),
             Self::DependencyCheck => Some(Self::GitDirectories),
             Self::GitDirectories => Some(Self::Authentication),
             Self::Authentication => Some(Self::EditorSelection),
@@ -124,7 +210,10 @@ impl OnboardingStep {
     pub fn previous(&self) -> Option<Self> {
         match self {
             Self::Welcome => None,
-            Self::DependencyCheck => Some(Self::Welcome),
+            Self::Source => Some(Self::Welcome),
+            Self::Role => Some(Self::Source),
+            Self::UseCase => Some(Self::Role),
+            Self::DependencyCheck => Some(Self::UseCase),
             Self::GitDirectories => Some(Self::DependencyCheck),
             Self::Authentication => Some(Self::GitDirectories),
             Self::EditorSelection => Some(Self::Authentication),
@@ -243,6 +332,12 @@ pub struct OnboardingState {
     pub available_editors: Vec<EditorOption>,
     /// Currently selected editor index
     pub selected_editor_index: usize,
+    /// Selected choice index for the Source questionnaire step
+    pub selected_source_index: usize,
+    /// Selected choice index for the Role questionnaire step
+    pub selected_role_index: usize,
+    /// Selected choice index for the use-case questionnaire step
+    pub selected_use_case_index: usize,
 }
 
 impl OnboardingState {
@@ -264,7 +359,64 @@ impl OnboardingState {
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,
+            selected_source_index: 0,
+            selected_role_index: 0,
+            selected_use_case_index: 0,
         }
+    }
+
+    /// Currently selected choice index for a questionnaire step.
+    pub const fn questionnaire_index(&self, kind: QuestionnaireKind) -> usize {
+        match kind {
+            QuestionnaireKind::Source => self.selected_source_index,
+            QuestionnaireKind::Role => self.selected_role_index,
+            QuestionnaireKind::UseCase => self.selected_use_case_index,
+        }
+    }
+
+    /// Move the questionnaire selection up by one (no-op at the top).
+    pub const fn questionnaire_select_up(&mut self, kind: QuestionnaireKind) {
+        let idx = match kind {
+            QuestionnaireKind::Source => &mut self.selected_source_index,
+            QuestionnaireKind::Role => &mut self.selected_role_index,
+            QuestionnaireKind::UseCase => &mut self.selected_use_case_index,
+        };
+        if *idx > 0 {
+            *idx -= 1;
+        }
+    }
+
+    /// Move the questionnaire selection down by one (clamped to the last choice).
+    pub const fn questionnaire_select_down(&mut self, kind: QuestionnaireKind) {
+        let max_idx = kind.choices().len().saturating_sub(1);
+        let idx = match kind {
+            QuestionnaireKind::Source => &mut self.selected_source_index,
+            QuestionnaireKind::Role => &mut self.selected_role_index,
+            QuestionnaireKind::UseCase => &mut self.selected_use_case_index,
+        };
+        if *idx < max_idx {
+            *idx += 1;
+        }
+    }
+
+    /// The selected answer string for a questionnaire step, if any.
+    pub fn questionnaire_answer(&self, kind: QuestionnaireKind) -> Option<String> {
+        kind.choices().get(self.questionnaire_index(kind)).copied().map(str::to_string)
+    }
+
+    /// Selected "Source" answer (how the user found ainb).
+    pub fn selected_source(&self) -> Option<String> {
+        self.questionnaire_answer(QuestionnaireKind::Source)
+    }
+
+    /// Selected "Role" answer.
+    pub fn selected_role(&self) -> Option<String> {
+        self.questionnaire_answer(QuestionnaireKind::Role)
+    }
+
+    /// Selected "Use Case" answer.
+    pub fn selected_use_case(&self) -> Option<String> {
+        self.questionnaire_answer(QuestionnaireKind::UseCase)
     }
 
     /// Detect available editors on the system
@@ -470,7 +622,7 @@ mod tests {
     #[test]
     fn test_step_navigation() {
         let step = OnboardingStep::Welcome;
-        assert_eq!(step.next(), Some(OnboardingStep::DependencyCheck));
+        assert_eq!(step.next(), Some(OnboardingStep::Source));
         assert_eq!(step.previous(), None);
 
         let step = OnboardingStep::Summary;
@@ -483,11 +635,28 @@ mod tests {
     }
 
     #[test]
+    fn test_questionnaire_steps_chain_after_welcome() {
+        // The three questionnaire steps sit between Welcome and DependencyCheck.
+        assert_eq!(
+            OnboardingStep::Source.previous(),
+            Some(OnboardingStep::Welcome)
+        );
+        assert_eq!(OnboardingStep::Source.next(), Some(OnboardingStep::Role));
+        assert_eq!(OnboardingStep::Role.next(), Some(OnboardingStep::UseCase));
+        assert_eq!(
+            OnboardingStep::UseCase.next(),
+            Some(OnboardingStep::DependencyCheck)
+        );
+    }
+
+    #[test]
     fn test_step_numbers() {
         assert_eq!(OnboardingStep::Welcome.number(), 1);
-        assert_eq!(OnboardingStep::EditorSelection.number(), 5);
-        assert_eq!(OnboardingStep::Summary.number(), 6);
-        assert_eq!(OnboardingStep::total(), 6);
+        assert_eq!(OnboardingStep::Source.number(), 2);
+        assert_eq!(OnboardingStep::UseCase.number(), 4);
+        assert_eq!(OnboardingStep::EditorSelection.number(), 8);
+        assert_eq!(OnboardingStep::Summary.number(), 9);
+        assert_eq!(OnboardingStep::total(), 9);
     }
 
     #[test]

@@ -309,6 +309,8 @@ pub enum AppEvent {
     OnboardingSkipAuth,        // Skip authentication step
     OnboardingEditorUp,        // Move editor selection up
     OnboardingEditorDown,      // Move editor selection down
+    OnboardingQuestionUp,      // Move questionnaire selection up (Source/Role/UseCase)
+    OnboardingQuestionDown,    // Move questionnaire selection down (Source/Role/UseCase)
     OnboardingFinish,          // Complete onboarding
     OnboardingInstallConfig,   // Install recommended config (I key)
     // Setup menu events
@@ -1687,6 +1689,18 @@ impl EventHandler {
                         KeyCode::Home => Some(AppEvent::OnboardingCursorHome),
                         KeyCode::End => Some(AppEvent::OnboardingCursorEnd),
                         KeyCode::Char(ch) => Some(AppEvent::OnboardingInputChar(ch)),
+                        _ => None,
+                    }
+                }
+                OnboardingStep::Source | OnboardingStep::Role | OnboardingStep::UseCase => {
+                    match key_event.code {
+                        KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
+                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::OnboardingQuestionUp),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            Some(AppEvent::OnboardingQuestionDown)
+                        }
                         _ => None,
                     }
                 }
@@ -5021,6 +5035,22 @@ impl EventHandler {
                     let max_idx = onboarding_state.available_editors.len().saturating_sub(1);
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
+                    }
+                }
+            }
+            AppEvent::OnboardingQuestionUp => {
+                use crate::components::onboarding::QuestionnaireKind;
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
+                        onboarding_state.questionnaire_select_up(kind);
+                    }
+                }
+            }
+            AppEvent::OnboardingQuestionDown => {
+                use crate::components::onboarding::QuestionnaireKind;
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
+                        onboarding_state.questionnaire_select_down(kind);
                     }
                 }
             }

@@ -9,4 +9,6 @@ pub use component::OnboardingComponent;
 pub use dependency_checker::{
     Dependency, DependencyCategory, DependencyCheckResult, DependencyChecker, DependencyStatus,
 };
-pub use state::{OnboardingFocus, OnboardingState, OnboardingStep, ValidatedPath};
+pub use state::{
+    OnboardingFocus, OnboardingState, OnboardingStep, QuestionnaireKind, ValidatedPath,
+};

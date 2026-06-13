@@ -3551,6 +3551,9 @@ impl AppState {
             config.mark_completed();
             config.git_directories = state.get_valid_directories();
             config.skipped_dependencies = state.skipped_dependencies.clone();
+            config.source = state.selected_source();
+            config.role = state.selected_role();
+            config.use_case = state.selected_use_case();
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
 
             // Update app config with git directories
