@@ -82,6 +82,15 @@ pub mod mentions;
 /// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
 /// for the process lifetime, and exposes an `otlp` seam for P8.2.
 pub mod observability;
+/// `gh`-backed PR status fetch behind an injectable seam (e38.34).
+///
+/// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
+/// to `gh pr view --json statusCheckRollup,mergeable,state` behind the
+/// [`pr_status::PrStatusProvider`] trait, so the task-detail badge can surface
+/// real check status and the refresh path can auto-move a merged PR's issue to
+/// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
+/// all-`Unknown` status — never a panic.
+pub mod pr_status;
 /// Durable issue-comment emission at run-loop lifecycle checkpoints (e38.6).
 ///
 /// At each FSM checkpoint the claim loop reaches — the task starts running, and
