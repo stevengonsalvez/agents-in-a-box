@@ -81,6 +81,12 @@ def _base_env(root: Path) -> dict:
     env = dict(os.environ)
     env.pop("GLOBAL_LEARNINGS_PATH", None)  # let shard resolution run
     env["RECALL_LEARNINGS_ROOT"] = str(root)
+    # A6 added a branch dimension under shards/<project>/branches/<branch>/.
+    # This proof seeds the R15 project-level shard (shards/<project>/), which A6
+    # defines as TRUNK parity (empty branch). Pin RECALL_BRANCH="" so recall.py's
+    # branch detection resolves to that project shard rather than the runner's
+    # current worktree branch (which would point at a non-existent sub-shard).
+    env["RECALL_BRANCH"] = ""
     env.setdefault("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
     env.setdefault(
         "SENTENCE_TRANSFORMERS_HOME",
