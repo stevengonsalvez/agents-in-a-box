@@ -73,6 +73,12 @@ Everything flows to:
 │   │   └── ...
 │   └── episodes/               Session episode notes
 ├── nano_graphrag_cache/        GraphRAG index (nodes, edges, communities)
+├── shards/                     R15: per-project shard KBs (each its own
+│   ├── <project-a>/            documents/ + nano_graphrag_cache/). Recall
+│   │   ├── documents/          defaults to the CURRENT project's shard for
+│   │   └── nano_graphrag_cache/ faster, cross-project-noise-free injection;
+│   └── <project-b>/            `reflect:recall --global` searches the pooled
+│                                top-level KB across all projects.
 └── .memory-ingest-log.yaml     Tracks what's been ingested (prevents reprocessing)
 
 # The `reflect` CLI itself is installed separately via:

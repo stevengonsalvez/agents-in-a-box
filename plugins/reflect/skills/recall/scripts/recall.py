@@ -321,6 +321,123 @@ QMD_DOCS_ROOT = Path.home() / ".learnings" / "documents"
 QMD_PATH_RE = re.compile(r"qmd://" + re.escape(QMD_COLLECTION) + r"/(\S+?\.md)")
 RRF_K = 60  # standard reciprocal-rank-fusion constant
 
+# R15: per-project sharding (Hindsight `bank_id` partitioning + per-bank HNSW
+# shape). Each project keeps its OWN nano-graphrag index under
+# ~/.learnings/shards/<project>/ instead of pooling into one global KB.
+# Smaller per-project corpora → faster recall and clean isolation (no
+# cross-project noise in injection). recall.py defaults to the CURRENT
+# project's shard; `--global` (or RECALL_GLOBAL=1) searches the pooled
+# ~/.learnings KB across all projects.
+#
+# The engine resolves its KB from $GLOBAL_LEARNINGS_PATH (learnings_cli.py
+# get_repo_path). We thread the chosen KB root to the `reflect` subprocess
+# via that env var AND scope the corpus-scan arms (QMD/temporal docs root)
+# to the same root, so all arms agree on which shard they read.
+#
+# Hard precedence (highest wins):
+#   1. an EXPLICIT pre-set $GLOBAL_LEARNINGS_PATH — the eval/behavioral
+#      harnesses and any isolated caller pin the KB this way; sharding must
+#      never clobber it (else hermetic tests would leak into real shards).
+#   2. `--global` / RECALL_GLOBAL=1 → the pooled GLOBAL_LEARNINGS_ROOT.
+#   3. the current project's shard, when a project is detectable.
+#   4. the pooled global KB (no project → nothing to shard by).
+SHARDS_DIRNAME = "shards"
+# RECALL_GLOBAL=1 is the env analog of the --global flag (so the SessionStart
+# hook / settings.json can force global scope without a CLI edit).
+RECALL_GLOBAL_ENV = os.environ.get("RECALL_GLOBAL", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+def _global_learnings_root() -> Path:
+    """R15: the pooled global KB root that every shard lives beneath.
+
+    Defaults to ``~/.learnings`` (the canonical KB the engine + ingest use).
+    ``RECALL_LEARNINGS_ROOT`` overrides it so hermetic tests (and a relocated
+    install) can sandbox the shard tree without touching the user's real KB.
+    Resolved on each call so tests can flip the env without re-importing.
+    """
+    override = (os.environ.get("RECALL_LEARNINGS_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".learnings"
+
+
+# Back-compat module constant — the default pooled root. Prefer
+# _global_learnings_root() on the hot path so RECALL_LEARNINGS_ROOT is honoured.
+GLOBAL_LEARNINGS_ROOT = Path.home() / ".learnings"
+
+
+def _shards_root() -> Path:
+    """R15: the parent dir holding every per-project shard."""
+    return _global_learnings_root() / SHARDS_DIRNAME
+
+
+def shard_kb_path(project: str) -> Path | None:
+    """R15: the shard KB dir for ``project`` — ``~/.learnings/shards/<project>/``.
+
+    ``project`` is the normalized id (:func:`_normalize_project` output — a
+    bare lowercased name). Returns None for an empty project so callers fall
+    back to the pooled global KB rather than minting a ``shards//`` path.
+    """
+    if not project:
+        return None
+    return _shards_root() / project
+
+
+def resolve_kb_root(scope_global: bool) -> Path | None:
+    """R15: pick the KB root the `reflect` subprocess + corpus arms should read.
+
+    Returns None to mean "leave $GLOBAL_LEARNINGS_PATH untouched / use the
+    engine default" — i.e. an explicit pre-set override is in force, or no
+    shard applies. Concrete precedence (see the module comment): explicit
+    env override > global scope > current-project shard > pooled global.
+    """
+    # (1) An explicit pre-set override always wins — never clobber a harness'
+    #     hermetic KB or a caller that already chose a path.
+    if (os.environ.get("GLOBAL_LEARNINGS_PATH") or "").strip():
+        return None
+    # (2) Global scope → the pooled KB across all projects.
+    if scope_global or RECALL_GLOBAL_ENV:
+        return _global_learnings_root()
+    # (3) Current project → its shard, when a project is detectable.
+    shard = shard_kb_path(detect_current_project())
+    if shard is not None:
+        return shard
+    # (4) No project context → fall back to the pooled global KB.
+    return _global_learnings_root()
+
+
+def recall_env(scope_global: bool) -> tuple[dict[str, str], Path | None]:
+    """R15: subprocess env + KB root for the chosen scope.
+
+    The returned env is ``os.environ`` plus ``GLOBAL_LEARNINGS_PATH`` set to
+    the resolved KB root (so the `reflect` subprocess reads that shard). When
+    :func:`resolve_kb_root` returns None (explicit override in force) the env
+    is the untouched ``os.environ`` and the root is None — the corpus arms
+    then read whatever the existing $GLOBAL_LEARNINGS_PATH points at, exactly
+    as before R15.
+    """
+    root = resolve_kb_root(scope_global)
+    env = dict(os.environ)
+    if root is not None:
+        env["GLOBAL_LEARNINGS_PATH"] = str(root)
+    return env, root
+
+
+def _docs_root_for(kb_root: Path | None) -> Path:
+    """R15: the documents/ dir the corpus-scan arms (QMD/temporal) read.
+
+    ``kb_root`` is recall_env's resolved root: a shard, the pooled global, or
+    None. None means "honour whatever $GLOBAL_LEARNINGS_PATH is already set
+    to" — the pre-R15 behaviour fetch_temporal/fetch_qmd already implement —
+    so the corpus arm and the `reflect` subprocess never disagree on shard.
+    """
+    if kb_root is not None:
+        return kb_root / "documents"
+    override = os.environ.get("GLOBAL_LEARNINGS_PATH")
+    return Path(override) / "documents" if override else QMD_DOCS_ROOT
+
 
 # S1: structured field projection. New learnings carry typed frontmatter
 # fields (problem / root_cause / fix / rule / category / entities /
@@ -620,7 +737,24 @@ def find_learnings_cli() -> Path | None:
     return None
 
 
-CACHE_VERSION = "v6-temporal-arm"  # bump when fusion semantics change
+CACHE_VERSION = "v7-shard"  # bump when fusion / cache-key semantics change
+
+
+def _cache_scope_token(mode: str, kb_root: Path | None) -> str:
+    """R15: a cache `mode` component that ALSO encodes the shard.
+
+    The same query against two projects' shards (or the pooled global KB)
+    returns different result sets, so they must not share a cache entry.
+    Folding the resolved KB root into the mode component keeps cache_path /
+    fuzzy_read_cache / update_cache_index unchanged while making every cache
+    key shard-specific. ``kb_root`` None (explicit $GLOBAL_LEARNINGS_PATH
+    override in force) reuses the bare mode — pre-R15 keys, so an
+    override-driven caller's cache is unaffected.
+    """
+    if kb_root is None:
+        return mode
+    digest = hashlib.sha1(str(kb_root).encode()).hexdigest()[:8]
+    return f"{mode}@{digest}"
 
 
 def cache_path(query: str, mode: str, limit: int) -> Path:
@@ -835,11 +969,17 @@ def find_qmd_cli() -> Path | None:
     return Path(cli_on_path) if cli_on_path else None
 
 
-def fetch_qmd(query: str, limit: int, timeout: int = 10) -> list[Learning]:
+def fetch_qmd(
+    query: str, limit: int, timeout: int = 10, docs_root: Path | None = None
+) -> list[Learning]:
     """Fast BM25 retrieval via qmd. Complement to GraphRAG's vector path.
 
     Returns empty list on any failure (missing CLI, timeout, empty KB) — QMD
     is strictly a booster, never a blocker.
+
+    R15: ``docs_root`` scopes which shard's documents back the hits (the
+    parsed paths are resolved relative to it); None keeps the pre-R15 default
+    (``QMD_DOCS_ROOT``).
     """
     qmd = find_qmd_cli()
     if not qmd:
@@ -854,10 +994,10 @@ def fetch_qmd(query: str, limit: int, timeout: int = 10) -> list[Learning]:
         return []
     if proc.returncode != 0 or not proc.stdout:
         return []
-    return parse_qmd_output(proc.stdout)
+    return parse_qmd_output(proc.stdout, docs_root=docs_root)
 
 
-def parse_qmd_output(text: str) -> list[Learning]:
+def parse_qmd_output(text: str, docs_root: Path | None = None) -> list[Learning]:
     """Convert qmd's text output to Learning objects by reading each hit's file.
 
     qmd emits lines like `qmd://learnings/learnings/<file>.md:<line> #hash`
@@ -866,12 +1006,13 @@ def parse_qmd_output(text: str) -> list[Learning]:
     """
     seen: set[str] = set()
     learnings: list[Learning] = []
+    root = docs_root if docs_root is not None else QMD_DOCS_ROOT  # R15
     for m in QMD_PATH_RE.finditer(text):
         rel = m.group(1)
         if rel in seen:  # qmd can emit multiple line hits per file
             continue
         seen.add(rel)
-        path = QMD_DOCS_ROOT / rel
+        path = root / rel
         try:
             content = path.read_text()
         except OSError:
@@ -926,7 +1067,8 @@ def learning_timestamp(learning: Learning) -> datetime | None:
 
 
 def fetch_temporal(
-    temporal: TemporalRange | None, limit: int, query: str = ""
+    temporal: TemporalRange | None, limit: int, query: str = "",
+    docs_root: Path | None = None,
 ) -> list[Learning]:
     """R5: temporal retrieval arm — date-window scan of the learnings corpus.
 
@@ -948,12 +1090,16 @@ def fetch_temporal(
     """
     if temporal is None or not TEMPORAL_ARM_ENABLED or limit <= 0:
         return []
-    # Honour the engine's KB override (the eval harness and any isolated
-    # caller set GLOBAL_LEARNINGS_PATH to a sandbox KB whose documents live
-    # under <base>/documents) — scanning the user's live corpus from inside
-    # a sandboxed run would leak real learnings into the results.
-    override = os.environ.get("GLOBAL_LEARNINGS_PATH")
-    root = Path(override) / "documents" if override else QMD_DOCS_ROOT
+    # R15: scope the corpus scan to the chosen shard when the caller passed a
+    # docs_root. Otherwise honour the engine's KB override (the eval harness
+    # and any isolated caller set GLOBAL_LEARNINGS_PATH to a sandbox KB whose
+    # documents live under <base>/documents) — scanning the user's live
+    # corpus from inside a sandboxed run would leak real learnings.
+    if docs_root is not None:
+        root = docs_root
+    else:
+        override = os.environ.get("GLOBAL_LEARNINGS_PATH")
+        root = Path(override) / "documents" if override else QMD_DOCS_ROOT
     try:
         if not root.is_dir():
             return []
@@ -1048,6 +1194,7 @@ def fetch_ce_scores(
     query: str,
     learnings: list[Learning],
     timeout: int = CE_TIMEOUT,
+    env: dict[str, str] | None = None,
 ) -> dict[str, float] | None:
     """R2: score the top fused candidates via `reflect rerank` (cross-encoder).
 
@@ -1073,6 +1220,7 @@ def fetch_ce_scores(
             [str(cli), "rerank", query],
             input=payload,
             capture_output=True, text=True, timeout=timeout, check=False,
+            env=env,  # R15: scope the rerank to the chosen shard's KB
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -1112,6 +1260,7 @@ def fetch_embeddings(
     query: str,
     learnings: list[Learning],
     timeout: int = EMBED_TIMEOUT,
+    env: dict[str, str] | None = None,
 ) -> tuple[list[float], dict[str, list[float]]] | None:
     """R3: embed the query + top fused candidates via `reflect embed`.
 
@@ -1136,6 +1285,7 @@ def fetch_embeddings(
             [str(cli), "embed", query],
             input=payload,
             capture_output=True, text=True, timeout=timeout, check=False,
+            env=env,  # R15: scope the embed to the chosen shard's KB
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -2098,8 +2248,15 @@ def recall(
     session_id: str | None = None,
     gap_log: bool = True,
     followup_track: bool = True,
+    scope_global: bool = False,
 ) -> RecallResult:
     """High-level API: query → ranked Learnings. Never raises on KB issues.
+
+    R15: ``scope_global`` False (default) scopes retrieval to the CURRENT
+    project's shard (``~/.learnings/shards/<project>/``); True searches the
+    pooled global KB across all projects. An explicit pre-set
+    $GLOBAL_LEARNINGS_PATH override always wins over both (the harness/eval
+    contract). See :func:`resolve_kb_root`.
 
     R4: ``max_tokens`` > 0 bounds the result set by estimated tokens instead
     of count alone. R7: ``min_overlap`` > 0 suppresses out-of-domain results
@@ -2130,8 +2287,30 @@ def recall(
             temporal=temporal,
         )
 
+    # R15: resolve which KB the `reflect` subprocess + corpus arms read. By
+    # default this is the current project's shard; --global / RECALL_GLOBAL
+    # selects the pooled KB; an explicit pre-set $GLOBAL_LEARNINGS_PATH
+    # override leaves the env untouched (kb_root is None) and every arm reads
+    # that override, exactly as before R15.
+    subproc_env, kb_root = recall_env(scope_global)
+    docs_root = _docs_root_for(kb_root)
+    # R16 × R15: when the corpus is already a single-project shard, the
+    # project-affinity boost is redundant (every hit is same-project) — pass
+    # current_project="" to neutralize it. Only the pooled-global path
+    # (kb_root == GLOBAL_LEARNINGS_ROOT) lets affinity auto-detect and apply.
+    # An explicit override (kb_root None) keeps the pre-R15 auto-detect.
+    rerank_project: str | None = (
+        "" if (kb_root is not None and kb_root != _global_learnings_root())
+        else None
+    )
+
     fetched_limit = max(limit * 2, 10)
-    cache_file = cache_path(query, mode, fetched_limit)
+    # R15: the cache is keyed by the SHARD too — the same query against two
+    # projects' shards (or the pooled global KB) returns different result
+    # sets, so they must not share a cache entry. Fold the resolved KB root
+    # into the cache's mode component; the fuzzy index uses the same token.
+    cache_mode = _cache_scope_token(mode, kb_root)
+    cache_file = cache_path(query, cache_mode, fetched_limit)
     if use_cache:
         # R9: Tier 0 — exact-hash hit; Tier 1 — fuzzy fallback over the
         # token-set index (Jaccard ≥ FUZZY_CACHE_THRESHOLD, TTL still
@@ -2139,7 +2318,9 @@ def recall(
         cached = read_cache(cache_file, cache_ttl)
         cache_tier = "exact" if cached else None
         if cached is None:
-            cached = fuzzy_read_cache(query, mode, fetched_limit, cache_ttl)
+            cached = fuzzy_read_cache(
+                query, cache_mode, fetched_limit, cache_ttl  # R15: shard-keyed
+            )
             if cached is not None:
                 cache_tier = "fuzzy"
         if cached:
@@ -2153,7 +2334,10 @@ def recall(
             ]
             ce_scores = _coerce_ce_scores(cached.get("ce_scores")) if CROSS_ENCODER_ENABLED else None  # R2
             embeddings = _coerce_embeddings(cached.get("embeddings")) if mmr_on else None  # R3
-            learnings, rank_scores = rerank_with_scores(learnings, query_tags, ce_scores=ce_scores)
+            learnings, rank_scores = rerank_with_scores(
+                learnings, query_tags, ce_scores=ce_scores,
+                current_project=rerank_project,  # R15×R16
+            )
             learnings = filter_by_confidence(learnings, confidence.upper())
             learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
             if mmr_on:  # R3
@@ -2194,6 +2378,7 @@ def recall(
                 [str(cli), "search", query, "--mode", search_mode,
                  "--format", "json", "--limit", str(fetched_limit)],
                 capture_output=True, text=True, timeout=60, check=False,
+                env=subproc_env,  # R15: scope to the chosen shard's KB
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             return [], f"subprocess failed: {e}"
@@ -2209,10 +2394,15 @@ def recall(
     temporal_arm = TEMPORAL_ARM_ENABLED and temporal is not None
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         learnings_future = pool.submit(_fetch_mode, mode)
-        qmd_future = pool.submit(fetch_qmd, query, fetched_limit)
+        qmd_future = pool.submit(
+            fetch_qmd, query, fetched_limit, docs_root=docs_root  # R15
+        )
         graph_future = pool.submit(_fetch_mode, "local") if graph_arm else None
         temporal_future = (
-            pool.submit(fetch_temporal, temporal, fetched_limit, query)
+            pool.submit(
+                fetch_temporal, temporal, fetched_limit, query,
+                docs_root=docs_root,  # R15
+            )
             if temporal_arm else None
         )
         graph_results, graph_err = learnings_future.result()
@@ -2242,11 +2432,15 @@ def recall(
     if CROSS_ENCODER_ENABLED or mmr_on:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             ce_future = (
-                pool.submit(fetch_ce_scores, cli, query, learnings)
+                pool.submit(
+                    fetch_ce_scores, cli, query, learnings, env=subproc_env  # R15
+                )
                 if CROSS_ENCODER_ENABLED else None
             )
             emb_future = (
-                pool.submit(fetch_embeddings, cli, query, learnings)
+                pool.submit(
+                    fetch_embeddings, cli, query, learnings, env=subproc_env  # R15
+                )
                 if mmr_on else None
             )
             if ce_future is not None:
@@ -2279,8 +2473,11 @@ def recall(
         )
         # R9: register this fetch's token set so near-identical future
         # queries can fuzzy-hit the payload just written.
-        update_cache_index(query, mode, fetched_limit, cache_file)
-    learnings, rank_scores = rerank_with_scores(learnings, query_tags, ce_scores=ce_scores)
+        update_cache_index(query, cache_mode, fetched_limit, cache_file)  # R15
+    learnings, rank_scores = rerank_with_scores(
+        learnings, query_tags, ce_scores=ce_scores,
+        current_project=rerank_project,  # R15×R16
+    )
     learnings = filter_by_confidence(learnings, confidence.upper())
     learnings, gated = apply_ood_gate(learnings, query, min_overlap)  # R7
     if mmr_on:  # R3
@@ -2344,6 +2541,11 @@ def main() -> int:
                          "field (e.g. rule, fix, root_cause, problem) instead "
                          "of the full note. Legacy notes fall back to the "
                          "matching body section, then key_insight/title.")
+    ap.add_argument("--global", dest="scope_global", action="store_true",
+                    help="R15: search the POOLED global KB across all "
+                         "projects instead of the current project's shard "
+                         "(~/.learnings/shards/<project>/). Default scope is "
+                         "the current project's shard.")
     args = ap.parse_args()
 
     query = " ".join(args.query).strip()
@@ -2369,6 +2571,7 @@ def main() -> int:
         session_id=args.session_id,
         gap_log=not args.no_gap_log,
         followup_track=not args.no_followup,
+        scope_global=args.scope_global,  # R15
     )
 
     if result.error:
