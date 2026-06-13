@@ -42,6 +42,7 @@
 
 use ainb_hangar_core::ids::TaskId;
 use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::widgets::transcript::{render_transcript, transcript_color, transcript_glyph};
@@ -58,6 +59,13 @@ const HINT_MUTED: Color = Color::rgb(120, 120, 140);
 const BADGE_PREFIX: &str = "▶ PR ";
 /// The keybinding hint painted next to the URL (two-space gap + `[o] open`).
 const BADGE_HINT: &str = "  [o] open";
+/// Green for a passing CI rollup / a clean mergeable PR (e38.34).
+const STATUS_GREEN: Color = Color::rgb(120, 220, 120);
+/// Red for a failing CI rollup / a merge conflict (e38.34) — visually distinct
+/// from the green pass + the muted unknown so a glance reads the state.
+const STATUS_RED: Color = Color::rgb(240, 100, 100);
+/// Amber for a pending (still-running) CI rollup (e38.34).
+const STATUS_AMBER: Color = Color::rgb(230, 190, 90);
 /// Accent for the comment-compose input bar (a calm emerald, distinct from the
 /// gold PR badge so the two bars never read as the same control).
 const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
@@ -176,7 +184,21 @@ pub struct TaskDetailState {
     /// closed. While open the modal captures every key as text input, so it is
     /// mutually exclusive with the scroll / retry / cancel keys.
     compose: Option<String>,
+    /// The last fetched PR check + merge status (e38.34), shown on the badge next
+    /// to the URL. Defaults to all-`Unknown` (rendered as a muted `…`) until a
+    /// `hangar/pr_status_refresh` answers; only meaningful when [`Self::pr_url`]
+    /// is `Some`. A merged status is reflected by the daemon's auto-Done move, so
+    /// the plugin never transitions on its own.
+    pr_status: PrStatus,
 }
+
+/// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
+/// stays a `const fn`. (`PrStatus::default()` is not `const`.)
+const UNKNOWN_PR_STATUS: PrStatus = PrStatus {
+    ci: CiRollup::Unknown,
+    mergeable: Mergeable::Unknown,
+    state: MergeState::Unknown,
+};
 
 impl TaskDetailState {
     /// A fresh task-detail state bound to `task_id` for `issue`, empty transcript,
@@ -192,6 +214,7 @@ impl TaskDetailState {
             stuck_to_bottom: true,
             cancel_modal_open: false,
             compose: None,
+            pr_status: UNKNOWN_PR_STATUS,
         }
     }
 
@@ -214,6 +237,20 @@ impl TaskDetailState {
     #[must_use]
     pub fn pr_url(&self) -> Option<&str> {
         self.issue.pr_url.as_deref()
+    }
+
+    /// The last fetched PR check + merge status (e38.34). All-`Unknown` until a
+    /// `hangar/pr_status_refresh` answers; the badge renders it next to the URL.
+    #[must_use]
+    pub const fn pr_status(&self) -> PrStatus {
+        self.pr_status
+    }
+
+    /// Apply a freshly fetched PR status (e38.34) — the reducer calls this when a
+    /// `hangar/pr_status_refresh` reply lands so the badge re-renders the CI +
+    /// merge state on the next paint.
+    pub const fn set_pr_status(&mut self, status: PrStatus) {
+        self.pr_status = status;
     }
 
     /// The current lifecycle.
@@ -585,7 +622,7 @@ pub fn render_task_detail(
     // pushing the transcript + sidebar down one row. When absent there is NO
     // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
     let body_top = state.pr_url().map_or(top, |url| {
-        render_pr_badge(buf, area_w, top, url);
+        render_pr_badge(buf, area_w, top, url, state.pr_status());
         top.saturating_add(1)
     });
 
@@ -633,18 +670,56 @@ fn render_compose_bar(buf: &mut WireBuffer, area_w: u16, row: u16, body: &str) {
     let _ = put_clipped(buf, cx, row, COMPOSE_HINT, HINT_MUTED, area_w);
 }
 
-/// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold followed by
-/// a muted `[o] open` keybinding hint next to it (hint-near-control).
+/// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold, then the
+/// CI rollup and merge status (e38.34), then a muted `[o] open` keybinding hint
+/// (hint-near-control).
+///
+/// The status reads in two colour-coded segments right after the URL:
+/// - **CI**: ` CI ✓` (green pass) / ` CI ✗` (red fail) / ` CI …` (amber pending /
+///   muted unknown) — so a glance distinguishes a green build from a broken one.
+/// - **mergeable**: ` ✓ mergeable` (green) / ` ✗ CONFLICT` (red) — a conflict is
+///   loud + red, never the same colour as a clean merge. An `Unknown` mergeable
+///   (GitHub still computing) paints nothing, never a false token.
 ///
 /// The whole row is clipped at `area_w` by **chars** (never bytes —
-/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates a long URL
-/// without panicking on a multi-byte boundary. The gold prefix + URL share the
-/// badge colour; the trailing hint is muted gray.
-fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str) {
+/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
+/// panicking on a multi-byte boundary; a tight width drops the trailing segments
+/// first (URL → CI → mergeable → hint), keeping the most-load-bearing data left.
+fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str, status: PrStatus) {
     let mut cx = 0u16;
     cx = put_clipped(buf, cx, row, BADGE_PREFIX, BADGE_GOLD, area_w);
     cx = put_clipped(buf, cx, row, url, BADGE_GOLD, area_w);
+    let (ci_label, ci_color) = ci_segment(status.ci);
+    cx = put_clipped(buf, cx, row, ci_label, ci_color, area_w);
+    if let Some((label, color)) = mergeable_segment(status.mergeable) {
+        cx = put_clipped(buf, cx, row, label, color, area_w);
+    }
     let _ = put_clipped(buf, cx, row, BADGE_HINT, HINT_MUTED, area_w);
+}
+
+/// The CI rollup badge segment: ` CI <glyph>` + its colour (e38.34).
+///
+/// Always painted (the CI axis is the headline status), with `Unknown` /
+/// `Pending` both showing a muted-vs-amber `…` so the badge reads "status
+/// loading" rather than blank.
+const fn ci_segment(ci: CiRollup) -> (&'static str, Color) {
+    match ci {
+        CiRollup::Pass => (" CI ✓", STATUS_GREEN),
+        CiRollup::Fail => (" CI ✗", STATUS_RED),
+        CiRollup::Pending => (" CI …", STATUS_AMBER),
+        CiRollup::Unknown => (" CI …", HINT_MUTED),
+    }
+}
+
+/// The mergeable badge segment: ` ✓ mergeable` / ` ✗ CONFLICT` + colour, or `None`
+/// when GitHub has not finished computing mergeability (`Unknown`) so the badge
+/// never claims a false state (e38.34).
+const fn mergeable_segment(m: Mergeable) -> Option<(&'static str, Color)> {
+    match m {
+        Mergeable::Mergeable => Some((" ✓ mergeable", STATUS_GREEN)),
+        Mergeable::Conflicting => Some((" ✗ CONFLICT", STATUS_RED)),
+        Mergeable::Unknown => None,
+    }
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping by **chars** at column `right`

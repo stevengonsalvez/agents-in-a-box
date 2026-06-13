@@ -468,6 +468,18 @@ impl ScreenStates {
     pub fn open_task_detail(&mut self, task_id: ainb_hangar_core::ids::TaskId, issue: IssueRow) {
         self.task_detail = Some(TaskDetailState::new(task_id, issue));
     }
+
+    /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
+    /// so the badge re-renders the CI + merge state. A no-op when no task-detail
+    /// is open (the reply outlived the screen).
+    pub const fn set_task_detail_pr_status(
+        &mut self,
+        status: ainb_hangar_proto::pr_status::PrStatus,
+    ) {
+        if let Some(td) = self.task_detail.as_mut() {
+            td.set_pr_status(status);
+        }
+    }
 }
 
 /// A cross-screen navigation the key router surfaces to the plugin glue, which
