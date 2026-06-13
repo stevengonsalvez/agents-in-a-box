@@ -48,8 +48,15 @@ def _isolate(monkeypatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     # detect_current_project memoizes per process.
     monkeypatch.setattr(recall_mod, "_CURRENT_PROJECT_CACHE", None, raising=False)
+    # A6: these R15 tests assert the PROJECT-level shard resolution; A6 adds a
+    # branch dimension underneath it. Pin the branch to trunk ("" — main/master
+    # / detached) so the default scope is the project shard exactly as R15
+    # intends. Branch-aware scoping is covered in test_recall_branch_aware.py.
+    monkeypatch.setattr(recall_mod, "_CURRENT_BRANCH_CACHE", None, raising=False)
+    monkeypatch.setattr(recall_mod, "detect_current_branch", lambda: "")
     yield
     monkeypatch.setattr(recall_mod, "_CURRENT_PROJECT_CACHE", None, raising=False)
+    monkeypatch.setattr(recall_mod, "_CURRENT_BRANCH_CACHE", None, raising=False)
 
 
 # --- bullet 1: shard dir layout ------------------------------------------

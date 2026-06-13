@@ -342,11 +342,34 @@ RRF_K = 60  # standard reciprocal-rank-fusion constant
 #   3. the current project's shard, when a project is detectable.
 #   4. the pooled global KB (no project → nothing to shard by).
 SHARDS_DIRNAME = "shards"
+# A6: branch-aware sharding. Within a project shard, each git branch/worktree
+# keeps its OWN sub-index under ``shards/<project>/branches/<branch>/`` so two
+# worktrees of the same repo (agents-in-a-box LITERALLY runs
+# ``/.agents-in-a-box/worktrees/by-name/...``) don't pollute each other's
+# recall. The project-level shard root (``shards/<project>/``, R15's path)
+# becomes the ALL-BRANCHES scope: ``--all-branches`` / RECALL_ALL_BRANCHES
+# searches it, pooling every branch's learnings. Default recall scope is the
+# CURRENT branch's sub-shard. Detection: ``git rev-parse --abbrev-ref HEAD``
+# (worktree-aware — each worktree reports its own checked-out branch). The
+# main/master branch and a detached HEAD map to NO branch shard (they fall
+# back to the project-level shard) so the common single-branch case keeps
+# R15's exact path and behaviour.
+BRANCHES_DIRNAME = "branches"
+# Branches we never carve a sub-shard for — the trunk a fresh clone sits on,
+# and a detached HEAD (no branch identity). These collapse to the
+# project-level shard so the no-worktree common case is byte-identical to R15.
+_TRUNK_BRANCHES = frozenset({"main", "master", ""})
 # RECALL_GLOBAL=1 is the env analog of the --global flag (so the SessionStart
 # hook / settings.json can force global scope without a CLI edit).
 RECALL_GLOBAL_ENV = os.environ.get("RECALL_GLOBAL", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
+# A6: RECALL_ALL_BRANCHES=1 is the env analog of --all-branches (so the
+# SessionStart hook / settings.json can widen scope to every branch of the
+# current project without a CLI edit).
+RECALL_ALL_BRANCHES_ENV = os.environ.get(
+    "RECALL_ALL_BRANCHES", ""
+).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _global_learnings_root() -> Path:
@@ -373,25 +396,75 @@ def _shards_root() -> Path:
     return _global_learnings_root() / SHARDS_DIRNAME
 
 
-def shard_kb_path(project: str) -> Path | None:
-    """R15: the shard KB dir for ``project`` — ``~/.learnings/shards/<project>/``.
+def _sanitize_branch(raw: Any) -> str:
+    """A6: normalize a git branch/worktree branch name to a filesystem-safe
+    shard-dir component.
 
-    ``project`` is the normalized id (:func:`_normalize_project` output — a
-    bare lowercased name). Returns None for an empty project so callers fall
+    Git allows ``/`` in branch names (``feat/auth``); a raw branch would mint
+    nested dirs and let ``feat/auth`` and ``feat`` collide with a real
+    ``branches/feat`` subtree. Slashes (and any path separator) collapse to
+    ``__`` so each branch maps to exactly one flat shard dir. Trunk branches
+    (main/master) and a missing/detached value return "" — the caller then
+    falls back to the project-level shard (R15's path). Lowercased so case-
+    only branch variants don't fragment the shard tree on case-insensitive
+    filesystems.
+    """
+    if raw is None or isinstance(raw, bool):
+        return ""
+    text = str(raw).strip()
+    if not text or text in _TRUNK_BRANCHES:
+        return ""
+    # Collapse every path separator + a few shell-hostile chars to "__".
+    safe = re.sub(r"[/\\\s:]+", "__", text).strip("._").lower()
+    # A detached HEAD reports "HEAD" from --abbrev-ref; treat it as no branch.
+    if not safe or safe == "head":
+        return ""
+    return safe
+
+
+def shard_kb_path(project: str, branch: str = "") -> Path | None:
+    """R15 + A6: the shard KB dir for ``project`` (and ``branch``).
+
+    Without a branch (R15): ``~/.learnings/shards/<project>/`` — the
+    project-level shard, also the ALL-BRANCHES scope under A6.
+
+    With a branch (A6): ``~/.learnings/shards/<project>/branches/<branch>/`` —
+    an isolated per-branch/per-worktree sub-shard so two worktrees of one repo
+    don't pollute each other's recall.
+
+    ``project`` is the normalized id (:func:`_normalize_project` output);
+    ``branch`` is the sanitized component (:func:`_sanitize_branch` output —
+    "" for trunk/detached). Returns None for an empty project so callers fall
     back to the pooled global KB rather than minting a ``shards//`` path.
     """
     if not project:
         return None
-    return _shards_root() / project
+    root = _shards_root() / project
+    if branch:
+        return root / BRANCHES_DIRNAME / branch
+    return root
 
 
-def resolve_kb_root(scope_global: bool) -> Path | None:
-    """R15: pick the KB root the `reflect` subprocess + corpus arms should read.
+def resolve_kb_root(
+    scope_global: bool, all_branches: bool = False
+) -> Path | None:
+    """R15 + A6: pick the KB root the `reflect` subprocess + corpus arms read.
 
     Returns None to mean "leave $GLOBAL_LEARNINGS_PATH untouched / use the
     engine default" — i.e. an explicit pre-set override is in force, or no
-    shard applies. Concrete precedence (see the module comment): explicit
-    env override > global scope > current-project shard > pooled global.
+    shard applies. Concrete precedence (highest wins):
+
+      1. explicit pre-set $GLOBAL_LEARNINGS_PATH override (harness contract)
+      2. global scope (``--global`` / RECALL_GLOBAL) → pooled KB, all projects
+      3. current project + current branch → the per-branch sub-shard (A6)
+         (UNLESS ``all_branches`` / RECALL_ALL_BRANCHES widens to the
+         project-level shard, pooling every branch of the project)
+      4. current project, no branch (trunk/detached) → the project shard (R15)
+      5. no project context → pooled global KB
+
+    A6: per-branch isolation only kicks in when a NON-trunk branch is
+    detectable AND ``all_branches`` is off — so the no-worktree main/master
+    case stays byte-identical to R15.
     """
     # (1) An explicit pre-set override always wins — never clobber a harness'
     #     hermetic KB or a caller that already chose a path.
@@ -400,25 +473,31 @@ def resolve_kb_root(scope_global: bool) -> Path | None:
     # (2) Global scope → the pooled KB across all projects.
     if scope_global or RECALL_GLOBAL_ENV:
         return _global_learnings_root()
-    # (3) Current project → its shard, when a project is detectable.
-    shard = shard_kb_path(detect_current_project())
+    project = detect_current_project()
+    # (3/4) Current project → its shard. A6: scope to the current branch's
+    #       sub-shard unless --all-branches widens to the project level.
+    branch = "" if (all_branches or RECALL_ALL_BRANCHES_ENV) else detect_current_branch()
+    shard = shard_kb_path(project, branch)
     if shard is not None:
         return shard
-    # (4) No project context → fall back to the pooled global KB.
+    # (5) No project context → fall back to the pooled global KB.
     return _global_learnings_root()
 
 
-def recall_env(scope_global: bool) -> tuple[dict[str, str], Path | None]:
-    """R15: subprocess env + KB root for the chosen scope.
+def recall_env(
+    scope_global: bool, all_branches: bool = False
+) -> tuple[dict[str, str], Path | None]:
+    """R15 + A6: subprocess env + KB root for the chosen scope.
 
     The returned env is ``os.environ`` plus ``GLOBAL_LEARNINGS_PATH`` set to
     the resolved KB root (so the `reflect` subprocess reads that shard). When
     :func:`resolve_kb_root` returns None (explicit override in force) the env
     is the untouched ``os.environ`` and the root is None — the corpus arms
     then read whatever the existing $GLOBAL_LEARNINGS_PATH points at, exactly
-    as before R15.
+    as before R15. ``all_branches`` widens the per-branch scope to the
+    project-level shard (A6).
     """
-    root = resolve_kb_root(scope_global)
+    root = resolve_kb_root(scope_global, all_branches)
     env = dict(os.environ)
     if root is not None:
         env["GLOBAL_LEARNINGS_PATH"] = str(root)
@@ -737,7 +816,7 @@ def find_learnings_cli() -> Path | None:
     return None
 
 
-CACHE_VERSION = "v7-shard"  # bump when fusion / cache-key semantics change
+CACHE_VERSION = "v8-branch"  # bump when fusion / cache-key semantics change
 
 
 def _cache_scope_token(mode: str, kb_root: Path | None) -> str:
@@ -1621,6 +1700,46 @@ def detect_current_project() -> str:
     return project
 
 
+_CURRENT_BRANCH_CACHE: str | None = None
+
+
+def detect_current_branch() -> str:
+    """A6: the current git branch/worktree branch, sanitized, memoized.
+
+    Resolution: ``git rev-parse --abbrev-ref HEAD`` run in the session cwd —
+    worktree-aware, so each worktree (``/.agents-in-a-box/worktrees/...``)
+    reports the branch ITS HEAD points at, which is exactly the isolation
+    boundary we shard on. $RECALL_BRANCH overrides the detection (the
+    SessionStart hook already knows the branch; tests pin it).
+
+    The result is passed through :func:`_sanitize_branch`, so trunk branches
+    (main/master), a detached HEAD, or no git context all return "" — and the
+    caller then uses the project-level shard (R15's path). Memoized per
+    process like :func:`detect_current_project`.
+    """
+    global _CURRENT_BRANCH_CACHE
+    if _CURRENT_BRANCH_CACHE is not None:
+        return _CURRENT_BRANCH_CACHE
+    override = os.environ.get("RECALL_BRANCH")
+    if override is not None:
+        branch = _sanitize_branch(override)
+    else:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
+        branch = (
+            _sanitize_branch(proc.stdout.strip())
+            if proc is not None and proc.returncode == 0
+            else ""
+        )
+    _CURRENT_BRANCH_CACHE = branch
+    return branch
+
+
 def project_norm(current_project: str, hit_project: str) -> float:
     """R16: same-project match → 1.0 (boost ceiling 1 + α/2); everything
     else — cross-project, unknown current project, project-less learning —
@@ -2249,14 +2368,18 @@ def recall(
     gap_log: bool = True,
     followup_track: bool = True,
     scope_global: bool = False,
+    all_branches: bool = False,
 ) -> RecallResult:
     """High-level API: query → ranked Learnings. Never raises on KB issues.
 
-    R15: ``scope_global`` False (default) scopes retrieval to the CURRENT
-    project's shard (``~/.learnings/shards/<project>/``); True searches the
+    R15 + A6: ``scope_global`` False (default) scopes retrieval to the CURRENT
+    project's shard, and — A6 — within it to the CURRENT branch's sub-shard
+    (``~/.learnings/shards/<project>/branches/<branch>/``) so worktrees of one
+    repo don't pollute each other; ``all_branches`` widens to the
+    project-level shard (every branch). ``scope_global`` True searches the
     pooled global KB across all projects. An explicit pre-set
-    $GLOBAL_LEARNINGS_PATH override always wins over both (the harness/eval
-    contract). See :func:`resolve_kb_root`.
+    $GLOBAL_LEARNINGS_PATH override always wins over all of these (the
+    harness/eval contract). See :func:`resolve_kb_root`.
 
     R4: ``max_tokens`` > 0 bounds the result set by estimated tokens instead
     of count alone. R7: ``min_overlap`` > 0 suppresses out-of-domain results
@@ -2292,7 +2415,7 @@ def recall(
     # selects the pooled KB; an explicit pre-set $GLOBAL_LEARNINGS_PATH
     # override leaves the env untouched (kb_root is None) and every arm reads
     # that override, exactly as before R15.
-    subproc_env, kb_root = recall_env(scope_global)
+    subproc_env, kb_root = recall_env(scope_global, all_branches)  # A6
     docs_root = _docs_root_for(kb_root)
     # R16 × R15: when the corpus is already a single-project shard, the
     # project-affinity boost is redundant (every hit is same-project) — pass
@@ -2546,6 +2669,12 @@ def main() -> int:
                          "projects instead of the current project's shard "
                          "(~/.learnings/shards/<project>/). Default scope is "
                          "the current project's shard.")
+    ap.add_argument("--all-branches", dest="all_branches", action="store_true",
+                    help="A6: widen scope from the CURRENT branch's sub-shard "
+                         "(~/.learnings/shards/<project>/branches/<branch>/) "
+                         "to the project-level shard, pooling every branch of "
+                         "the current project. Default scope is the current "
+                         "branch only (worktree isolation).")
     args = ap.parse_args()
 
     query = " ".join(args.query).strip()
@@ -2572,6 +2701,7 @@ def main() -> int:
         gap_log=not args.no_gap_log,
         followup_track=not args.no_followup,
         scope_global=args.scope_global,  # R15
+        all_branches=args.all_branches,  # A6
     )
 
     if result.error:

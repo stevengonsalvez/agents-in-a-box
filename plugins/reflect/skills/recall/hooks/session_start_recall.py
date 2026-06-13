@@ -462,6 +462,15 @@ def _main_body() -> NoReturn:
     # than that, prefer empty context over a stalled session boot. The
     # recall cache makes repeat sessions fast; the first call absorbs
     # the miss silently.
+    # A6: pin the branch recall.py shards on to the one THIS hook detected in
+    # the session cwd — so the boot-time inject reads the current worktree's
+    # branch sub-shard (~/.learnings/shards/<project>/branches/<branch>/) and
+    # never serves another worktree's learnings. current_branch() already
+    # collapses main/master to "" (the project-level shard); recall.py
+    # sanitizes the raw value. Worktrees are the literal layout
+    # agents-in-a-box runs in, so default-isolating here is the point of A6.
+    recall_env = dict(os.environ)
+    recall_env["RECALL_BRANCH"] = current_branch(cwd)
     try:
         r = subprocess.run(
             [
@@ -488,6 +497,7 @@ def _main_body() -> NoReturn:
             text=True,
             timeout=10,
             check=False,
+            env=recall_env,  # A6: pin the branch shard scope
         )
     except (subprocess.TimeoutExpired, OSError):
         emit(ambient_block)

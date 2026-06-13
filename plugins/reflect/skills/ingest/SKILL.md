@@ -76,9 +76,17 @@ Everything flows to:
 ├── shards/                     R15: per-project shard KBs (each its own
 │   ├── <project-a>/            documents/ + nano_graphrag_cache/). Recall
 │   │   ├── documents/          defaults to the CURRENT project's shard for
-│   │   └── nano_graphrag_cache/ faster, cross-project-noise-free injection;
-│   └── <project-b>/            `reflect:recall --global` searches the pooled
-│                                top-level KB across all projects.
+│   │   ├── nano_graphrag_cache/ faster, cross-project-noise-free injection;
+│   │   └── branches/           A6: per-branch / per-worktree sub-shards.
+│   │       ├── feat__auth/     Worktrees of one repo (agents-in-a-box runs
+│   │       │   ├── documents/  /.agents-in-a-box/worktrees/...) get SEPARATE
+│   │       │   └── nano_graphrag_cache/ sub-shards so feat/auth and
+│   │       └── feat__payment/  feat/payment don't pollute each other's recall.
+│   └── <project-b>/            Recall defaults to the CURRENT branch's sub-
+│                                shard; trunk (main/master) uses the project
+│                                shard. `reflect:recall --all-branches` pools
+│                                every branch of the project; `--global` pools
+│                                every project at the top-level KB.
 └── .memory-ingest-log.yaml     Tracks what's been ingested (prevents reprocessing)
 
 # The `reflect` CLI itself is installed separately via:
