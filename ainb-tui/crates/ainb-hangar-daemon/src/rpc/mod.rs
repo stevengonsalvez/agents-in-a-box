@@ -476,6 +476,7 @@ async fn handle(
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         methods::HANGAR_USAGE_ROLLUP => handle_usage_rollup(pool, req).await,
+        methods::HANGAR_PR_STATUS_REFRESH => handle_pr_status_refresh(pool, req, events).await,
         methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
         methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
         other => Err(RpcError {
@@ -725,6 +726,45 @@ async fn handle_usage_rollup(
         None => ainb_hangar_proto::snapshots::UsageRollupResult::default(),
     };
     to_value(&rollup)
+}
+
+/// Dispatch `hangar/pr_status_refresh` (e38.34): fetch the CI + merge status of
+/// an issue's bound PR and auto-move the issue to Done on merge.
+///
+/// Mutating + workspace-scoped: resolves the workspace and **rejects** a mistyped
+/// one with `INVALID_PARAMS` (never a silent no-op, mirroring
+/// [`handle_task_transition`]). Delegates to [`snapshots::refresh_pr_status`] with
+/// the production [`crate::pr_status::GhPrStatusProvider`] (a `gh` subprocess that
+/// degrades to all-`Unknown` when absent / unauthenticated). When the refresh
+/// performed the auto-Done transition, pushes the `IssueUpdated` event so a
+/// subscribed board reflects the column move, and answers with
+/// `transitioned_to_done: true`. An issue with no bound PR answers an all-unknown
+/// status + `false` (a read). Split out of [`handle`] to keep that dispatcher
+/// within the line cap.
+async fn handle_pr_status_refresh(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let params: ainb_hangar_proto::snapshots::PrStatusRefreshParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let provider = crate::pr_status::GhPrStatusProvider::new();
+    let (status, transitioned) =
+        snapshots::refresh_pr_status(pool, ws.as_str(), &params.issue_id, &provider)
+            .await
+            .map_err(|e| store_err(&e))?;
+    // Only a committed transition announces the column move to subscribers.
+    if let Some(row) = transitioned.clone() {
+        events.emit(ws.as_str(), HangarEvent::IssueUpdated(row));
+    }
+    to_value(&ainb_hangar_proto::snapshots::PrStatusRefreshResult {
+        status,
+        transitioned_to_done: transitioned.is_some(),
+    })
 }
 
 /// Dispatch `hangar/issue_create` (e38.29): create one new issue, push the

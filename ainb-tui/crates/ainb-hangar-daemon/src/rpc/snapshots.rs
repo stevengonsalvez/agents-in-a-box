@@ -1000,6 +1000,64 @@ async fn read_issue_row(
     }))
 }
 
+/// The lifecycle state a merged PR auto-transitions its backing issue to
+/// (e38.34). The same `"done"` token the Beads inbound reconcile lands.
+const PR_MERGED_DONE_STATE: &str = "done";
+
+/// Refresh the CI + merge status of `issue_id`'s bound PR, auto-moving the issue
+/// to Done when the PR is merged (`hangar/pr_status_refresh`, e38.34).
+///
+/// Resolves the issue's latest task `result.pr_url` (the P9.1 capture), fetches
+/// its [`PrStatus`] through the injectable `provider` (the real
+/// [`crate::pr_status::GhPrStatusProvider`] in production, a fake in tests — never
+/// real `gh` under test), and — **only** when the PR is merged AND the issue is
+/// not already in the `done` state — moves the issue to `done` via
+/// [`IssueRepo::update_state`] (the same primitive the Beads inbound reconcile
+/// uses). The done-stamp now keys on the PR actually merging, not on a `bd`-side
+/// close sync.
+///
+/// Returns the fetched status plus `Some(row)` with the re-read issue **iff** this
+/// call performed the transition (so the caller can push the `IssueUpdated` event
+/// and the plugin can reflect the column move); `None` for the second element when
+/// no transition happened (an open / closed / un-merged PR, or no bound PR — in
+/// which case the status is the all-`Unknown` degrade value).
+///
+/// An issue with no bound PR resolves an all-`Unknown` status + no transition (a
+/// read, never an error). A `gh` fetch failure already degrades inside the
+/// provider, so this path never errors on the fetch itself.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault (the pr-url resolve, the state
+/// update, or the issue re-read).
+pub async fn refresh_pr_status(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    provider: &dyn crate::pr_status::PrStatusProvider,
+) -> Result<(ainb_hangar_proto::pr_status::PrStatus, Option<IssueRow>), sqlx::Error> {
+    // No bound PR → all-unknown status, no transition (a read, never `gh`).
+    let Some(pr_url) = latest_pr_url_for_issue(pool, workspace_id, issue_id).await? else {
+        return Ok((ainb_hangar_proto::pr_status::PrStatus::default(), None));
+    };
+    let status = provider.fetch(&pr_url).await;
+    if !status.is_merged() {
+        return Ok((status, None));
+    }
+    // The PR is merged. Read the current issue to skip a no-op re-stamp (and to
+    // avoid emitting an `IssueUpdated` for an already-done issue — idempotent).
+    let Some(issue) = IssueRepo::get_by_id(pool, issue_id).await? else {
+        return Ok((status, None));
+    };
+    if issue.state == PR_MERGED_DONE_STATE {
+        return Ok((status, None));
+    }
+    IssueRepo::update_state(pool, issue_id, PR_MERGED_DONE_STATE).await?;
+    // Re-read the now-Done row so the caller can push `IssueUpdated`.
+    let row = read_issue_row(pool, workspace_id, issue_id).await?;
+    Ok((status, row))
+}
+
 /// Create one new issue in `workspace_id`, then return it as a wire [`IssueRow`]
 /// (`hangar/issue_create`, e38.29).
 ///
