@@ -20,8 +20,15 @@ What it strips (in order)
    * JWTs                ``eyJ…\\.…\\.…``           → ``<REDACTED:jwt>``
    * Slack tokens        ``xox[baprs]-…``         → ``<REDACTED:slack_token>``
    * Private keys        PEM ``-----BEGIN … KEY-----`` blocks → ``<REDACTED:private_key>``
-   * Generic ``KEY=value`` where KEY ∈ {token, key, secret, password, api_key,
-     auth, authorization} and value is ≥12 chars → ``KEY=<REDACTED:generic_secret>``
+   * GitLab PATs ``glpat-…``        → ``<REDACTED:gitlab_token>``
+   * Google API keys ``AIza…``      → ``<REDACTED:google_api_key>``
+   * npm tokens ``npm_…``           → ``<REDACTED:npm_token>``
+   * Slack webhooks ``hooks.slack.com/services/…`` → ``<REDACTED:slack_webhook>``
+   * ``Authorization: Bearer <tok>`` → ``Bearer <REDACTED:bearer_token>``
+   * Generic ``KEY=value`` where KEY *contains* {token, key, secret, password,
+     passwd, api_key, auth, authorization} — anywhere in the identifier, so
+     ``AWS_SECRET_ACCESS_KEY``/``GITLAB_TOKEN``/``GOOGLE_API_KEY``/``NPM_TOKEN``
+     all match — and value is ≥12 chars → ``KEY=<REDACTED:generic_secret>``
 3. **Emails**                → ``<REDACTED:email>``
 4. **IPv4 addresses**        → ``<REDACTED:ipv4>``
 5. **Home paths** ``/Users/<u>`` / ``/home/<u>`` → ``/Users/<user>`` etc.;
@@ -62,7 +69,22 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         "github_token",
     ),
     (re.compile(r"gh[posru]_[A-Za-z0-9]{20,}"), "<REDACTED:github_token>", "github_token"),
+    # GitLab personal-access / pipeline tokens (glpat-…). No generic-keyword
+    # anchor, so without this prefix rule a bare token leaks into a published
+    # issue unredacted.
+    (re.compile(r"glpat-[A-Za-z0-9_\-]{16,}"), "<REDACTED:gitlab_token>", "gitlab_token"),
+    # Google API keys (AIza…). Fixed 39-char total in practice; match ≥30 of
+    # body to stay tolerant without being greedy.
+    (re.compile(r"\bAIza[A-Za-z0-9_\-]{30,}\b"), "<REDACTED:google_api_key>", "google_api_key"),
+    # npm automation/access tokens (npm_…).
+    (re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"), "<REDACTED:npm_token>", "npm_token"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"), "<REDACTED:slack_token>", "slack_token"),
+    # Slack incoming-webhook URLs carry a posting credential in the path.
+    (
+        re.compile(r"https://hooks\.slack\.com/services/\S+"),
+        "<REDACTED:slack_webhook>",
+        "slack_webhook",
+    ),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<REDACTED:aws_key>", "aws_key"),
     (
         re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"),
@@ -83,6 +105,16 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         "<REDACTED:private_key>",
         "private_key",
     ),
+    # ``Authorization: Bearer <token>`` — strip the credential, keep the scheme
+    # so the line still reads. Runs after the more specific token rules above so
+    # a ``Bearer eyJ…`` JWT is already redacted by the time we get here; this
+    # catches opaque bearer tokens with no recognizable prefix. Only the token
+    # is replaced (group 1 — the ``Bearer `` scheme — is preserved).
+    (
+        re.compile(r"(\bBearer\s+)[A-Za-z0-9_\-.=+/]{12,}"),
+        r"\1<REDACTED:bearer_token>",
+        "bearer_token",
+    ),
 ]
 
 # Generic KEY=value / KEY: value secret. The keyword set and the {12,} value
@@ -90,8 +122,15 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
 # The ``(?!<REDACTED:)`` guard stops this coarse rule from re-redacting a
 # placeholder a more specific earlier rule already wrote (e.g. a PEM block that
 # happened to follow the literal text "key:").
+# The keyword is allowed to be EMBEDDED in a longer identifier. ``_`` is a word
+# char, so a strict ``\b(key)\b`` boundary fails on ``AWS_SECRET_ACCESS_KEY``,
+# ``GITLAB_TOKEN``, ``GOOGLE_API_KEY``, ``NPM_TOKEN`` — the keyword sits between
+# word chars, never on a boundary, so the whole assignment passes through
+# unredacted. Surrounding ``\w*`` lets the keyword match anywhere inside the
+# identifier; group 1 captures the FULL env-var name so it's preserved verbatim
+# and only the value is stripped.
 _GENERIC_SECRET_RE = re.compile(
-    r"\b(token|key|secret|password|api[_-]?key|auth(?:orization)?)\b"
+    r"\b(\w*(?:token|key|secret|password|passwd|api[_-]?key|auth(?:orization)?)\w*)"
     r"(\s*[:=]\s*)"
     r"(['\"]?)(?!<REDACTED:)([^\s'\"]{12,})\3",
     re.IGNORECASE,

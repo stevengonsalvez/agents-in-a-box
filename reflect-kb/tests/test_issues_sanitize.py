@@ -148,6 +148,64 @@ def test_secret_wins_over_hash_classification():
     assert "<REDACTED:hash>" not in out
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "AWS_SECRET_ACCESS_KEY=" + _BODY + "wJalrXUtnFEMI",
+        "GITLAB_TOKEN=" + "glpat" + _BODY[:20],
+        "GOOGLE_API_KEY=" + _BODY + "AIzaSyXYZ",
+        "NPM_TOKEN=" + "npm_" + _BODY,
+    ],
+)
+def test_embedded_keyword_env_vars_are_redacted(assignment):
+    # The keyword (KEY/TOKEN) is embedded in a longer env-var name; ``_`` is a
+    # word char so a strict ``\b(key)\b`` boundary never matches and the value
+    # would leak. The relaxed surrounding-``\w*`` rule must catch them.
+    name, _, value = assignment.partition("=")
+    out = sanitize(f"export {assignment}").text
+    assert value not in out
+    assert "REDACTED" in out
+    # The env-var name is preserved, only the value is stripped.
+    assert name in out
+
+
+def test_gitlab_pat_redacted():
+    token = "glpat-" + "a" * 24
+    out = sanitize(f"clone with {token} now").text
+    assert token not in out
+    assert "<REDACTED:gitlab_token>" in out
+
+
+def test_google_api_key_redacted():
+    key = "AIza" + "Sy" + "B" * 33
+    out = sanitize(f"maps key {key}").text
+    assert key not in out
+    assert "<REDACTED:google_api_key>" in out
+
+
+def test_npm_token_redacted():
+    token = "npm_" + "z" * 36
+    out = sanitize(f"//registry.npmjs.org/:_authToken={token}").text
+    assert token not in out
+    assert "<REDACTED:npm_token>" in out
+
+
+def test_slack_webhook_url_redacted():
+    url = "https://hooks.slack.com/services/T0000/B0000/abcdefghijklmnop"
+    out = sanitize(f"posting to {url} ok").text
+    assert "abcdefghijklmnop" not in out
+    assert "<REDACTED:slack_webhook>" in out
+
+
+def test_authorization_bearer_token_redacted():
+    token = "opaqueBearerToken1234567890"
+    out = sanitize(f"Authorization: Bearer {token}").text
+    assert token not in out
+    assert "<REDACTED:bearer_token>" in out
+    # The scheme is preserved so the line still reads.
+    assert "Bearer" in out
+
+
 def test_fine_grained_github_pat_is_redacted():
     # Fine-grained PATs (github_pat_<22>_<59>) are NOT matched by the classic
     # gh[posru]_ rule (underscore mid-body, ``i`` after ``gh``) — a dedicated
