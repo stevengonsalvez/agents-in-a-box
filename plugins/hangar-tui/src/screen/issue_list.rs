@@ -1,9 +1,10 @@
 //! P4.3 — Issue list screen: the pure reducer + width-aware render.
 //!
 //! The issue list is the default landing screen (hotkey `1`). It renders a
-//! workspace's [`IssueRow`]s grouped by lifecycle status into three columns —
-//! Todo / In Progress / Done — with row selection, filter chips, and a
-//! type-narrow filter-input mode. As with the screen router ([`crate::screen`]),
+//! workspace's [`IssueRow`]s grouped by lifecycle status into the five canonical
+//! columns — Backlog / Todo / In Progress / In Review / Done (63l.3) — with row
+//! selection, filter chips, and a type-narrow filter-input mode. As with the
+//! screen router ([`crate::screen`]),
 //! the reducer ([`reduce_issue_list`]) is **pure**: it folds a key press or a
 //! host [`HangarEvent`] into a new [`IssueListState`] plus an optional
 //! [`IssueListIntent`] for the plugin glue to act on (open a task, start the
@@ -26,52 +27,91 @@ use std::collections::HashMap;
 
 use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
+use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
-/// The three status columns issues are bucketed into for display.
+/// The number of status columns the board renders — the five canonical
+/// lifecycle statuses (63l.3). Kept as a single constant so the column enum and
+/// the render's [`SectionBands`] split stay in lockstep.
+pub(crate) const COLUMN_COUNT: usize = IssueLifecycle::ALL.len();
+
+/// The five status columns issues are bucketed into for display, one per
+/// canonical [`IssueLifecycle`] status (63l.3).
 ///
 /// The mapping from the wire `state` string to a column is owned by
-/// [`IssueColumn::for_state`]; everything the daemon doesn't explicitly mark
-/// done or in-progress falls into [`IssueColumn::Todo`] so a new lifecycle
-/// string never silently vanishes from the board.
+/// [`IssueColumn::for_state`], which delegates to the canonical
+/// [`IssueLifecycle::for_state`] — the SINGLE source of truth the daemon also
+/// maps through. Legacy `open` and any unknown string fall into
+/// [`IssueColumn::Todo`], legacy `closed` into [`IssueColumn::Done`], so a row
+/// never silently vanishes from the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueColumn {
-    /// Not started — the default bucket (`"open"`, `"todo"`, unknown states).
+    /// Not yet triaged into active work (`"backlog"`) — the leftmost column.
+    Backlog,
+    /// Triaged, ready to start (`"todo"`, legacy `"open"`, unknown states).
     Todo,
     /// Actively being worked (`"in_progress"`).
     InProgress,
-    /// Terminal / closed (`"done"`, `"closed"`).
+    /// Work done, awaiting review / merge (`"in_review"`).
+    InReview,
+    /// Terminal / closed (`"done"`, legacy `"closed"`).
     Done,
 }
 
 impl IssueColumn {
-    /// Bucket a wire `state` string into its display column.
+    /// Bucket a wire `state` string into its display column, via the canonical
+    /// [`IssueLifecycle`] vocabulary (the one source of truth the daemon shares).
     ///
     /// Unknown states fall into [`IssueColumn::Todo`] (fail-visible, not
     /// fail-hidden) so the board never drops a row the daemon sent.
     #[must_use]
     pub fn for_state(state: &str) -> Self {
-        match state {
-            "in_progress" => Self::InProgress,
-            "done" | "closed" => Self::Done,
-            _ => Self::Todo,
+        Self::from_lifecycle(IssueLifecycle::for_state(state))
+    }
+
+    /// Map a canonical [`IssueLifecycle`] status to its display column. The two
+    /// enums are 1:1 by design; this is the seam that keeps the plugin's column
+    /// vocabulary pinned to the proto source of truth.
+    #[must_use]
+    const fn from_lifecycle(status: IssueLifecycle) -> Self {
+        match status {
+            IssueLifecycle::Backlog => Self::Backlog,
+            IssueLifecycle::Todo => Self::Todo,
+            IssueLifecycle::InProgress => Self::InProgress,
+            IssueLifecycle::InReview => Self::InReview,
+            IssueLifecycle::Done => Self::Done,
         }
     }
 
-    /// The column header label (without the count suffix).
+    /// The column header label (without the count suffix) — the canonical
+    /// [`IssueLifecycle::label`].
     #[must_use]
     pub const fn label(self) -> &'static str {
+        self.lifecycle().label()
+    }
+
+    /// The canonical [`IssueLifecycle`] status this column renders.
+    #[must_use]
+    const fn lifecycle(self) -> IssueLifecycle {
         match self {
-            Self::Todo => "Todo",
-            Self::InProgress => "In Progress",
-            Self::Done => "Done",
+            Self::Backlog => IssueLifecycle::Backlog,
+            Self::Todo => IssueLifecycle::Todo,
+            Self::InProgress => IssueLifecycle::InProgress,
+            Self::InReview => IssueLifecycle::InReview,
+            Self::Done => IssueLifecycle::Done,
         }
     }
 
-    /// The three columns in left-to-right display order.
+    /// The five columns in left-to-right display order (`backlog` … `done`).
     #[must_use]
-    pub const fn all() -> [Self; 3] {
-        [Self::Todo, Self::InProgress, Self::Done]
+    pub const fn all() -> [Self; COLUMN_COUNT] {
+        [
+            Self::Backlog,
+            Self::Todo,
+            Self::InProgress,
+            Self::InReview,
+            Self::Done,
+        ]
     }
 }
 
@@ -696,24 +736,26 @@ struct Band {
     end: u16,
 }
 
-/// The three status sections' bands, splitting the body `[col_top, bottom)` into
-/// three contiguous, non-overlapping vertical thirds.
+/// The status sections' bands, splitting the body `[col_top, bottom)` into
+/// [`COLUMN_COUNT`] contiguous, non-overlapping vertical slices — one per
+/// canonical lifecycle column.
 struct SectionBands {
-    bands: [Band; 3],
+    bands: [Band; COLUMN_COUNT],
 }
 
 impl SectionBands {
-    /// Divide `[col_top, bottom)` into three contiguous bands. The body height is
-    /// split into thirds; the remainder rows go to the earlier bands so the whole
-    /// height is used and the last band still ends exactly at `bottom`. A body too
-    /// short to give every section a row degrades gracefully (zero-height bands
-    /// simply paint nothing — never out of bounds).
-    fn split(col_top: u16, bottom: u16) -> [Band; 3] {
+    /// Divide `[col_top, bottom)` into [`COLUMN_COUNT`] contiguous bands. The body
+    /// height is split evenly; the remainder rows go to the earlier bands so the
+    /// whole height is used and the last band still ends exactly at `bottom`. A
+    /// body too short to give every section a row degrades gracefully (zero-height
+    /// bands simply paint nothing — never out of bounds).
+    fn split(col_top: u16, bottom: u16) -> [Band; COLUMN_COUNT] {
         let avail = bottom.saturating_sub(col_top);
-        let base = avail / 3;
-        let extra = avail % 3; // 0..=2 leftover rows handed to the earliest bands
+        let n = u16::try_from(COLUMN_COUNT).unwrap_or(u16::MAX);
+        let base = avail / n;
+        let extra = avail % n; // leftover rows handed to the earliest bands
         let mut start = col_top;
-        let mut bands = [Band { start, end: start }; 3];
+        let mut bands = [Band { start, end: start }; COLUMN_COUNT];
         for (i, band) in bands.iter_mut().enumerate() {
             let h = base + u16::from(u16::try_from(i).unwrap_or(u16::MAX) < extra);
             // Clamp end >= start: when `bottom < col_top` (only reachable from a
@@ -729,7 +771,7 @@ impl SectionBands {
 
 impl IntoIterator for SectionBands {
     type Item = Band;
-    type IntoIter = std::array::IntoIter<Band, 3>;
+    type IntoIter = std::array::IntoIter<Band, COLUMN_COUNT>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.bands.into_iter()
@@ -922,22 +964,86 @@ mod tests {
         r.labels = vec!["bug".into()];
         let s = IssueListState::with_rows(vec![r]);
 
-        let mut buf = WireBuffer::new(80, 8);
-        render_issue_list(&mut buf, 80, 1, 7, &s, 0);
+        // Tall enough that the five canonical bands each get a header + an issue
+        // row (the labelled `open` issue lands in the Todo band).
+        let mut buf = WireBuffer::new(80, 16);
+        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
 
-        // Reconstruct every painted row and assert the chip glyphs appear.
-        let mut painted = String::new();
-        for y in 0..8u16 {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    painted.push_str(&cell.symbol);
-                }
-            }
-        }
+        let painted = painted_text(&buf);
         assert!(
             painted.contains("‹bug›"),
             "labelled issue must render its chip: {painted:?}"
         );
+    }
+
+    /// Reconstruct the full painted text of a rendered buffer (every cell, in
+    /// row-major order) so a render assertion can search for headers / glyphs.
+    fn painted_text(buf: &WireBuffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.height {
+            for (coord, cell) in &buf.cells {
+                if coord.y == y {
+                    out.push_str(&cell.symbol);
+                }
+            }
+        }
+        out
+    }
+
+    /// The board renders ALL FIVE canonical lifecycle columns, each with its live
+    /// count, and buckets a representative row into each (63l.3 plugin render
+    /// proof). A `backlog` and an `in_review` row prove the two new columns are
+    /// not dropped, and the legacy `open` / `closed` tokens still land under
+    /// Todo / Done via the canonical helper.
+    #[test]
+    fn renders_all_five_canonical_columns_with_counts() {
+        let s = IssueListState::with_rows(vec![
+            row("i-backlog", "backlog", None),
+            row("i-todo", "todo", None),
+            row("i-open", "open", None), // legacy -> Todo
+            row("i-prog", "in_progress", None),
+            row("i-review", "in_review", None),
+            row("i-done", "done", None),
+            row("i-closed", "closed", None), // legacy -> Done
+        ]);
+
+        // Tall enough that every five-band header gets a row.
+        let mut buf = WireBuffer::new(80, 24);
+        render_issue_list(&mut buf, 80, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+
+        // Every canonical column header with its live count.
+        for header in [
+            "Backlog (1)",
+            "Todo (2)", // todo + legacy open
+            "In Progress (1)",
+            "In Review (1)",
+            "Done (2)", // done + legacy closed
+        ] {
+            assert!(
+                painted.contains(header),
+                "missing column header {header:?} in:\n{painted}"
+            );
+        }
+    }
+
+    /// Each canonical lifecycle string buckets into its own column, and the
+    /// legacy tokens map forward — the plugin delegates to the one
+    /// `IssueLifecycle` source of truth (63l.3).
+    #[test]
+    fn for_state_maps_every_canonical_and_legacy_token() {
+        assert_eq!(IssueColumn::for_state("backlog"), IssueColumn::Backlog);
+        assert_eq!(IssueColumn::for_state("todo"), IssueColumn::Todo);
+        assert_eq!(
+            IssueColumn::for_state("in_progress"),
+            IssueColumn::InProgress
+        );
+        assert_eq!(IssueColumn::for_state("in_review"), IssueColumn::InReview);
+        assert_eq!(IssueColumn::for_state("done"), IssueColumn::Done);
+        // Legacy + unknown.
+        assert_eq!(IssueColumn::for_state("open"), IssueColumn::Todo);
+        assert_eq!(IssueColumn::for_state("weird"), IssueColumn::Todo);
+        assert_eq!(IssueColumn::for_state("closed"), IssueColumn::Done);
     }
 
     /// The renderer draws a 50-issue fixture at the 80×24 floor without writing
