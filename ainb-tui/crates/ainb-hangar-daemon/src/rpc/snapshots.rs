@@ -35,7 +35,7 @@ use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
 use ainb_hangar_store::repo::usage::UsageRepo;
-use ainb_hangar_store::repo::workspace::apply_issue_prefix;
+use ainb_hangar_store::repo::workspace::{apply_issue_prefix, issue_display_id};
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -62,6 +62,11 @@ const ISSUE_STATES: &[&str] = &[
 
 /// Snapshot every issue in `workspace_id`, mapped to wire [`IssueRow`]s.
 ///
+/// Each row carries its `HGR-<n>` `display_id` (63l.3): the issue's per-workspace
+/// creation ordinal ([`IssueRepo::workspace_seq`]) joined to the workspace's
+/// `issue_prefix` (or the `HGR` default) via [`issue_display_id`]. The prefix is
+/// read once for the whole snapshot, not per row.
+///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if any per-state query fails.
@@ -69,6 +74,9 @@ pub async fn issues_list(
     pool: &SqlitePool,
     workspace_id: &str,
 ) -> Result<Vec<IssueRow>, sqlx::Error> {
+    // Read the workspace's display prefix once; every row's HGR-<n> resolves
+    // against the same prefix (NULL → the HGR default at the display layer).
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let mut out = Vec::new();
     for state in ISSUE_STATES {
         for issue in IssueRepo::list_by_workspace_state(pool, workspace_id, state).await? {
@@ -76,12 +84,16 @@ pub async fn issues_list(
                 index: "id".to_string(),
                 source: format!("malformed issue id {:?}: {e}", issue.id).into(),
             })?;
+            // 63l.3: the HGR-<n> the issue list + CLI surface, derived from the
+            // issue's creation ordinal and the workspace prefix read above.
+            let display_id =
+                issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
             // P9.2: surface the PR URL captured by P9.1 from this issue's latest
             // completed task's `result.pr_url`, or `None` when no task opened a PR.
             let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
             out.push(IssueRow {
                 id,
-                display_id: None,
+                display_id,
                 workspace_id: issue.workspace_id,
                 title: issue.title,
                 description: issue.description,
@@ -97,6 +109,24 @@ pub async fn issues_list(
         }
     }
     Ok(out)
+}
+
+/// The `HGR-<n>` display id for one issue, or `None` when the id resolves to no
+/// row in `workspace_id` (a stale id). Joins the issue's per-workspace creation
+/// ordinal ([`IssueRepo::workspace_seq`]) to `prefix` (the workspace's
+/// `issue_prefix`, or the `HGR` default when `None`) via [`issue_display_id`].
+///
+/// The single place a wire row's display id is assembled, so the list, search,
+/// update, label, and create paths all agree byte-for-byte (63l.3).
+async fn issue_display_row(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    prefix: Option<&str>,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(IssueRepo::workspace_seq(pool, workspace_id, issue_id)
+        .await?
+        .map(|seq| issue_display_id(prefix, seq)))
 }
 
 /// Ranked title + description + comment search within `workspace_id`, mapped to
@@ -119,6 +149,7 @@ pub async fn issues_search(
     workspace_id: &str,
     query: &str,
 ) -> Result<Vec<IssueRow>, sqlx::Error> {
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let mut out = Vec::new();
     // `search_ranked` already returns rows in rank order (title > desc > comment,
     // then created_at, id), so the wire order is preserved one-for-one.
@@ -127,10 +158,12 @@ pub async fn issues_search(
             index: "id".to_string(),
             source: format!("malformed issue id {:?}: {e}", issue.id).into(),
         })?;
+        let display_id =
+            issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
         let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
         out.push(IssueRow {
             id,
-            display_id: None,
+            display_id,
             workspace_id: issue.workspace_id,
             title: issue.title,
             description: issue.description,
@@ -912,10 +945,12 @@ pub async fn issue_update(
         index: "id".to_string(),
         source: format!("malformed issue id {:?}: {e}", issue.id).into(),
     })?;
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
+    let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
-        display_id: None,
+        display_id,
         workspace_id: issue.workspace_id,
         title: issue.title,
         description: issue.description,
@@ -1001,10 +1036,12 @@ async fn read_issue_row(
         index: "id".to_string(),
         source: format!("malformed issue id {:?}: {e}", issue.id).into(),
     })?;
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
+    let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
-        display_id: None,
+        display_id,
         workspace_id: issue.workspace_id,
         title: issue.title,
         description: issue.description,
@@ -1132,9 +1169,14 @@ pub async fn issue_create(
         index: "id".to_string(),
         source: format!("malformed issue id {id:?}: {e}").into(),
     })?;
+    // 63l.3: the just-inserted issue is the workspace's newest, so its display
+    // ordinal is the post-insert count; resolve it the same way the list does so
+    // the response + pushed IssueCreated event carry the HGR-<n> a later snapshot
+    // shows.
+    let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
         id: issue_id,
-        display_id: None,
+        display_id,
         workspace_id: workspace_id.to_string(),
         title,
         description: description.map(ToString::to_string),
