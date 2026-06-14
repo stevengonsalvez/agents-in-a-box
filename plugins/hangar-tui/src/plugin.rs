@@ -213,6 +213,22 @@ pub struct HangarPlugin {
     /// Drained in `render` (the spawned task where host IO is safe), exactly like
     /// the assign / comment / create deferred RPCs. `None` when no move is armed.
     pending_issue_state_update: Option<(String, ainb_hangar_proto::lifecycle::IssueLifecycle)>,
+    /// The right-click context-menu overlay (63l.5), present only while open.
+    /// Raised by the `OpenContextMenu` mouse intent over a card; its keyboard /
+    /// click navigation produces a [`ContextMenuIntent`](crate::screen::context_menu::ContextMenuIntent)
+    /// the `render` drain binds to a real `hangar/issue_update` RPC. `None` when
+    /// the menu is closed.
+    context_menu: Option<crate::screen::context_menu::ContextMenuState>,
+    /// A priority edit (63l.5) raised by the context menu's `Priority ▸` submenu:
+    /// the `(issue_id, priority)` to fire as `hangar/issue_update{priority}` over
+    /// the daemon socket. Drained in `render` like the state-move RPC. `None` when
+    /// no priority edit is armed.
+    pending_issue_priority_update: Option<(String, i64)>,
+    /// An assignee edit (63l.5) raised by the context menu's `Assign ▸` submenu:
+    /// the `(issue_id, actor_ref)` to fire as `hangar/issue_update{assignee}` over
+    /// the daemon socket. Drained in `render` like the assign-picker path. `None`
+    /// when no assignee edit is armed.
+    pending_issue_assignee_update: Option<(String, String)>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -251,6 +267,9 @@ impl Default for HangarPlugin {
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
             pending_issue_state_update: None,
+            context_menu: None,
+            pending_issue_priority_update: None,
+            pending_issue_assignee_update: None,
         }
     }
 }
@@ -1074,6 +1093,76 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire the deferred issue-priority RPC raised by the context menu's
+    /// `Priority ▸` submenu (63l.5).
+    ///
+    /// Maps the `(issue_id, priority)` to `hangar/issue_update`, setting the
+    /// issue's `priority` scalar (`0..3`) over the SAME `ISSUE_UPDATE_REQ_ID` seam
+    /// the assignee / state edits use. The daemon's `IssueUpdated` push re-renders
+    /// the new chip. A send failure is logged but non-fatal — the next snapshot
+    /// reconciles.
+    async fn apply_issue_priority_update(
+        &mut self,
+        host: &HostClient,
+        issue_id: String,
+        priority: i64,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id, "priority": priority
+        });
+        let Ok(body) = encode_request(
+            ISSUE_UPDATE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_UPDATE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: issue priority send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fire the deferred issue-assignee RPC raised by the context menu's
+    /// `Assign ▸` submenu (63l.5).
+    ///
+    /// Maps the `(issue_id, actor_ref)` to `hangar/issue_update`, setting the
+    /// issue's `assignee` to the picked canonical `member:<id>` / `agent:<id>` ref
+    /// over the SAME `ISSUE_UPDATE_REQ_ID` seam the agent-picker assign uses. The
+    /// daemon's `IssueUpdated` push re-renders the assignee. A send failure is
+    /// logged but non-fatal — the next snapshot reconciles.
+    async fn apply_issue_assignee_update(
+        &mut self,
+        host: &HostClient,
+        issue_id: String,
+        actor_ref: String,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id, "assignee": actor_ref
+        });
+        let Ok(body) = encode_request(
+            ISSUE_UPDATE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_UPDATE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: issue assignee send failed: {e}"))
+                .await;
+        }
+    }
+
     /// Fire a deferred issue-comment RPC raised by the task-detail compose modal
     /// (e38.5).
     ///
@@ -1372,6 +1461,13 @@ impl HangarPlugin {
                 self.daemon_start_error.as_deref(),
             );
         }
+        // 63l.5: the right-click context menu floats over the board, anchored at
+        // the click. It sits ABOVE the body but BELOW the first-run modal (which
+        // stays the top-most overlay on a fresh machine). The render records its
+        // hit-map onto the state so the next click hit-tests against this paint.
+        if let Some(menu) = self.context_menu.as_mut() {
+            crate::screen::context_menu::render_context_menu(&mut buf, w, h, menu);
+        }
         // P5.6: the first-run danger-full-access modal overlays everything (last
         // write wins on the sparse buffer) until the user accepts.
         if self.first_run.is_showing() {
@@ -1402,6 +1498,17 @@ impl HangarPlugin {
                     self.first_run_ack_pending = true;
                 }
             }
+            return;
+        }
+
+        // 63l.5: while the context menu is open it is *modal* — it captures every
+        // key. Arrows / `hjkl` navigate, Enter / `l` fire-or-open, Esc / `h`
+        // collapse-or-close. A fired leaf is applied here (binding its deferred
+        // RPC); the menu closes itself when a leaf fires or Esc is pressed at the
+        // root. Intercepted ahead of every screen route so it never leaks a key to
+        // the board beneath it.
+        if self.context_menu.is_some() {
+            self.route_context_menu_key(key);
             return;
         }
 
@@ -1462,6 +1569,34 @@ impl HangarPlugin {
         }
     }
 
+    /// Route a key to the open context menu (63l.5), folding it into the menu
+    /// reducer and applying any leaf intent it fires.
+    ///
+    /// The SDK arrow [`KeyCode`](ainb_plugin_sdk::KeyCode)s and the `h`/`j`/`k`/`l`
+    /// vim chars map onto the menu's small [`ContextMenuKey`](crate::screen::context_menu::ContextMenuKey)
+    /// alphabet; an unmapped key is swallowed (the menu is modal). When the
+    /// reduction closes the menu (a fired leaf, or Esc at the root) the overlay is
+    /// dropped so the board regains focus.
+    fn route_context_menu_key(&mut self, key: &ainb_plugin_sdk::KeyEvent) {
+        let Some(menu_key) = context_menu_key_of(key) else {
+            return;
+        };
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        if let Some(intent) = menu.handle_key(menu_key) {
+            self.apply_context_menu_intent(intent);
+        }
+        // Drop the overlay once it closes itself (a leaf fired, or Esc at root).
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(crate::screen::context_menu::ContextMenuState::is_closed)
+        {
+            self.context_menu = None;
+        }
+    }
+
     /// Fold one forwarded mouse event into the card-board mouse framework
     /// (63l.2): hit-test it against the last render's [`hit_map`](Self::hit_map),
     /// fold the [`MouseFsm`](crate::mouse::MouseFsm), and stash any produced
@@ -1473,8 +1608,48 @@ impl HangarPlugin {
     /// queue is the `wants_redraw` signal), applying the local effects and (in
     /// 63l.4) binding the mutating intents to RPCs.
     fn on_mouse(&mut self, ev: ainb_plugin_sdk::MouseEvent) {
+        // 63l.5: while the context menu is open it owns the pointer. A left-down is
+        // hit-tested against the menu's render-time hit-map (firing a leaf, opening
+        // a submenu, or dismissing on a click-away); every other event is swallowed
+        // so it can't reach the board beneath the overlay.
+        if self.context_menu.is_some() {
+            self.route_context_menu_mouse(ev);
+            return;
+        }
         if let Some(intent) = self.mouse_fsm.handle(&self.hit_map, ev) {
             self.pending_mouse_intents.push(intent);
+        }
+    }
+
+    /// Route a forwarded pointer event to the open context menu (63l.5).
+    ///
+    /// Only a `Down{Left}` acts (the conventional menu click): it folds into the
+    /// menu's [`handle_click`](crate::screen::context_menu::ContextMenuState::handle_click)
+    /// against the last render's hit-map, applying any fired leaf intent and
+    /// dropping the overlay once it closes (a leaf fired, or a click-away dismiss).
+    /// Other events while the menu is open are swallowed.
+    fn route_context_menu_mouse(&mut self, ev: ainb_plugin_sdk::MouseEvent) {
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+        if !matches!(
+            ev.kind,
+            MouseKind::Down {
+                button: MouseButton::Left
+            }
+        ) {
+            return;
+        }
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        if let Some(intent) = menu.handle_click(ev.col, ev.row) {
+            self.apply_context_menu_intent(intent);
+        }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(crate::screen::context_menu::ContextMenuState::is_closed)
+        {
+            self.context_menu = None;
         }
     }
 
@@ -1529,10 +1704,13 @@ impl HangarPlugin {
     /// - `ScrollColumn` / `Hover` / `DragHover` update the local board state
     ///   (per-column scroll, hover highlight) so the next render reflects them.
     ///
-    /// The remaining intents (`OpenContextMenu`, `NewIssue`, `FocusColumn`,
-    /// `PanColumns`, `SwitchTab`) land in later board sub-beads (the context-menu
-    /// overlay, the seeded create flow); they are consumed here so they never
-    /// accumulate.
+    /// - `OpenContextMenu` raises the right-click context-menu overlay (63l.5)
+    ///   anchored at the click, seeded with the issue's current state/priority + the
+    ///   cached actor snapshot.
+    ///
+    /// The remaining intents (`NewIssue`, `FocusColumn`, `PanColumns`, `SwitchTab`)
+    /// land in later board sub-beads (the seeded create flow); they are consumed
+    /// here so they never accumulate.
     fn drain_mouse_intents(&mut self) {
         use crate::mouse::MouseIntent;
         use crate::screen::issue_list::IssueColumn;
@@ -1578,12 +1756,103 @@ impl HangarPlugin {
                 MouseIntent::DragHover { card, .. } => {
                     self.screens.issue_list.set_hover(Some(card));
                 }
+                // A right-click on a card raises the context-menu overlay (63l.5)
+                // anchored at the click, seeded with the issue's current
+                // state/priority + the cached actor snapshot for the Assign submenu.
+                MouseIntent::OpenContextMenu { issue_id, at } => {
+                    self.open_context_menu(&issue_id, at);
+                }
                 // The remaining intents land in later board sub-beads.
-                MouseIntent::OpenContextMenu { .. }
-                | MouseIntent::NewIssue(_)
+                MouseIntent::NewIssue(_)
                 | MouseIntent::FocusColumn(_)
                 | MouseIntent::PanColumns { .. }
                 | MouseIntent::SwitchTab(_) => {}
+            }
+        }
+    }
+
+    /// Raise the context-menu overlay for `issue_id` anchored at `at` (63l.5).
+    ///
+    /// Looks the issue up in the cached issue list to seed the menu with its
+    /// `HGR-<n>` display id and current lifecycle state + priority (so the
+    /// submenus mark what is set), and copies the cached actor snapshot into the
+    /// Assign submenu. A right-click on an id with no cached row is a no-op (a
+    /// stale hit-map entry) rather than opening an empty menu.
+    fn open_context_menu(&mut self, issue_id: &str, at: (u16, u16)) {
+        use crate::screen::context_menu::{ContextMenuState, MenuActor};
+        let Some(row) = self
+            .screens
+            .issue_list
+            .visible_rows()
+            .find(|r| r.id.as_str() == issue_id)
+            .cloned()
+        else {
+            return;
+        };
+        let display_id = row
+            .display_id
+            .clone()
+            .unwrap_or_else(|| row.id.as_str().to_string());
+        let status = ainb_hangar_proto::lifecycle::IssueLifecycle::for_state(&row.state);
+        let actors: Vec<MenuActor> = self
+            .screens
+            .actors
+            .iter()
+            .map(|a| MenuActor {
+                actor_ref: a.actor_ref.clone(),
+                display_name: a.display_name.clone(),
+            })
+            .collect();
+        self.context_menu = Some(ContextMenuState::new(
+            row.id.as_str().to_string(),
+            display_id,
+            status,
+            row.priority,
+            at,
+            actors,
+        ));
+    }
+
+    /// Apply a context-menu leaf intent (63l.5): bind it to the matching deferred
+    /// daemon RPC (fired in `render`) or the local task-open path, then close the
+    /// menu unless the leaf (Copy id) keeps it open for its confirmation note.
+    fn apply_context_menu_intent(
+        &mut self,
+        intent: crate::screen::context_menu::ContextMenuIntent,
+    ) {
+        use crate::screen::context_menu::ContextMenuIntent;
+        let app = self.app_state().clone();
+        match intent {
+            ContextMenuIntent::Open { issue_id } => {
+                self.screens.issue_list.select_by_id(&issue_id);
+                if let Ok(id) = ainb_hangar_core::ids::IssueId::from_str(&issue_id) {
+                    self.apply_nav(&app, NavIntent::OpenTaskForIssue(id));
+                }
+            }
+            ContextMenuIntent::MoveTo {
+                issue_id,
+                to_status,
+            } => {
+                // Move the card optimistically (so the board reflects it at once)
+                // AND arm the durable `issue_update{state}` RPC — the same seam the
+                // drag-drop path uses.
+                if let Some(moved) = self.screens.issue_list.move_issue_to(&issue_id, to_status) {
+                    self.pending_issue_state_update = Some((moved, to_status));
+                }
+            }
+            ContextMenuIntent::SetPriority { issue_id, priority } => {
+                self.pending_issue_priority_update = Some((issue_id, priority));
+            }
+            ContextMenuIntent::Assign {
+                issue_id,
+                actor_ref,
+            } => {
+                self.pending_issue_assignee_update = Some((issue_id, actor_ref));
+            }
+            // Copy id has no host clipboard cap yet; the menu's own `copied` note is
+            // the user-visible effect. Log the copy seam so it is observable.
+            ContextMenuIntent::CopyId { display_id } => {
+                tracing::info!(%display_id, "hangar: context-menu copy id");
             }
         }
     }
@@ -1682,6 +1951,35 @@ impl HangarPlugin {
         next.screen = target;
         next.prior_screen = None;
         self.app = Some(next);
+    }
+}
+
+/// Map a wire key to the open context menu's small navigation alphabet (63l.5),
+/// or `None` for a key the modal menu swallows.
+///
+/// Both the SDK arrow [`KeyCode`](ainb_plugin_sdk::KeyCode)s and the vim
+/// `h`/`j`/`k`/`l` chars map onto the same directions, so the menu navigates the
+/// same way regardless of how the user reaches for it. `Enter` fires/opens and
+/// `Esc` collapses-or-closes.
+const fn context_menu_key_of(
+    key: &ainb_plugin_sdk::KeyEvent,
+) -> Option<crate::screen::context_menu::ContextMenuKey> {
+    use crate::screen::context_menu::ContextMenuKey;
+    match &key.code {
+        KeyCode::Up => Some(ContextMenuKey::Up),
+        KeyCode::Down => Some(ContextMenuKey::Down),
+        KeyCode::Right => Some(ContextMenuKey::Right),
+        KeyCode::Left => Some(ContextMenuKey::Left),
+        KeyCode::Enter => Some(ContextMenuKey::Enter),
+        KeyCode::Esc => Some(ContextMenuKey::Esc),
+        KeyCode::Char { ch } => match ch {
+            'k' => Some(ContextMenuKey::Up),
+            'j' => Some(ContextMenuKey::Down),
+            'l' => Some(ContextMenuKey::Right),
+            'h' => Some(ContextMenuKey::Left),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1800,7 +2098,14 @@ impl Plugin for HangarPlugin {
         // frame reflects it (selection move, drag highlight, an opened task). The
         // pending-intent queue IS the signal; it is emptied once `render` drains
         // the stashed intents.
+        //
+        // 63l.5: an open context menu also wants every frame so its keyboard /
+        // mouse navigation (selection move, submenu open) repaints, and an armed
+        // context-menu RPC (priority / assignee edit) needs a render to fire.
         !self.pending_mouse_intents.is_empty()
+            || self.context_menu.is_some()
+            || self.pending_issue_priority_update.is_some()
+            || self.pending_issue_assignee_update.is_some()
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
@@ -1903,6 +2208,17 @@ impl Plugin for HangarPlugin {
         self.drain_mouse_intents();
         if let Some((issue_id, to_status)) = self.pending_issue_state_update.take() {
             self.apply_issue_state_update(host, issue_id, to_status)
+                .await;
+        }
+        // 63l.5: fire any context-menu priority / assignee edit armed by a leaf.
+        // Both reuse the `hangar/issue_update` seam (the daemon's `IssueUpdated`
+        // push reconciles the optimistic local state), mirroring the state-move RPC.
+        if let Some((issue_id, priority)) = self.pending_issue_priority_update.take() {
+            self.apply_issue_priority_update(host, issue_id, priority)
+                .await;
+        }
+        if let Some((issue_id, actor_ref)) = self.pending_issue_assignee_update.take() {
+            self.apply_issue_assignee_update(host, issue_id, actor_ref)
                 .await;
         }
         self.rebuild_hit_map(w, h);
@@ -2753,6 +3069,221 @@ mod tests {
             p.screens.issue_list.hovered_id(),
             Some("t1"),
             "the hover intent sets the hovered card"
+        );
+    }
+
+    // ----- 63l.5: right-click context-menu overlay -----
+
+    /// Build a bare key-code press (Up/Down/Right/Left/Enter/Esc).
+    fn key_press(code: KeyCode) -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code,
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    /// Build a left-button-down mouse event at `(col, row)`.
+    fn down_left(col: u16, row: u16) -> ainb_plugin_sdk::MouseEvent {
+        ainb_plugin_sdk::MouseEvent {
+            kind: ainb_plugin_sdk::MouseKind::Down {
+                button: ainb_plugin_sdk::MouseButton::Left,
+            },
+            col,
+            row,
+            mods: 0,
+        }
+    }
+
+    /// Seed a connected plugin whose board holds two cards (`card-a` in Todo,
+    /// `card-b` in Backlog) plus a cached actor snapshot, so a right-click menu on
+    /// `card-b` can move/prioritise/assign it.
+    fn connected_plugin_with_two_cards() -> HangarPlugin {
+        use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState};
+        let mut p = connected_plugin_with_issue();
+        p.screens.set_issues(vec![
+            IssueRow {
+                id: ainb_hangar_core::ids::IssueId::from_str("card-a").unwrap(),
+                display_id: Some("HGR-1".into()),
+                workspace_id: "default".into(),
+                title: "Alpha".into(),
+                description: None,
+                state: "todo".into(),
+                assignee: None,
+                creator: "member:me".into(),
+                created_at: 0,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                pr_url: None,
+            },
+            IssueRow {
+                id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
+                display_id: Some("HGR-2".into()),
+                workspace_id: "default".into(),
+                title: "Bravo".into(),
+                description: None,
+                state: "backlog".into(),
+                assignee: None,
+                creator: "member:me".into(),
+                created_at: 0,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                pr_url: None,
+            },
+        ]);
+        p.screens.set_actors(vec![ActorRow {
+            actor_ref: "member:alice".into(),
+            display_name: "alice".into(),
+            subtitle: "dev".into(),
+            presence: PresenceState::Online,
+            is_agent: false,
+            recent_rank: Some(0),
+        }]);
+        p
+    }
+
+    /// USER-VISIBLE PROOF (63l.5 — the menu TAKES EFFECT): a right-click on a card
+    /// raises the context menu, and navigating `Move to ▸ In Progress` then Enter
+    /// arms the durable `hangar/issue_update{state:in_progress}` RPC for THAT card
+    /// (`card-b`) and closes the menu. The card also moves optimistically.
+    #[test]
+    fn context_menu_move_to_in_progress_arms_issue_update_for_card_b() {
+        use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+        let mut p = connected_plugin_with_two_cards();
+        // A right-click on card-b raises the overlay (drained from the mouse intent).
+        p.pending_mouse_intents
+            .push(crate::mouse::MouseIntent::OpenContextMenu {
+                issue_id: "card-b".into(),
+                at: (40, 6),
+            });
+        p.drain_mouse_intents();
+        assert!(
+            p.context_menu
+                .as_ref()
+                .is_some_and(|m| m.issue_id() == "card-b"),
+            "a right-click raises the menu for the clicked card"
+        );
+
+        // Navigate: Down to `Move to`, Right to open the submenu (pre-selects the
+        // current status, Backlog → order 0), then Down to In Progress (order 2).
+        p.on_key(&key_press(KeyCode::Down)); // Move to
+        p.on_key(&key_press(KeyCode::Right)); // open submenu (Backlog preselected)
+        p.on_key(&key_press(KeyCode::Down)); // Todo
+        p.on_key(&key_press(KeyCode::Down)); // In Progress
+        p.on_key(&key_press(KeyCode::Enter)); // fire
+
+        // The menu closed and armed the durable state-update RPC for card-b.
+        assert!(p.context_menu.is_none(), "firing a leaf closes the menu");
+        assert_eq!(
+            p.pending_issue_state_update,
+            Some(("card-b".to_string(), IssueLifecycle::InProgress)),
+            "Move to > In Progress arms issue_update with state=in_progress for card-b"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.5): `Priority ▸ High` arms
+    /// `hangar/issue_update{priority:2}` (the wire scalar `High` round-trips to).
+    #[test]
+    fn context_menu_priority_high_arms_priority_update() {
+        let mut p = connected_plugin_with_two_cards();
+        p.open_context_menu("card-b", (40, 6));
+
+        // Down x2 to `Priority`, Right to open (current priority 0 → None at idx 3),
+        // Up x2 to High (None→Medium→High), Enter to fire.
+        p.on_key(&key_press(KeyCode::Down)); // Move to
+        p.on_key(&key_press(KeyCode::Down)); // Priority
+        p.on_key(&key_press(KeyCode::Right)); // open submenu
+        p.on_key(&key_press(KeyCode::Up)); // Medium
+        p.on_key(&key_press(KeyCode::Up)); // High
+        p.on_key(&key_press(KeyCode::Enter)); // fire
+
+        assert!(p.context_menu.is_none(), "firing closes the menu");
+        assert_eq!(
+            p.pending_issue_priority_update,
+            Some(("card-b".to_string(), 2)),
+            "Priority > High arms issue_update with priority=2 for card-b"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.5): `Assign ▸ alice` arms
+    /// `hangar/issue_update{assignee:member:alice}` over the cached actor.
+    #[test]
+    fn context_menu_assign_arms_assignee_update() {
+        let mut p = connected_plugin_with_two_cards();
+        p.open_context_menu("card-b", (40, 6));
+
+        // Down x3 to `Assign`, Right to open, Enter on the first actor (alice).
+        p.on_key(&key_press(KeyCode::Down)); // Move to
+        p.on_key(&key_press(KeyCode::Down)); // Priority
+        p.on_key(&key_press(KeyCode::Down)); // Assign
+        p.on_key(&key_press(KeyCode::Right)); // open submenu
+        p.on_key(&key_press(KeyCode::Enter)); // fire on alice
+
+        assert_eq!(
+            p.pending_issue_assignee_update,
+            Some(("card-b".to_string(), "member:alice".to_string())),
+            "Assign > alice arms issue_update with assignee=member:alice for card-b"
+        );
+    }
+
+    /// 63l.5: Esc inside an open submenu collapses to the root; Esc at the root
+    /// closes the whole menu back to the board (no RPC armed).
+    #[test]
+    fn context_menu_esc_collapses_then_closes() {
+        let mut p = connected_plugin_with_two_cards();
+        p.open_context_menu("card-b", (40, 6));
+        p.on_key(&key_press(KeyCode::Down)); // Move to
+        p.on_key(&key_press(KeyCode::Right)); // open submenu
+        p.on_key(&key_press(KeyCode::Esc)); // collapse submenu
+        assert!(
+            p.context_menu.is_some(),
+            "Esc in a submenu collapses, not closes the menu"
+        );
+        p.on_key(&key_press(KeyCode::Esc)); // close at root
+        assert!(p.context_menu.is_none(), "Esc at the root closes the menu");
+        assert!(
+            p.pending_issue_state_update.is_none()
+                && p.pending_issue_priority_update.is_none()
+                && p.pending_issue_assignee_update.is_none(),
+            "closing the menu without picking a leaf arms no RPC"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.5 — render + mouse): the menu paints its items and a
+    /// left-click on the painted `Open` row opens the clicked card's task detail,
+    /// proving the rendered hit-map is the consumed click path.
+    #[test]
+    fn context_menu_renders_and_click_open_takes_effect() {
+        let mut p = connected_plugin_with_two_cards();
+        p.open_context_menu("card-b", (10, 5));
+
+        // Render the frame: the menu paints its title + items, and records its
+        // hit-map for the next click.
+        let frame = p.compose_frame(100, 30);
+        let text = buf_text(&frame, 100, 30);
+        for needle in ["HGR-2", "Open", "Move to", "Priority", "Assign", "Copy id"] {
+            assert!(
+                text.contains(needle),
+                "the context menu must paint `{needle}`:\n{text}"
+            );
+        }
+
+        // A left-click on the painted `Open` root row opens the card's task detail.
+        // The root box is anchored at (10, 5); `Open` is the first row two below the
+        // title (row 5 + 2 = 7), inside the box columns.
+        p.on_mouse(down_left(13, 7));
+        assert!(
+            p.context_menu.is_none(),
+            "clicking Open closes the menu, got {:?}",
+            p.context_menu.is_some()
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::TaskDetail(_)),
+            "clicking Open opens the card's task detail, got {:?}",
+            p.app_state().screen
         );
     }
 }
