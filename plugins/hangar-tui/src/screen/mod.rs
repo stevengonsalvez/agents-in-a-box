@@ -18,6 +18,7 @@ pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
 pub mod command_palette;
+pub mod context_menu;
 pub mod daemon_health;
 pub mod inbox;
 pub mod issue_list;
