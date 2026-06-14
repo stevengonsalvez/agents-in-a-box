@@ -222,6 +222,71 @@ def test_candidate_is_sanitized_before_filing(tmp_path):
     assert github_prefix not in blob
 
 
+def test_residual_audit_flags_are_surfaced_on_result(tmp_path):
+    # A base64-ish blob the sanitizer can't redact must still reach the run
+    # result's audit so a reviewer (or the CLI) sees it — the audit must NOT be
+    # discarded the way it was before _sanitize_candidate dropped it.
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    blob = "Zm9vYmFyYmF6" * 5  # 60 chars base64-ish, no known secret shape
+    cand = CandidateIssue(
+        title="New finding with a suspicious blob",
+        body=f"## Summary\nresidual data: {blob}",
+        labels=["bug"],
+    )
+    result = run_issues(
+        dry_run=True,
+        queue=qf,
+        ledger_path=tmp_path / "filed.json",
+        analyze_fn=_analyzer([cand]),
+        gh_runner=_FakeGh(),
+        fetch_titles=lambda: [],
+    )
+    kinds = {f["kind"] for f in result.audit}
+    assert "possible_base64_blob" in kinds
+    # Each finding is attributed to the candidate it came from.
+    assert all("candidate" in f for f in result.audit)
+
+
+def test_ledger_saved_incrementally_after_each_file(tmp_path):
+    # The ledger must be persisted after EACH successful file, so a crash
+    # mid-loop still records the issues already filed. Simulate a crash on the
+    # 2nd create: the 1st must already be on disk.
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    ledger = tmp_path / "filed.json"
+    cands = [
+        CandidateIssue(title="First brand new finding", body="b", labels=["bug"]),
+        CandidateIssue(title="Second brand new finding", body="b", labels=["bug"]),
+    ]
+
+    from reflect_kb.issues.dedupe import load_ledger
+
+    class _CrashOnSecondCreate(_FakeGh):
+        def __call__(self, cmd):
+            if cmd[:3] == ["gh", "issue", "create"] and len(self.created) >= 1:
+                raise subprocess.CalledProcessError(1, cmd, stderr="boom")
+            return super().__call__(cmd)
+
+    fake_gh = _CrashOnSecondCreate()
+    result = run_issues(
+        dry_run=False,
+        queue=qf,
+        ledger_path=ledger,
+        analyze_fn=_analyzer(cands),
+        gh_runner=fake_gh,
+        fetch_titles=lambda: [],
+    )
+    # First filed, second failed — but the first is already persisted.
+    assert result.filed_count == 1
+    assert ledger.exists()
+    saved = load_ledger(ledger)
+    fps = {e["fingerprint"] for e in saved["filed_issues"]}
+    from reflect_kb.issues.dedupe import fingerprint
+
+    assert fingerprint("First brand new finding") in fps
+
+
 def test_empty_queue_returns_clean_result(tmp_path):
     result = run_issues(
         dry_run=True, queue=tmp_path / "nonexistent.jsonl", ledger_path=tmp_path / "filed.json"

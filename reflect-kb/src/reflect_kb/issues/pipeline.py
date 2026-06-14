@@ -62,6 +62,12 @@ class IssuesRunResult:
     skipped: list[DedupeDecision] = field(default_factory=list)
     previews: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Residual-suspicious flags from the sanitizer's non-mutating audit pass,
+    # aggregated across every candidate's title+body. Each entry carries the
+    # candidate title so a reviewer can see WHICH issue still looks suspicious.
+    # Non-empty audit does NOT mean unsafe — it means "a human should eyeball
+    # this before it's published".
+    audit: list[dict] = field(default_factory=list)
 
     @property
     def filed_count(self) -> int:
@@ -72,16 +78,30 @@ def _default_gh_runner(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
-def _sanitize_candidate(cand: CandidateIssue, maps: Optional[dict[str, str]]) -> CandidateIssue:
-    """Return a copy of ``cand`` with title+body sanitized for publication."""
-    s_title = sanitize(cand.title, maps=maps).text.strip()
-    s_body = sanitize(cand.body, maps=maps).text
-    return CandidateIssue(
+def _sanitize_candidate(
+    cand: CandidateIssue, maps: Optional[dict[str, str]]
+) -> tuple[CandidateIssue, list[dict]]:
+    """Sanitize ``cand`` for publication and surface its residual-audit flags.
+
+    Returns the sanitized candidate AND the list of audit findings (the
+    non-mutating "look here" flags the sanitizer raised on title+body), each
+    tagged with the candidate title so the caller can attribute it. Dropping
+    the audit — as an earlier version did — silently discarded the documented
+    safety net that flags residual suspicious tokens for a human.
+    """
+    title_res = sanitize(cand.title, maps=maps)
+    body_res = sanitize(cand.body, maps=maps)
+    s_title = title_res.text.strip()
+    safe = CandidateIssue(
         title=s_title or cand.title,
-        body=s_body,
+        body=body_res.text,
         labels=list(cand.labels),
         source_citation=cand.source_citation,
     )
+    audit: list[dict] = []
+    for finding in (*title_res.audit, *body_res.audit):
+        audit.append({**finding, "candidate": safe.title})
+    return safe, audit
 
 
 def _filter_labels(
@@ -219,8 +239,13 @@ def run_issues(
         result.notes.append(f"analyzer produced no candidates (reason: {reason})")
         return result
 
-    # 4. Sanitize EVERY candidate again (defence in depth) before it can leave.
-    safe_candidates = [_sanitize_candidate(c, maps) for c in candidates]
+    # 4. Sanitize EVERY candidate again (defence in depth) before it can leave,
+    #    aggregating each candidate's residual-audit flags onto the run result.
+    safe_candidates: list[CandidateIssue] = []
+    for c in candidates:
+        safe, audit = _sanitize_candidate(c, maps)
+        safe_candidates.append(safe)
+        result.audit.extend(audit)
 
     # 5. Dedupe: in-batch → local ledger → existing GitHub issues.
     ledger = dedupe_mod.load_ledger(ledger_path)
@@ -249,7 +274,6 @@ def run_issues(
         )
         return result
 
-    filed_any = False
     for cand in keepers:
         try:
             filed = _file_one(cand, repo, gh_run)
@@ -263,9 +287,10 @@ def run_issues(
             gh_issue_number=filed.gh_issue_number,
             gh_url=filed.gh_url,
         )
-        filed_any = True
-
-    if filed_any:
+        # Persist incrementally — the atomic save runs after EACH successful
+        # file, not once at the end. A crash after `gh issue create` succeeds
+        # but before the ledger is saved would otherwise leave the filed issue
+        # unrecorded → a duplicate on the next run.
         dedupe_mod.save_ledger(ledger, ledger_path)
 
     return result
