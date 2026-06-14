@@ -224,16 +224,33 @@ class BehavioralKB:
             cmd += ["--mmr-lambda", str(mmr_lambda)]
         if extra_args:
             cmd += extra_args
-        r = _run(cmd, self.env(env), timeout=300)
-        if r.returncode != 0:
-            raise HarnessError(
-                f"recall.py exited {r.returncode}\nSTDERR:\n{r.stderr[-1200:]}"
-            )
+        # Transient-engine-error guard. Under harness load (reindex + several
+        # sequential recalls each fanning out concurrent `reflect search`
+        # subprocesses that load the ~420MB embedding model), the primary search
+        # subprocess intermittently fails; recall.py's D9 path then sets
+        # result.error and main() exits 0 having printed NOTHING. That empty
+        # stdout parses to {} and is indistinguishable from a real recall only
+        # to a caller that does not look — but it is NOT a legitimate empty
+        # recall, which always emits a full envelope carrying a `results` key
+        # (possibly `[]`). So: empty/whitespace stdout on a clean exit == engine
+        # flake -> retry. A genuine zero-result recall is returned as-is. This
+        # makes every proof sharing this harness deterministic without masking a
+        # real empty result.
+        last_stdout = ""
+        for _attempt in range(4):
+            r = _run(cmd, self.env(env), timeout=300)
+            if r.returncode != 0:
+                raise HarnessError(
+                    f"recall.py exited {r.returncode}\nSTDERR:\n{r.stderr[-1200:]}"
+                )
+            last_stdout = r.stdout or ""
+            if last_stdout.strip():
+                break  # got a real envelope (empty-result recalls still print one)
         try:
-            return json.loads(r.stdout or "{}")
+            return json.loads(last_stdout or "{}")
         except json.JSONDecodeError as exc:
             raise HarnessError(
-                f"recall.py returned non-JSON:\n{r.stdout[:1200]}"
+                f"recall.py returned non-JSON:\n{last_stdout[:1200]}"
             ) from exc
 
     def recall_ids(self, query: str, **flags) -> list[str]:
