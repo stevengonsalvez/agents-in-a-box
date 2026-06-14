@@ -106,6 +106,7 @@ impl CommandRegistry {
         r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
+        r.register(WebCommand); // read-only web dashboard (ainb-web crate)
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
@@ -1244,6 +1245,85 @@ impl CliCommand for AbtopCommand {
     }
 }
 
+/// `ainb web [--listen <addr>] [--token <secret>] [--insecure-bind]` — serve
+/// the read-only fleet dashboard (sessions + fleet needs + cost) with live
+/// SSE updates, from the embedded vanilla-JS frontend (`ainb-web` crate).
+///
+/// Security: binds to loopback by default. A non-loopback bind is REFUSED
+/// unless `--token` is supplied (every `/api/*` route then requires the bearer
+/// token) or `--insecure-bind` is set explicitly. The dashboard never mutates
+/// fleet state. Data is proxied from the existing `ainb --format json`
+/// commands so the browser view never drifts from the CLI/TUI.
+pub struct WebCommand;
+impl CliCommand for WebCommand {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Serve a read-only, SSE-live web dashboard for the fleet")
+                .arg(
+                    clap::Arg::new("listen")
+                        .long("listen")
+                        .value_name("ADDR")
+                        .default_value("127.0.0.1:8420")
+                        .help("Address to bind (default loopback; non-loopback needs --token)"),
+                )
+                .arg(
+                    clap::Arg::new("token").long("token").value_name("SECRET").help(
+                        "Bearer token required on every /api/* route (enables non-loopback bind)",
+                    ),
+                )
+                .arg(
+                    clap::Arg::new("insecure-bind")
+                        .long("insecure-bind")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Allow a non-loopback bind with no token (NOT recommended)"),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        // Extract owned values synchronously so only owned data crosses into
+        // the 'static future.
+        let listen_raw = matches
+            .get_one::<String>("listen")
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8420".to_string());
+        let token = matches.get_one::<String>("token").cloned();
+        let insecure_bind = matches.get_flag("insecure-bind");
+
+        Box::pin(async move {
+            use std::net::ToSocketAddrs;
+            let listen = listen_raw
+                .to_socket_addrs()
+                .with_context(|| format!("invalid --listen address: {listen_raw}"))?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--listen resolved to no address: {listen_raw}"))?;
+
+            let config = ainb_web::WebConfig {
+                listen,
+                token,
+                insecure_bind,
+                read_only: true,
+            };
+
+            // Validate the bind policy before any socket is opened so the
+            // refusal is clear and nothing ever listens on an unsafe address.
+            if let Err(e) = config.check_bind_security() {
+                anyhow::bail!("{e}");
+            }
+
+            let data = std::sync::Arc::new(ainb_web::AinbCliSource::new());
+            eprintln!("ainb web dashboard → http://{listen}");
+            if config.token.is_some() {
+                eprintln!("  bearer token required on /api/* routes");
+            }
+            ainb_web::serve(config, data).await.map_err(|e| anyhow::anyhow!("{e}"))
+        })
+    }
+}
+
 /// `ainb plugin {marketplace,install,update,remove,list,search}` — Phase 4
 /// marketplace + installer. Argument shapes nailed down in Phase 2b so plugin
 /// authors could target them today; Phase 4 wires the real handlers in
@@ -1531,14 +1611,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_five_commands() {
+    fn built_ins_registers_twenty_six_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + abtop + plugin stub + fleet + hidden notifyd
-        // + hangar = 25. The TUI is NOT in the registry — main.rs handles
+        // + tmux namespace + abtop + web + plugin stub + fleet + hidden notifyd
+        // + hangar = 26. The TUI is NOT in the registry — main.rs handles
         // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 25, "expected 25 entries, got {names:?}");
+        assert_eq!(names.len(), 26, "expected 26 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1561,6 +1641,7 @@ mod tests {
             "tmux",
             "completion",
             "abtop",
+            "web",
             "plugin",
             "fleet",
             "notifyd",
