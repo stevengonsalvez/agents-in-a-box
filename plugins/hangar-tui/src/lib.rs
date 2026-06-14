@@ -7,6 +7,7 @@
 //! `Plugin` trait. The connection state machine + daemon JSON-RPC
 //! client land in P3.7.
 
+pub mod board_mouse;
 pub mod chrome;
 pub mod connection;
 pub mod firstrun;
@@ -18,6 +19,7 @@ pub mod shell;
 pub mod stream;
 pub mod widgets;
 
+pub use board_mouse::{fold_board_mouse, BoardMouseIntent};
 pub use chrome::{render_footer, render_top_bar, Presence};
 pub use connection::{ConnState, Connection};
 pub use firstrun::{reduce_first_run, FirstRunIntent, FirstRunModal, FirstRunReduction};
