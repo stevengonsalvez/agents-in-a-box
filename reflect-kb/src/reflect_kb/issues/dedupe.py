@@ -12,8 +12,10 @@ Three dedup layers, cheapest first:
    every issue this tool has filed. A fingerprint present there is skipped. This
    is what makes a second run idempotent even offline.
 3. **Remote** — ``gh issue list`` titles (open + closed) are fetched once;
-   exact-fingerprint match OR ≥``_TOKEN_OVERLAP`` token overlap with an existing
-   title marks a candidate as already-on-GitHub.
+   an exact-fingerprint match (``dup-on-github``) OR a high symmetric-Jaccard
+   token overlap with a minimum shared-token floor (``dup-on-github-overlap``)
+   marks a candidate as already-on-GitHub. The two are surfaced distinctly so a
+   reviewer can tell an exact suppression from a softer fuzzy one.
 
 The fingerprint is ``slugify(title)`` (lowercase, non-alphanumerics → ``-``,
 truncated at 60 chars) — identical to agent-deck so a port of an existing
@@ -33,11 +35,17 @@ from typing import Callable, Optional
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
-# Token overlap (Jaccard-ish: shared / candidate-token-count) above which a
-# candidate is treated as a duplicate of an existing GitHub issue. Coarse by
-# design — agent-deck used 50%; we keep that and add an exact-fingerprint fast
-# path so identical titles always match regardless of overlap maths.
-_TOKEN_OVERLAP = 0.5
+# Token overlap above which a candidate is treated as a duplicate of an
+# existing GitHub issue. agent-deck used an asymmetric 50%-of-candidate-tokens
+# heuristic, which false-positive-suppresses genuinely-new issues with short
+# titles against long unrelated existing ones (a 2-word candidate sharing one
+# generic word with a 10-word issue scored 50% and was wrongly dropped). We use
+# SYMMETRIC Jaccard (shared / union) at a higher 0.7 threshold AND require a
+# minimum shared-token count, so a single incidental shared word can never
+# suppress a new issue. The exact-fingerprint fast path still matches identical
+# titles regardless of overlap maths.
+_TOKEN_OVERLAP = 0.7
+_MIN_SHARED_TOKENS = 2
 
 _LEDGER_VERSION = 1
 
@@ -85,7 +93,10 @@ class DedupeDecision:
 
     candidate: CandidateIssue
     keep: bool
-    reason: str  # "new" | "dup-in-batch" | "dup-in-ledger" | "dup-on-github"
+    # "new" | "dup-in-batch" | "dup-in-ledger"
+    # | "dup-on-github" (exact-fingerprint match)
+    # | "dup-on-github-overlap" (fuzzy token-overlap match — softer signal)
+    reason: str
     existing_ref: Optional[str] = None  # gh issue # / url / ledger fingerprint
 
 
@@ -99,11 +110,19 @@ def _tokens(title: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", title.lower()) if w not in _STOP and len(w) > 2}
 
 
-def _token_overlap(a: str, b: str) -> float:
+def _token_overlap(a: str, b: str) -> tuple[float, int]:
+    """Symmetric Jaccard overlap of two titles and the shared-token count.
+
+    Returns ``(jaccard, shared)`` where ``jaccard = |a ∩ b| / |a ∪ b|``. Jaccard
+    is symmetric, so a short candidate is not penalized for being shorter than a
+    long existing title the way the old shared/candidate ratio was.
+    """
     ta, tb = _tokens(a), _tokens(b)
-    if not ta:
-        return 0.0
-    return len(ta & tb) / len(ta)
+    if not ta or not tb:
+        return 0.0, 0
+    shared = ta & tb
+    union = ta | tb
+    return len(shared) / len(union), len(shared)
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -242,7 +261,8 @@ def partition_candidates(
 
         match = _match_existing(cand, existing_titles)
         if match is not None:
-            decisions.append(DedupeDecision(cand, False, "dup-on-github", match))
+            existing_title, reason = match
+            decisions.append(DedupeDecision(cand, False, reason, existing_title))
             seen_in_batch.add(fp)
             continue
 
@@ -252,11 +272,23 @@ def partition_candidates(
     return decisions
 
 
-def _match_existing(cand: CandidateIssue, existing_titles: list[str]) -> Optional[str]:
+def _match_existing(cand: CandidateIssue, existing_titles: list[str]) -> Optional[tuple[str, str]]:
+    """Return ``(existing_title, reason)`` for the best dedupe match, else None.
+
+    Exact-fingerprint matches win and are reported as ``dup-on-github``. Fuzzy
+    token-overlap matches require BOTH a high symmetric-Jaccard score AND a
+    minimum shared-token count, and are reported distinctly as
+    ``dup-on-github-overlap`` so a reviewer can tell a soft fuzzy suppression
+    from an exact one.
+    """
     cand_fp = cand.fingerprint
+    # Exact-fingerprint pass first — a precise match always beats a fuzzy one.
     for title in existing_titles:
         if fingerprint(title) == cand_fp:
-            return title
-        if _token_overlap(cand.title, title) >= _TOKEN_OVERLAP:
-            return title
+            return title, "dup-on-github"
+    # Fuzzy token-overlap pass — symmetric Jaccard AND a shared-count floor.
+    for title in existing_titles:
+        jaccard, shared = _token_overlap(cand.title, title)
+        if jaccard >= _TOKEN_OVERLAP and shared >= _MIN_SHARED_TOKENS:
+            return title, "dup-on-github-overlap"
     return None

@@ -56,13 +56,14 @@ def test_existing_github_exact_title_skipped():
 
 
 def test_existing_github_token_overlap_skipped():
-    # >=50% token overlap with an existing title marks it a dup.
+    # High symmetric-Jaccard overlap (near-identical titles) is still caught,
+    # but surfaced distinctly as a fuzzy overlap match, not an exact one.
     decisions = partition_candidates(
-        [_cand("Sanitizer misses telegram bot tokens")],
-        existing_titles=["telegram bot tokens not redacted by sanitizer"],
+        [_cand("sanitizer misses telegram bot tokens")],
+        existing_titles=["sanitizer misses telegram bot tokens entirely"],
     )
     assert not decisions[0].keep
-    assert decisions[0].reason == "dup-on-github"
+    assert decisions[0].reason == "dup-on-github-overlap"
 
 
 def test_genuinely_new_candidate_is_kept():
@@ -71,6 +72,19 @@ def test_genuinely_new_candidate_is_kept():
         existing_titles=["something about authentication flow"],
     )
     assert decisions[0].keep
+    assert decisions[0].reason == "new"
+
+
+def test_short_new_title_not_suppressed_by_long_unrelated_existing():
+    # Regression for the asymmetric-overlap false-positive: a short genuine new
+    # issue sharing one incidental word with a long unrelated existing issue
+    # must NOT be suppressed. 'Drain loop hangs' vs 'loop counter wrong in
+    # metrics drain' share {loop, drain} but describe different problems.
+    decisions = partition_candidates(
+        [_cand("Drain loop hangs")],
+        existing_titles=["loop counter wrong in metrics drain reporting code"],
+    )
+    assert decisions[0].keep, decisions[0].reason
     assert decisions[0].reason == "new"
 
 
