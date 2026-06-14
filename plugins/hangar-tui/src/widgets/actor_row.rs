@@ -8,12 +8,12 @@
 //!
 //! This widget is reused across the picker (P4.5), the issue-list assignee
 //! column (P4.3), and the task-detail sidebar assignee field (P4.4), so the same
-//! actor renders identically everywhere (Multica visual parity).
+//! actor renders identically everywhere (reference visual parity).
 
 use ainb_hangar_proto::events::{ActorRow, PresenceState};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
-/// Violet ring colour on an agent glyph (Multica UX §12.1 differentiation).
+/// Violet ring colour on an agent glyph (reference UX §12.1 differentiation).
 pub const AGENT_VIOLET: Color = Color::rgb(180, 120, 220);
 /// Neutral gray for a human glyph.
 pub const HUMAN_NEUTRAL: Color = Color::rgb(170, 170, 180);

@@ -1,4 +1,4 @@
-//! Task-detail right-hand sidebar — progressive disclosure (Multica UX §12.8).
+//! Task-detail right-hand sidebar — progressive disclosure (reference UX §12.8).
 //!
 //! A narrow column to the right of the transcript that surfaces the task's
 //! metadata: status and assignee are *always* shown; the description (and, in

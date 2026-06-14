@@ -3,7 +3,7 @@
 //! The usage-dashboard screen (hotkey `U`) renders the daemon's `task_usage`
 //! rollup (`hangar/usage_rollup`): the workspace's grand total tokens in/out +
 //! cost across every recorded run, then a per-agent breakdown table (each agent's
-//! summed tokens + cost + run count, heaviest cost first). Mirrors Multica's
+//! summed tokens + cost + run count, heaviest cost first). Mirrors the reference's
 //! usage-rollup surface.
 //!
 //! As with every Hangar screen the plugin owns **zero domain data**

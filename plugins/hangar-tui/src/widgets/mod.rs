@@ -5,7 +5,7 @@
 //! IO. Screens own their reducer state and delegate the visual chrome of common
 //! controls (filter chip bars, the working-agent avatar stack) to the widgets
 //! here so the same control renders identically wherever it appears
-//! (`feedback_keybinding_hints_near_control`, Multica visual parity).
+//! (`feedback_keybinding_hints_near_control`, reference visual parity).
 //!
 //! - [`card_board`] — the Linear-style status board (63l.1): five status columns
 //!   of sleek bordered, rounded cards with per-column scroll, a dashed
@@ -13,12 +13,12 @@
 //! - [`filter_chip`] — the `All / Members / Agents / Mine`-style chip bar
 //!   rendered on the issue list (P4.3) and reused by the skill manager (P4.6).
 //! - [`working_chip`] — the top-right avatar stack + count badge showing which
-//!   agents are currently working (Multica `WorkspaceAgentWorkingChip`, UX §2
+//!   agents are currently working (the reference's `WorkspaceAgentWorkingChip`, UX §2
 //!   journey 5).
 //! - [`transcript`] — the 5-colour message taxonomy renderer for the task-detail
-//!   transcript (P4.4, Multica UX §7 verbatim).
+//!   transcript (P4.4, reference UX §7 verbatim).
 //! - [`sidebar`] — the task-detail right-hand progressive-disclosure metadata
-//!   column (P4.4, Multica UX §12.8).
+//!   column (P4.4, reference UX §12.8).
 
 pub mod actor_row;
 pub mod card_board;

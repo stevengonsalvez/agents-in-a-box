@@ -1,4 +1,4 @@
-//! Transcript renderer — the 5-colour message taxonomy (Multica UX §7 verbatim).
+//! Transcript renderer — the 5-colour message taxonomy (reference UX §7 verbatim).
 //!
 //! The task-detail screen (P4.4) streams a task's transcript: a sequence of
 //! [`MessageKind`]-lanes, each with one glyph + colour. This widget is a **pure

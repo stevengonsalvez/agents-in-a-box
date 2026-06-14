@@ -694,7 +694,7 @@ const ID_ACCENT: Color = Color::rgb(150, 160, 190);
 /// their live counts (`Todo (3)`).
 ///
 /// `working_count` is the number of agents currently working, surfaced as the
-/// top-right avatar-stack chip (Multica `WorkspaceAgentWorkingChip`).
+/// top-right avatar-stack chip (the reference's `WorkspaceAgentWorkingChip`).
 pub fn render_issue_list(
     buf: &mut WireBuffer,
     area_w: u16,

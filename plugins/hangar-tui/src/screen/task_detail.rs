@@ -105,7 +105,7 @@ impl TaskLifecycle {
 ///
 /// Both carry a body and a [`MessageKind`] lane so the renderer can colour them
 /// uniformly; comments render in the slate "tool result" lane as a neutral
-/// interleave (Multica renders human comments distinctly from agent prose
+/// interleave (the reference renders human comments distinctly from agent prose
 /// without their own taxonomy colour).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptEntry {

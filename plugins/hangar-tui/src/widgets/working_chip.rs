@@ -1,4 +1,4 @@
-//! Working-agents avatar-stack chip (Multica `WorkspaceAgentWorkingChip`).
+//! Working-agents avatar-stack chip (the reference's `WorkspaceAgentWorkingChip`).
 //!
 //! Rendered top-right on the issue list (UX §2 journey 5): a small stack of up
 //! to three agent glyphs followed by a `+N` overflow badge when more agents are
@@ -13,7 +13,7 @@
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 /// Violet ring colour for the agent glyph, matching the agent-row accent
-/// (Multica UX §12.1 polymorphic-actor differentiation).
+/// (reference UX §12.1 polymorphic-actor differentiation).
 const AGENT_VIOLET: Color = Color::rgb(180, 120, 220);
 /// Muted text for the overflow `+N` badge.
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);

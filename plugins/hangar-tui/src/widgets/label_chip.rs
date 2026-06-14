@@ -3,7 +3,7 @@
 //! Renders an issue's labels as a compact horizontal run of chips —
 //! `‹bug› ‹p0›` — in a calm violet, used on the issue-list rows and the
 //! task-detail sidebar so a label renders identically wherever it appears
-//! (Multica visual parity, the `LabelChip` component). Pure render: it takes the
+//! (reference visual parity, the `LabelChip` component). Pure render: it takes the
 //! label names and paints cells, holding no state and doing no IO.
 //!
 //! Width-aware: chips are drawn left-to-right and clipped at `right`

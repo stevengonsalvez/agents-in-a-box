@@ -3,7 +3,7 @@
 //! Opened with `a` on a selected issue-list row, the agent picker is a modal
 //! overlay (centred, dim background) over whatever screen launched it. It shows a
 //! **polymorphic actor list** — humans and agents in one flat list, recent-use
-//! pinned ahead of the alphabetical body (Multica UX §12.1) — with a
+//! pinned ahead of the alphabetical body (reference UX §12.1) — with a
 //! type-narrowing `/` filter. Enter assigns the selected actor to the issue
 //! ([`AgentPickerIntent::Assign`]); Esc closes without assigning.
 //!
