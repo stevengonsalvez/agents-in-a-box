@@ -825,6 +825,52 @@ impl TuiSession {
             .expect("tmux send-keys -l");
     }
 
+    /// Send one raw SGR mouse escape sequence into the pane (63l.7).
+    ///
+    /// The TUI enables SGR mouse reporting (`EnableMouseCapture`, mode `1006`), so
+    /// a pointer event reaches the app as `ESC [ < <btn> ; <col> ; <row> <m|M>`,
+    /// where `M` is a button press / motion and `m` is a release. SGR coordinates
+    /// are **1-based** (the top-left cell is `1;1`), so the caller passes 1-based
+    /// `col`/`row`.
+    ///
+    /// `btn` is the SGR button code: `0` = left, `2` = right, plus the `32` motion
+    /// bit for a drag (`0 | 32 = 32` left-drag), and `64` / `65` for wheel up /
+    /// down. The raw bytes are sent verbatim via `send-keys -H` (hex), which never
+    /// reinterprets them as tmux key names — the only reliable way to inject a
+    /// control sequence with an embedded `ESC`.
+    pub fn send_mouse_sgr(&self, btn: u16, col: u16, row: u16, press: bool) {
+        let final_byte = if press { 'M' } else { 'm' };
+        let seq = format!("\x1b[<{btn};{col};{row}{final_byte}");
+        // Encode each byte as two hex digits — `send-keys -H` consumes a
+        // whitespace-separated list of hex byte values.
+        let hex: Vec<String> = seq.bytes().map(|b| format!("{b:02x}")).collect();
+        let mut args = vec!["send-keys", "-H", "-t", &self.name];
+        let hex_refs: Vec<&str> = hex.iter().map(String::as_str).collect();
+        args.extend_from_slice(&hex_refs);
+        Command::new("tmux").args(&args).status().expect("tmux send-keys -H mouse sgr");
+    }
+
+    /// Convenience: a left-button press at 1-based `(col, row)` (SGR button `0`).
+    pub fn mouse_press(&self, col: u16, row: u16) {
+        self.send_mouse_sgr(0, col, row, true);
+    }
+
+    /// Convenience: a left-button drag (motion with button held) to 1-based
+    /// `(col, row)` — SGR button `32` (`0` left | `32` motion bit).
+    pub fn mouse_drag(&self, col: u16, row: u16) {
+        self.send_mouse_sgr(32, col, row, true);
+    }
+
+    /// Convenience: a left-button release at 1-based `(col, row)` (final byte `m`).
+    pub fn mouse_release(&self, col: u16, row: u16) {
+        self.send_mouse_sgr(0, col, row, false);
+    }
+
+    /// Convenience: a right-button press at 1-based `(col, row)` (SGR button `2`).
+    pub fn mouse_right_press(&self, col: u16, row: u16) {
+        self.send_mouse_sgr(2, col, row, true);
+    }
+
     /// Capture the visible pane text (empty on error).
     pub fn capture(&self) -> String {
         Command::new("tmux")
