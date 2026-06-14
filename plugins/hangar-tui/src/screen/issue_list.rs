@@ -17,9 +17,10 @@
 //! read model, pulled over RPC and kept current by folding the event stream.
 //! `IssueListState` is that render-state cache and nothing more.
 //!
-//! Status grouping reads the wire `state` string verbatim
-//! ([`IssueColumn::for_state`]); the daemon owns the canonical lifecycle, the
-//! plugin only buckets the strings it is handed. A `TaskStarted` event promotes
+//! Status grouping maps each wire `state` through [`IssueColumn::for_state`],
+//! which delegates to the shared canonical five-status `IssueLifecycle`
+//! (Backlog / Todo / In Progress / In Review / Done), folding legacy strings
+//! (`open` / `closed`) forward into the right column. A `TaskStarted` event promotes
 //! the task's issue into In Progress without waiting for an `IssueUpdated`,
 //! because the daemon reports task lifecycle before it rewrites the issue row.
 
@@ -723,11 +724,11 @@ pub fn render_issue_list(
     // Width split: status/assignee take fixed caps, the title absorbs the rest.
     let cols = ColumnWidths::for_area(area_w);
 
-    // e38.39 — body-filling layout. The three status sections each get a
-    // proportional vertical *band* of the body so they spread down the pane
+    // e38.39 / 63l — body-filling layout. The five canonical status sections each
+    // get a proportional vertical *band* of the body so they spread down the pane
     // instead of clustering at the top with a vast void below. The chip bar
     // consumed `top`; the column body runs from `col_top` to `bottom`, split into
-    // three bands of `bottom - col_top` rows (the remainder lands on the earlier
+    // five bands of `bottom - col_top` rows (the remainder lands on the earlier
     // bands so no row is wasted). Each section paints its header on its band's
     // first row and its issue rows beneath, clamped to the band end — a dense
     // section truncates within its share rather than pushing the next section's
