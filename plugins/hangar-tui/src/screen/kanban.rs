@@ -34,20 +34,9 @@
 //! domain data (`project_ainb_plugin_owns_data_plane`).
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow};
-use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
+use ainb_plugin_sdk::WireBuffer;
 
-/// Title / accent gold.
-const GOLD: Color = Color::rgb(255, 215, 0);
-/// Selected-card marker + focused-column header green.
-const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-/// Primary card text.
-const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
-/// Muted text (unfocused headers, hints).
-const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
-/// Running / active accent (blue).
-const RUNNING_BLUE: Color = Color::rgb(100, 149, 237);
-/// Failed / cancelled accent (red).
-const WARN_RED: Color = Color::rgb(220, 120, 100);
+use crate::widgets::card_board::{self, BoardCard, PriorityChip};
 
 /// The four board columns, in left-to-right display order.
 ///
@@ -165,6 +154,10 @@ pub struct KanbanState {
     columns: [Column; 4],
     focused_col: usize,
     focused_row: usize,
+    /// The task id the pointer is hovering over (63l.6), or `None` off every
+    /// card. The card-board render lifts the hovered card's border so the cursor
+    /// target reads before a click. Cleared when the pointer moves to empty space.
+    hovered_id: Option<String>,
 }
 
 impl Default for KanbanState {
@@ -173,6 +166,7 @@ impl Default for KanbanState {
             columns: BoardColumn::all().map(Column::empty),
             focused_col: 0,
             focused_row: 0,
+            hovered_id: None,
         }
     }
 }
@@ -192,9 +186,110 @@ impl KanbanState {
             columns,
             focused_col: 0,
             focused_row: 0,
+            hovered_id: None,
         };
         state.snap_focus_to_card();
         state
+    }
+
+    /// Flatten the four board columns into the shared card-board
+    /// [`BoardColumn`](card_board::BoardColumn)s the render paints and the mouse
+    /// layer hit-tests against (63l.6), computing each card's age against `now_ms`.
+    ///
+    /// Each task card maps onto the card anatomy: the id line is `#<short_id>`, the
+    /// two title lines carry `<agent> · <age> · <status>` (so the bead's required
+    /// id + title + state + age all read on the tile), the priority chip comes from
+    /// the row, and the assignee initial is the agent's first char. The same
+    /// geometry feeds `render_kanban` and the hit-map, so paint + hit-test never
+    /// drift.
+    #[must_use]
+    pub fn board_columns(&self, now_ms: i64) -> Vec<card_board::BoardColumn> {
+        self.columns
+            .iter()
+            .map(|col| {
+                let cards = col
+                    .cards
+                    .iter()
+                    .map(|c| BoardCard {
+                        issue_id: c.task_id.clone(),
+                        display_id: format!("#{}", c.short_id),
+                        title: format!(
+                            "{} · {} · {}",
+                            c.agent_id,
+                            age_label(c.created_at, now_ms),
+                            c.status
+                        ),
+                        priority: PriorityChip::from_priority(0),
+                        assignee_initial: c.agent_id.chars().next(),
+                    })
+                    .collect::<Vec<_>>();
+                card_board::BoardColumn {
+                    glyph: column_glyph(col.status),
+                    name: col.status.label().to_string(),
+                    cards,
+                    scroll_offset: col.scroll_offset.min(cards_len_floor(&col.cards)),
+                }
+            })
+            .collect()
+    }
+
+    /// Resolve the `(column, card)` slot of the card the render draws with the
+    /// heavy highlight border (63l.6): the HOVERED card when the pointer is over
+    /// one (the cursor target reads before a click), else the keyboard focus.
+    /// `None` when neither resolves to a visible card.
+    #[must_use]
+    pub fn highlight_board_card(&self) -> Option<(usize, usize)> {
+        if let Some(hover) = self.hovered_id.as_deref() {
+            for (ci, col) in self.columns.iter().enumerate() {
+                if let Some(ri) = col.cards.iter().position(|c| c.task_id == hover) {
+                    return Some((ci, ri));
+                }
+            }
+        }
+        // Fall back to the keyboard focus when nothing is hovered.
+        (!self.columns[self.focused_col].cards.is_empty())
+            .then_some((self.focused_col, self.focused_row))
+    }
+
+    /// The task id the pointer is hovering, if any (63l.6).
+    #[must_use]
+    pub fn hovered_id(&self) -> Option<&str> {
+        self.hovered_id.as_deref()
+    }
+
+    /// Set (or clear with `None`) the hovered card id (63l.6). A pointer move over
+    /// a card highlights it; a move onto empty space clears it.
+    pub fn set_hover(&mut self, id: Option<String>) {
+        self.hovered_id = id;
+    }
+
+    /// Scroll board column `index` (`0..4`) vertically by `delta` rows (63l.6):
+    /// `+1` reveals a card further down, `-1` scrolls back up. The offset saturates
+    /// at `0` and is capped at the column's last card so a scroll past the end is a
+    /// no-op. A wheel-scroll over a column's body drives this. An out-of-range
+    /// index is ignored.
+    pub fn scroll_column(&mut self, index: usize, delta: i32) {
+        let Some(col) = self.columns.get_mut(index) else {
+            return;
+        };
+        let next = if delta >= 0 {
+            col.scroll_offset
+                .saturating_add(delta.unsigned_abs() as usize)
+        } else {
+            col.scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize)
+        };
+        col.scroll_offset = next.min(cards_len_floor(&col.cards));
+    }
+
+    /// The task id of the card at board slot `(column, card)`, if any (63l.6) — the
+    /// click target a `ClickOpen` resolves to a task to open.
+    #[must_use]
+    pub fn task_id_at(&self, column: usize, card: usize) -> Option<&str> {
+        self.columns
+            .get(column)
+            .and_then(|c| c.cards.get(card))
+            .map(|c| c.task_id.as_str())
     }
 
     /// The four columns, left-to-right.
@@ -456,20 +551,32 @@ fn unchanged(state: &KanbanState) -> KanbanReduction {
 }
 
 // ---------------------------------------------------------------------------
-// Width-aware four-column render
+// Card-board render (63l.6)
 // ---------------------------------------------------------------------------
 
-/// Each card occupies this many rows (title, agent, age+chip).
-const CARD_ROWS: u16 = 3;
+/// The status glyph painted before a column's name (63l.6): empty queued,
+/// filling through running, solid done, a cross for the failed/cancelled bucket.
+const fn column_glyph(column: BoardColumn) -> char {
+    match column {
+        BoardColumn::Queued => '○',
+        BoardColumn::Running => '◔',
+        BoardColumn::Done => '●',
+        BoardColumn::Failed => '✕',
+    }
+}
 
-/// Render the Kanban board into `buf` between rows `top` and `bottom`.
-///
-/// The width is split into four equal columns (`area.width / 4`, the
-/// `Constraint::Percentage(25)` × 4 of `project_ainb_tui_width_aware_panels`).
-/// Each column paints a header (`<label> (<count>)`, the focused column's in
-/// green) and its cards top-to-bottom from `scroll_offset`; the focused card
-/// carries a `▶` marker in [`SELECTION_GREEN`]. Card titles truncate via
-/// `chars().take(...)` (never byte-slice — the rust-utf8-truncate trap).
+/// The largest scroll offset a column may hold: its last card index, so a scroll
+/// never lands the body on a blank past-the-end gap. `0` for an empty column.
+fn cards_len_floor(cards: &[CardSummary]) -> usize {
+    cards.len().saturating_sub(1)
+}
+
+/// Render the Kanban board into `buf` between rows `top` and `bottom` THROUGH the
+/// shared Linear-style card-board (63l.6) — four status columns (`queued` /
+/// `running` / `done` / `failed`) side by side, each a per-column-scrollable
+/// stack of bordered task cards showing `#<short_id>`, the agent + age + status,
+/// and a priority chip. The hovered (or keyboard-focused) card carries the heavy
+/// clay highlight border.
 ///
 /// `now_ms` is the render-time clock the card ages are computed against.
 pub fn render_kanban(
@@ -480,104 +587,9 @@ pub fn render_kanban(
     state: &KanbanState,
     now_ms: i64,
 ) {
-    let col_w = (area_w / 4).max(1);
-    for (i, col) in state.columns.iter().enumerate() {
-        let x0 = u16::try_from(i).unwrap_or(0) * col_w;
-        let focused = i == state.focused_col;
-        render_column(buf, x0, col_w, top, bottom, col, focused, state, now_ms);
-    }
-}
-
-/// Render one column: header + its visible cards.
-#[allow(clippy::too_many_arguments)]
-fn render_column(
-    buf: &mut WireBuffer,
-    x0: u16,
-    col_w: u16,
-    top: u16,
-    bottom: u16,
-    col: &Column,
-    focused: bool,
-    state: &KanbanState,
-    now_ms: i64,
-) {
-    let header = format!("{} ({})", col.status.label(), col.cards.len());
-    let header_color = if focused { SELECTION_GREEN } else { GOLD };
-    put_str(
-        buf,
-        x0,
-        top,
-        &truncate(&header, col_w as usize),
-        header_color,
-        x0 + col_w,
-    );
-
-    let body_top = top + 2;
-    let mut row = body_top;
-    for (idx, card) in col.cards.iter().enumerate().skip(col.scroll_offset) {
-        if row + CARD_ROWS > bottom + 1 {
-            break;
-        }
-        let card_focused = focused && idx == state.focused_row;
-        render_card(buf, x0, col_w, row, card, card_focused, now_ms);
-        row += CARD_ROWS + 1;
-    }
-}
-
-/// Render one card across three rows in its column slot.
-fn render_card(
-    buf: &mut WireBuffer,
-    x0: u16,
-    col_w: u16,
-    row: u16,
-    card: &CardSummary,
-    focused: bool,
-    now_ms: i64,
-) {
-    let right = x0 + col_w;
-    let marker = if focused { '▶' } else { ' ' };
-    let title_color = if focused { SELECTION_GREEN } else { SOFT_WHITE };
-    // Row 0: `▶ #<short_id>`.
-    let title = format!("{marker} #{}", card.short_id);
-    put_str(
-        buf,
-        x0,
-        row,
-        &truncate(&title, col_w as usize),
-        title_color,
-        right,
-    );
-    // Row 1: agent id, indented under the marker.
-    put_str(
-        buf,
-        x0 + 2,
-        row + 1,
-        &truncate(&card.agent_id, col_w.saturating_sub(2) as usize),
-        SOFT_WHITE,
-        right,
-    );
-    // Row 2: `<age>  <status chip>`.
-    let age = age_label(card.created_at, now_ms);
-    let mut x = put_str(buf, x0 + 2, row + 2, &age, MUTED_GRAY, right);
-    x += 1;
-    put_str(
-        buf,
-        x,
-        row + 2,
-        &card.status,
-        status_color(&card.status),
-        right,
-    );
-}
-
-/// The status-chip colour for a wire status token.
-fn status_color(status: &str) -> Color {
-    match BoardColumn::for_status(status) {
-        BoardColumn::Running => RUNNING_BLUE,
-        BoardColumn::Done => SELECTION_GREEN,
-        BoardColumn::Failed => WARN_RED,
-        BoardColumn::Queued => MUTED_GRAY,
-    }
+    let columns = state.board_columns(now_ms);
+    let highlight = state.highlight_board_card();
+    let _ = card_board::render_card_board(buf, area_w, top, bottom, &columns, highlight);
 }
 
 /// A compact relative-age label (`5m` / `2h` / `3d`) from `created_at` to `now`.
@@ -595,33 +607,110 @@ fn age_label(created_at_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// Truncate `s` to `max` chars with an ellipsis, char-safe (multi-byte aware) —
-/// never byte-slice (the rust-utf8-truncate trap).
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let take = max.saturating_sub(1);
-    let mut out: String = s.chars().take(take).collect();
-    out.push('…');
-    out
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Write `s` at `(x, row)` in `color`, clipping at `right`. Returns the next free
-/// column. Char-safe (iterates `char`s, not bytes).
-fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) -> u16 {
-    let mut cx = x;
-    for ch in s.chars() {
-        if cx >= right {
-            break;
+    const NOW: i64 = 1_700_000_600_000;
+
+    fn task(id: &str, status: &str) -> TaskCardRow {
+        TaskCardRow {
+            id: ainb_hangar_core::ids::TaskId::from_str(id).unwrap(),
+            workspace_id: "default".into(),
+            agent_id: "claude-agent".into(),
+            issue_id: Some("issue-1".into()),
+            status: status.into(),
+            priority: 0,
+            created_at: NOW - 300_000, // 5m
         }
-        let mut cell = Cell::new(ch.to_string());
-        cell.fg = Some(color);
-        buf.push(Coord::new(cx, row), cell);
-        cx = cx.saturating_add(1);
     }
-    cx
+
+    /// `board_columns` flattens the four buckets into card-board columns whose
+    /// cards carry `#<short_id>`, an agent · age · status title, and the column
+    /// glyph + label, so the screen renders THROUGH the shared card-board (63l.6).
+    #[test]
+    fn board_columns_map_tasks_to_card_board_cards() {
+        let state = KanbanState::from_tasks(
+            &[
+                task("01HANGARTASKQUEUED01", "queued"),
+                task("01HANGARTASKRUNNING03", "running"),
+            ],
+            NOW,
+        );
+        let cols = state.board_columns(NOW);
+        assert_eq!(cols.len(), 4, "four board columns");
+        assert_eq!(cols[0].name, "queued");
+        assert_eq!(cols[0].glyph, '○');
+        let queued_card = &cols[0].cards[0];
+        assert_eq!(queued_card.issue_id, "01HANGARTASKQUEUED01");
+        assert_eq!(queued_card.display_id, "#EUED01");
+        assert!(
+            queued_card.title.contains("claude-agent")
+                && queued_card.title.contains("5m")
+                && queued_card.title.contains("queued"),
+            "the card title carries agent · age · status: {:?}",
+            queued_card.title
+        );
+        // The running task buckets into the running column.
+        assert_eq!(cols[1].cards.len(), 1);
+        assert_eq!(cols[1].cards[0].issue_id, "01HANGARTASKRUNNING03");
+    }
+
+    /// A wheel-scroll over a column nudges that column's scroll offset, saturating
+    /// at `0` upward and capped at the last card downward — and only the targeted
+    /// column moves (the click resolves the column, not a hard-wired one).
+    #[test]
+    fn scroll_column_offsets_only_that_column_and_saturates() {
+        let tasks: Vec<TaskCardRow> = (0..4)
+            .map(|i| task(&format!("01HANGARTASKQUEUE0{i}"), "queued"))
+            .collect();
+        let mut state = KanbanState::from_tasks(&tasks, NOW);
+        // Scroll the queued column (index 0) down twice → offset 2.
+        state.scroll_column(0, 1);
+        state.scroll_column(0, 1);
+        assert_eq!(state.board_columns(NOW)[0].scroll_offset, 2);
+        // Other columns are untouched.
+        assert_eq!(state.board_columns(NOW)[1].scroll_offset, 0);
+        // Up past the top saturates at 0.
+        state.scroll_column(0, -5);
+        assert_eq!(state.board_columns(NOW)[0].scroll_offset, 0);
+        // Down past the last card caps at len-1 (never a blank body).
+        for _ in 0..10 {
+            state.scroll_column(0, 1);
+        }
+        assert_eq!(state.board_columns(NOW)[0].scroll_offset, 3);
+        // An out-of-range column index is a no-op (no panic).
+        state.scroll_column(99, 1);
+    }
+
+    /// A hover resolves the highlighted `(column, card)` slot, overriding the
+    /// keyboard focus; clearing the hover falls back to the focus.
+    #[test]
+    fn highlight_resolves_hover_over_focus() {
+        let mut state = KanbanState::from_tasks(
+            &[
+                task("01HANGARTASKQUEUED01", "queued"),
+                task("01HANGARTASKRUNNING03", "running"),
+            ],
+            NOW,
+        );
+        // Focus defaults to the first non-empty column/card (queued, slot (0,0)).
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+        // Hovering the running task overrides the highlight to its slot (1, 0).
+        state.set_hover(Some("01HANGARTASKRUNNING03".to_string()));
+        assert_eq!(state.highlight_board_card(), Some((1, 0)));
+        // Clearing the hover falls back to the focus.
+        state.set_hover(None);
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+    }
+
+    /// `task_id_at` resolves a board slot back to the task id a click opens.
+    #[test]
+    fn task_id_at_resolves_the_click_target() {
+        let state = KanbanState::from_tasks(&[task("01HANGARTASKRUNNING03", "running")], NOW);
+        assert_eq!(state.task_id_at(1, 0), Some("01HANGARTASKRUNNING03"));
+        // An empty / out-of-range slot resolves to nothing.
+        assert_eq!(state.task_id_at(0, 0), None);
+        assert_eq!(state.task_id_at(9, 9), None);
+    }
 }

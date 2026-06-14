@@ -1,11 +1,13 @@
-//! P8.4 — Kanban board render snapshots + status→column mapping.
+//! P8.4 / 63l.6 — Kanban board render snapshots + status→column mapping.
 //!
-//! Seeds six tasks across the six lifecycle statuses, renders [`KanbanState`] to a
-//! 120×30 backing buffer, and pins the layout with `insta::assert_snapshot!`
-//! (trailing newline trimmed per `reference_insta_trailing_newline_trap`). The
-//! snapshot proves the four column headers carry their bucket counts and each
-//! card shows `#<short_id>`, the assignee, an age label, and a status chip.
-//! Non-vacuous colour checks back the selection marker + the status-chip colours.
+//! Seeds six tasks across the six lifecycle statuses, renders [`KanbanState`]
+//! THROUGH the shared Linear-style card-board (63l.6) to a 120×30 backing buffer,
+//! and pins the layout with `insta::assert_snapshot!` (trailing newline trimmed
+//! per `reference_insta_trailing_newline_trap`). The snapshot proves the four
+//! status columns carry their bucket counts and each task renders as a bordered
+//! card showing `#<short_id>`, the agent + age + status, and a priority chip.
+//! A non-vacuous colour check backs the heavy highlight border on the focused
+//! card.
 
 use ainb_hangar_proto::events::TaskCardRow;
 use ainb_plugin_hangar::screen::kanban::{render_kanban, BoardColumn, KanbanState};
@@ -13,12 +15,8 @@ use ainb_plugin_sdk::{Color, WireBuffer};
 
 /// Fixed render clock so the age labels are deterministic.
 const NOW_MS: i64 = 1_700_000_600_000;
-/// `SELECTION_GREEN` — the focused marker / done chip colour.
-const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-/// `RUNNING_BLUE` — the running chip colour.
-const RUNNING_BLUE: Color = Color::rgb(100, 149, 237);
-/// `WARN_RED` — the failed/cancelled chip colour.
-const WARN_RED: Color = Color::rgb(220, 120, 100);
+/// `CLAY` — the heavy highlight border colour of the focused card-board card.
+const CLAY: Color = Color::rgb(210, 130, 90);
 
 fn task(id: &str, agent: &str, status: &str, created_at: i64) -> TaskCardRow {
     TaskCardRow {
@@ -119,7 +117,8 @@ fn board_buckets_counts() {
     assert_eq!(cols[3].cards.len(), 2, "failed+cancelled → 2");
 }
 
-/// Full-board render snapshot at 120×30: four headers with counts + card fields.
+/// Full-board render snapshot at 120×30: four card-board headers with counts +
+/// card fields, painted THROUGH the shared card-board (63l.6).
 #[test]
 fn render_full_board_snapshot() {
     let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
@@ -127,7 +126,7 @@ fn render_full_board_snapshot() {
     render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
     let full = glyph_map(&buf, 120);
 
-    // Four column headers carry their bucket counts.
+    // Four column headers carry their status glyph + bucket count (card-board form).
     assert!(full.contains("queued (2)"), "queued header/count:\n{full}");
     assert!(
         full.contains("running (1)"),
@@ -136,7 +135,7 @@ fn render_full_board_snapshot() {
     assert!(full.contains("done (1)"), "done header/count:\n{full}");
     assert!(full.contains("failed (2)"), "failed header/count:\n{full}");
 
-    // Card fields: short ids (last 6 chars), assignee, age, status chip.
+    // Card fields: `#<short_id>` id line, agent + age + status in the title.
     assert!(full.contains("#EUED01"), "queued short id:\n{full}");
     assert!(full.contains("#NING03"), "running short id:\n{full}");
     assert!(full.contains("claude-agent"), "assignee:\n{full}");
@@ -144,46 +143,31 @@ fn render_full_board_snapshot() {
     // Age labels (5m queued, 1m running, 3d done, 10m failed, 1h cancelled).
     assert!(full.contains("5m"), "5m age:\n{full}");
     assert!(full.contains("3d"), "3d age:\n{full}");
-    // Status chips render the raw token next to the card.
-    assert!(full.contains("running"), "running chip:\n{full}");
-    assert!(full.contains("cancelled"), "cancelled chip:\n{full}");
+    // The second card in the failed/cancelled bucket renders too (its short id),
+    // proving both tasks bucket into the same column and both paint.
+    assert!(full.contains("#NCEL06"), "cancelled short id:\n{full}");
+    // The running status token renders intact in the card title.
+    assert!(full.contains("running"), "running status:\n{full}");
+    // The card-board paints bordered, rounded cards (the rounded corner glyph is
+    // the card-board signature — the old band layout painted bare rows).
+    assert!(full.contains('╭'), "rounded card borders:\n{full}");
 
     insta::assert_snapshot!(full);
 }
 
-/// The focused card's `▶` marker is painted in `SELECTION_GREEN` (non-vacuous).
+/// The focused card carries the heavy clay highlight border (63l.6) — proof the
+/// render goes through the shared card-board, which raises the focused tile.
 #[test]
-fn focused_card_marker_is_green() {
+fn focused_card_has_heavy_clay_border() {
     let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
     let mut buf = WireBuffer::new(120, 30);
     render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
-    let green_marker = buf
+    let heavy_in_clay = buf
         .cells
         .iter()
-        .any(|(_, cell)| cell.symbol == "▶" && cell.fg == Some(SELECTION_GREEN));
+        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
-        green_marker,
-        "the focused card's `▶` marker must be painted SELECTION_GREEN"
+        heavy_in_clay,
+        "the focused card must carry the heavy clay border (card-board highlight)"
     );
-}
-
-/// The status chips carry distinct accents: running blue, failed red, done green
-/// (non-vacuous per-column colour check).
-#[test]
-fn status_chips_carry_distinct_accents() {
-    let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
-    let mut buf = WireBuffer::new(120, 30);
-    render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
-
-    let has_color = |needle: char, color: Color| {
-        buf.cells
-            .iter()
-            .any(|(_, c)| c.symbol == needle.to_string() && c.fg == Some(color))
-    };
-    // `running` chip → blue (the 'r' of the chip word).
-    assert!(has_color('r', RUNNING_BLUE), "running chip must be blue");
-    // `cancelled` chip → red (the 'c' of the chip word).
-    assert!(has_color('c', WARN_RED), "cancelled chip must be warn-red");
-    // `done` chip → green (the 'd' of the chip word, also the done header).
-    assert!(has_color('d', SELECTION_GREEN), "done chip must be green");
 }
