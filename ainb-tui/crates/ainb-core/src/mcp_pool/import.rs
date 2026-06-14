@@ -81,10 +81,11 @@ fn import_into(target: &Path, sources: &[PooledServer]) -> Result<ImportReport> 
     }
 
     if !report.imported.is_empty() {
-        if let Some(dir) = target.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(target, doc.to_string()).with_context(|| format!("write {}", target.display()))?;
+        // Atomic so a torn write can't corrupt ainb's own config. Inherit
+        // umask (like AppConfig::save) rather than forcing 0600 — keeps
+        // perms consistent with the rest of the config file.
+        super::paths::write_atomic(target, &doc.to_string(), None)
+            .with_context(|| format!("write {}", target.display()))?;
     }
     Ok(report)
 }
@@ -92,7 +93,7 @@ fn import_into(target: &Path, sources: &[PooledServer]) -> Result<ImportReport> 
 fn server_table(server: &PooledServer) -> Table {
     let mut t = Table::new();
     t["name"] = value(server.name.as_str());
-    t["description"] = value(format!("imported from .mcp.json"));
+    t["description"] = value("imported by ainb mcp import");
     t["enabled_by_default"] = value(true);
     t["shared"] = value(true);
 

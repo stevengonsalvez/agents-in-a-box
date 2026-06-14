@@ -46,8 +46,11 @@ pub fn write_session_mcp_json(worktree: &Path, pooled: &[PooledServer]) -> Resul
         wired.push(server.name.clone());
     }
 
-    let pretty = serde_json::to_string_pretty(&root)?;
-    std::fs::write(&path, pretty + "\n").with_context(|| format!("write {}", path.display()))?;
+    // Atomic temp-file + rename: this is the user's OWN .mcp.json and has no
+    // backup, so a torn write would be unrecoverable loss of their content.
+    let pretty = serde_json::to_string_pretty(&root)? + "\n";
+    super::paths::write_atomic(&path, &pretty, None)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(wired)
 }
 
@@ -75,6 +78,12 @@ pub fn extract_stdio_servers(servers: Option<&Value>) -> Vec<PooledServer> {
     let Some(map) = servers.and_then(Value::as_object) else { return vec![] };
     let mut out = Vec::new();
     for (name, entry) in map {
+        // Untrusted boundary: `.mcp.json` keys become socket filenames and
+        // config keys. Reject anything that could traverse or break out.
+        if !super::valid_server_name(name) {
+            tracing::warn!("mcp_pool: ignoring server with unsafe name {name:?}");
+            continue;
+        }
         let transport = entry.get("type").and_then(Value::as_str).unwrap_or("stdio");
         if transport != "stdio" {
             continue;
@@ -188,6 +197,10 @@ mod tests {
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap())
                 .unwrap();
-        assert!(written["mcpServers"]["ctx"]["command"].as_str().unwrap().contains("ainb") || written["mcpServers"]["ctx"]["command"].is_string());
+        // The generated entry must be a shim invocation: ainb mcp proxy <sock>.
+        let entry = &written["mcpServers"]["ctx"];
+        assert_eq!(entry["args"][0], "mcp");
+        assert_eq!(entry["args"][1], "proxy");
+        assert!(entry["args"][2].as_str().unwrap().ends_with("ctx.sock"));
     }
 }

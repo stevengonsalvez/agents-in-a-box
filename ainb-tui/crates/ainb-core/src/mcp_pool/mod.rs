@@ -36,6 +36,18 @@ pub struct PooledServer {
     pub env: std::collections::HashMap<String, String>,
 }
 
+/// Whether a server name is safe to use as a socket filename and as a TOML/
+/// JSON config key. Names flow from untrusted sources (a repo's `.mcp.json`
+/// keys), so anything that could traverse out of the sockets dir
+/// (`..`, `/`) or break out of a config-table key (quotes, dots, control
+/// chars) is rejected. Conservative allowlist: ASCII alnum + `_` + `-`,
+/// 1–64 chars.
+pub fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 impl PooledServer {
     /// Host-resolvability check shared by config eligibility and .mcp.json
     /// import: command on PATH (or an existing absolute path) and no
@@ -71,6 +83,10 @@ pub fn pooled_servers(config: &AppConfig) -> Vec<PooledServer> {
 
 fn eligible(server: &McpServerConfig) -> Option<PooledServer> {
     if !server.shared || !server.enabled_by_default {
+        return None;
+    }
+    if !valid_server_name(&server.name) {
+        tracing::warn!("mcp_pool: skipping server with unsafe name {:?}", server.name);
         return None;
     }
     let McpServerDefinition::Command { command, args, env } = &server.definition else {
@@ -135,5 +151,39 @@ mod tests {
         let pooled = pooled_servers(&config);
         assert_eq!(pooled.len(), 1, "{pooled:?}");
         assert_eq!(pooled[0].name, "ok");
+    }
+
+    #[test]
+    fn valid_server_name_accepts_safe_rejects_traversal_and_keys() {
+        for ok in ["context7", "my-server", "srv_1", "A", &"x".repeat(64)] {
+            assert!(valid_server_name(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            "",                       // empty
+            &"x".repeat(65),          // too long
+            "../etc",                 // traversal
+            "a/b",                    // slash
+            "..",                     // parent
+            "a.b",                    // dotted → nested TOML table
+            "a\"b",                   // quote → key breakout
+            "a b",                    // space
+            "a\nb",                   // control char
+            "srv]",                   // bracket
+        ] {
+            assert!(!valid_server_name(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn unsafe_name_rejected_from_config_and_socket_path() {
+        // Config eligibility drops an unsafe name…
+        let mut config = AppConfig::default();
+        config.mcp_servers.clear();
+        config.mcp_servers.insert("../evil".into(), cmd_server("../evil", "sh", &[]));
+        assert!(pooled_servers(&config).is_empty(), "unsafe config name must not pool");
+
+        // …and server_socket refuses to build a traversal path.
+        assert!(crate::mcp_pool::paths::server_socket("../../etc/x").is_err());
+        assert!(crate::mcp_pool::paths::server_socket("context7").is_ok());
     }
 }

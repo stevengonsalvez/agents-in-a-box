@@ -51,8 +51,9 @@ pub fn install_codex(servers: &[PooledServer]) -> Result<InstallReport> {
         wired.push(server.name.clone());
     }
 
-    std::fs::create_dir_all(target.parent().unwrap())?;
-    std::fs::write(&target, doc.to_string())?;
+    // 0600 — codex config can carry env secrets; atomic so a torn write
+    // never corrupts another tool's config.
+    paths::write_atomic(&target, &doc.to_string(), Some(0o600))?;
     Ok(InstallReport { target, wired })
 }
 
@@ -96,8 +97,7 @@ pub fn install_copilot(servers: &[PooledServer]) -> Result<InstallReport> {
         wired.push(server.name.clone());
     }
 
-    std::fs::create_dir_all(target.parent().unwrap())?;
-    std::fs::write(&target, serde_json::to_string_pretty(&root)? + "\n")?;
+    paths::write_atomic(&target, &(serde_json::to_string_pretty(&root)? + "\n"), Some(0o600))?;
     Ok(InstallReport { target, wired })
 }
 
@@ -106,6 +106,39 @@ fn backup(target: &Path) -> Result<()> {
         "{}bak",
         target.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
     ));
+    // Never clobber an existing backup: the first run captured the user's
+    // pristine pre-install config; a second run would otherwise copy the
+    // already-shimmed file over it, destroying the only good copy.
+    if bak.exists() {
+        return Ok(());
+    }
     std::fs::copy(target, &bak).with_context(|| format!("backup {}", bak.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_never_clobbers_a_pristine_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        std::fs::write(&target, "pristine\n").unwrap();
+
+        backup(&target).unwrap();
+        let bak = target.with_extension("toml.bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "pristine\n");
+
+        // Simulate a second install run over an already-modified file.
+        std::fs::write(&target, "shimmed-garbage\n").unwrap();
+        backup(&target).unwrap();
+
+        // The backup must still hold the original, not the shimmed state.
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            "pristine\n",
+            "second backup() must not overwrite the good .bak"
+        );
+    }
 }

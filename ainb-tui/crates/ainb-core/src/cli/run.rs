@@ -166,10 +166,19 @@ fn setup_mcp_pool(work_dir: &std::path::Path) {
     // Auto-import: stdio servers already declared in the worktree's
     // .mcp.json join the pool too (config entries win on name conflict).
     // Users who never touched ainb config still get pooling for free.
+    // Auto-import runs whatever a repo's .mcp.json declares as a pooled
+    // (and later spawned) process. That matches Claude Code's own
+    // project-.mcp.json trust model, but log the exact command/args loudly
+    // so it's auditable — a freshly-cloned repo could declare anything.
     let known: std::collections::HashSet<String> = pooled.iter().map(|s| s.name.clone()).collect();
     for server in mcp_pool::mcp_json::parse_stdio_servers(&work_dir.join(".mcp.json")) {
         if !known.contains(&server.name) && server.resolvable_on_host() {
-            info!("mcp pool: auto-importing '{}' from project .mcp.json", server.name);
+            warn!(
+                "mcp pool: auto-importing '{}' from project .mcp.json — will pool+spawn: {} {}",
+                server.name,
+                server.command,
+                server.args.join(" ")
+            );
             pooled.push(server);
         }
     }
