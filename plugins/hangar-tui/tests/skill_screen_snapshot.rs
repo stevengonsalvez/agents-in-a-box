@@ -20,8 +20,8 @@ use ainb_plugin_hangar::screen::skill_manager::{
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
-/// `SELECTION_GREEN` from the TUI palette (the active-row marker colour).
-const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+/// `CLAY` — the heavy highlight border colour of the selected card-board card.
+const CLAY: Color = Color::rgb(210, 130, 90);
 
 fn skill(slug: &str, name: &str, used: bool) -> SkillRow {
     SkillRow {
@@ -60,37 +60,42 @@ fn glyph_map(buf: &WireBuffer, cols: u16) -> String {
         .to_string()
 }
 
-/// The list pane (left ~22 cols) of the render, as a glyph map.
+/// The list pane (left 28 cols) of the render, as a glyph map.
 fn list_pane(buf: &WireBuffer) -> String {
-    glyph_map(buf, 22)
+    glyph_map(buf, 28)
 }
 
-/// Three imported skills render in the list with the first selected, the
-/// action-key hints painted on the chip row.
+/// Three imported skills render in the list pane THROUGH the card-board (63l.6):
+/// a single `Skills (N)` column of bordered cards, the first selected with the
+/// heavy clay highlight border, the action-key hints painted on the chip row.
 #[test]
 fn test_skill_list_renders_imported_skills() {
     let state = SkillManagerState::new(three_skills());
-    // Narrow width keeps the middle file-tree collapsed so the list snapshot is
-    // stable (the list always occupies the left 22 cols).
-    let mut buf = WireBuffer::new(80, 10);
-    render_skill_manager(&mut buf, 80, 0, 10, &state);
+    // A tall, narrow buffer (file-tree collapsed below 100 cols) so all three
+    // 6-row cards fit in the left list pane.
+    let mut buf = WireBuffer::new(80, 26);
+    render_skill_manager(&mut buf, 80, 0, 26, &state);
 
-    // POSITIVE: all three skills render, `commit` carries the `▶` selection.
-    insta::assert_snapshot!(list_pane(&buf), @r###"
-    [All] [Used] [Unused]
-    ▶ commit
-      find-missing-tests
-      brainstorm
-    "###);
+    // POSITIVE: the single `Skills (N)` card-board column header + every skill
+    // card (name on the id line, used/unused in the title) renders.
+    insta::assert_snapshot!(list_pane(&buf));
 
-    // NON-VACUOUS COLOUR CHECK: the selected row's `▶` marker is SELECTION_GREEN.
-    let green_marker = buf
+    let list = list_pane(&buf);
+    assert!(list.contains("Skills (3)"), "card-board header:\n{list}");
+    for name in ["commit", "find-missing-tests", "brainstorm"] {
+        assert!(list.contains(name), "skill card {name} missing:\n{list}");
+    }
+    // The card-board paints rounded card borders (its signature).
+    assert!(list.contains('╭'), "rounded card borders:\n{list}");
+
+    // NON-VACUOUS COLOUR CHECK: the selected card carries the heavy clay border.
+    let heavy_in_clay = buf
         .cells
         .iter()
-        .any(|(_, cell)| cell.symbol == "▶" && cell.fg == Some(SELECTION_GREEN));
+        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
-        green_marker,
-        "the selected skill's `▶` marker must be painted in SELECTION_GREEN"
+        heavy_in_clay,
+        "the selected skill card must carry the heavy clay highlight border"
     );
 
     // The action-key hints sit on the chip row (P6.5 keybinding-near-control).

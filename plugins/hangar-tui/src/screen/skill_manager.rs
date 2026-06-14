@@ -83,6 +83,11 @@ pub struct SkillManagerState {
     /// `None` until the user opens a skill's detail (Enter). Drives the detail
     /// pane (P6.5).
     detail: Option<SkillDetail>,
+    /// First visible card index — the list pane's vertical scroll offset (63l.6).
+    scroll_offset: usize,
+    /// The skill slug the pointer is hovering over (63l.6), or `None` off every
+    /// card. The card-board render lifts the hovered card's border.
+    hovered_slug: Option<String>,
 }
 
 /// The loaded detail of one skill: its slug (to guard stale replies) + the
@@ -109,6 +114,8 @@ impl SkillManagerState {
             dirty: BTreeSet::new(),
             conflict_banner: None,
             detail: None,
+            scroll_offset: 0,
+            hovered_slug: None,
         }
     }
 
@@ -166,6 +173,86 @@ impl SkillManagerState {
     #[must_use]
     pub fn selected_skill(&self) -> Option<SkillRow> {
         self.visible_skills().into_iter().nth(self.selected)
+    }
+
+    /// Flatten the visible skills into a SINGLE card-board column (63l.6) the list
+    /// pane paints and the mouse layer hit-tests against. Skills are a flat list
+    /// (no status columns), so the board is one `Skills (N)` column of cards; each
+    /// card carries the skill name (id line) and its used/unused state (title).
+    /// The same geometry feeds the render and the hit-map.
+    #[must_use]
+    pub fn board_columns(&self) -> Vec<crate::widgets::card_board::BoardColumn> {
+        use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip};
+        let cards = self
+            .visible_skills()
+            .into_iter()
+            .map(|s| BoardCard {
+                issue_id: s.slug.clone(),
+                display_id: s.name.clone(),
+                title: if s.used {
+                    "used".to_string()
+                } else {
+                    "unused".to_string()
+                },
+                priority: PriorityChip::from_priority(0),
+                assignee_initial: s.name.chars().next(),
+            })
+            .collect::<Vec<_>>();
+        vec![BoardColumn {
+            glyph: '◆',
+            name: "Skills".to_string(),
+            cards,
+            scroll_offset: self
+                .scroll_offset
+                .min(self.visible_skills().len().saturating_sub(1)),
+        }]
+    }
+
+    /// The `(0, card)` slot the render draws with the heavy highlight border
+    /// (63l.6): the hovered card when the pointer is over one, else the keyboard
+    /// selection. `None` when the visible list is empty.
+    #[must_use]
+    pub fn highlight_board_card(&self) -> Option<(usize, usize)> {
+        let visible = self.visible_skills();
+        if let Some(hover) = self.hovered_slug.as_deref() {
+            if let Some(idx) = visible.iter().position(|s| s.slug == hover) {
+                return Some((0, idx));
+            }
+        }
+        (!visible.is_empty()).then_some((0, self.selected))
+    }
+
+    /// Set (or clear) the hovered skill slug (63l.6).
+    pub fn set_hover(&mut self, slug: Option<String>) {
+        self.hovered_slug = slug;
+    }
+
+    /// The hovered skill slug, if any (63l.6).
+    #[must_use]
+    pub fn hovered_slug(&self) -> Option<&str> {
+        self.hovered_slug.as_deref()
+    }
+
+    /// Scroll the single board column vertically by `delta` rows (63l.6),
+    /// saturating at `0` and capped at the last visible card.
+    pub fn scroll(&mut self, delta: i32) {
+        let len = self.visible_skills().len();
+        let next = if delta >= 0 {
+            self.scroll_offset
+                .saturating_add(delta.unsigned_abs() as usize)
+        } else {
+            self.scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize)
+        };
+        self.scroll_offset = next.min(len.saturating_sub(1));
+    }
+
+    /// Move the list selection onto the visible skill carrying `slug` (63l.6 mouse
+    /// click). A no-op when no visible skill carries that slug.
+    pub fn select_by_slug(&mut self, slug: &str) {
+        if let Some(idx) = self.visible_skills().iter().position(|s| s.slug == slug) {
+            self.selected = idx;
+        }
     }
 }
 
@@ -443,7 +530,9 @@ pub fn render_skill_manager(
         content_top += 1;
     }
 
-    let list_w: u16 = 22;
+    // The list pane is widened to 28 cols so the card-board column (min 14) paints
+    // a readable bordered card (63l.6).
+    let list_w: u16 = 28;
     let tree_w: u16 = if area_w >= MIDDLE_COLLAPSE_WIDTH {
         26
     } else {
@@ -496,7 +585,11 @@ fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
     }
 }
 
-/// Render the left skill list with a `▶` marker on the selection.
+/// Render the left skill list as a single card-board column (63l.6): one
+/// `Skills (N)` column of bordered cards, each carrying the skill name (id line)
+/// and its used/unused state (title), with the hovered/selected card raised by
+/// the heavy clay border. Painted through the shared card-board so the list pane
+/// hit-tests against exactly the geometry it draws.
 fn render_skill_list(
     buf: &mut WireBuffer,
     width: u16,
@@ -504,20 +597,82 @@ fn render_skill_list(
     bottom: u16,
     state: &SkillManagerState,
 ) {
-    use ainb_plugin_sdk::{Cell, Color, Coord};
-    const NAME: Color = Color::rgb(220, 220, 230);
-    const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+    let columns = state.board_columns();
+    let highlight = state.highlight_board_card();
+    let _ =
+        crate::widgets::card_board::render_card_board(buf, width, top, bottom, &columns, highlight);
+}
 
-    let visible = state.visible_skills();
-    for ((i, skill), row) in visible.iter().enumerate().zip(top..bottom) {
-        let selected = i == state.selected;
-        let marker = if selected { '▶' } else { ' ' };
-        let color = if selected { SELECTION_GREEN } else { NAME };
-        let line = format!("{marker} {}", skill.name);
-        for (ch, cx) in line.chars().zip(0..width) {
-            let mut cell = Cell::new(ch.to_string());
-            cell.fg = Some(color);
-            buf.push(Coord::new(cx, row), cell);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(slug: &str, name: &str, used: bool) -> SkillRow {
+        SkillRow {
+            slug: slug.into(),
+            name: name.into(),
+            used,
+            updated_at: 0,
         }
+    }
+
+    /// `board_columns` flattens the visible skills into a single card-board column
+    /// whose cards carry the skill name + used/unused state, so the list pane
+    /// renders THROUGH the shared card-board (63l.6).
+    #[test]
+    fn board_columns_map_skills_to_a_single_column_of_cards() {
+        let state = SkillManagerState::new(vec![
+            skill("commit", "commit", true),
+            skill("brainstorm", "brainstorm", false),
+        ]);
+        let cols = state.board_columns();
+        assert_eq!(cols.len(), 1, "skills are a single flat column");
+        assert_eq!(cols[0].name, "Skills");
+        assert_eq!(cols[0].cards.len(), 2);
+        assert_eq!(cols[0].cards[0].issue_id, "commit");
+        assert_eq!(cols[0].cards[0].display_id, "commit");
+        assert_eq!(cols[0].cards[0].title, "used");
+        assert_eq!(cols[0].cards[1].title, "unused");
+    }
+
+    /// The board column respects the active filter: the `Unused` chip drops the
+    /// used skill from the cards (the board paints exactly the visible list).
+    #[test]
+    fn board_columns_respect_the_active_filter() {
+        let state = SkillManagerState::new(vec![
+            skill("commit", "commit", true),
+            skill("brainstorm", "brainstorm", false),
+        ]);
+        let filtered = set_filter(&state, SkillFilter::Unused).state;
+        let cols = filtered.board_columns();
+        assert_eq!(cols[0].cards.len(), 1, "only the unused skill is a card");
+        assert_eq!(cols[0].cards[0].issue_id, "brainstorm");
+    }
+
+    /// A hover overrides the selection for the highlight; clearing it falls back.
+    #[test]
+    fn highlight_resolves_hover_over_selection() {
+        let mut state = SkillManagerState::new(vec![
+            skill("commit", "commit", true),
+            skill("brainstorm", "brainstorm", false),
+        ]);
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+        state.set_hover(Some("brainstorm".to_string()));
+        assert_eq!(state.highlight_board_card(), Some((0, 1)));
+        state.set_hover(None);
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+    }
+
+    /// A mouse click selects the clicked skill by slug (no-op for an unknown slug).
+    #[test]
+    fn select_by_slug_moves_the_selection() {
+        let mut state = SkillManagerState::new(vec![
+            skill("commit", "commit", true),
+            skill("brainstorm", "brainstorm", false),
+        ]);
+        state.select_by_slug("brainstorm");
+        assert_eq!(state.selected_index(), 1);
+        state.select_by_slug("ghost");
+        assert_eq!(state.selected_index(), 1, "an unknown slug is a no-op");
     }
 }
