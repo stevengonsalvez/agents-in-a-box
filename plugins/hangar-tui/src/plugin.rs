@@ -191,6 +191,20 @@ pub struct HangarPlugin {
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
     /// refresh is armed; consumed (taken) once fired.
     pending_pr_status_refresh: Option<String>,
+    /// The card-board mouse drag FSM (63l.2). `handle_mouse` folds each forwarded
+    /// pointer event against the [`hit_map`](Self::hit_map) into this, producing a
+    /// [`MouseIntent`](crate::mouse::MouseIntent).
+    mouse_fsm: crate::mouse::MouseFsm,
+    /// The render-time hit-map (63l.2) the last `render` recorded for the active
+    /// board screen — the geometry `handle_mouse` hit-tests against. Rebuilt each
+    /// render; empty until the first paint of a board screen.
+    hit_map: crate::mouse::HitMap,
+    /// Mouse intents `handle_mouse` produced, drained on the next `render`
+    /// (63l.2). `handle_mouse` runs INLINE on the reader loop, so it only stashes
+    /// intents here; the spawned `render` applies the local board effects (select,
+    /// open) and (in 63l.4) binds the mutating ones to RPCs. A non-empty queue is
+    /// itself the [`Plugin::wants_redraw`] signal — no separate redraw bool.
+    pending_mouse_intents: Vec<crate::mouse::MouseIntent>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -225,6 +239,9 @@ impl Default for HangarPlugin {
             start_daemon_pending: false,
             daemon_start_error: None,
             pending_pr_status_refresh: None,
+            mouse_fsm: crate::mouse::MouseFsm::default(),
+            hit_map: crate::mouse::HitMap::default(),
+            pending_mouse_intents: Vec::new(),
         }
     }
 }
@@ -1399,6 +1416,85 @@ impl HangarPlugin {
         }
     }
 
+    /// Fold one forwarded mouse event into the card-board mouse framework
+    /// (63l.2): hit-test it against the last render's [`hit_map`](Self::hit_map),
+    /// fold the [`MouseFsm`](crate::mouse::MouseFsm), and stash any produced
+    /// [`MouseIntent`](crate::mouse::MouseIntent) for the next render to drain.
+    ///
+    /// Host-free + non-blocking (the SDK dispatches `handle_mouse` INLINE on the
+    /// reader loop): it never touches a socket, only hit-tests + folds the FSM and
+    /// stashes the produced intent. The spawned `render` drains it (a non-empty
+    /// queue is the `wants_redraw` signal), applying the local effects and (in
+    /// 63l.4) binding the mutating intents to RPCs.
+    fn on_mouse(&mut self, ev: ainb_plugin_sdk::MouseEvent) {
+        if let Some(intent) = self.mouse_fsm.handle(&self.hit_map, ev) {
+            self.pending_mouse_intents.push(intent);
+        }
+    }
+
+    /// Rebuild the render-time hit-map (63l.2) for the active board screen.
+    ///
+    /// Today the issue list is the only board screen wired to the mouse layer; it
+    /// flattens its visible rows into card-board columns
+    /// ([`IssueListState::board_columns`](crate::screen::issue_list::IssueListState::board_columns)),
+    /// renders them into a scratch [`WireBuffer`] purely to obtain the
+    /// [`BoardLayout`](crate::widgets::card_board::BoardLayout) geometry, and
+    /// builds the hit-map from it — so `handle_mouse` hit-tests against the SAME
+    /// geometry the board paints, never re-derived. Non-board screens clear the
+    /// map (a click there resolves to nothing). The visible board swap lands in
+    /// 63l.4; this records the geometry so the mouse path is live now.
+    fn rebuild_hit_map(&mut self, w: u16, h: u16) {
+        use crate::mouse::HitMap;
+        if matches!(self.app_state().screen, Screen::IssueList) {
+            let columns = self.screens.issue_list.board_columns();
+            // Render into a throwaway buffer to capture the layout; the body runs
+            // below the chip row (top + 1) to the footer (h - 1), matching the
+            // issue-list body band.
+            let mut scratch = WireBuffer::new(w, h);
+            let top = 2u16.min(h);
+            let bottom = h.saturating_sub(1).max(top);
+            let layout = crate::widgets::card_board::render_card_board(
+                &mut scratch,
+                w,
+                top,
+                bottom,
+                &columns,
+                None,
+            );
+            self.hit_map = HitMap::from_board_layout(&layout);
+        } else {
+            self.hit_map = HitMap::default();
+        }
+    }
+
+    /// Drain the mouse intents stashed by `handle_mouse` (63l.2), applying the
+    /// ones this bead acts on. A `Select` highlights the pressed card; a
+    /// `ClickOpen` opens its task detail (reusing the keyboard `enter` glue so the
+    /// open flow is byte-identical). The mutating intents (move / reorder / new)
+    /// and the context-menu / pan / scroll / hover / focus / tab intents bind
+    /// their effects in 63l.4 (the visible board swap + the RPC binding) — here
+    /// they are consumed (cleared) so they never accumulate.
+    fn drain_mouse_intents(&mut self) {
+        use crate::mouse::MouseIntent;
+        let app = self.app_state().clone();
+        let intents = std::mem::take(&mut self.pending_mouse_intents);
+        for intent in intents {
+            match intent {
+                // A press highlights the hit card immediately (local, no RPC).
+                MouseIntent::Select(id) => self.screens.issue_list.select_by_id(&id),
+                // A click opens the clicked issue's task detail.
+                MouseIntent::ClickOpen(id) => {
+                    self.screens.issue_list.select_by_id(&id);
+                    if let Ok(issue_id) = ainb_hangar_core::ids::IssueId::from_str(&id) {
+                        self.apply_nav(&app, NavIntent::OpenTaskForIssue(issue_id));
+                    }
+                }
+                // The remaining intents bind their effects in 63l.4.
+                _ => {}
+            }
+        }
+    }
+
     /// Act on a cross-screen [`NavIntent`] surfaced by a screen reducer: open the
     /// modal/screen on the routing state and build its cache.
     fn apply_nav(&mut self, app: &AppState, nav: NavIntent) {
@@ -1591,6 +1687,29 @@ impl Plugin for HangarPlugin {
         Ok(())
     }
 
+    async fn handle_mouse(
+        &mut self,
+        _host: &HostClient,
+        params: ainb_plugin_sdk::HandleMouseParams,
+    ) -> Result<()> {
+        // 63l.2: fold the forwarded pointer event into the card-board mouse
+        // framework. Like `handle_key`, this runs INLINE on the SDK reader loop,
+        // so it MUST stay non-blocking: it only hit-tests against the last
+        // render's hit-map, folds the FSM, and stashes any intent. The deferred
+        // open-click / mutating intents drain in `render` (the spawned task where
+        // host IO is safe), exactly as the key-path actions do.
+        self.on_mouse(params.mouse);
+        Ok(())
+    }
+
+    fn wants_redraw(&self) -> bool {
+        // 63l.2: a mouse gesture that produced an intent arms a redraw so the next
+        // frame reflects it (selection move, drag highlight, an opened task). The
+        // pending-intent queue IS the signal; it is emptied once `render` drains
+        // the stashed intents.
+        !self.pending_mouse_intents.is_empty()
+    }
+
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
         // Drain any deferred Workspace-pane action here: `plugin/render` is
         // dispatched on a SPAWNED task (unlike the inline `handle_key`/
@@ -1682,6 +1801,12 @@ impl Plugin for HangarPlugin {
         } else {
             (params.viewport.width, params.viewport.height)
         };
+        // 63l.2: drain any mouse intents the inline `handle_mouse` stashed (the
+        // open-click reuses the keyboard task-open path; the mutating ones bind to
+        // RPCs in 63l.4), then rebuild the render-time hit-map for THIS frame's
+        // board geometry so the next pointer event hit-tests against what we paint.
+        self.drain_mouse_intents();
+        self.rebuild_hit_map(w, h);
         Ok(self.compose_frame(w, h))
     }
 
@@ -2150,5 +2275,263 @@ mod tests {
             "Esc restores the screen the palette overlaid"
         );
         assert!(p.screens.command_palette.is_none(), "palette dismissed");
+    }
+
+    /// A synthetic [`MouseEvent`](ainb_plugin_sdk::MouseEvent) at `(col, row)`.
+    fn mouse_at(
+        kind: ainb_plugin_sdk::MouseKind,
+        col: u16,
+        row: u16,
+    ) -> ainb_plugin_sdk::MouseEvent {
+        ainb_plugin_sdk::MouseEvent {
+            kind,
+            col,
+            row,
+            mods: 0,
+        }
+    }
+
+    /// USER-VISIBLE PROOF (63l.2 — `handle_mouse` is the real consumed path): on the
+    /// issue list, after a render builds the hit-map, a left-press over a painted
+    /// card SELECTS it (and arms a redraw), and a press-then-release on that same
+    /// card CLICK-OPENS its task detail once the render drains the intent. This
+    /// drives the REAL plugin mouse path (`on_mouse` → FSM → intent stash →
+    /// `drain_mouse_intents`), not the FSM in isolation.
+    #[test]
+    fn mouse_press_selects_and_click_opens_the_hit_card() {
+        use ainb_hangar_proto::events::IssueRow;
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+
+        let mut p = connected_plugin_with_issue();
+        // Add a second issue in a different lifecycle so the board has cards in
+        // more than one column (the press must resolve the RIGHT card).
+        p.screens.set_issues(vec![
+            IssueRow {
+                id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+                display_id: Some("HGR-1".into()),
+                workspace_id: "default".into(),
+                title: "Refactor API".into(),
+                description: None,
+                state: "todo".into(),
+                assignee: None,
+                creator: "member:me".into(),
+                created_at: 0,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                pr_url: None,
+            },
+            IssueRow {
+                id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
+                display_id: Some("HGR-2".into()),
+                workspace_id: "default".into(),
+                title: "Wire the mouse".into(),
+                description: None,
+                state: "in_progress".into(),
+                assignee: Some("agent:claude".into()),
+                creator: "member:me".into(),
+                created_at: 0,
+                priority: 2,
+                due_date: None,
+                labels: Vec::new(),
+                pr_url: None,
+            },
+        ]);
+
+        // A render builds the hit-map for the current board geometry.
+        p.rebuild_hit_map(120, 24);
+        assert!(
+            !p.hit_map.is_empty(),
+            "the issue-list render must record a board hit-map"
+        );
+
+        // Find the on-screen rect of the issue-2 card (In Progress, column 2) the
+        // SAME way the render painted it, so the press lands on it.
+        let columns = p.screens.issue_list.board_columns();
+        let mut scratch = WireBuffer::new(120, 24);
+        let layout =
+            crate::widgets::card_board::render_card_board(&mut scratch, 120, 2, 23, &columns, None);
+        let card2 = layout
+            .columns
+            .iter()
+            .flat_map(|c| c.cards.iter())
+            .find(|c| c.issue_id == "issue-2")
+            .expect("issue-2 must be painted as a card")
+            .rect;
+        let (cx, cy) = (card2.x + 1, card2.y + 1);
+
+        // Left-press the card → the FSM stashes a Select intent and arms a redraw
+        // (the queue IS the redraw signal). The selection applies on the drain.
+        p.on_mouse(mouse_at(
+            MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            cx,
+            cy,
+        ));
+        assert!(p.wants_redraw(), "a mouse gesture arms a redraw");
+        assert!(
+            p.pending_mouse_intents
+                .iter()
+                .any(|i| matches!(i, crate::mouse::MouseIntent::Select(id) if id == "issue-2")),
+            "the press stashes a Select(issue-2) intent"
+        );
+        p.drain_mouse_intents();
+        assert_eq!(
+            p.screens.issue_list.selected_row().map(|r| r.id.as_str()),
+            Some("issue-2"),
+            "draining the press selects the hit card"
+        );
+        assert!(!p.wants_redraw(), "the drain empties the redraw queue");
+
+        // Release on the same card with no drag → ClickOpen, stashed for the
+        // render drain.
+        p.on_mouse(mouse_at(
+            MouseKind::Up {
+                button: MouseButton::Left,
+            },
+            cx,
+            cy,
+        ));
+        assert!(
+            matches!(p.mouse_fsm.state(), crate::mouse::MouseState::Idle),
+            "release returns the FSM to Idle"
+        );
+        assert!(
+            p.pending_mouse_intents
+                .iter()
+                .any(|i| matches!(i, crate::mouse::MouseIntent::ClickOpen(id) if id == "issue-2")),
+            "a click stashes a ClickOpen intent for the render drain"
+        );
+
+        // The render drains the click → the task detail for issue-2 opens.
+        p.drain_mouse_intents();
+        assert!(
+            matches!(p.app_state().screen, Screen::TaskDetail(_)),
+            "draining the click opens the clicked issue's task detail, got {:?}",
+            p.app_state().screen
+        );
+        assert!(!p.wants_redraw(), "the drain empties the redraw queue");
+    }
+
+    /// MUTATION GUARD (63l.2): a press on EMPTY board space (no card) must NOT
+    /// select any card nor stash a `ClickOpen` — proving the selection is driven by
+    /// the hit-test, not by the press happening at all.
+    #[test]
+    fn mouse_press_on_empty_space_selects_nothing() {
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+        let mut p = connected_plugin_with_issue();
+        p.rebuild_hit_map(120, 24);
+        let before = p
+            .screens
+            .issue_list
+            .selected_row()
+            .map(|r| r.id.as_str().to_string());
+
+        // Press far outside any column (bottom-right corner of an 80-wide layout
+        // region that has empty columns there).
+        p.on_mouse(mouse_at(
+            MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            119,
+            23,
+        ));
+        p.on_mouse(mouse_at(
+            MouseKind::Up {
+                button: MouseButton::Left,
+            },
+            119,
+            23,
+        ));
+        // No ClickOpen stashed, and the selection is unchanged.
+        assert!(
+            !p.pending_mouse_intents
+                .iter()
+                .any(|i| matches!(i, crate::mouse::MouseIntent::ClickOpen(_))),
+            "a press on empty space must not click-open a card"
+        );
+        let after = p
+            .screens
+            .issue_list
+            .selected_row()
+            .map(|r| r.id.as_str().to_string());
+        assert_eq!(
+            before, after,
+            "empty-space press leaves the selection alone"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.2 — drag→move intent): a left-press on a card then
+    /// a drag into another column's drop zone then a release emits a `MoveCard`
+    /// intent carrying the destination lifecycle status — the framework produces
+    /// the move intent the P2 RPC binding consumes.
+    #[test]
+    fn mouse_drag_across_columns_stashes_move_card_intent() {
+        use ainb_hangar_proto::events::IssueRow;
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+
+        let mut p = connected_plugin_with_issue();
+        p.screens.set_issues(vec![IssueRow {
+            id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+            display_id: Some("HGR-1".into()),
+            workspace_id: "default".into(),
+            title: "Refactor API".into(),
+            description: None,
+            state: "backlog".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+        }]);
+        p.rebuild_hit_map(120, 24);
+
+        // Press the backlog card (column 0), then drag into a different column's
+        // body and release there.
+        let columns = p.screens.issue_list.board_columns();
+        let mut scratch = WireBuffer::new(120, 24);
+        let layout =
+            crate::widgets::card_board::render_card_board(&mut scratch, 120, 2, 23, &columns, None);
+        let card = layout.columns[0].cards[0].rect;
+        // A point in column 2 (In Progress) body — to the right of column 0/1.
+        let other = layout.columns[2].rect;
+        let (ox, oy) = (other.x + 2, other.y + 5);
+
+        p.on_mouse(mouse_at(
+            MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            card.x + 1,
+            card.y + 1,
+        ));
+        p.on_mouse(mouse_at(
+            MouseKind::Drag {
+                button: MouseButton::Left,
+            },
+            ox,
+            oy,
+        ));
+        p.on_mouse(mouse_at(
+            MouseKind::Up {
+                button: MouseButton::Left,
+            },
+            ox,
+            oy,
+        ));
+
+        assert!(
+            p.pending_mouse_intents.iter().any(|i| matches!(
+                i,
+                crate::mouse::MouseIntent::MoveCard { issue_id, to_status }
+                    if issue_id == "issue-1"
+                        && *to_status == ainb_hangar_proto::lifecycle::IssueLifecycle::InProgress
+            )),
+            "a cross-column drag-drop must stash a MoveCard{{issue-1, InProgress}} intent, \
+             got {:?}",
+            p.pending_mouse_intents
+        );
     }
 }
