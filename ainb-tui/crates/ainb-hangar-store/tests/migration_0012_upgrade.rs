@@ -4,7 +4,7 @@
 //! Migration 0012 replaces the migration-0004 `idx_one_pending_task_per_issue`
 //! (one pending task per issue across ALL agents) with
 //! `idx_one_pending_task_per_issue_agent` scoped to `(issue_id, agent_id)` —
-//! Multica's per-(issue, agent) concurrency model, where DIFFERENT agents may
+//! the reference's per-(issue, agent) concurrency model, where DIFFERENT agents may
 //! each hold a pending task for one issue while the SAME agent still coalesces
 //! to one.
 //!

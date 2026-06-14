@@ -14,7 +14,7 @@
 //! for the same issue **and the same agent** therefore returns a `sqlx::Error`
 //! UNIQUE-constraint violation rather than silently double-queueing — this is
 //! how the enqueue path coalesces duplicate fires, while *different* agents
-//! may each queue work on one issue in parallel (Multica's per-(issue, agent)
+//! may each queue work on one issue in parallel (the reference's per-(issue, agent)
 //! model, `pkg/db/queries/agent.sql` `ClaimAgentTask`). Tasks with a `NULL`
 //! `issue_id` (chat / autopilot placeholders) are excluded from the index and
 //! never collide.

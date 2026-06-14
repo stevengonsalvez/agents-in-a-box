@@ -5,10 +5,10 @@
 //! cargo test threads do not share state. Time is injected via [`FixedClock`]
 //! so `dispatched_at` assertions are deterministic.
 //!
-//! The claim contract (mirrors Multica `task.go`):
+//! The claim contract (mirrors the reference control plane `task.go`):
 //! - claim flips exactly one `queued` row for the runtime to `dispatched`
 //!   and stamps `dispatched_at = clock.now_ms()`,
-//! - candidates order by `priority DESC, created_at, id` (Multica ordering
+//! - candidates order by `priority DESC, created_at, id` (reference ordering
 //!   parity, migration 0013): urgent work jumps the queue; equal priorities
 //!   drain FIFO,
 //! - an empty queue returns `Ok(None)` (the daemon sleeps + retries; not an
@@ -215,7 +215,7 @@ async fn claim_skips_tasks_for_other_runtimes() {
 
 #[tokio::test]
 async fn claim_drains_priority_desc_then_fifo() {
-    // Multica ordering parity: `ORDER BY priority DESC, created_at, id`.
+    // Reference ordering parity: `ORDER BY priority DESC, created_at, id`.
     // Higher priority (0..3 = P3..P0, higher = more urgent) jumps the queue
     // even when a lower-priority task is older; equal priorities drain FIFO
     // by created_at.
@@ -295,7 +295,7 @@ async fn claim_takes_oldest_queued_first() {
 
 #[tokio::test]
 async fn partial_unique_index_blocks_second_pending_per_issue() {
-    // Asserts the partial unique index is wired (migration 0012, Multica
+    // Asserts the partial unique index is wired (migration 0012, reference
     // parity): a second *pending* task for the same issue AND the same agent
     // raises `UNIQUE constraint failed: idx_one_pending_task_per_issue_agent`.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -451,7 +451,7 @@ async fn claim_counts_dispatched_against_max_concurrent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_claims_two_agents_same_issue_both_succeed() {
-    // Multica per-(issue, agent) parity: two DIFFERENT agents each hold a
+    // Reference per-(issue, agent) parity: two DIFFERENT agents each hold a
     // pending task on the SAME issue and claim them concurrently — both claims
     // must succeed (the per-(issue, agent) index and the claim guard scope to
     // the agent, never to the issue globally).
@@ -491,7 +491,7 @@ async fn concurrent_claims_two_agents_same_issue_both_succeed() {
 
 #[tokio::test]
 async fn claim_blocks_second_active_task_for_same_issue_same_agent() {
-    // The NOT EXISTS active-set guard (Multica ClaimAgentTask parity): while
+    // The NOT EXISTS active-set guard (reference ClaimAgentTask parity): while
     // agent-1 has a RUNNING task on issue-1, a queued task for the SAME
     // (issue, agent) must not be claimed — even though the agent is well under
     // its max_concurrent_tasks cap (5), so only the issue guard can block here.

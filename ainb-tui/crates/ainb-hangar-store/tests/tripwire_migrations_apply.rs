@@ -169,7 +169,7 @@ async fn migration_0002_creates_agent_table() {
     assert!(agent.contains("name TEXT NOT NULL"), "agent.name: {agent}");
     assert!(
         agent.contains("runtime_id TEXT NOT NULL REFERENCES agent_runtime(id)"),
-        "agent.runtime_id FK (required by Multica pattern): {agent}"
+        "agent.runtime_id FK (required by reference pattern): {agent}"
     );
     assert!(
         agent.contains("instructions TEXT"),
@@ -397,7 +397,7 @@ async fn migration_0004_creates_agent_task_queue_with_partial_unique() {
     );
 
     // Migration 0012 replaces the 0004 global-per-issue index with the
-    // per-(issue, agent) scope (Multica ClaimAgentTask parity), so the final
+    // per-(issue, agent) scope (reference ClaimAgentTask parity), so the final
     // schema carries `idx_one_pending_task_per_issue_agent` and the old name
     // must be gone.
     let old_count: i64 = sqlx::query_scalar(
@@ -613,7 +613,7 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
 #[tokio::test]
 async fn migration_0013_adds_task_priority_column() {
     // `priority` (0..3 = P3..P0, higher = more urgent; default 0 = P3) feeds
-    // the claim ordering `ORDER BY priority DESC, created_at, id` (Multica
+    // the claim ordering `ORDER BY priority DESC, created_at, id` (reference
     // ordering parity). ALTER TABLE ADD COLUMN rewrites the catalog SQL, so
     // the column shows up in `sqlite_master` like the originals.
     let dir = tempfile::tempdir().expect("tempdir");

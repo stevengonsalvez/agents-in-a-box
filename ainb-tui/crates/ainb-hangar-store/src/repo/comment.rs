@@ -13,7 +13,7 @@
 //! lands a row when the target `(issue_id, workspace_id)` pair resolves to a real
 //! issue in that tenant, and the list returns a foreign tenant's comments never.
 //! This is the same FK-less-by-design tenant isolation the issue repo enforces
-//! (per the Multica architecture review §7); the daemon resolves the workspace
+//! (per the reference architecture review §7); the daemon resolves the workspace
 //! row id before calling here.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};

@@ -9,7 +9,7 @@
 //! max_attempts) is inherited verbatim; all per-run timestamps and outputs
 //! reset.
 //!
-//! # Retry/resume taxonomy (Multica migration 055 + `GetLastTaskSession`)
+//! # Retry/resume taxonomy (reference migration 055 + `GetLastTaskSession`)
 //!
 //! The terminal [`FailureReason`] classifies into one of three
 //! [`RetryDisposition`]s ([`RetryService::retry_disposition`]):
@@ -23,7 +23,7 @@
 //!   [`FailureReason::SemanticInactivity`]: the model wedged on its own context,
 //!   so the retry **starts fresh** — the child's `session_id` is cleared so a
 //!   *new* session begins instead of resuming the wedged one. This mirrors
-//!   Multica's `GetLastTaskSession`, which excludes poisoned terminal states
+//!   the reference's `GetLastTaskSession`, which excludes poisoned terminal states
 //!   from the resume hint so an auto-retry never inherits a stuck conversation.
 //! - **[`RetryDisposition::NoRetry`]** — [`FailureReason::AgentError`] (the LLM
 //!   mis-tooled / gave up), [`FailureReason::UserCancel`] (terminal by intent),
@@ -40,7 +40,7 @@
 //! process died mid-retry. That single insert is subject to the
 //! `idx_one_pending_task_per_issue_agent` partial unique index (migration 0012):
 //! if another pending task already holds the per-(issue, agent) slot, the insert
-//! raises a UNIQUE error which this service propagates (Multica raises + logs;
+//! raises a UNIQUE error which this service propagates (the reference raises + logs;
 //! we mirror that rather than silently swallowing the collision).
 
 use ainb_hangar_core::clock::HangarClock;

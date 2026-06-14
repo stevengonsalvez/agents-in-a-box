@@ -3,7 +3,7 @@
 //! The index `idx_one_pending_task_per_issue_agent` (migration 0012) enforces
 //! *at most one* non-terminal (`queued` or `dispatched`) task per
 //! `(issue_id, agent_id)` pair, coalescing duplicate fires per agent while
-//! letting DIFFERENT agents queue work on one issue in parallel (Multica's
+//! letting DIFFERENT agents queue work on one issue in parallel (the reference's
 //! per-(issue, agent) model, `pkg/db/queries/agent.sql` `ClaimAgentTask`).
 //! These tests prove the four invariants the index must hold:
 //!
@@ -153,7 +153,7 @@ async fn transitioning_first_to_done_then_inserting_second_pending_succeeds() {
 
 #[tokio::test]
 async fn second_pending_task_same_issue_different_agent_is_allowed() {
-    // Per-(issue, agent) scope (migration 0012, Multica ClaimAgentTask parity):
+    // Per-(issue, agent) scope (migration 0012, reference ClaimAgentTask parity):
     // a DIFFERENT agent may hold its own pending task on the same issue.
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");

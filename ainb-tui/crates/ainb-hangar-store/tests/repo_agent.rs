@@ -1,7 +1,7 @@
 //! Typed repository round-trip for `agent` rows.
 //!
 //! Proves the `AgentRepo` sqlx wrapper inserts an [`Agent`] and reads it back
-//! identically, with the `agent.runtime_id` FK (required by the Multica pattern)
+//! identically, with the `agent.runtime_id` FK (required by the reference pattern)
 //! satisfied by a real `agent_runtime` row.
 
 use ainb_hangar_store::Store;

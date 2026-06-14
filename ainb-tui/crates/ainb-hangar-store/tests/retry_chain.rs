@@ -7,7 +7,7 @@
 //! parent's `attempt + 1`. Everything else (workspace / runtime / agent / issue
 //! / `work_dir`) is inherited verbatim.
 //!
-//! Retry eligibility mirrors Multica migration 055: only `runtime_offline` and
+//! Retry eligibility mirrors the reference migration 055: only `runtime_offline` and
 //! `runtime_recovery` failures are retried automatically; `agent_error` (the LLM
 //! mis-tooled / gave up) and `user_cancel` are terminal-by-intent and never spawn
 //! a child. `attempt >= max_attempts` caps the chain regardless of reason.
@@ -321,7 +321,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
 #[tokio::test]
 async fn failure_reason_agent_error_does_not_retry() {
     // agent_error is a user-facing failure (LLM mis-tooled, gave up). No retry
-    // row. (Multica migration 055 behaviour.)
+    // row. (Reference migration 055 behaviour.)
     let (_dir, store) = open_seeded().await;
     let parent = seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::AgentError).await;
     let clock = FixedClock(NOW_MS);
@@ -475,7 +475,7 @@ async fn partial_unique_index_blocks_retry_when_existing_pending() {
     // The failed task carries an issue_id; a *new* manually-enqueued queued task
     // already exists for the same issue AND the same agent. The retry insert
     // collides with idx_one_pending_task_per_issue_agent and surfaces the UNIQUE
-    // error (Multica raises + logs; we mirror by propagating the DB error).
+    // error (the reference raises + logs; we mirror by propagating the DB error).
     let (_dir, store) = open_seeded().await;
     let issue = seed_issue(&store, "issue-1").await;
     let parent = seed_failed_task(

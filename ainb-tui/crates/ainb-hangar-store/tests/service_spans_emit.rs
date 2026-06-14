@@ -4,7 +4,7 @@
 //! These spans are the daemon's observability surface: a single run shows up as
 //! `task.claim -> task.start -> task.complete` (or `.fail` / `.cancel`) and an
 //! autopilot firing shows up as `autopilot.tick`, each carrying the ids an
-//! operator filters by. The field key names mirror Multica's structured `slog`
+//! operator filters by. The field key names mirror the reference's structured `slog`
 //! keys (`task_id`, `workspace_id`, `runtime_id`, `outcome`, ...).
 //!
 //! ## Stale-plan → real-method mapping

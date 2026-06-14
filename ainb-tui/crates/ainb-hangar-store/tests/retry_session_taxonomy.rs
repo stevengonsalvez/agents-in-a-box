@@ -11,7 +11,7 @@
 //! - **`FreshRetry`** (conversation-poisoning terminal — `iteration_limit` /
 //!   `api_invalid_request` / `semantic_inactivity`): the child is spawned with
 //!   `session_id = NULL` so the new attempt *starts fresh*. Resuming a wedged
-//!   conversation would only re-fail (Multica `GetLastTaskSession` exclusion).
+//!   conversation would only re-fail (reference `GetLastTaskSession` exclusion).
 //! - **`NoRetry`** (agent error / user cancel / timeout / unknown): no child.
 //!
 //! Each test uses an isolated tempdir store + a [`FixedClock`] so parallel cargo

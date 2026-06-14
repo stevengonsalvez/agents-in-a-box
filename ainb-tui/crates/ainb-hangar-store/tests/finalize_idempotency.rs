@@ -6,7 +6,7 @@
 //! [`FixedClock`] so the lifecycle timestamps (`started_at` / `finished_at`) are
 //! deterministic.
 //!
-//! The finalize contract (mirrors Multica `task.go:1010` idempotent finalize):
+//! The finalize contract (mirrors the reference control plane `task.go:1010` idempotent finalize):
 //! - a transition that mutates exactly one row returns
 //!   [`FinalizeOutcome::Transitioned`],
 //! - a replayed transition (0-row UPDATE) re-reads the row: if it is already in
@@ -230,7 +230,7 @@ async fn complete_running_marks_done_with_result() {
 #[tokio::test]
 async fn complete_already_done_returns_success() {
     // result_idempotent: a 0-row UPDATE re-reads the row; finding it already
-    // `done` returns Ok(AlreadyTerminal). Verbatim Multica task.go:1010.
+    // `done` returns Ok(AlreadyTerminal). Verbatim reference task.go:1010.
     let (_dir, store) = open_seeded().await;
     seed_task_in_state(&store, "t1", "done").await;
     let clock = FixedClock(NOW_MS);
@@ -332,7 +332,7 @@ async fn fail_running_with_reason() {
 
 #[tokio::test]
 async fn fail_reason_serializes_snake_case() {
-    // FailureReason serializes to the snake_case tokens Multica's
+    // FailureReason serializes to the snake_case tokens the reference's
     // failure_reason column uses.
     let (_dir, store) = open_seeded().await;
     seed_task_in_state(&store, "t1", "running").await;

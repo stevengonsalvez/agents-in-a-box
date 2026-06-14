@@ -2,8 +2,8 @@
 //! `(actor_type, actor_id)` columns work through the [`IssueRepo`] layer.
 //!
 //! The interesting property is that the same repo API stores both a `member`
-//! and an `agent` assignee (the FK-less polymorphic actor pattern, per Multica
-//! architecture review §7), and that an out-of-set actor type is rejected by the
+//! and an `agent` assignee (the FK-less polymorphic actor pattern, per the
+//! reference architecture review §7), and that an out-of-set actor type is rejected by the
 //! `CHECK` constraint at the SQL boundary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};

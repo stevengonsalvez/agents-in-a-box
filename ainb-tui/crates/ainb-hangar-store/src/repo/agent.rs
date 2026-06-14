@@ -9,7 +9,7 @@
 //!
 //! # FK invariant
 //!
-//! `agent.runtime_id` is **required** (NOT NULL): per the Multica pattern an
+//! `agent.runtime_id` is **required** (NOT NULL): per the reference pattern an
 //! agent always binds to exactly one [`crate::repo::agent_runtime`] row, since
 //! an agent with nowhere to run is meaningless. Inserting an [`Agent`] whose
 //! `runtime_id` (or `workspace_id`/`owner_id`) does not reference an existing
@@ -43,7 +43,7 @@ pub struct Agent {
     pub workspace_id: String,
     /// Human-readable agent name.
     pub name: String,
-    /// Runtime this agent runs on (`agent_runtime.id`). Required by the Multica
+    /// Runtime this agent runs on (`agent_runtime.id`). Required by the reference
     /// pattern — never empty/absent.
     pub runtime_id: String,
     /// Free-form system prompt / instructions; `None` when unset.

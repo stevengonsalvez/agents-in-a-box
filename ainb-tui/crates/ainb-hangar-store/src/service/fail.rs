@@ -19,7 +19,7 @@ use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 
 /// Why a task failed.
 ///
-/// Serializes to the `snake_case` tokens Multica's `failure_reason` column uses,
+/// Serializes to the `snake_case` tokens the reference's `failure_reason` column uses,
 /// so the stored value is wire-compatible. The initial set is the six P1.3
 /// reasons; new code paths in P5+ may extend it (forbid wildcard match arms per
 /// `reference_gated_by_variant_propagation`).
@@ -32,7 +32,7 @@ use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 /// the session on retry, the conversation-poisoning terminals
 /// ([`Self::IterationLimit`] / [`Self::ApiInvalidRequest`] /
 /// [`Self::SemanticInactivity`]) retry FRESH (a new session — resuming a wedged
-/// conversation would only re-fail, mirroring Multica's `GetLastTaskSession`
+/// conversation would only re-fail, mirroring the reference's `GetLastTaskSession`
 /// exclusion set), and the rest do not retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

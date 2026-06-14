@@ -10,7 +10,7 @@
 //!
 //! There is deliberately **no foreign key** on the `_id` columns — an actor may
 //! live in either the `member` or `agent` table, which a single `SQLite` FK cannot
-//! express. This is FK-less by design (per the Multica architecture review §7).
+//! express. This is FK-less by design (per the reference architecture review §7).
 //! The `_type` columns' `CHECK` constraints keep the discriminant honest; the
 //! [`ActorRef`] type keeps the `_id` half non-empty; referential integrity of
 //! the `_id` value is a service-layer concern.

@@ -3,7 +3,7 @@
 //!
 //! Migration 0001's `workspace` was identity-only (`id` / `slug` / `name` /
 //! `created_at`). Migration 0020 added three nullable config columns that hold
-//! the per-workspace agent-run configuration Multica workspaces carry:
+//! the per-workspace agent-run configuration the reference's workspaces carry:
 //!
 //! - **`context_prompt`** — free-text agent context. When set, dispatch writes
 //!   it into the per-task execenv as a `CLAUDE.md` so the agent run actually

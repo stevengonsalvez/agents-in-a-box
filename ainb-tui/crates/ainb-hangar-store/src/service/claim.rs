@@ -14,7 +14,7 @@
 //!
 //! The candidate `SELECT` excludes any task whose agent already has
 //! `max_concurrent_tasks` rows **in flight** — i.e. already `dispatched` or
-//! `running` (Multica's `CountRunningTasks` guard, `task.go:761`, widened to
+//! `running` (the reference's `CountRunningTasks` guard, `task.go:761`, widened to
 //! the post-claim set). This keeps a single agent from being dispatched more
 //! concurrent work than its runtime can handle. The count and the claim happen
 //! in one statement, so the cap holds even under concurrent claims.
@@ -34,7 +34,7 @@
 //!
 //! The candidate `SELECT` also excludes any issue task whose agent already has
 //! another *active* (`queued` / `dispatched` / `running`) task for the same
-//! issue — the `NOT EXISTS` guard from Multica's `ClaimAgentTask`
+//! issue — the `NOT EXISTS` guard from the reference's `ClaimAgentTask`
 //! (`pkg/db/queries/agent.sql`). Work on one issue serialises per **agent**,
 //! not globally: a different agent's task on the same issue stays claimable, so
 //! several agents can work one issue in parallel. Pairs with the
@@ -43,7 +43,7 @@
 //! guard extends that exclusion to the `running` set at claim time. Tasks with
 //! `issue_id IS NULL` (chat / autopilot) bypass the guard entirely.
 //!
-//! Mirrors Multica's `task.go` claim path.
+//! Mirrors the reference control plane's `task.go` claim path.
 
 use ainb_hangar_core::clock::HangarClock;
 use sqlx::{Row, SqlitePool};
@@ -124,7 +124,7 @@ impl ClaimTaskService {
 /// Atomic claim statement.
 ///
 /// The candidate sub-select picks the most urgent `queued` task for the
-/// runtime — `ORDER BY priority DESC, created_at, id` (Multica ordering
+/// runtime — `ORDER BY priority DESC, created_at, id` (reference ordering
 /// parity: higher `priority` jumps the queue, 0..3 = P3..P0 per migration
 /// 0013; equal priorities drain FIFO) — whose agent is under its
 /// `max_concurrent_tasks` cap (a correlated COUNT of the agent's in-flight
@@ -132,7 +132,7 @@ impl ClaimTaskService {
 /// is already counted and concurrent daemons cannot over-dispatch) AND has no
 /// other active (`queued` /
 /// `dispatched` / `running`) task for the same issue (the `NOT EXISTS`
-/// per-(issue, agent) guard — Multica `ClaimAgentTask` parity; `NULL`
+/// per-(issue, agent) guard — reference `ClaimAgentTask` parity; `NULL`
 /// `issue_id` candidates never match the correlated equality and so bypass
 /// it). The outer `UPDATE ... RETURNING` then flips exactly that row and
 /// returns the projection [`claimed_from_row`] decodes.

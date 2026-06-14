@@ -5,7 +5,7 @@
 //! flips the row to `done`. It is idempotent: a replayed completion of an
 //! already-`done` row returns [`FinalizeOutcome::AlreadyTerminal`]; a row that
 //! lost to a concurrent `fail`/`cancel` returns
-//! [`FinalizeError::TerminalMismatch`] (verbatim Multica `task.go:1010`).
+//! [`FinalizeError::TerminalMismatch`] (verbatim reference `task.go:1010`).
 
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::task::state::TaskState;
