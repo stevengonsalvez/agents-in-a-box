@@ -144,6 +144,16 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
         "retention_days": 90,
         "max_memory_lines": 200,
     },
+    "issues": {
+        # `reflect issues` mode: distill recent transcripts -> deduped GitHub
+        # issues. Reuses the pending_reflections queue + REFLECT_STATE_DIR.
+        # repo = None -> gh infers the repo from the cwd. limit caps how many
+        # recent transcripts are pulled from the queue per run. model is the
+        # analyzer model passed to `claude -p`.
+        "repo": None,
+        "limit": 20,
+        "model": "sonnet",
+    },
     "telemetry": {
         "enabled": True,
         "log_level": "info",

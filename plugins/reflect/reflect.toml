@@ -41,6 +41,19 @@ auto_approve_threshold = 0.8
 retention_days = 90
 max_memory_lines = 200
 
+[issues]
+# `reflect issues` mode — distill recent transcripts into privacy-sanitized,
+# deduplicated GitHub issues. Reuses the pending_reflections queue and
+# REFLECT_STATE_DIR; nothing is filed until a candidate passes the privacy
+# sanitizer, and `--dry-run` prints the exact bodies without calling `gh`.
+#
+#   repo   = target OWNER/NAME. Leave unset so `gh` infers it from the cwd.
+#   limit  = max recent transcripts to pull from the queue per run.
+#   model  = analyzer model passed to `claude -p` (gated on Claude auth).
+# repo  = "owner/name"
+limit = 20
+model = "sonnet"
+
 [telemetry]
 enabled = true
 log_level = "info"
