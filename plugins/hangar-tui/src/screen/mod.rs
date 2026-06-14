@@ -23,6 +23,7 @@ pub mod daemon_health;
 pub mod inbox;
 pub mod issue_list;
 pub mod kanban;
+pub mod list_context_menu;
 pub mod logs;
 mod router;
 pub mod settings;
