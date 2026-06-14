@@ -5,7 +5,7 @@ use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlan
 use crate::data::usage::{
     ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilters, UsagePeriod,
     UsageProviderFilter, UsageQuery, UsageSourceRoots, analyze_yield, billing_period,
-    compare_models, disabled_cache, optimize_usage, parse_usage_for,
+    compare_models, disabled_cache, filter_usage_data_full, optimize_usage, parse_usage_for,
     parse_usage_for_with_roots_and_cache, shared_cache,
 };
 use crate::output_format::OutputFormat;
@@ -296,15 +296,17 @@ fn print_report_with_data(
     format: OutputFormat,
     title: &str,
 ) -> Result<()> {
-    // Apply the same filter pipeline the host-side `print_report` uses,
-    // but operate on the supplied snapshot directly instead of opening
-    // the cache.
+    // Apply the same period / provider / chip filter pipeline the
+    // host-side cache path applies, but re-aggregate the supplied
+    // snapshot's `calls` instead of opening the cache. `--period`
+    // (today/week/30days/month/all/--month/--quarter/--last-n-days/--ytd/
+    // --from/--to) genuinely scopes the data here: `filter_usage_data_full`
+    // date-bounds the call set and re-rolls every dimension, so the plugin
+    // path is no longer a lifetime-only all-time snapshot.
     let filters = build_filters_from_args(args);
-    let view = if filters.is_empty() {
-        data.clone()
-    } else {
-        crate::data::usage::filter_usage_data(data, &filters)
-    };
+    let period = period_from_args(args)?;
+    let provider = provider_filter_from_args(args);
+    let view = filter_usage_data_full(data, &filters, &period, provider);
     match format {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report_json(&view))?);
@@ -1366,15 +1368,21 @@ fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
     }
 }
 
-fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
-    // Period precedence (top wins; clap rejects combinations via the
-    // conflicts_with_all groups on UsageReportArgs):
-    //   --month YYYY-MM            -> SpecificMonth
-    //   --quarter YYYY-Qn          -> SpecificQuarter
-    //   --last-n-days N            -> LastNDays(N)
-    //   --ytd                      -> YearToDate
-    //   --from / --to              -> Custom (existing free-text behaviour)
-    //   --period {today|week|30days|month|all}  (default)
+/// Resolve the effective [`UsagePeriod`] from the report args.
+///
+/// Period precedence (top wins; clap rejects combinations via the
+/// `conflicts_with_all` groups on [`UsageReportArgs`]):
+///   --month YYYY-MM            -> SpecificMonth
+///   --quarter YYYY-Qn          -> SpecificQuarter
+///   --last-n-days N            -> LastNDays(N)
+///   --ytd                      -> YearToDate
+///   --from / --to              -> Custom (existing free-text behaviour)
+///   --period {today|week|30days|month|all}  (default)
+///
+/// Shared by the host cache path ([`query_from_args`]) and the plugin
+/// snapshot path ([`print_report_with_data`]) so `--period` scopes the
+/// data identically regardless of which path produced the [`UsageData`].
+fn period_from_args(args: &UsageReportArgs) -> Result<UsagePeriod> {
     let period = if let Some(month_str) = &args.month {
         parse_month_arg(month_str)?
     } else if let Some(quarter_str) = &args.quarter {
@@ -1408,17 +1416,25 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
             PeriodArg::All => UsagePeriod::All,
         }
     };
+    Ok(period)
+}
 
+/// Map the `--provider` arg onto the internal [`UsageProviderFilter`].
+fn provider_filter_from_args(args: &UsageReportArgs) -> UsageProviderFilter {
+    match args.provider {
+        ProviderArg::All => UsageProviderFilter::All,
+        ProviderArg::Claude => UsageProviderFilter::Claude,
+        ProviderArg::Codex => UsageProviderFilter::Codex,
+        ProviderArg::Cursor => UsageProviderFilter::Cursor,
+        ProviderArg::Copilot => UsageProviderFilter::Copilot,
+        ProviderArg::Gemini => UsageProviderFilter::Gemini,
+    }
+}
+
+fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
     Ok(UsageQuery {
-        period,
-        provider_filter: match args.provider {
-            ProviderArg::All => UsageProviderFilter::All,
-            ProviderArg::Claude => UsageProviderFilter::Claude,
-            ProviderArg::Codex => UsageProviderFilter::Codex,
-            ProviderArg::Cursor => UsageProviderFilter::Cursor,
-            ProviderArg::Copilot => UsageProviderFilter::Copilot,
-            ProviderArg::Gemini => UsageProviderFilter::Gemini,
-        },
+        period: period_from_args(args)?,
+        provider_filter: provider_filter_from_args(args),
         include_projects: args.include.clone(),
         exclude_projects: args.exclude.clone(),
         filters: UsageFilters {

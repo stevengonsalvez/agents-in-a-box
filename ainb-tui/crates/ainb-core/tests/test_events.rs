@@ -1,11 +1,6 @@
 // ABOUTME: Unit tests for event handling to ensure keyboard inputs map to correct app actions
 
-use ainb::app::events::AppEvent;
-use ainb::app::screens::ids as screen_ids;
 use ainb::app::{AppState, EventHandler};
-// UsagePeriod / UsageProviderFilter no longer used in this file —
-// the test that referenced them has moved into the burndown plugin.
-use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -54,59 +49,13 @@ fn test_navigation_key_events() {
     assert!(right_event.is_some());
 }
 
-#[tokio::test]
-async fn test_n_key_triggers_new_session() {
-    use ainb::app::state::AsyncAction;
-
-    let mut state = AppState::default();
-
-    // Simulate pressing 'n' key
-    let key_event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
-
-    // Handle the key event
-    let app_event = EventHandler::handle_key_event(key_event, &mut state);
-
-    // Should return NewSession event
-    assert!(app_event.is_some());
-
-    // Process the event
-    if let Some(event) = app_event {
-        EventHandler::process_event(event, &mut state);
-    }
-
-    // Should have set pending async action
-    assert!(state.pending_async_action.is_some());
-
-    // Should be NewSessionNormal
-    if state.pending_async_action == Some(AsyncAction::NewSessionNormal) {
-        // Test passed
-    } else {
-        panic!(
-            "Expected AsyncAction::NewSessionNormal, got: {:?}",
-            state.pending_async_action
-        );
-    }
-
-    // Process the async action to complete the flow
-    if let Err(e) = state.process_async_action().await {
-        panic!("Failed to process async action: {e}");
-    }
-
-    // After processing, the behavior depends on whether current dir is a git repo
-    // If it is, we should be in NewSession view with current dir
-    // If it's not, we should be in SearchWorkspace view
-    // Or we might still be in SessionList if auth setup is required
-    assert!(
-        state.current_screen == screen_ids::NEW_SESSION
-            || state.current_screen == screen_ids::SEARCH_WORKSPACE
-            || state.current_screen == screen_ids::SESSION_LIST
-            || state.current_screen == screen_ids::AUTH_SETUP,
-        "Unexpected screen: {:?}",
-        state.current_screen
-    );
-    // The new session state might not be set if auth setup is required
-    assert!(state.pending_async_action.is_none());
-}
+// test_n_key_triggers_new_session removed — it asserted against the legacy
+// `AsyncAction::NewSessionNormal` variant, which was deleted in the Phase-6
+// new-session redesign (the 2-screen preset-driven wizard; see
+// `48c1ea99 feat(tui): redesign new-session flow`). The whole legacy
+// new-session async-action set is gone, so this test no longer compiles.
+// The 'n' keypress is still covered by `test_action_key_events` below
+// (asserts the event fires); the wizard flow has its own coverage.
 
 #[test]
 fn test_arrow_key_navigation() {

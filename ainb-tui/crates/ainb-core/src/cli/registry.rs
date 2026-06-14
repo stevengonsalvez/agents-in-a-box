@@ -726,75 +726,7 @@ async fn dispatch_inner(
         }
     }
 
-    // Retry contract: burndown reports `exit_code = 1` + empty stdout +
-    // a stderr containing this exact byte sequence when `self.data` is
-    // None. Any *other* exit/stdout/stderr shape (including a real
-    // error from clap, a runtime fault, or a successful report with
-    // exit 0) breaks out of the retry loop immediately so we don't
-    // mask a genuine failure as "still waiting".
-    let install_hint_marker = b"install session-reader";
-    let wait_budget = plugin_data_wait();
-    let deadline = std::time::Instant::now() + wait_budget;
-    let started = std::time::Instant::now();
-    let mut last_trace = started;
-    let mut attempt: u32 = 0;
-    let mut outcome;
-    loop {
-        attempt = attempt.wrapping_add(1);
-        if trace && last_trace.elapsed() >= std::time::Duration::from_secs(2) {
-            // Periodic heartbeat: include plugin lifecycle state so a
-            // user running `AINB_USAGE_TRACE=1` can distinguish "scan
-            // in progress" from "plugin crashed". Mirrors
-            // `ainb plugin watch` semantics.
-            for p in &registered {
-                let state = handle.lifecycle_state(&p.id);
-                eprintln!(
-                    "[usage-cli] @{:.1}s attempt {attempt} plugin {} lifecycle={:?}",
-                    started.elapsed().as_secs_f32(),
-                    p.id,
-                    state
-                );
-            }
-            last_trace = std::time::Instant::now();
-        }
-        outcome = handle.dispatch_cli(&burndown, "usage", argv.clone()).await.map_err(|e| {
-            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
-        })?;
-        let should_retry = matches!(
-            &outcome,
-            CliOutcome::Ok(r)
-                if r.exit_code == 1
-                    && r.stdout.is_empty()
-                    && r.stderr
-                        .windows(install_hint_marker.len())
-                        .any(|w| w == install_hint_marker)
-        );
-        if !should_retry {
-            if trace {
-                eprintln!(
-                    "[usage-cli] dispatch returned in {:.1}s (attempt {attempt})",
-                    started.elapsed().as_secs_f32()
-                );
-            }
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "error: session-reader plugin didn't publish usage data within {}s \
-                 — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
-                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
-                wait_budget.as_secs()
-            );
-        }
-        if trace {
-            eprintln!(
-                "[usage-cli] attempt {attempt} returned 'install session-reader' \
-                 (snapshot not yet finalised); retrying in {}ms",
-                PLUGIN_DATA_POLL.as_millis()
-            );
-        }
-        tokio::time::sleep(PLUGIN_DATA_POLL).await;
-    }
+    let outcome = poll_burndown(handle, &burndown, &registered, argv, trace).await?;
 
     let exit = match outcome {
         CliOutcome::Ok(result) => {
@@ -815,6 +747,148 @@ async fn dispatch_inner(
         }
     };
     Ok(exit)
+}
+
+/// Dispatch `usage <argv>` to the burndown plugin, retrying while the
+/// plugin reports the "install session-reader" sentinel (snapshot not yet
+/// finalised). Shared by [`dispatch_inner`] (the `ainb usage` exit path)
+/// and [`capture_usage_via_plugin`] (the in-process consumer used by
+/// `ainb fleet cost`). The caller owns interpreting the returned
+/// [`CliOutcome`].
+///
+/// Retry contract: burndown reports `exit_code = 1` + empty stdout + a
+/// stderr containing the `install session-reader` marker when `self.data`
+/// is None. Any *other* exit/stdout/stderr shape (a real clap error, a
+/// runtime fault, or a successful report with exit 0) breaks out of the
+/// retry loop immediately so we don't mask a genuine failure as "still
+/// waiting".
+async fn poll_burndown(
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    burndown: &ainb_plugin_runtime::PluginId,
+    registered: &[std::sync::Arc<ainb_plugin_runtime::RegisteredPlugin>],
+    argv: Vec<String>,
+    trace: bool,
+) -> anyhow::Result<ainb_plugin_runtime::CliOutcome> {
+    use ainb_plugin_runtime::CliOutcome;
+
+    let install_hint_marker = b"install session-reader";
+    let wait_budget = plugin_data_wait();
+    let deadline = std::time::Instant::now() + wait_budget;
+    let started = std::time::Instant::now();
+    let mut last_trace = started;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt = attempt.wrapping_add(1);
+        if trace && last_trace.elapsed() >= std::time::Duration::from_secs(2) {
+            // Periodic heartbeat: include plugin lifecycle state so a
+            // user running `AINB_USAGE_TRACE=1` can distinguish "scan
+            // in progress" from "plugin crashed". Mirrors
+            // `ainb plugin watch` semantics.
+            for p in registered {
+                let state = handle.lifecycle_state(&p.id);
+                eprintln!(
+                    "[usage-cli] @{:.1}s attempt {attempt} plugin {} lifecycle={:?}",
+                    started.elapsed().as_secs_f32(),
+                    p.id,
+                    state
+                );
+            }
+            last_trace = std::time::Instant::now();
+        }
+        let outcome = handle.dispatch_cli(burndown, "usage", argv.clone()).await.map_err(|e| {
+            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+        })?;
+        let should_retry = matches!(
+            &outcome,
+            CliOutcome::Ok(r)
+                if r.exit_code == 1
+                    && r.stdout.is_empty()
+                    && r.stderr
+                        .windows(install_hint_marker.len())
+                        .any(|w| w == install_hint_marker)
+        );
+        if !should_retry {
+            if trace {
+                eprintln!(
+                    "[usage-cli] dispatch returned in {:.1}s (attempt {attempt})",
+                    started.elapsed().as_secs_f32()
+                );
+            }
+            return Ok(outcome);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "error: session-reader plugin didn't publish usage data within {}s \
+                 — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
+                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
+                wait_budget.as_secs()
+            );
+        }
+        if trace {
+            eprintln!(
+                "[usage-cli] attempt {attempt} returned 'install session-reader' \
+                 (snapshot not yet finalised); retrying in {}ms",
+                PLUGIN_DATA_POLL.as_millis()
+            );
+        }
+        tokio::time::sleep(PLUGIN_DATA_POLL).await;
+    }
+}
+
+/// Run `ainb usage <argv>` against the burndown plugin and return its
+/// captured stdout, instead of streaming it to the process stdout and
+/// exiting like [`dispatch_usage_via_plugin`] does.
+///
+/// This is the in-process entry point for `ainb fleet cost`, which needs
+/// burndown's `usage report --format json` payload as a string to build
+/// its own fleet-shaped rollups. It owns the same runtime init +
+/// spawn_blocking drop dance as [`run_usage_via_plugin`] so the tokio
+/// "Cannot drop a runtime in a context where blocking is not allowed"
+/// panic doesn't bite on shutdown.
+///
+/// `argv` must already carry the leading `--format <token>` pair (the
+/// plugin reads format from argv via its own `extract_format`).
+pub async fn capture_usage_via_plugin(argv: Vec<String>) -> anyhow::Result<String> {
+    let (runtime, handle, _outcome) = crate::plugins::init_plugin_runtime()
+        .map_err(|e| anyhow::anyhow!("plugin runtime init failed: {e}"))?;
+    let result = capture_inner(&handle, argv).await;
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
+    result
+}
+
+async fn capture_inner(
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    argv: Vec<String>,
+) -> anyhow::Result<String> {
+    use ainb_plugin_runtime::{CliOutcome, PluginId};
+
+    let trace = std::env::var("AINB_USAGE_TRACE").is_ok();
+    let burndown = PluginId::from("burndown");
+    let registered = handle.registered_plugins();
+    if !registered.iter().any(|p| p.id == burndown) {
+        anyhow::bail!(
+            "error: fleet cost analytics requires the burndown plugin \
+             (install via 'ainb plugin install burndown')"
+        );
+    }
+
+    match poll_burndown(handle, &burndown, &registered, argv, trace).await? {
+        CliOutcome::Ok(result) => {
+            if result.exit_code != 0 {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                anyhow::bail!(
+                    "burndown plugin exited {} while fetching usage data: {}",
+                    result.exit_code,
+                    stderr.trim()
+                );
+            }
+            Ok(String::from_utf8_lossy(&result.stdout).into_owned())
+        }
+        CliOutcome::PluginError { code, message } => {
+            anyhow::bail!("burndown plugin error {code}: {message}")
+        }
+        CliOutcome::RuntimeError(msg) => anyhow::bail!("plugin runtime: {msg}"),
+    }
 }
 
 /// Legacy top-level `ainb statusline`. Kept (hidden) so existing
@@ -1377,6 +1451,15 @@ impl CliCommand for FleetCommand {
                     .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
                     .arg(clap::Arg::new("key").long("key").required(true)),
             );
+        let cost = Command::new("cost")
+            .about("Per-session / model / day / group spend rollups + budget caps")
+            .arg(
+                clap::Arg::new("period")
+                    .long("period")
+                    .value_parser(["today", "week", "30days", "month", "all"])
+                    .default_value("month")
+                    .help("Reporting window passed to the burndown plugin"),
+            );
         let daemon = Command::new("daemon")
             .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
             .arg(
@@ -1387,13 +1470,16 @@ impl CliCommand for FleetCommand {
             );
         app.subcommand(
             Command::new(self.name())
-                .about("Fleet orchestration: standup / broadcast / sequence / needs / daemon")
+                .about(
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon",
+                )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(sequence)
                 .subcommand(needs)
+                .subcommand(cost)
                 .subcommand(daemon)
                 .subcommand(enrich_cache),
         )

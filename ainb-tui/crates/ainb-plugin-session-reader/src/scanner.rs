@@ -714,6 +714,7 @@ pub(crate) fn fold(mut calls: Vec<ProviderCall>) -> AggState {
         let session = sessions.entry(session_key.clone()).or_insert_with(|| SessionAccumulator {
             provider: call.provider,
             project: call.project.clone(),
+            project_path: call.project_path.clone(),
             session_id: call.session_id.clone(),
             first_timestamp: call.timestamp,
             last_timestamp: call.timestamp,
@@ -830,6 +831,7 @@ pub(crate) fn emit(state: AggState) -> UsageData {
                     SessionUsage {
                         provider: s.provider,
                         project: s.project,
+                        project_path: s.project_path,
                         session_id: s.session_id,
                         first_timestamp: s.first_timestamp,
                         last_timestamp: s.last_timestamp,
@@ -1061,6 +1063,7 @@ impl ProjectAccumulator {
 struct SessionAccumulator {
     provider: Provider,
     project: String,
+    project_path: String,
     session_id: String,
     first_timestamp: chrono::DateTime<chrono::Utc>,
     last_timestamp: chrono::DateTime<chrono::Utc>,
