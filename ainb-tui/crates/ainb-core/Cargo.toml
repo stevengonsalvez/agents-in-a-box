@@ -95,6 +95,8 @@ ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
 # Notification daemon — used in-process for the Inbox screen reader.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
+# Read-only web dashboard — backs the `ainb web` subcommand.
+ainb-web = { path = "../ainb-web", version = "1.7.0" }
 # CSPRNG for `ainb hangar auth token create` (the OsRng passed to the store's
 # `mint_pat` / `mint_daemon_token`). All hashing/encoding lives in the store +
 # core; the CLI only supplies the random source.
