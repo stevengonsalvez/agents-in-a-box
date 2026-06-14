@@ -9,6 +9,29 @@ Every Claude Code session normally spawns its **own** node/bun process for each 
 
 *Two sessions attach to a real context7 server and both receive its tools (`resolve-library-id`, `query-docs`). `ainb mcp status` reports `clients: 2` against one `child_pid` — a single shared process group. Without the pool, those two sessions would spawn two separate context7 servers.*
 
+## Enable it
+
+- It's **on by default** — `[mcp_pool].enabled = true`. There's nothing to turn on for a basic setup.
+- Start a Claude session the normal way: `ainb run --repo . --worktree`.
+- The daemon auto-starts on first use; you never launch it by hand.
+- Toggle it in the TUI under **Configuration → MCP Pool**, or in `config.toml`:
+
+```toml
+[mcp_pool]
+enabled = true
+idle_grace_secs = 300
+```
+
+## Use it
+
+- **Already have a `.mcp.json`?** Do nothing — its stdio servers are auto-imported into the pool at session create.
+- **No config yet?** Add a `.mcp.json`, or define `[mcp_servers.<name>]` in `config.toml` — either works.
+- **Persist a one-off `.mcp.json` into config:** `ainb mcp import` (or `ainb mcp import --user`).
+- **Check it's sharing:** `ainb mcp status` → look for `"clients": N` against one `"child_pid"`.
+- **Share with Codex/Copilot too:** `ainb mcp install --codex --copilot`.
+- **Stop the pool:** `ainb mcp stop`.
+- **Don't pool a stateful server** (browser/db bridge): set `shared = false` on its `[mcp_servers.<name>]` entry.
+
 ## How it works
 
 ```
