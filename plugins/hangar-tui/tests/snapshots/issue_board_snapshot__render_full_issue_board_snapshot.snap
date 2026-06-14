@@ -1,0 +1,14 @@
+---
+source: plugins/hangar-tui/tests/issue_board_snapshot.rs
+expression: full
+---
+
+[All] [Members] [Agents] [Mine]                                                                                       ⬡⬡
+☰ Backlog (1)       ⋯ + ○ Todo (1)          ⋯ + ◔ In Progress (1)   ⋯ + ◑ In Review (1)     ⋯ + ● Done (1)          ⋯ +
+
+┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮
+┃HGR-1                 ┃│HGR-2                 ││HGR-3                 ││HGR-4                 ││HGR-5                 │
+┃Issue i-backlog       ┃│Issue i-todo          ││Issue i-prog          ││Issue i-review        ││Issue i-done          │
+┃                      ┃│                      ││                      ││                      ││                      │
+┃◇ None              ◔a┃│◆ Medium            ◔c││◆ High              ◔g││◆ Urgent            ◔b││◇ None                │
+┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯
