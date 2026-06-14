@@ -229,6 +229,23 @@ pub struct HangarPlugin {
     /// the daemon socket. Drained in `render` like the assign-picker path. `None`
     /// when no assignee edit is armed.
     pending_issue_assignee_update: Option<(String, String)>,
+    /// The render-time card-board layout (63l.6) the last `render` recorded for the
+    /// active NON-issue list board screen (Kanban / Autopilots / Skills) — the
+    /// geometry `handle_mouse` folds via
+    /// [`fold_board_mouse`](crate::board_mouse::fold_board_mouse) against. Rebuilt
+    /// each render; `None` off those screens (a click there resolves to nothing).
+    board_layout: Option<crate::widgets::card_board::BoardLayout>,
+    /// List-screen mouse intents `handle_mouse` produced (63l.6), drained on the
+    /// next `render`. Like the issue board's queue, this is the inline,
+    /// non-blocking stash: the spawned `render` binds each to the active screen's
+    /// EXISTING action (open/scroll/hover/context-menu). A non-empty queue is part
+    /// of the [`Plugin::wants_redraw`] signal.
+    pending_board_mouse_intents: Vec<crate::board_mouse::BoardMouseIntent>,
+    /// The generic list-screen right-click context-menu overlay (63l.6), present
+    /// only while open. Raised by an `OpenContextMenu` board-mouse intent over a
+    /// Kanban / Autopilots / Skills card; its leaf binds to the screen's EXISTING
+    /// daemon RPC seam. `None` when closed.
+    list_context_menu: Option<crate::screen::list_context_menu::ListContextMenuState>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -244,6 +261,16 @@ fn read_daemon_token() -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let token = raw.trim().to_string();
     (!token.is_empty()).then_some(token)
+}
+
+/// The current wall-clock time in epoch milliseconds, for the Kanban card-age
+/// derivation when (re)building the hit-map (63l.6). Mirrors the render clock in
+/// [`crate::screen::app_screens`]; a clock skew before the epoch saturates to `0`.
+fn now_ms_clock() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 impl Default for HangarPlugin {
@@ -270,6 +297,9 @@ impl Default for HangarPlugin {
             context_menu: None,
             pending_issue_priority_update: None,
             pending_issue_assignee_update: None,
+            board_layout: None,
+            pending_board_mouse_intents: Vec::new(),
+            list_context_menu: None,
         }
     }
 }
@@ -1468,6 +1498,13 @@ impl HangarPlugin {
         if let Some(menu) = self.context_menu.as_mut() {
             crate::screen::context_menu::render_context_menu(&mut buf, w, h, menu);
         }
+        // 63l.6: the generic list-screen context menu (Kanban / Autopilots /
+        // Skills) floats over the board the same way, anchored at the click. It
+        // records its hit-map onto the state so the next click hit-tests against
+        // this paint.
+        if let Some(menu) = self.list_context_menu.as_mut() {
+            crate::screen::list_context_menu::render_list_context_menu(&mut buf, w, h, menu);
+        }
         // P5.6: the first-run danger-full-access modal overlays everything (last
         // write wins on the sparse buffer) until the user accepts.
         if self.first_run.is_showing() {
@@ -1509,6 +1546,13 @@ impl HangarPlugin {
         // the board beneath it.
         if self.context_menu.is_some() {
             self.route_context_menu_key(key);
+            return;
+        }
+
+        // 63l.6: the generic list-screen context menu (Kanban / Autopilots /
+        // Skills) is likewise modal while open — it captures every key.
+        if self.list_context_menu.is_some() {
+            self.route_list_context_menu_key(key);
             return;
         }
 
@@ -1608,14 +1652,28 @@ impl HangarPlugin {
     /// queue is the `wants_redraw` signal), applying the local effects and (in
     /// 63l.4) binding the mutating intents to RPCs.
     fn on_mouse(&mut self, ev: ainb_plugin_sdk::MouseEvent) {
-        // 63l.5: while the context menu is open it owns the pointer. A left-down is
-        // hit-tested against the menu's render-time hit-map (firing a leaf, opening
-        // a submenu, or dismissing on a click-away); every other event is swallowed
-        // so it can't reach the board beneath the overlay.
+        // 63l.5: while the issue context menu is open it owns the pointer.
         if self.context_menu.is_some() {
             self.route_context_menu_mouse(ev);
             return;
         }
+        // 63l.6: while the list-screen context menu is open it owns the pointer.
+        if self.list_context_menu.is_some() {
+            self.route_list_context_menu_mouse(ev);
+            return;
+        }
+        // 63l.6: the Kanban / Autopilots / Skills list screens fold the pointer
+        // against the render-time card-board layout (the lifecycle-free
+        // `fold_board_mouse` path), NOT the issue board's lifecycle FSM. A click
+        // opens, a wheel scrolls, a move hovers, a right-click anchors a context
+        // menu — no drag, no fabricated mutation.
+        if let Some(layout) = self.board_layout.as_ref() {
+            if let Some(intent) = crate::board_mouse::fold_board_mouse(layout, ev) {
+                self.pending_board_mouse_intents.push(intent);
+            }
+            return;
+        }
+        // Otherwise the issue board's lifecycle-typed drag FSM.
         if let Some(intent) = self.mouse_fsm.handle(&self.hit_map, ev) {
             self.pending_mouse_intents.push(intent);
         }
@@ -1666,25 +1724,84 @@ impl HangarPlugin {
     /// 63l.4; this records the geometry so the mouse path is live now.
     fn rebuild_hit_map(&mut self, w: u16, h: u16) {
         use crate::mouse::HitMap;
-        if matches!(self.app_state().screen, Screen::IssueList) {
-            let columns = self.screens.issue_list.board_columns();
-            // Render into a throwaway buffer to capture the layout; the body runs
-            // below the chip row (top + 1) to the footer (h - 1), matching the
-            // issue-list body band.
-            let mut scratch = WireBuffer::new(w, h);
-            let top = 2u16.min(h);
-            let bottom = h.saturating_sub(1).max(top);
-            let layout = crate::widgets::card_board::render_card_board(
-                &mut scratch,
-                w,
-                top,
-                bottom,
-                &columns,
-                None,
-            );
-            self.hit_map = HitMap::from_board_layout(&layout);
-        } else {
-            self.hit_map = HitMap::default();
+        // Default: no board geometry recorded (a click resolves to nothing).
+        self.hit_map = HitMap::default();
+        self.board_layout = None;
+        match self.app_state().screen {
+            Screen::IssueList => {
+                let columns = self.screens.issue_list.board_columns();
+                // The issue body runs below the chip row (top + 1) to the footer
+                // (h - 1), matching the issue-list body band.
+                let mut scratch = WireBuffer::new(w, h);
+                let top = 2u16.min(h);
+                let bottom = h.saturating_sub(1).max(top);
+                let layout = crate::widgets::card_board::render_card_board(
+                    &mut scratch,
+                    w,
+                    top,
+                    bottom,
+                    &columns,
+                    None,
+                );
+                // The issue board uses the lifecycle-typed FSM hit-map.
+                self.hit_map = HitMap::from_board_layout(&layout);
+            }
+            // 63l.6: the Kanban / Autopilots / Skills list screens record the
+            // card-board layout the lifecycle-free `fold_board_mouse` hit-tests
+            // against. Each scratch render mirrors that screen's REAL body band so
+            // the hit-test geometry is exactly what `render_body` paints.
+            Screen::Kanban => {
+                let mut scratch = WireBuffer::new(w, h);
+                let columns = self.screens.kanban.board_columns(now_ms_clock());
+                let (top, bottom) = (1u16, h.saturating_sub(1).max(1));
+                self.board_layout = Some(crate::widgets::card_board::render_card_board(
+                    &mut scratch,
+                    w,
+                    top,
+                    bottom,
+                    &columns,
+                    None,
+                ));
+            }
+            Screen::Autopilots => {
+                if !self.screens.autopilots.autopilots().is_empty() {
+                    let mut scratch = WireBuffer::new(w, h);
+                    let columns = self.screens.autopilots.board_columns();
+                    // The autopilots board occupies body_top (top+1) .. board_bottom
+                    // (reserving 4 rows for the run-history pane), matching
+                    // `render_autopilots`.
+                    let body_top = 2u16.min(h);
+                    let bottom = h.saturating_sub(1).max(body_top);
+                    let avail = bottom.saturating_sub(body_top);
+                    let board_bottom = body_top.saturating_add(avail.saturating_sub(4).max(1));
+                    self.board_layout = Some(crate::widgets::card_board::render_card_board(
+                        &mut scratch,
+                        w,
+                        body_top,
+                        board_bottom,
+                        &columns,
+                        None,
+                    ));
+                }
+            }
+            Screen::SkillManager => {
+                let mut scratch = WireBuffer::new(w, h);
+                let columns = self.screens.skill_manager.board_columns();
+                // The skill list pane is the left 28 cols, starting one row below
+                // the chip bar (top + 1), matching `render_skill_manager`.
+                let list_w = 28u16.min(w);
+                let content_top = 2u16.min(h);
+                let bottom = h.saturating_sub(1).max(content_top);
+                self.board_layout = Some(crate::widgets::card_board::render_card_board(
+                    &mut scratch,
+                    list_w,
+                    content_top,
+                    bottom,
+                    &columns,
+                    None,
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -1768,6 +1885,336 @@ impl HangarPlugin {
                 | MouseIntent::PanColumns { .. }
                 | MouseIntent::SwitchTab(_) => {}
             }
+        }
+    }
+
+    /// Drain the list-screen mouse intents stashed by `handle_mouse` (63l.6),
+    /// binding each to the active screen's EXISTING action so the Kanban /
+    /// Autopilots / Skills boards are fully mouse-driven.
+    ///
+    /// - `ClickOpen` opens the clicked card's detail (Kanban task detail) or
+    ///   selects the clicked card (Autopilots → loads its run history, Skills →
+    ///   loads its detail) — the same effect the keyboard select produces.
+    /// - `ScrollColumn` / `Hover` update the local board state (per-column scroll,
+    ///   hover highlight).
+    /// - `OpenContextMenu` raises the generic list context-menu overlay anchored
+    ///   at the click, whose leaf binds to the screen's real RPC.
+    ///
+    /// Each binding maps onto a pending-action the `render` pass already drains
+    /// and fires (no new wire method); a right-click `Run now` on a Kanban card,
+    /// for instance, arms the existing `hangar/task_transition` seam.
+    fn drain_board_mouse_intents(&mut self) {
+        use crate::board_mouse::BoardMouseIntent;
+        let screen = self.app_state().screen.clone();
+        let intents = std::mem::take(&mut self.pending_board_mouse_intents);
+        for intent in intents {
+            match (&screen, intent) {
+                // ---- Kanban ----
+                (Screen::Kanban, BoardMouseIntent::ClickOpen(task_id)) => {
+                    self.open_kanban_task(&task_id);
+                }
+                (Screen::Kanban, BoardMouseIntent::ScrollColumn { column, delta }) => {
+                    self.screens.kanban.scroll_column(column, delta);
+                }
+                (Screen::Kanban, BoardMouseIntent::Hover(id)) => {
+                    self.screens.kanban.set_hover(id);
+                }
+                (Screen::Kanban, BoardMouseIntent::OpenContextMenu { id, at }) => {
+                    self.open_kanban_context_menu(&id, at);
+                }
+                // ---- Autopilots ----
+                (Screen::Autopilots, BoardMouseIntent::ClickOpen(id)) => {
+                    // A click selects the autopilot AND loads its run history
+                    // (`hangar/autopilot_runs`), the same effect a keyboard select
+                    // produces — the "open detail" for an autopilot is its history.
+                    self.screens.autopilots.select_by_id(&id);
+                    self.screens.pending_autopilot_action =
+                        Some(crate::screen::AutopilotAction::LoadRuns(id));
+                }
+                (Screen::Autopilots, BoardMouseIntent::ScrollColumn { delta, .. }) => {
+                    self.screens.autopilots.scroll(delta);
+                }
+                (Screen::Autopilots, BoardMouseIntent::Hover(id)) => {
+                    self.screens.autopilots.set_hover(id);
+                }
+                (Screen::Autopilots, BoardMouseIntent::OpenContextMenu { id, at }) => {
+                    self.open_autopilot_context_menu(&id, at);
+                }
+                // ---- Skills ----
+                (Screen::SkillManager, BoardMouseIntent::ClickOpen(slug)) => {
+                    // A click selects the skill AND opens its detail
+                    // (`hangar/skill_get`), the same effect Enter produces.
+                    self.screens.skill_manager.select_by_slug(&slug);
+                    self.screens.pending_skill_action =
+                        Some(crate::screen::SkillAction::LoadDetail(slug));
+                }
+                (Screen::SkillManager, BoardMouseIntent::ScrollColumn { delta, .. }) => {
+                    self.screens.skill_manager.scroll(delta);
+                }
+                (Screen::SkillManager, BoardMouseIntent::Hover(slug)) => {
+                    self.screens.skill_manager.set_hover(slug);
+                }
+                (Screen::SkillManager, BoardMouseIntent::OpenContextMenu { id, at }) => {
+                    self.open_skill_context_menu(&id, at);
+                }
+                // A stale intent for a since-changed screen is dropped.
+                _ => {}
+            }
+        }
+    }
+
+    /// Open the task detail (63l.6 Kanban click) for the clicked task, focusing
+    /// the clicked card first so the selection lands on it. Builds the task-detail
+    /// screen from the clicked card's known fields (a synthesized issue header) so
+    /// a click opens the task's transcript exactly as the issue board's click-open
+    /// path does. A no-op when no card carries the id (a stale hit-map entry).
+    fn open_kanban_task(&mut self, task_id: &str) {
+        let Some(card) = self.screens.kanban.card_for_task(task_id).cloned() else {
+            return;
+        };
+        self.screens.kanban.focus_task(task_id);
+        let Ok(tid) = ainb_hangar_core::ids::TaskId::from_str(task_id) else {
+            return;
+        };
+        // Synthesize a minimal issue header from the card so the task-detail screen
+        // renders the task's title + status; the streaming transcript folds events
+        // addressed to this task id, exactly as the issue board's open does.
+        let issue = ainb_hangar_proto::events::IssueRow {
+            id: ainb_hangar_core::ids::IssueId::from_str(format!("task-{task_id}")).unwrap_or_else(
+                |_| ainb_hangar_core::ids::IssueId::from_str("task").expect("non-empty"),
+            ),
+            display_id: Some(format!("#{}", card.short_id)),
+            workspace_id: self.app_state().ws_id.as_str().to_string(),
+            title: format!("Task {}", card.short_id),
+            description: None,
+            state: card.status.clone(),
+            assignee: Some(format!("agent:{}", card.agent_id)),
+            creator: "member:me".to_string(),
+            created_at: card.created_at,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+        };
+        self.screens.open_task_detail(tid.clone(), issue);
+        let mut next = self.app_state().clone();
+        next.selected_task = Some(tid.clone());
+        next.prior_screen = None;
+        next.screen = Screen::TaskDetail(tid);
+        self.app = Some(next);
+    }
+
+    /// Raise the generic list context-menu for a Kanban task (63l.6): the task's
+    /// real actions (Open / Run now / Cancel / Copy id) bound to the EXISTING
+    /// `hangar/task_transition` seam. Run-now transitions a queued task to
+    /// `running`; Cancel transitions it to `cancelled` — real mutations, no new
+    /// wire method. A no-op when no card carries the id (a stale hit-map entry).
+    fn open_kanban_context_menu(&mut self, task_id: &str, at: (u16, u16)) {
+        use crate::screen::list_context_menu::{
+            ListContextMenuState, ListMenuAction, ListMenuItem,
+        };
+        let Some(card) = self.screens.kanban.card_for_task(task_id).cloned() else {
+            return;
+        };
+        let id = task_id.to_string();
+        let items = vec![
+            ListMenuItem::new("Open", ListMenuAction::Open(id.clone())),
+            ListMenuItem::new("Run now", ListMenuAction::RunNow(id.clone())),
+            ListMenuItem::new("Cancel", ListMenuAction::Cancel(id.clone())),
+            ListMenuItem::new(
+                "Copy id",
+                ListMenuAction::CopyId(format!("#{}", card.short_id)),
+            ),
+        ];
+        self.list_context_menu = Some(ListContextMenuState::new(
+            format!("#{}", card.short_id),
+            at,
+            items,
+        ));
+    }
+
+    /// Raise the generic list context-menu for an autopilot (63l.6): its real
+    /// actions (Open / Run now / Enable-or-Disable / Edit / Copy id) bound to the
+    /// EXISTING autopilot RPC seam (`hangar/autopilot_fire_now`,
+    /// `hangar/autopilot_set_enabled`). A no-op for an unknown id.
+    fn open_autopilot_context_menu(&mut self, autopilot_id: &str, at: (u16, u16)) {
+        use crate::screen::list_context_menu::{
+            ListContextMenuState, ListMenuAction, ListMenuItem,
+        };
+        let Some(ap) = self
+            .screens
+            .autopilots
+            .autopilots()
+            .iter()
+            .find(|a| a.id == autopilot_id)
+            .cloned()
+        else {
+            return;
+        };
+        let id = autopilot_id.to_string();
+        let toggle_label = if ap.enabled { "Disable" } else { "Enable" };
+        let items = vec![
+            ListMenuItem::new("Open", ListMenuAction::Open(id.clone())),
+            ListMenuItem::new("Run now", ListMenuAction::RunNow(id.clone())),
+            ListMenuItem::new(
+                toggle_label,
+                ListMenuAction::SetEnabled {
+                    id: id.clone(),
+                    enabled: !ap.enabled,
+                },
+            ),
+            ListMenuItem::new("Edit", ListMenuAction::Edit(id.clone())),
+            ListMenuItem::new("Copy id", ListMenuAction::CopyId(ap.name.clone())),
+        ];
+        self.list_context_menu = Some(ListContextMenuState::new(ap.name.clone(), at, items));
+    }
+
+    /// Raise the generic list context-menu for a skill (63l.6): its read actions
+    /// (Open / Copy id). Skills have no per-card mutating action distinct from the
+    /// global sync / agent-scoped attach-detach, so the menu offers the read
+    /// actions only (the bead's "no invented mutation" path). A no-op for an
+    /// unknown slug.
+    fn open_skill_context_menu(&mut self, slug: &str, at: (u16, u16)) {
+        use crate::screen::list_context_menu::{
+            ListContextMenuState, ListMenuAction, ListMenuItem,
+        };
+        let Some(skill) = self
+            .screens
+            .skill_manager
+            .visible_skills()
+            .into_iter()
+            .find(|s| s.slug == slug)
+        else {
+            return;
+        };
+        let items = vec![
+            ListMenuItem::new("Open", ListMenuAction::Open(slug.to_string())),
+            ListMenuItem::new("Copy id", ListMenuAction::CopyId(skill.slug.clone())),
+        ];
+        self.list_context_menu = Some(ListContextMenuState::new(skill.name.clone(), at, items));
+    }
+
+    /// Apply a list context-menu leaf action (63l.6): bind it to the active
+    /// screen's EXISTING deferred RPC (fired in `render`) or the local open path.
+    /// Each variant maps onto a pending-action the render pass already drains and
+    /// fires — there is no new wire method.
+    fn apply_list_menu_action(&mut self, action: crate::screen::list_context_menu::ListMenuAction) {
+        use crate::screen::list_context_menu::ListMenuAction;
+        use crate::screen::{AutopilotAction, KanbanAction, SkillAction};
+        let screen = self.app_state().screen.clone();
+        match (&screen, action) {
+            // ---- Kanban: Open / Run now / Cancel / Copy id ----
+            (Screen::Kanban, ListMenuAction::Open(task_id)) => self.open_kanban_task(&task_id),
+            (Screen::Kanban, ListMenuAction::RunNow(task_id)) => {
+                // Run a queued task now = transition it to `running` over the
+                // EXISTING `hangar/task_transition` seam.
+                self.screens.pending_kanban_action = Some(KanbanAction::MoveCard {
+                    task_id,
+                    to_status: ainb_hangar_core::task_status::TaskStatus::Running
+                        .as_str()
+                        .to_string(),
+                });
+            }
+            (Screen::Kanban, ListMenuAction::Cancel(task_id)) => {
+                self.screens.pending_kanban_action = Some(KanbanAction::MoveCard {
+                    task_id,
+                    to_status: ainb_hangar_core::task_status::TaskStatus::Cancelled
+                        .as_str()
+                        .to_string(),
+                });
+            }
+            // ---- Autopilots: Open / Run now / Enable-Disable / Edit / Copy id ----
+            (Screen::Autopilots, ListMenuAction::Open(id)) => {
+                self.screens.autopilots.select_by_id(&id);
+                self.screens.pending_autopilot_action = Some(AutopilotAction::LoadRuns(id));
+            }
+            (Screen::Autopilots, ListMenuAction::RunNow(id)) => {
+                self.screens.pending_autopilot_action = Some(AutopilotAction::FireNow(id));
+            }
+            (Screen::Autopilots, ListMenuAction::SetEnabled { id, enabled }) => {
+                self.screens.pending_autopilot_action = Some(AutopilotAction::SetEnabled {
+                    autopilot_id: id,
+                    enabled,
+                });
+            }
+            (Screen::Autopilots, ListMenuAction::Edit(_id)) => {
+                // Edit opens the create/edit flow (no RPC at this layer yet);
+                // selecting it is the user-visible effect.
+            }
+            // ---- Skills: Open ----
+            (Screen::SkillManager, ListMenuAction::Open(slug)) => {
+                self.screens.skill_manager.select_by_slug(&slug);
+                self.screens.pending_skill_action = Some(SkillAction::LoadDetail(slug));
+            }
+            // Copy id has no host clipboard cap yet; the menu's own `copied` note is
+            // the user-visible effect. Log the copy seam so it is observable.
+            (_, ListMenuAction::CopyId(display_id)) => {
+                tracing::info!(%display_id, "hangar: list context-menu copy id");
+            }
+            // A stale action for a since-changed screen is dropped.
+            _ => {}
+        }
+    }
+
+    /// Route a key to the open list context menu (63l.6): fold it into the menu
+    /// reducer and apply any leaf action it fires, dropping the overlay when it
+    /// closes (a leaf fired, or Esc).
+    fn route_list_context_menu_key(&mut self, key: &ainb_plugin_sdk::KeyEvent) {
+        use crate::screen::list_context_menu::ListMenuKey;
+        let menu_key = match &key.code {
+            KeyCode::Up => ListMenuKey::Up,
+            KeyCode::Down => ListMenuKey::Down,
+            KeyCode::Right | KeyCode::Enter => ListMenuKey::Enter,
+            KeyCode::Left | KeyCode::Esc => ListMenuKey::Esc,
+            KeyCode::Char { ch } => match ch {
+                'k' => ListMenuKey::Up,
+                'j' => ListMenuKey::Down,
+                'l' => ListMenuKey::Enter,
+                'h' => ListMenuKey::Esc,
+                _ => return,
+            },
+            _ => return,
+        };
+        let Some(menu) = self.list_context_menu.as_mut() else {
+            return;
+        };
+        if let Some(action) = menu.handle_key(menu_key) {
+            self.apply_list_menu_action(action);
+        }
+        if self
+            .list_context_menu
+            .as_ref()
+            .is_some_and(crate::screen::list_context_menu::ListContextMenuState::is_closed)
+        {
+            self.list_context_menu = None;
+        }
+    }
+
+    /// Route a forwarded pointer event to the open list context menu (63l.6): a
+    /// `Down{Left}` folds into its `handle_click`, firing a leaf / dismissing on a
+    /// click-away; other events are swallowed.
+    fn route_list_context_menu_mouse(&mut self, ev: ainb_plugin_sdk::MouseEvent) {
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+        if !matches!(
+            ev.kind,
+            MouseKind::Down {
+                button: MouseButton::Left
+            }
+        ) {
+            return;
+        }
+        let Some(menu) = self.list_context_menu.as_mut() else {
+            return;
+        };
+        if let Some(action) = menu.handle_click(ev.col, ev.row) {
+            self.apply_list_menu_action(action);
+        }
+        if self
+            .list_context_menu
+            .as_ref()
+            .is_some_and(crate::screen::list_context_menu::ListContextMenuState::is_closed)
+        {
+            self.list_context_menu = None;
         }
     }
 
@@ -2102,10 +2549,16 @@ impl Plugin for HangarPlugin {
         // 63l.5: an open context menu also wants every frame so its keyboard /
         // mouse navigation (selection move, submenu open) repaints, and an armed
         // context-menu RPC (priority / assignee edit) needs a render to fire.
+        //
+        // 63l.6: the list-screen mouse intents + the generic list context menu
+        // arm the same redraw so the Kanban / Autopilots / Skills boards repaint
+        // after a click / scroll / hover / menu navigation.
         !self.pending_mouse_intents.is_empty()
             || self.context_menu.is_some()
             || self.pending_issue_priority_update.is_some()
             || self.pending_issue_assignee_update.is_some()
+            || !self.pending_board_mouse_intents.is_empty()
+            || self.list_context_menu.is_some()
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
@@ -2206,6 +2659,10 @@ impl Plugin for HangarPlugin {
         // hit-map for THIS frame's board geometry so the next pointer event
         // hit-tests against what we paint.
         self.drain_mouse_intents();
+        // 63l.6: drain the Kanban / Autopilots / Skills list-screen mouse intents
+        // (click-open / scroll / hover / context-menu) bound to each screen's
+        // existing action; the deferred RPCs they arm fire in the drains below.
+        self.drain_board_mouse_intents();
         if let Some((issue_id, to_status)) = self.pending_issue_state_update.take() {
             self.apply_issue_state_update(host, issue_id, to_status)
                 .await;

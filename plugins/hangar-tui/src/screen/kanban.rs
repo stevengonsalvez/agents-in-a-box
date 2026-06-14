@@ -292,6 +292,29 @@ impl KanbanState {
             .map(|c| c.task_id.as_str())
     }
 
+    /// Move the keyboard focus onto the card carrying `task_id` (63l.6 mouse
+    /// click), so a pointer click lands the selection on the clicked card exactly
+    /// as a keyboard walk would. A no-op when no card carries that id.
+    pub fn focus_task(&mut self, task_id: &str) {
+        for (ci, col) in self.columns.iter().enumerate() {
+            if let Some(ri) = col.cards.iter().position(|c| c.task_id == task_id) {
+                self.focused_col = ci;
+                self.focused_row = ri;
+                return;
+            }
+        }
+    }
+
+    /// The card carrying `task_id`, if any (63l.6) — the source the click-open
+    /// path reads to build the task-detail screen for the clicked task.
+    #[must_use]
+    pub fn card_for_task(&self, task_id: &str) -> Option<&CardSummary> {
+        self.columns
+            .iter()
+            .flat_map(|c| c.cards.iter())
+            .find(|c| c.task_id == task_id)
+    }
+
     /// The four columns, left-to-right.
     #[must_use]
     pub const fn columns(&self) -> &[Column; 4] {
