@@ -357,3 +357,86 @@ fn mutation_scroll_targets_the_hit_column() {
         "a scroll over column 1 must not scroll column 0"
     );
 }
+
+/// The same two-column board, but every rect shifted down by `dy` rows. Models a
+/// render whose hit-map geometry no longer matches where the cards are painted —
+/// the failure mode the click-target tests must catch.
+fn two_column_map_offset(dy: u16) -> HitMap {
+    let mut map = HitMap::default();
+    map.push(Rect::new(0, dy, 40, 1), Target::Tab(0));
+    map.push(
+        Rect::new(0, 1 + dy, 18, 1),
+        Target::ColumnHeader(IssueLifecycle::Todo),
+    );
+    map.push(
+        Rect::new(18, 1 + dy, 2, 1),
+        Target::NewButton(IssueLifecycle::Todo),
+    );
+    map.push(Rect::new(0, 3 + dy, 20, 6), Target::Card("A".to_string()));
+    map.push(
+        Rect::new(0, 2 + dy, 20, 18),
+        Target::DropZone(IssueLifecycle::Todo),
+    );
+    map.push(
+        Rect::new(20, 1 + dy, 18, 1),
+        Target::ColumnHeader(IssueLifecycle::InProgress),
+    );
+    map.push(
+        Rect::new(38, 1 + dy, 2, 1),
+        Target::NewButton(IssueLifecycle::InProgress),
+    );
+    map.push(Rect::new(20, 3 + dy, 20, 6), Target::Card("B".to_string()));
+    map.push(
+        Rect::new(20, 2 + dy, 20, 18),
+        Target::DropZone(IssueLifecycle::InProgress),
+    );
+    map
+}
+
+/// MUTATION (hit-map geometry): the click coordinate `(2, 4)` opens card A only
+/// because the hit-map records A's rect at rows `[3, 9)`. If the render seeds the
+/// hit-map with the WRONG geometry — every rect offset down by 8 rows — the same
+/// click no longer lands on card A: it resolves to empty space (no intent) and
+/// the FSM never arms a press. This is the proof the click-target assertions are
+/// load-bearing on the geometry, not on a coincidence: a misaligned hit-map
+/// breaks the click, exactly as the bead's "offset the hit-map" mutation requires.
+#[test]
+fn mutation_offset_hit_map_breaks_card_click() {
+    // Control: against the CORRECT geometry, the click opens A.
+    let good = two_column_map();
+    let mut fsm = MouseFsm::default();
+    let press = fsm.handle(&good, down(MouseButton::Left, 2, 4));
+    assert_eq!(
+        press,
+        Some(MouseIntent::Select("A".to_string())),
+        "control: a click on the real card A geometry selects A"
+    );
+    let open = fsm.handle(&good, up(MouseButton::Left, 2, 4));
+    assert_eq!(
+        open,
+        Some(MouseIntent::ClickOpen("A".to_string())),
+        "control: the release opens card A"
+    );
+
+    // Mutant: the SAME click coordinate against an offset hit-map. Card A now sits
+    // at rows [11, 17), so (2, 4) lands above the whole offset board — no target,
+    // no press, no open.
+    let offset = two_column_map_offset(8);
+    let mut fsm2 = MouseFsm::default();
+    let press2 = fsm2.handle(&offset, down(MouseButton::Left, 2, 4));
+    assert_eq!(
+        press2, None,
+        "a misaligned (offset) hit-map must NOT resolve (2,4) to card A: {press2:?}"
+    );
+    assert_eq!(
+        fsm2.state(),
+        &MouseState::Idle,
+        "with no card under the click the FSM never arms a press"
+    );
+    let open2 = fsm2.handle(&offset, up(MouseButton::Left, 2, 4));
+    assert_ne!(
+        open2,
+        Some(MouseIntent::ClickOpen("A".to_string())),
+        "an offset hit-map must not open card A from a click that misses it: {open2:?}"
+    );
+}
