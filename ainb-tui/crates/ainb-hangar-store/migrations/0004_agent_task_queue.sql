@@ -42,7 +42,7 @@ CREATE TABLE agent_task_queue (
 -- per issue. The predicate is partial — rows that are terminal/running, or that
 -- have no issue (issue_id IS NULL: chat / autopilot placeholders), are excluded
 -- and therefore never collide. P1's enqueue path relies on this to deduplicate.
--- (Mirrors Multica's 022_task_lifecycle_guards.up.sql; the WHERE form is portable
+-- (Mirrors the reference's 022_task_lifecycle_guards.up.sql; the WHERE form is portable
 -- to the future Postgres backend byte-for-byte.)
 CREATE UNIQUE INDEX idx_one_pending_task_per_issue
     ON agent_task_queue(issue_id)

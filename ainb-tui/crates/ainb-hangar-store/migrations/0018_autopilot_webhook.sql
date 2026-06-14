@@ -4,7 +4,7 @@
 -- it on a `cron_expr` tick, and `autopilot_fire_now` fires it by hand. This
 -- migration adds a THIRD trigger surface — an authenticated local HTTP webhook —
 -- so an external system can `POST /hangar/webhook/<autopilot_id>` and fire the
--- autopilot's existing P7.4 enqueue path on demand. The Multica `webhook|api`
+-- autopilot's existing P7.4 enqueue path on demand. The the reference `webhook|api`
 -- trigger family the 0009 comment deferred ("webhook / api triggers are out of
 -- scope") lands here.
 --
@@ -39,7 +39,7 @@
 --                              `X-Hangar-Event` header) or the request is
 --                              accepted-but-ignored (200, fires nothing). `NULL`
 --                              (the default) fires on every signed request. This
---                              is the v1 collapse of Multica's richer filter
+--                              is the v1 collapse of the reference's richer filter
 --                              expression — an exact event-name match, not a DSL.
 --
 -- `ALTER TABLE ... ADD COLUMN` with a constant/NULL default is a catalog-only

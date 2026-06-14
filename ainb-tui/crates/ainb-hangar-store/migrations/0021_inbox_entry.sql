@@ -4,7 +4,7 @@
 -- issue / comment / task lifecycle events to subscribed plugins over the socket,
 -- but nothing PERSISTED or AGGREGATED them. A plugin that was not attached at
 -- the moment an event fired never saw it, and there was no notion of an unread
--- count or a mark-read sweep (the Multica notifyd Inbox pattern). This migration
+-- count or a mark-read sweep (the reference notifyd Inbox pattern). This migration
 -- adds the durable aggregate the inbox screen reads from.
 --
 -- An `inbox_entry` is one aggregated, workspace-scoped notification derived from

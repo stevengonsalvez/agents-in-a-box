@@ -2,7 +2,7 @@
 --
 -- At v1 the `workspace` table (migration 0001) carried only identity:
 -- `id` / `slug` / `name` / `created_at`. There was no place to persist the
--- per-workspace agent-run configuration Multica workspaces carry (parity-review
+-- per-workspace agent-run configuration the reference workspaces carry (parity-review
 -- design gap: "per-workspace context prompt + repo whitelist + issue prefix"):
 --   - a CONTEXT PROMPT injected into every agent run in the workspace (written
 --     into the per-task execenv as a `CLAUDE.md` so the agent actually sees it),

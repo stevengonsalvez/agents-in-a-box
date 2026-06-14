@@ -6,7 +6,7 @@
 -- columns — the actor may live in either the `member` or `agent` table, and
 -- SQLite cannot express a conditional FK. The `_type` CHECK constraint is what
 -- keeps the column honest; integrity of the `_id` half is enforced at the
--- service layer (per Multica architecture review §7).
+-- service layer (per the reference architecture review §7).
 --
 -- The `assignee` is optional (an unassigned issue is valid), so both
 -- `assignee_type` and `assignee_id` are nullable. The `creator` is mandatory.

@@ -1,7 +1,7 @@
 -- Hangar v1 schema, migration 0013: task priority.
 --
 -- Adds `priority` to `agent_task_queue` so urgent work can jump the queue —
--- Multica's claim orders `priority DESC, created_at` while Hangar's was strict
+-- the reference's claim orders `priority DESC, created_at` while Hangar's was strict
 -- FIFO (`created_at, id` only), with no expedite path (parity-review design
 -- gap: "Claim has no priority dimension").
 --

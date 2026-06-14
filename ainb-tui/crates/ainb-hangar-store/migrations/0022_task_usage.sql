@@ -6,7 +6,7 @@
 -- session id, but the final `result` line's `usage` (input/output tokens) and
 -- `total_cost_usd` were written only to the log file — nothing PERSISTED or
 -- AGGREGATED them. There was no in-Hangar view of token/cost spend, and no
--- per-agent rollup (the Multica usage-dashboard pattern). This migration adds the
+-- per-agent rollup (the reference usage-dashboard pattern). This migration adds the
 -- durable per-task aggregate the usage dashboard rolls up.
 --
 -- A `task_usage` row is one provider run's captured usage, written once at the

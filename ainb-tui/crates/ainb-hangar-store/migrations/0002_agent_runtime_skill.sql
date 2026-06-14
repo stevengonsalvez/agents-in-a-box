@@ -2,7 +2,7 @@
 --
 -- `agent_runtime` is a registered provider endpoint (a daemon advertising a
 -- provider such as `claude`/`codex`) within a workspace. An `agent` ALWAYS
--- binds to exactly one runtime — `agent.runtime_id` is NOT NULL by the Multica
+-- binds to exactly one runtime — `agent.runtime_id` is NOT NULL by the reference
 -- pattern: an agent with no place to run is meaningless, so the FK is required
 -- rather than nullable.
 --

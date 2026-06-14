@@ -2,7 +2,7 @@
 --
 -- Replaces the migration-0004 `idx_one_pending_task_per_issue` — which
 -- serialized ONE pending task per issue across ALL agents — with the
--- per-(issue, agent) scope Multica's `ClaimAgentTask` was designed around
+-- per-(issue, agent) scope the reference's `ClaimAgentTask` was designed around
 -- (`pkg/db/queries/agent.sql`): DIFFERENT agents may each hold a pending task
 -- for the same issue and work it in parallel, while the SAME agent still
 -- coalesces duplicate fires to one pending row per issue. Decision recorded in

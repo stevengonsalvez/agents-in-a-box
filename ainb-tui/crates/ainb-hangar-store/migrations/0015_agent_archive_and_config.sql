@@ -3,7 +3,7 @@
 -- At v1 the `agent` table (migration 0002) carried only identity + instructions:
 -- there was no way to ARCHIVE an agent (hide it from the active picker without a
 -- hard delete) and no place to persist the per-agent runtime configuration the
--- Multica agents carry (parity-review design gap: "create/edit/archive agents +
+-- the reference agents carry (parity-review design gap: "create/edit/archive agents +
 -- configure runtime/model/args partial"). This migration adds both — the persist
 -- + expose half. Wiring these knobs into the provider EXEC is a SEPARATE bead
 -- (e38.16); this migration only lands the columns the edit/archive RPCs write.

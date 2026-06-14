@@ -4,7 +4,7 @@
 -- An autopilot's tick model was hard-coded at v1: the fire path always enqueued
 -- a task with `issue_id = NULL` (migrations 0009/0010, autopilot_run.rs), and the
 -- scheduler's concurrency control was a single integer (`max_concurrent_runs`)
--- with only ONE policy — skip-when-at-limit (scheduler.rs). Multica shipped two
+-- with only ONE policy — skip-when-at-limit (scheduler.rs). the reference shipped two
 -- orthogonal knobs the 0009 comment collapsed away; this migration restores them
 -- as two `autopilot` config columns.
 --
