@@ -75,3 +75,42 @@ def test_split_just_over_limit():
     chunks = split_message(text)
     assert len(chunks) == 2
     assert all(len(c) <= TG_MAX_LENGTH for c in chunks)
+
+
+def test_split_raw_before_convert_never_cuts_entities_or_tags():
+    """Splitting the RAW reply BEFORE md_to_tg_html keeps every chunk valid.
+
+    Regression: converting to HTML first then splitting at 4096 could slice an
+    HTML entity (e.g. ``&amp;``) or a tag (``<b>``) mid-token, which Telegram
+    rejects with a 400. Splitting the raw text first guarantees boundaries fall
+    on raw characters, so each converted chunk is self-contained.
+    """
+    # A >4096 reply full of chars that become entities, plus bold spans.
+    unit = "**bold** a < b & c > d "
+    raw = unit * 400  # well over TG_MAX_LENGTH
+    assert len(raw) > TG_MAX_LENGTH
+
+    raw_chunks = split_message(raw)
+    assert len(raw_chunks) >= 2
+
+    converted = [md_to_tg_html(c) for c in raw_chunks]
+
+    for html_chunk in converted:
+        # No half-written entity: every '&' must start a complete entity.
+        for amp in _amp_positions(html_chunk):
+            assert _has_complete_entity_at(html_chunk, amp), (
+                f"entity sliced at {amp}: {html_chunk[amp : amp + 8]!r}"
+            )
+        # Balanced bold tags within the chunk (no dangling <b> or </b>).
+        assert html_chunk.count("<b>") == html_chunk.count("</b>")
+        # No stray '<' that isn't part of a recognised tag start.
+        assert "< " not in html_chunk
+
+
+def _amp_positions(s: str) -> list[int]:
+    return [i for i, ch in enumerate(s) if ch == "&"]
+
+
+def _has_complete_entity_at(s: str, idx: int) -> bool:
+    semi = s.find(";", idx, idx + 10)
+    return semi != -1

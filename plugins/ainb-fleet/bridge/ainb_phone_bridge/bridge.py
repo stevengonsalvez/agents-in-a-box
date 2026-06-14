@@ -146,9 +146,21 @@ def build_dispatcher(config: BridgeConfig, bot: Bot) -> Dispatcher:
             log.exception("relay failed")
             reply = f"Bridge error: {exc}"
 
-        html = md_to_tg_html(reply)
-        for chunk in split_message(html):
-            await message.answer(chunk, parse_mode=ParseMode.HTML)
+        # Split the RAW reply BEFORE HTML conversion so a chunk boundary can
+        # never slice through an HTML tag or entity (which Telegram rejects with
+        # a 400). Each raw chunk is converted independently.
+        for raw_chunk in split_message(reply):
+            chunk = md_to_tg_html(raw_chunk)
+            try:
+                await message.answer(chunk, parse_mode=ParseMode.HTML)
+            except Exception:  # pragma: no cover - network / parse fallback
+                # HTML rejected or send failed — retry as plain text so the
+                # user still gets the content rather than nothing.
+                log.exception("HTML send failed; retrying as plain text")
+                try:
+                    await message.answer(raw_chunk, parse_mode=None)
+                except Exception:  # pragma: no cover - give up on this chunk
+                    log.exception("plain-text retry also failed")
 
     return dp
 
