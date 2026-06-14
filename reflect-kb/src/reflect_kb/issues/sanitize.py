@@ -160,6 +160,15 @@ _SUSPICIOUS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d"), "private_ip_range"),
 ]
 
+# Placeholders this sanitizer itself writes, e.g. ``<REDACTED:generic_secret>``.
+# The audit runs on ALREADY-redacted text, so without masking these the coarse
+# suspicious patterns (env_var_assignment, possible_base64_blob, …) re-flag the
+# sanitizer's OWN output — a fully-redacted ``FOO=<REDACTED:generic_secret>``
+# would be reported as a suspicious env assignment, burying genuine residue. We
+# blank placeholder spans (to equal-length spaces, preserving line/column
+# offsets) before the audit regexes run.
+_PLACEHOLDER_RE = re.compile(r"<REDACTED:[a-z_]+>")
+
 
 @dataclass
 class SanitizeResult:
@@ -251,10 +260,21 @@ def sanitize(text: str, *, maps: Optional[dict[str, str]] = None) -> SanitizeRes
     return SanitizeResult(text=out, redactions=tally, audit=_audit(out))
 
 
+def _mask_placeholders(line: str) -> str:
+    """Blank this sanitizer's own ``<REDACTED:…>`` placeholders to equal-length
+    spaces, so the audit regexes scan only genuinely-unredacted residue."""
+    return _PLACEHOLDER_RE.sub(lambda m: " " * (m.end() - m.start()), line)
+
+
 def _audit(text: str) -> list[dict]:
-    """Non-mutating scan for residual suspicious tokens, by line."""
+    """Non-mutating scan for residual suspicious tokens, by line.
+
+    Placeholder spans this sanitizer already wrote are masked out first, so the
+    audit never re-flags its own redactions (which would drown real findings).
+    """
     findings: list[dict] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = _mask_placeholders(raw_line)
         for pattern, kind in _SUSPICIOUS:
             m = pattern.search(line)
             if m:

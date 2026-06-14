@@ -71,6 +71,13 @@ def gather_transcripts(
 
     # Keep the LAST occurrence per resolved path (most recent enqueue wins),
     # then trim to ``limit`` newest. We iterate in file (append) order.
+    #
+    # A plain ``dict[key] = value`` update keeps the key at its ORIGINAL
+    # insertion position while only replacing the value, so a path enqueued
+    # early then re-enqueued late would still sort as "old" — corrupting both
+    # the de-dup result ordering and the ``limit`` tail trim. To make the order
+    # reflect the most recent enqueue, we explicitly ``pop`` an existing key
+    # before re-inserting it, moving it to the end of the insertion order.
     by_path: dict[str, TranscriptRef] = {}
     try:
         with open(qf, encoding="utf-8", errors="replace") as fh:
@@ -90,7 +97,11 @@ def gather_transcripts(
                     continue
                 if require_exists and not resolved.exists():
                     continue
-                by_path[str(resolved)] = TranscriptRef(
+                key = str(resolved)
+                # Drop any earlier entry for this path so the re-insert below
+                # lands the (newer) entry at the end of the ordered dict.
+                by_path.pop(key, None)
+                by_path[key] = TranscriptRef(
                     session_id=str(entry.get("session_id", "") or "unknown"),
                     transcript_path=resolved,
                     trigger=str(entry.get("trigger", "") or "unknown"),

@@ -57,6 +57,28 @@ def test_dedupes_by_resolved_path_keeping_latest(tmp_path):
     assert refs[0].session_id == "second"  # latest enqueue wins
 
 
+def test_duplicate_path_reorders_to_latest_enqueue(tmp_path):
+    # A path enqueued EARLY then re-enqueued LATE must sort as "most recent",
+    # not stay frozen at its original insertion position. With limit=2 over the
+    # sequence [a, b, c, a] the survivors are [b, a] — a moved past b/c on its
+    # second enqueue. A naive dict-update keeps a at index 0 and would instead
+    # return [c-ish, ...], so this guards the de-dup ordering regression.
+    a = _touch(tmp_path, "a.jsonl")
+    b = _touch(tmp_path, "b.jsonl")
+    c = _touch(tmp_path, "c.jsonl")
+    qf = _write_queue(
+        tmp_path,
+        [
+            {"session_id": "a-old", "transcript_path": str(a), "trigger": "precompact"},
+            {"session_id": "b", "transcript_path": str(b), "trigger": "stop"},
+            {"session_id": "c", "transcript_path": str(c), "trigger": "stop"},
+            {"session_id": "a-new", "transcript_path": str(a), "trigger": "stop"},
+        ],
+    )
+    refs = gather_transcripts(queue=qf, limit=2)
+    assert [r.session_id for r in refs] == ["c", "a-new"]
+
+
 def test_limit_keeps_most_recent(tmp_path):
     paths = [_touch(tmp_path, f"t{i}.jsonl") for i in range(5)]
     qf = _write_queue(
