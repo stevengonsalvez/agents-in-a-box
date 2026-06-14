@@ -7,6 +7,9 @@
 //! here so the same control renders identically wherever it appears
 //! (`feedback_keybinding_hints_near_control`, Multica visual parity).
 //!
+//! - [`card_board`] — the Linear-style status board (63l.1): five status columns
+//!   of sleek bordered, rounded cards with per-column scroll, a dashed
+//!   empty-state, and a returned layout model the P0.2 mouse layer hit-tests.
 //! - [`filter_chip`] — the `All / Members / Agents / Mine`-style chip bar
 //!   rendered on the issue list (P4.3) and reused by the skill manager (P4.6).
 //! - [`working_chip`] — the top-right avatar stack + count badge showing which
@@ -18,6 +21,7 @@
 //!   column (P4.4, Multica UX §12.8).
 
 pub mod actor_row;
+pub mod card_board;
 pub mod danger_access_modal;
 pub mod editor_pane;
 pub mod file_tree;
