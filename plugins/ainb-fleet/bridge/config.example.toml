@@ -1,0 +1,31 @@
+# Example phone-bridge config — merge this [fleet.telegram] table into
+# ~/.agents-in-a-box/config/config.toml.
+#
+# The token is resolved through a secret resolver, so prefer an env or keychain
+# reference over a literal. The token is NEVER passed on the command line.
+
+[fleet.telegram]
+# token reference forms:
+#   "$TELEGRAM_BOT_TOKEN" / "${TELEGRAM_BOT_TOKEN}" — read from the environment
+#   "keychain:tg-bot"                                — macOS keychain item
+#   "1234567890:ABCdef..."                           — literal (discouraged)
+token = "$TELEGRAM_BOT_TOKEN"
+
+# Authorized Telegram user id (int, or a secret ref resolving to an int).
+# Messages from any other user are silently ignored.
+user_id = 123456789
+
+# Optional: session name to prefer when a message has no "name:" prefix.
+# When unset, the bridge prefers a conductor session and otherwise degrades to
+# the alphabetically-first running session.
+# default_target = "conductor"
+
+# Optional: in group chats, only act on @mentions / replies to the bot.
+require_mention_in_groups = true
+
+# Optional: seconds to wait for a session to finish its turn before reporting
+# that no reply arrived. Default 300.
+response_timeout = 300
+
+# Optional: HTTP/SOCKS proxy for the Telegram API (SOCKS needs aiohttp-socks).
+# proxy_url = "http://127.0.0.1:8080"
