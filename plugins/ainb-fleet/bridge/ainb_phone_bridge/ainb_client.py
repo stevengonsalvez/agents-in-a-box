@@ -123,11 +123,13 @@ def send_keys(tmux_session: str, text: str) -> bool:
     """Send ``text`` to a tmux session via literal send-keys + Enter.
 
     Uses ``-l`` (literal) so the payload is never interpreted as key names —
-    the same injection-safe transport ainb-fleet's broadcast/sequence use.
+    the same injection-safe transport ainb-fleet's broadcast/sequence use. A
+    ``--`` terminator precedes the payload so a message starting with ``-`` is
+    treated as literal text, not as a tmux flag (which would fail the send).
     """
     try:
         lit = subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "-l", text],
+            ["tmux", "send-keys", "-t", tmux_session, "-l", "--", text],
             capture_output=True,
             timeout=15,
             check=False,
@@ -183,17 +185,31 @@ def _scan_new_rows_for_turn_end(path: Path, start_offset: int) -> tuple[int, str
     ``reply_text`` is set only when an assistant row with
     ``stop_reason == "end_turn"`` is found in the new region. The last such
     turn wins (the most recent complete answer).
+
+    Only COMPLETE (newline-terminated) lines are consumed. A trailing partial
+    write (no terminating ``\n`` yet) is left for the next poll: the returned
+    offset never advances past the last newline, so a reply that lands in a
+    not-yet-flushed line is re-read once the line is completed instead of being
+    skipped and lost.
     """
     try:
         with path.open("rb") as fh:
             fh.seek(start_offset)
             data = fh.read()
-            new_offset = fh.tell()
     except OSError:
         return start_offset, None
 
+    # Advance only past complete lines: everything up to and including the last
+    # newline. A trailing partial line stays unread until it is terminated.
+    last_nl = data.rfind(b"\n")
+    if last_nl == -1:
+        # No complete line yet — nothing to consume, hold the offset.
+        return start_offset, None
+    complete = data[: last_nl + 1]
+    new_offset = start_offset + last_nl + 1
+
     reply: str | None = None
-    for line in data.splitlines():
+    for line in complete.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -229,17 +245,22 @@ def wait_for_reply(
     """Poll the transcript for the next end-of-turn assistant reply.
 
     ``transcript`` may be ``None`` at send time (no transcript yet); we re-resolve
-    it on each poll so a freshly-created file is picked up. Returns the reply
-    text or ``None`` on timeout.
+    it on each poll so a freshly-created file is picked up. Claude can also rotate
+    to a NEW ``*.jsonl`` mid-turn (resume / compaction), so on every poll we
+    re-resolve the latest transcript: if it differs from the one we are reading,
+    we switch to it and reset the offset to 0 so the end-of-turn row in the new
+    file is not missed. Returns the reply text or ``None`` on timeout.
     """
     deadline = time.monotonic() + timeout
     offset = start_offset
     path = transcript
     while time.monotonic() < deadline:
-        if path is None:
-            path = latest_transcript_for_cwd(cwd)
-            if path is not None:
-                offset = 0  # brand-new transcript — read from the top
+        latest = latest_transcript_for_cwd(cwd)
+        if latest is not None and latest != path:
+            # First resolution after a None send-time path, or a rotation to a
+            # newer transcript — read the new file from the top.
+            path = latest
+            offset = 0
         if path is not None:
             offset, reply = _scan_new_rows_for_turn_end(path, offset)
             if reply is not None:
