@@ -147,7 +147,7 @@ pub enum HangarEvent {
     },
 }
 
-/// The 5-colour transcript taxonomy (Multica UX §7 verbatim).
+/// The 5-colour transcript taxonomy (reference UX §7 verbatim).
 ///
 /// Each variant maps to one colour + glyph lane in the task-detail transcript
 /// renderer (P4.4). The wire form is `snake_case`.
@@ -178,7 +178,7 @@ pub enum TaskResult {
     Cancelled,
 }
 
-/// Three-state agent presence (Multica UX §12.2).
+/// Three-state agent presence (reference UX §12.2).
 ///
 /// `Unstable` (amber dot) means the runtime is *degraded* — not merely that the
 /// agent is queueing work; see the daemon-side presence derivation.
@@ -251,7 +251,7 @@ pub struct IssueRow {
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
 ///
 /// Polymorphic: a member (human) and an agent share this one shape so the picker
-/// renders them in a single flat list (Multica UX §12.1 polymorphic-actor
+/// renders them in a single flat list (reference UX §12.1 polymorphic-actor
 /// model). The `kind` discriminates the two; `presence` is only meaningful for
 /// agents (a member is rendered as plainly available / offline), but the daemon
 /// supplies it uniformly so the plugin never branches on kind to read a field.
