@@ -125,18 +125,27 @@ analyzer sees it, and every candidate's title + body are sanitized *again*
 before they can be printed (dry-run) or filed. The sanitizer strips, in order:
 
 1. caller-supplied `--map KEY=VALUE` substitutions (business/project names);
-2. **secrets** (highest priority): Anthropic / OpenAI / GitHub / Slack / AWS /
-   Telegram tokens, JWTs, PEM private-key blocks, and generic
-   `KEY=<12+ char value>` assignments;
+2. **secrets** (highest priority): Anthropic / OpenAI / GitHub (classic + fine-
+   grained PAT) / GitLab (`glpat-`) / Google API (`AIza…`) / npm (`npm_…`) /
+   Slack (token + incoming-webhook URL) / AWS / Telegram tokens, JWTs,
+   `Authorization: Bearer …` tokens, PEM private-key blocks, and generic
+   `KEY=<12+ char value>` assignments — where the keyword (token/key/secret/
+   password/api_key/auth) may be *embedded* in a longer env-var name, so
+   `AWS_SECRET_ACCESS_KEY` / `GITLAB_TOKEN` / `GOOGLE_API_KEY` / `NPM_TOKEN`
+   are all caught;
 3. emails, IPv4 addresses;
 4. home paths (`/Users/<u>` → `/Users/<user>`), `/tmp` and worktree paths;
 5. full UUIDs and long (≥20 char) hex strings.
 
 A non-mutating audit pass flags anything that still *looks* suspicious
 (base64-ish blobs, residual hex, env-var assignments, phone-shaped numbers,
-private IP ranges). The analyzer step degrades gracefully when no Claude auth
-context is present (it returns no candidates with a clear reason rather than
-failing). Filing is the *only* code path that calls `gh issue create`.
+private IP ranges). These residual flags are **surfaced** on the run result and
+printed (rich + `--format json`) so a reviewer sees which candidate still looks
+suspicious before anything is filed. The analyzer step degrades gracefully when
+no Claude auth context is present (it returns no candidates with a clear reason
+rather than failing). Filing is the *only* code path that calls
+`gh issue create`, and the local ledger is persisted after **each** successful
+file so a mid-loop crash never re-files an already-published issue.
 
 ## Architecture
 

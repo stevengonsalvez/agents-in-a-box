@@ -360,7 +360,9 @@ Most users don't need to touch any of these. Power users adjust:
 - `ingest.batch_size` — for bulk-importing large memory archives
 - `issues.repo` / `issues.limit` / `issues.model` — defaults for the
   [`reflect issues`](#reflect-issues--transcripts--github-issues) mode (target
-  repo, transcripts per run, analyzer model)
+  repo, transcripts per run, analyzer model). Used as the fallback when the
+  matching `--repo` / `--limit` / `--model` flag is unset; an explicit flag
+  always wins.
 
 ---
 
@@ -385,11 +387,15 @@ reflect issues ledger             # what has been filed
 **Safety model.** Publishing an issue sends content off-machine, so sanitization
 is conservative (over-redact > under-redact) and runs *twice* — once on the
 distilled timeline before the model sees it, once on each candidate before it
-can be printed or filed. It strips secrets (Anthropic/OpenAI/GitHub/Slack/AWS/
-Telegram tokens, JWTs, PEM keys, generic `KEY=value`), emails, IPs, home/tmp/
-worktree paths, UUIDs, and long hex; a non-mutating audit flags anything still
-suspicious. The analyzer degrades gracefully without Claude auth, `--dry-run`
-never calls `gh`, and re-running files zero duplicates. Full detail in the
+can be printed or filed. It strips secrets (Anthropic/OpenAI/GitHub/GitLab/
+Google/npm/Slack/AWS/Telegram tokens, Slack webhooks, `Bearer` tokens, JWTs,
+PEM keys, and generic `KEY=value` even when the keyword is embedded in a longer
+env-var name like `AWS_SECRET_ACCESS_KEY`), emails, IPs, home/tmp/worktree
+paths, UUIDs, and long hex; a non-mutating audit flags anything still suspicious
+and those flags are surfaced on every run so a reviewer sees them. The analyzer
+degrades gracefully without Claude auth, `--dry-run` never calls `gh`, and
+re-running files zero duplicates (the ledger is saved after each file). Full
+detail in the
 [CLI README](../../reflect-kb/README.md#reflect-issues--transcripts--github-issues).
 
 ---
