@@ -47,12 +47,18 @@ max_memory_lines = 200
 # REFLECT_STATE_DIR; nothing is filed until a candidate passes the privacy
 # sanitizer, and `--dry-run` prints the exact bodies without calling `gh`.
 #
-#   repo   = target OWNER/NAME. Leave unset so `gh` infers it from the cwd.
-#   limit  = max recent transcripts to pull from the queue per run.
-#   model  = analyzer model passed to `claude -p` (gated on Claude auth).
+#   repo          = target OWNER/NAME. Leave unset so `gh` infers it from cwd.
+#   limit         = max recent transcripts to pull from the queue per run.
+#   model         = analyzer model passed to `claude -p` (gated on Claude auth).
+#   label         = provenance label on every filed issue (auto-created if the
+#                   repo lacks it). Set "" to disable. Default: "reflect".
+#   title_prefix  = stamped on every issue title so it's clearly reflect-filed.
+#                   Set "" to disable. Default: "reflect: ".
 # repo  = "owner/name"
 limit = 20
 model = "sonnet"
+label = "reflect"
+title_prefix = "reflect: "
 
 [telemetry]
 enabled = true

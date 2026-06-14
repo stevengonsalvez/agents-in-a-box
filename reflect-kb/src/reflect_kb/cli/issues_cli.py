@@ -26,6 +26,7 @@ from rich.table import Table
 from reflect_kb import reflect_config
 from reflect_kb.issues import dedupe as dedupe_mod
 from reflect_kb.issues import manifest as manifest_mod
+from reflect_kb.issues import pipeline
 from reflect_kb.issues.pipeline import run_issues
 
 console = Console(stderr=True)
@@ -91,6 +92,18 @@ def issues_group():
     help="Extra sanitizer substitution (repeatable), e.g. --map AcmeCorp=<company>.",
 )
 @click.option(
+    "--label",
+    default=None,
+    help="Provenance label applied to every filed issue (auto-created if absent). "
+    "Falls back to [issues].label, then 'reflect'. Pass '' to disable.",
+)
+@click.option(
+    "--title-prefix",
+    default=None,
+    help="Prefix stamped on every issue title. Falls back to [issues].title_prefix, "
+    "then 'reflect: '. Pass '' to disable.",
+)
+@click.option(
     "--format", "-f", "output_format", default="rich", type=click.Choice(["rich", "json"])
 )
 def issues_run(
@@ -99,6 +112,8 @@ def issues_run(
     limit: Optional[int],
     model: Optional[str],
     maps: tuple[str, ...],
+    label: Optional[str],
+    title_prefix: Optional[str],
     output_format: str,
 ):
     """Distill recent transcripts and file (or preview) GitHub issues.
@@ -116,6 +131,14 @@ def issues_run(
     eff_repo = repo if repo is not None else cfg.get("repo")
     eff_limit = limit if limit is not None else int(cfg.get("limit", _DEFAULT_LIMIT))
     eff_model = model if model is not None else str(cfg.get("model", _DEFAULT_MODEL))
+    # Provenance: explicit flag wins, then [issues] config, then the pipeline
+    # defaults ("reflect: " / "reflect"). An explicitly empty string disables.
+    eff_label = label if label is not None else cfg.get("label", pipeline.DEFAULT_LABEL)
+    eff_title_prefix = (
+        title_prefix
+        if title_prefix is not None
+        else cfg.get("title_prefix", pipeline.DEFAULT_TITLE_PREFIX)
+    )
 
     parsed_maps = _parse_maps(maps)
     result = run_issues(
@@ -124,6 +147,8 @@ def issues_run(
         dry_run=dry_run,
         maps=parsed_maps or None,
         model=eff_model,
+        title_prefix=eff_title_prefix,
+        label=eff_label,
     )
 
     if output_format == "json":
