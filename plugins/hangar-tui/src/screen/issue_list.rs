@@ -32,8 +32,8 @@ use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 /// The number of status columns the board renders — the five canonical
-/// lifecycle statuses (63l.3). Kept as a single constant so the column enum and
-/// the render's [`SectionBands`] split stay in lockstep.
+/// lifecycle statuses (63l.3). Kept as a single constant so the column enum, the
+/// card-board render, and the per-column scroll offsets stay in lockstep.
 pub(crate) const COLUMN_COUNT: usize = IssueLifecycle::ALL.len();
 
 /// The five status columns issues are bucketed into for display, one per
@@ -70,11 +70,12 @@ impl IssueColumn {
         Self::from_lifecycle(IssueLifecycle::for_state(state))
     }
 
-    /// Map a canonical [`IssueLifecycle`] status to its display column. The two
-    /// enums are 1:1 by design; this is the seam that keeps the plugin's column
-    /// vocabulary pinned to the proto source of truth.
+    /// Map a canonical [`IssueLifecycle`] status to its display column (63l.4):
+    /// the seam the mouse layer uses to route a `MoveCard{to_status}` /
+    /// `ScrollColumn{status}` intent (which carries an [`IssueLifecycle`]) to the
+    /// matching display column. The two enums are 1:1 by design.
     #[must_use]
-    const fn from_lifecycle(status: IssueLifecycle) -> Self {
+    pub const fn from_lifecycle(status: IssueLifecycle) -> Self {
         match status {
             IssueLifecycle::Backlog => Self::Backlog,
             IssueLifecycle::Todo => Self::Todo,
@@ -114,6 +115,14 @@ impl IssueColumn {
             Self::Done,
         ]
     }
+}
+
+/// The 0-based left-to-right board index of a column (63l.4) — the index into
+/// the [`IssueColumn::all`] order and the per-column `scroll_offsets`. Pinned to
+/// the canonical [`IssueLifecycle::order`] so the column geometry, the scroll
+/// offsets, and the hit-map all agree on which column is which.
+const fn column_index(column: IssueColumn) -> usize {
+    column.lifecycle().order()
 }
 
 /// The status glyph painted before a card-board column's name (63l.2): a small
@@ -239,6 +248,15 @@ pub struct IssueListState {
     /// event can promote the right issue to In Progress (the event carries only
     /// the task id, the queue carried the issue id).
     task_issue: HashMap<String, IssueId>,
+    /// Per-column vertical scroll offset (63l.4): the first visible card index in
+    /// each canonical [`IssueColumn`], indexed by [`IssueColumn::all`] order. A
+    /// wheel-scroll over a column's body nudges its entry; the card-board render
+    /// skips this many leading cards in that column. All zero on a fresh snapshot.
+    scroll_offsets: [usize; COLUMN_COUNT],
+    /// The issue id the pointer is hovering over (63l.4), or `None` off every
+    /// card. The card-board render lifts the hovered card's border so the cursor
+    /// target reads before a click. Cleared when the pointer moves to empty space.
+    hovered_id: Option<String>,
 }
 
 impl Default for IssueListState {
@@ -252,6 +270,8 @@ impl Default for IssueListState {
             mode: IssueListMode::Normal,
             create_title: String::new(),
             task_issue: HashMap::new(),
+            scroll_offsets: [0; COLUMN_COUNT],
+            hovered_id: None,
         }
     }
 }
@@ -337,21 +357,23 @@ impl IssueListState {
         self.rows_in_column(column).count()
     }
 
-    /// Flatten the visible rows into the five card-board columns (63l.2) the
-    /// mouse layer hit-tests against. Each canonical [`IssueColumn`] becomes a
+    /// Flatten the visible rows into the five card-board columns (63l.2/63l.4) the
+    /// board render paints and the mouse layer hit-tests against. Each canonical
+    /// [`IssueColumn`] becomes a
     /// [`BoardColumn`](crate::widgets::card_board::BoardColumn) of
     /// [`BoardCard`](crate::widgets::card_board::BoardCard)s, in left-to-right
     /// order, carrying the per-card data a card paints (id, display id, title,
-    /// priority chip, assignee initial). The per-column scroll offset is `0` here
-    /// — the scroll model lands with the visible board swap (63l.4); this
-    /// adapter exists so `handle_mouse` can build a hit-map from the SAME board
-    /// geometry the render will paint.
+    /// priority chip, assignee initial) and the column's live scroll offset
+    /// (63l.4). `render_issue_list` paints from THESE columns and `rebuild_hit_map`
+    /// hit-tests against the SAME geometry, so the paint and the hit-test can never
+    /// drift.
     #[must_use]
     pub fn board_columns(&self) -> Vec<crate::widgets::card_board::BoardColumn> {
         use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip};
         IssueColumn::all()
             .into_iter()
-            .map(|column| {
+            .enumerate()
+            .map(|(idx, column)| {
                 let cards =
                     self.rows_in_column(column)
                         .map(|r| BoardCard {
@@ -366,15 +388,170 @@ impl IssueListState {
                                 a.split_once(':').map_or(a, |(_, id)| id).chars().next()
                             }),
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
+                // Clamp the stored offset to the column's card count so a column
+                // that shrank (a moved/deleted card) never scrolls past its last
+                // card into a blank body.
+                let scroll_offset = self.scroll_offsets[idx].min(cards.len().saturating_sub(1));
                 BoardColumn {
                     glyph: column_glyph(column),
                     name: column.label().to_string(),
                     cards,
-                    scroll_offset: 0,
+                    scroll_offset,
                 }
             })
             .collect()
+    }
+
+    /// The `(column_index, card_index)` of the selected card within the board
+    /// columns (63l.4), or `None` when nothing is selected / the selection falls
+    /// outside the visible board. The card-board render draws the heavy clay
+    /// border on this card. Resolved by matching the selected visible row's id
+    /// against the per-column card lists, so the selection a keyboard `j`/`k` (or
+    /// a mouse `Select`) moved is the card that reads as raised.
+    #[must_use]
+    pub fn selected_board_card(&self) -> Option<(usize, usize)> {
+        let selected_id = self.selected_row()?.id.as_str().to_string();
+        self.board_position_of(&selected_id)
+    }
+
+    /// The `(column_index, card_index)` of the card the card-board render draws
+    /// with the heavy clay border (63l.4): the HOVERED card when the pointer is
+    /// over one (the cursor target reads before a click), else the keyboard /
+    /// mouse-`Select` selection. `None` when neither resolves to a visible card.
+    #[must_use]
+    pub fn highlight_board_card(&self) -> Option<(usize, usize)> {
+        if let Some(hover) = self.hovered_id.as_deref() {
+            if let Some(pos) = self.board_position_of(hover) {
+                return Some(pos);
+            }
+        }
+        self.selected_board_card()
+    }
+
+    /// The `(column_index, card_index)` of the card carrying issue `id` within the
+    /// board columns, or `None` when it is not visible. Shared by the selection +
+    /// hover highlight resolvers (63l.4).
+    fn board_position_of(&self, id: &str) -> Option<(usize, usize)> {
+        for (col_idx, column) in IssueColumn::all().into_iter().enumerate() {
+            if let Some(card_idx) = self
+                .rows_in_column(column)
+                .position(|r| r.id.as_str() == id)
+            {
+                return Some((col_idx, card_idx));
+            }
+        }
+        None
+    }
+
+    /// The id of the card the pointer is hovering, if any (63l.4). The render
+    /// lifts this card's border so the cursor target reads before a click.
+    #[must_use]
+    pub fn hovered_id(&self) -> Option<&str> {
+        self.hovered_id.as_deref()
+    }
+
+    /// Set (or clear with `None`) the hovered card id (63l.4). A pointer move over
+    /// a card highlights it; a move onto empty space clears it.
+    pub fn set_hover(&mut self, id: Option<String>) {
+        self.hovered_id = id;
+    }
+
+    /// Scroll one canonical `column` vertically by `delta` rows (63l.4): `+1`
+    /// reveals a card further down, `-1` scrolls back up. The offset saturates at
+    /// `0` (never negative) and is clamped against the column's card count by
+    /// [`Self::board_columns`] so a scroll past the last card is a no-op. A
+    /// wheel-scroll over a column's body drives this.
+    pub fn scroll_column(&mut self, column: IssueColumn, delta: i32) {
+        let idx = column_index(column);
+        let current = self.scroll_offsets[idx];
+        let next = if delta >= 0 {
+            current.saturating_add(delta.unsigned_abs() as usize)
+        } else {
+            current.saturating_sub(delta.unsigned_abs() as usize)
+        };
+        // Cap at the last card so a column never scrolls into a blank body.
+        let card_count = self.rows_in_column(column).count();
+        self.scroll_offsets[idx] = next.min(card_count.saturating_sub(1));
+    }
+
+    /// Optimistically move the issue with `id` into `to_status`'s column (63l.4),
+    /// mutating its cached `state` so the board reflects a cross-column drag
+    /// immediately — ahead of the daemon's reconciling `IssueUpdated` push. A
+    /// no-op when no cached row carries that id (a stale drag). The daemon
+    /// `hangar/issue_update{state}` RPC (fired by the plugin glue) is the source of
+    /// truth; this local move keeps the UI responsive and is reconciled (not
+    /// duplicated) when the event arrives.
+    ///
+    /// Returns the issue's wire id when a row was moved (so the caller knows a real
+    /// move happened and can fire the RPC), else `None`.
+    pub fn move_issue_to(&mut self, id: &str, to_status: IssueLifecycle) -> Option<String> {
+        let row = self.rows.iter_mut().find(|r| r.id.as_str() == id)?;
+        row.state = to_status.as_str().to_string();
+        self.clamp_selection();
+        Some(id.to_string())
+    }
+
+    /// Reorder the issue with `id` to `to_index` within its own column (63l.4),
+    /// moving its row in the daemon-order `rows` vec so the card-board paints it at
+    /// the new slot. `to_index` is clamped to the column's bounds. A no-op when no
+    /// cached row carries that id.
+    ///
+    /// ## Reorder model: local order, not a priority rewrite
+    ///
+    /// A same-column drag is treated as a *display reorder only* — it reseats the
+    /// row in the local cache and does NOT rewrite the issue's `priority` (the
+    /// board's vertical axis is daemon order, not priority). A silent priority
+    /// nudge on every within-column drag would surprise the user and round-trip a
+    /// mutation they didn't intend; the cross-column drag (which IS a real
+    /// lifecycle change) is the one that fires a daemon RPC. The local order
+    /// reconciles to the daemon's on the next snapshot re-pull.
+    pub fn reorder_within_column(&mut self, id: &str, to_index: usize) {
+        // Resolve the dragged row's column + its absolute index in `rows`.
+        let Some((from_abs, column)) = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.id.as_str() == id)
+            .map(|(i, r)| (i, IssueColumn::for_state(&r.state)))
+        else {
+            return;
+        };
+        // The absolute `rows` indices of every row in that column, in order.
+        let column_abs: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| IssueColumn::for_state(&r.state) == column)
+            .map(|(i, _)| i)
+            .collect();
+        let Some(from_pos) = column_abs.iter().position(|&i| i == from_abs) else {
+            return;
+        };
+        // Clamp the target slot into the column's range.
+        let to_pos = to_index.min(column_abs.len().saturating_sub(1));
+        if to_pos == from_pos {
+            return;
+        }
+        // Lift the dragged row out, then reinsert it relative to the column member
+        // at the target slot. After the removal the column membership shifts: the
+        // anchor member's absolute index drops by one if it sat after the removed
+        // row. Dragging DOWN lands the row just AFTER the anchor; dragging UP just
+        // BEFORE it.
+        let row = self.rows.remove(from_abs);
+        let anchor_abs_orig = column_abs[to_pos];
+        let anchor_abs = if anchor_abs_orig > from_abs {
+            anchor_abs_orig.saturating_sub(1)
+        } else {
+            anchor_abs_orig
+        };
+        let insert_at = if to_pos > from_pos {
+            anchor_abs.saturating_add(1)
+        } else {
+            anchor_abs
+        };
+        self.rows.insert(insert_at.min(self.rows.len()), row);
+        self.clamp_selection();
     }
 
     /// The currently selected visible row, if any.
@@ -671,27 +848,20 @@ fn unchanged(state: &IssueListState) -> IssueListReduction {
 }
 
 // ---------------------------------------------------------------------------
-// Width-aware rendering
+// Card-board rendering (63l.4)
 // ---------------------------------------------------------------------------
 
-/// Column header accent.
-const GOLD: Color = Color::rgb(255, 215, 0);
-/// Muted text for unfocused rows + counts.
+/// Muted text for the create-issue input bar's keybinding hint.
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
-/// Primary row text.
-const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
-/// Selection-row highlight.
-const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-/// The HGR-<n> display-id accent: a dim slate-blue so the id reads as metadata
-/// leading the title without competing with the row text (63l.3).
-const ID_ACCENT: Color = Color::rgb(150, 160, 190);
 
-/// Render the issue list into `buf` between `top` and `bottom`.
+/// Render the issue list into `buf` between `top` and `bottom` (63l.4).
 ///
-/// All sub-widths derive from `area_w` (`project_ainb_tui_width_aware_panels`):
-/// the title gets the lion's share, the assignee and status columns are sized to
-/// their content caps. The selection row is highlighted; column headers carry
-/// their live counts (`Todo (3)`).
+/// The chip bar takes the first body row; the five-column Linear-style card-board
+/// ([`crate::widgets::card_board`]) fills the rest — `backlog` … `done` columns
+/// side by side, each a per-column-scrollable stack of bordered cards showing the
+/// `HGR-<n>` id, title, priority chip, and assignee. The selected (or hovered)
+/// card carries the heavy clay border. The inline create-issue input overlays the
+/// bottom row when active.
 ///
 /// `working_count` is the number of agents currently working, surfaced as the
 /// top-right avatar-stack chip (the reference's `WorkspaceAgentWorkingChip`).
@@ -721,191 +891,24 @@ pub fn render_issue_list(
         render_create_bar(buf, area_w, bottom.saturating_sub(1), &state.create_title);
     }
 
-    // Width split: status/assignee take fixed caps, the title absorbs the rest.
-    let cols = ColumnWidths::for_area(area_w);
-
-    // e38.39 / 63l — body-filling layout. The five canonical status sections each
-    // get a proportional vertical *band* of the body so they spread down the pane
-    // instead of clustering at the top with a vast void below. The chip bar
-    // consumed `top`; the column body runs from `col_top` to `bottom`, split into
-    // five bands of `bottom - col_top` rows (the remainder lands on the earlier
-    // bands so no row is wasted). Each section paints its header on its band's
-    // first row and its issue rows beneath, clamped to the band end — a dense
-    // section truncates within its share rather than pushing the next section's
-    // header off-screen, which is what keeps the board readable and overflow-free
-    // at the 80×24 floor.
+    // 63l.4 — the Issues screen is the headline of the redesign: it renders
+    // through the Linear-style card-board widget (five status columns side by
+    // side, each a scrollable stack of bordered cards) rather than the old
+    // vertical section bands. The board runs from the first body row below the
+    // chip bar (`col_top`) to the footer (`bottom`).
+    //
+    // The selected card carries the heavy clay border; when the pointer is
+    // hovering a card it takes the highlight instead (the cursor target reads
+    // before a click), falling back to the keyboard selection when nothing is
+    // hovered. The per-column scroll offsets ride on the board columns
+    // ([`IssueListState::board_columns`]), so the SAME geometry feeds the render,
+    // the hit-map, and the mouse layer.
     let col_top = top.saturating_add(1);
-    let bands = SectionBands::split(col_top, bottom);
-
-    let mut visible_index = 0usize;
-    for (column, band) in IssueColumn::all().into_iter().zip(bands) {
-        // Column header with live count, e.g. "Todo (3)", anchored at the band top.
-        if band.start < bottom {
-            let header = format!("{} ({})", column.label(), state.column_count(column));
-            put_str(buf, 0, band.start, &header, GOLD, area_w);
-        }
-
-        let mut row = band.start.saturating_add(1);
-        for r in state.rows_in_column(column) {
-            // Paint only while inside this section's band; rows past the band are
-            // truncated (their count already shows in the header). `visible_index`
-            // still advances so the selection marker tracks the global visible
-            // order even across a truncated row.
-            if row < band.end {
-                render_issue_row(buf, area_w, row, r, visible_index == state.selected, &cols);
-                row = row.saturating_add(1);
-            }
-            visible_index = visible_index.saturating_add(1);
-        }
-    }
-}
-
-/// The derived sub-widths for an issue row, sized from the area width
-/// (`project_ainb_tui_width_aware_panels`): the status/assignee columns take
-/// fixed caps and the title absorbs the rest.
-struct ColumnWidths {
-    title_w: u16,
-    assignee_w: u16,
-}
-
-impl ColumnWidths {
-    /// Derive the row sub-widths for a body `area_w`.
-    fn for_area(area_w: u16) -> Self {
-        let status_w: u16 = 13; // "In Progress" + padding
-        let assignee_w = area_w.saturating_sub(status_w).min(20);
-        let title_w = area_w
-            .saturating_sub(status_w)
-            .saturating_sub(assignee_w)
-            .max(8);
-        Self {
-            title_w,
-            assignee_w,
-        }
-    }
-}
-
-/// One status section's vertical band: `[start, end)` rows of the body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Band {
-    /// The band's header row (inclusive).
-    start: u16,
-    /// One past the band's last issue row (exclusive).
-    end: u16,
-}
-
-/// The status sections' bands, splitting the body `[col_top, bottom)` into
-/// [`COLUMN_COUNT`] contiguous, non-overlapping vertical slices — one per
-/// canonical lifecycle column.
-struct SectionBands {
-    bands: [Band; COLUMN_COUNT],
-}
-
-impl SectionBands {
-    /// Divide `[col_top, bottom)` into [`COLUMN_COUNT`] contiguous bands. The body
-    /// height is split evenly; the remainder rows go to the earlier bands so the
-    /// whole height is used and the last band still ends exactly at `bottom`. A
-    /// body too short to give every section a row degrades gracefully (zero-height
-    /// bands simply paint nothing — never out of bounds).
-    fn split(col_top: u16, bottom: u16) -> [Band; COLUMN_COUNT] {
-        let avail = bottom.saturating_sub(col_top);
-        let n = u16::try_from(COLUMN_COUNT).unwrap_or(u16::MAX);
-        let base = avail / n;
-        let extra = avail % n; // leftover rows handed to the earliest bands
-        let mut start = col_top;
-        let mut bands = [Band { start, end: start }; COLUMN_COUNT];
-        for (i, band) in bands.iter_mut().enumerate() {
-            let h = base + u16::from(u16::try_from(i).unwrap_or(u16::MAX) < extra);
-            // Clamp end >= start: when `bottom < col_top` (only reachable from a
-            // degenerate sub-`col_top` pane) the band stays empty rather than
-            // inverting to `{start, end < start}`.
-            let end = start.saturating_add(h).min(bottom).max(start);
-            *band = Band { start, end };
-            start = end;
-        }
-        bands
-    }
-}
-
-impl IntoIterator for SectionBands {
-    type Item = Band;
-    type IntoIter = std::array::IntoIter<Band, COLUMN_COUNT>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.bands.into_iter()
-    }
-}
-
-/// Paint a single issue `row` at `y`: selection marker, clipped title, assignee,
-/// and trailing label chips. Extracted so the section-band loop stays legible.
-fn render_issue_row(
-    buf: &mut WireBuffer,
-    area_w: u16,
-    y: u16,
-    r: &IssueRow,
-    selected: bool,
-    cols: &ColumnWidths,
-) {
-    let marker_color = if selected {
-        SELECTION_GREEN
-    } else {
-        MUTED_GRAY
-    };
-    put_str(
-        buf,
-        0,
-        y,
-        if selected { "▶ " } else { "  " },
-        marker_color,
-        area_w,
+    let columns = state.board_columns();
+    let highlight = state.highlight_board_card();
+    let _ = crate::widgets::card_board::render_card_board(
+        buf, area_w, col_top, bottom, &columns, highlight,
     );
-
-    let text_color = if selected { SOFT_WHITE } else { MUTED_GRAY };
-    // 63l.3: the HGR-<n> display id (when the daemon supplied one) leads the
-    // title in a dim id accent, then a `·` separator, then the title in the row
-    // text colour: `HGR-7 · Refactor API`. The id + separator + title share the
-    // title column, so a present id shortens the title's clip width by exactly
-    // what the id consumed — the row never overflows into the assignee column.
-    // A row with no display id paints the title verbatim at column 2 (the
-    // pre-63l.3 behaviour), so a legacy snapshot still reads cleanly.
-    let title_start = match r.display_id.as_deref() {
-        Some(display_id) if !display_id.is_empty() => {
-            let id_text = format!("{display_id} · ");
-            let id_clipped = clip(&id_text, cols.title_w);
-            let after_id = put_str(buf, 2, y, &id_clipped, ID_ACCENT, area_w);
-            after_id.min(2u16.saturating_add(cols.title_w))
-        }
-        _ => 2,
-    };
-    // The title takes whatever of the title column the id left (>= 0 columns).
-    let title_w = 2u16
-        .saturating_add(cols.title_w)
-        .saturating_sub(title_start);
-    put_str(
-        buf,
-        title_start,
-        y,
-        &clip(&r.title, title_w),
-        text_color,
-        area_w,
-    );
-
-    let ax = 2u16.saturating_add(cols.title_w).saturating_add(1);
-    let assignee = r.assignee.as_deref().unwrap_or("—");
-    let next_x = put_str(
-        buf,
-        ax,
-        y,
-        &clip(assignee, cols.assignee_w),
-        MUTED_GRAY,
-        area_w,
-    );
-
-    // Label chips trail the assignee in whatever width is left, clipped at the
-    // area edge (a row with no labels paints nothing here).
-    if !r.labels.is_empty() {
-        let chips_x = next_x.saturating_add(1);
-        crate::widgets::label_chip::render_label_chips(buf, chips_x, y, area_w, &r.labels);
-    }
 }
 
 /// Accent for the create-issue input bar (a calm emerald, distinct from the
@@ -923,11 +926,6 @@ fn render_create_bar(buf: &mut WireBuffer, area_w: u16, row: u16, title: &str) {
     let next = put_str(buf, 0, row, &prompt, CREATE_ACCENT, area_w);
     let hint = "  (Enter submit · Esc cancel)";
     put_str(buf, next, row, hint, MUTED_GRAY, area_w);
-}
-
-/// Clip `s` to at most `w` display columns (char-based, multi-byte safe).
-fn clip(s: &str, w: u16) -> String {
-    s.chars().take(w as usize).collect()
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
@@ -1042,69 +1040,200 @@ mod tests {
         assert_eq!(visible, vec!["i2"]);
     }
 
-    /// A labelled issue renders its label chip on the row (e38.10).
+    /// A labelled issue still renders as a card on the board (63l.4). The card
+    /// anatomy carries id/title/priority/assignee, not label chips, so the proof
+    /// is that the labelled issue paints its id + title inside the board (it is not
+    /// dropped just because it carries labels).
     #[test]
-    fn labelled_issue_renders_chip() {
+    fn labelled_issue_renders_as_a_card() {
         let mut r = row("i1", "open", Some("agent:claude"));
         r.labels = vec!["bug".into()];
         let s = IssueListState::with_rows(vec![r]);
 
-        // Tall enough that the five canonical bands each get a header + an issue
-        // row (the labelled `open` issue lands in the Todo band).
-        let mut buf = WireBuffer::new(80, 16);
-        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
 
         let painted = painted_text(&buf);
         assert!(
-            painted.contains("‹bug›"),
-            "labelled issue must render its chip: {painted:?}"
+            painted.contains("Issue i1"),
+            "the labelled issue must render as a card on the board: {painted:?}"
         );
     }
 
-    /// An issue row renders its HGR-<n> display id before the title (63l.3). The
-    /// daemon supplies the id; the plugin paints `HGR-7 · Issue i1` so a person
-    /// reading the board sees the human-facing id, not just the title.
+    /// A card renders its HGR-<n> display id on the id line (63l.4). The daemon
+    /// supplies the id; the card paints it so a person reading the board sees the
+    /// human-facing id leading the tile.
     #[test]
-    fn issue_row_renders_its_display_id_before_the_title() {
+    fn card_renders_its_display_id() {
         let mut r = row("i1", "todo", None);
         r.display_id = Some("HGR-7".into());
         let s = IssueListState::with_rows(vec![r]);
 
-        // Tall enough that the Todo band paints a header + the single issue row.
-        let mut buf = WireBuffer::new(80, 16);
-        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
 
         let painted = painted_text(&buf);
         assert!(
             painted.contains("HGR-7"),
-            "the row must render its display id: {painted:?}"
+            "the card must render its display id: {painted:?}"
         );
-        // The id sits before the title (the `id · title` order), so the substring
-        // `HGR-7` precedes `Issue i1` in row-major paint order.
+        // The card paints the id line ABOVE the title (the card anatomy order), so
+        // the id precedes the title in row-major paint order.
         let id_at = painted.find("HGR-7").expect("display id painted");
         let title_at = painted.find("Issue i1").expect("title painted");
         assert!(
             id_at < title_at,
-            "display id must render before the title: {painted:?}"
+            "the id line must paint before the title: {painted:?}"
         );
     }
 
-    /// A row with no display id (a pre-63l.3 snapshot) renders the title alone —
-    /// no stray separator, no panic.
+    /// A row with no display id (a pre-63l.3 snapshot) renders the raw issue id on
+    /// the card's id line (the card-board falls back to the issue id), and the
+    /// title still paints — no panic.
     #[test]
-    fn issue_row_without_display_id_renders_title_only() {
+    fn card_without_display_id_falls_back_to_issue_id() {
         let s = IssueListState::with_rows(vec![row("i1", "todo", None)]);
-        let mut buf = WireBuffer::new(80, 16);
-        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
         let painted = painted_text(&buf);
         assert!(
             painted.contains("Issue i1"),
             "the title must still render without a display id: {painted:?}"
         );
+        // The card-board paints the raw issue id when no display id is supplied.
         assert!(
-            !painted.contains('·'),
-            "no id separator should appear when there is no display id: {painted:?}"
+            painted.contains("i1"),
+            "the card falls back to the raw issue id: {painted:?}"
         );
+    }
+
+    /// 63l.4 — an optimistic cross-column move flips the issue's cached state into
+    /// the destination column so the board reflects a drag immediately, and reports
+    /// the moved id so the glue knows to fire the daemon RPC.
+    #[test]
+    fn move_issue_to_flips_cached_state_and_reports_id() {
+        let mut s = IssueListState::with_rows(vec![row("i1", "todo", None)]);
+        // The issue starts in Todo.
+        assert_eq!(s.column_count(IssueColumn::Todo), 1);
+        assert_eq!(s.column_count(IssueColumn::InProgress), 0);
+
+        let moved = s.move_issue_to("i1", IssueLifecycle::InProgress);
+        assert_eq!(moved.as_deref(), Some("i1"), "the moved id is reported");
+        // The board now shows the card under In Progress, not Todo.
+        assert_eq!(s.column_count(IssueColumn::Todo), 0);
+        assert_eq!(s.column_count(IssueColumn::InProgress), 1);
+
+        // A move of an unknown id is a no-op (no row, no reported id).
+        assert_eq!(s.move_issue_to("ghost", IssueLifecycle::Done), None);
+    }
+
+    /// 63l.4 — `selected_board_card` / `highlight_board_card` resolve the selected
+    /// row to its `(column, card)` slot on the board, and a hover overrides the
+    /// selection for the highlight (the cursor target reads before a click).
+    #[test]
+    fn highlight_resolves_hover_over_selection() {
+        let mut s = IssueListState::with_rows(vec![
+            row("i-todo", "todo", None),
+            row("i-prog", "in_progress", None),
+        ]);
+        // Selection defaults to the first visible row (i-todo, Todo column = 1).
+        assert_eq!(s.selected_board_card(), Some((1, 0)));
+        assert_eq!(s.highlight_board_card(), Some((1, 0)));
+
+        // Hovering the in-progress card overrides the highlight to (2, 0).
+        s.set_hover(Some("i-prog".to_string()));
+        assert_eq!(
+            s.highlight_board_card(),
+            Some((2, 0)),
+            "hover overrides the selection for the highlight"
+        );
+        // Clearing the hover falls back to the selection.
+        s.set_hover(None);
+        assert_eq!(s.highlight_board_card(), Some((1, 0)));
+    }
+
+    /// 63l.4 — a wheel-scroll over a column nudges its scroll offset, saturating at
+    /// `0` upward and capped at the last card downward, and the offset rides on the
+    /// board columns so the render skips the scrolled-off cards.
+    #[test]
+    fn scroll_column_offsets_board_and_saturates() {
+        let rows: Vec<IssueRow> = (0..4)
+            .map(|i| row(&format!("t{i}"), "todo", None))
+            .collect();
+        let mut s = IssueListState::with_rows(rows);
+
+        // Scroll the Todo column down twice → offset 2.
+        s.scroll_column(IssueColumn::Todo, 1);
+        s.scroll_column(IssueColumn::Todo, 1);
+        let cols = s.board_columns();
+        let todo = &cols[column_index(IssueColumn::Todo)];
+        assert_eq!(todo.scroll_offset, 2, "two down-scrolls offset by 2");
+
+        // Scrolling up past the top saturates at 0.
+        s.scroll_column(IssueColumn::Todo, -5);
+        let cols = s.board_columns();
+        assert_eq!(cols[column_index(IssueColumn::Todo)].scroll_offset, 0);
+
+        // Scrolling down past the last card caps at len-1 (never a blank body).
+        for _ in 0..10 {
+            s.scroll_column(IssueColumn::Todo, 1);
+        }
+        let cols = s.board_columns();
+        assert_eq!(cols[column_index(IssueColumn::Todo)].scroll_offset, 3);
+    }
+
+    /// 63l.4 — a same-column reorder reseats the dragged row within its column's
+    /// display order WITHOUT rewriting its priority (local order only). The other
+    /// columns' rows are untouched.
+    #[test]
+    fn reorder_within_column_reseats_local_order_only() {
+        let mut s = IssueListState::with_rows(vec![
+            row("t0", "todo", None),
+            row("t1", "todo", None),
+            row("t2", "todo", None),
+            row("p0", "in_progress", None),
+        ]);
+        // Todo order starts t0, t1, t2.
+        let order: Vec<&str> = s
+            .rows_in_column(IssueColumn::Todo)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(order, vec!["t0", "t1", "t2"]);
+
+        // Drag t0 to slot 2 (the bottom of the Todo column) — a downward move.
+        s.reorder_within_column("t0", 2);
+        let order: Vec<&str> = s
+            .rows_in_column(IssueColumn::Todo)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(order, vec!["t1", "t2", "t0"], "t0 reseats to the bottom");
+
+        // Drag t0 back to slot 0 (the top) — an upward move.
+        s.reorder_within_column("t0", 0);
+        let order: Vec<&str> = s
+            .rows_in_column(IssueColumn::Todo)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(order, vec!["t0", "t1", "t2"], "t0 reseats back to the top");
+
+        // The In Progress column is untouched.
+        let prog: Vec<&str> = s
+            .rows_in_column(IssueColumn::InProgress)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(prog, vec!["p0"]);
+
+        // A reorder of an unknown id is a no-op.
+        let before: Vec<String> = s
+            .rows_in_column(IssueColumn::Todo)
+            .map(|r| r.id.as_str().to_string())
+            .collect();
+        s.reorder_within_column("ghost", 0);
+        let after: Vec<String> = s
+            .rows_in_column(IssueColumn::Todo)
+            .map(|r| r.id.as_str().to_string())
+            .collect();
+        assert_eq!(before, after);
     }
 
     /// Reconstruct the full painted text of a rendered buffer (every cell, in
@@ -1121,11 +1250,12 @@ mod tests {
         out
     }
 
-    /// The board renders ALL FIVE canonical lifecycle columns, each with its live
-    /// count, and buckets a representative row into each (63l.3 plugin render
-    /// proof). A `backlog` and an `in_review` row prove the two new columns are
-    /// not dropped, and the legacy `open` / `closed` tokens still land under
-    /// Todo / Done via the canonical helper.
+    /// The Issues screen renders through the five-column card-board (63l.4): every
+    /// canonical lifecycle column appears with its live count header, and a
+    /// representative row is bucketed into each as a CARD (its id painted inside a
+    /// bordered tile). A `backlog` and an `in_review` row prove the two outer
+    /// columns are not dropped, and the legacy `open` / `closed` tokens still land
+    /// under Todo / Done via the canonical helper.
     #[test]
     fn renders_all_five_canonical_columns_with_counts() {
         let s = IssueListState::with_rows(vec![
@@ -1138,9 +1268,9 @@ mod tests {
             row("i-closed", "closed", None), // legacy -> Done
         ]);
 
-        // Tall enough that every five-band header gets a row.
-        let mut buf = WireBuffer::new(80, 24);
-        render_issue_list(&mut buf, 80, 1, 23, &s, 0);
+        // A wide board so every 16-cell column fits its header + card.
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
         let painted = painted_text(&buf);
 
         // Every canonical column header with its live count.
@@ -1156,6 +1286,56 @@ mod tests {
                 "missing column header {header:?} in:\n{painted}"
             );
         }
+
+        // Each column's representative issue renders as a card (its id painted).
+        for id in [
+            "i-backlog",
+            "i-todo",
+            "i-open",
+            "i-prog",
+            "i-review",
+            "i-done",
+            "i-closed",
+        ] {
+            assert!(
+                painted.contains(id),
+                "missing card id {id:?} in:\n{painted}"
+            );
+        }
+        // The board paints bordered, rounded cards — the rounded corner glyph is
+        // the card-board signature (the old band layout painted bare rows).
+        assert!(
+            painted.contains('╭'),
+            "the board must paint rounded card borders:\n{painted}"
+        );
+    }
+
+    /// A card paints its `HGR-<n>` display id and a coloured priority chip (63l.4
+    /// card anatomy), so the board reads as Linear-style tiles, not bare rows.
+    #[test]
+    fn card_paints_display_id_and_priority_chip() {
+        let mut r = row("i1", "in_progress", Some("agent:claude"));
+        r.display_id = Some("HGR-9".into());
+        r.priority = 3; // Urgent
+        let s = IssueListState::with_rows(vec![r]);
+
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("HGR-9"),
+            "the card must paint its display id: {painted:?}"
+        );
+        // The Urgent priority chip's label + filled-diamond glyph render.
+        assert!(
+            painted.contains("Urgent"),
+            "the card must paint its priority chip label: {painted:?}"
+        );
+        assert!(
+            painted.contains('◆'),
+            "the card must paint the priority chip glyph: {painted:?}"
+        );
     }
 
     /// Each canonical lifecycle string buckets into its own column, and the
@@ -1228,32 +1408,25 @@ mod tests {
         out.into_iter().collect()
     }
 
-    /// The y-row at which a header line (e.g. `"Todo ("`, `"Done ("`) is painted,
-    /// scanning the body region `[top, bottom)`.
-    fn header_row(buf: &WireBuffer, top: u16, bottom: u16, label: &str) -> Option<u16> {
-        (top..bottom).find(|&y| row_text(buf, y, buf.width).contains(label))
-    }
-
-    /// e38.39 — a populated landing must USE the body height: the three status
-    /// sections distribute down the pane instead of clustering at the top with a
-    /// vast void below. With a sparse-but-populated fixture at the 80×24 floor the
-    /// last section header (`Done`) must land in the lower portion of the body,
-    /// and the body's lowest painted content row must reach a sensible fraction of
-    /// the available height — so there is no large empty band before the footer.
+    /// 63l.4 — the card-board spreads its columns HORIZONTALLY across the full
+    /// width (Backlog left, Done right), not vertically. With a populated fixture
+    /// the leftmost (`Backlog`) and rightmost (`Done`) column headers must sit on
+    /// the SAME header row but at opposite ends of the board — the board uses the
+    /// width, it doesn't stack the sections down the pane.
     ///
-    /// Reverting to the old top-packed layout (sections stacked tightly from the
-    /// first body row) lands `Done` near the top and the fill assertion fails.
+    /// Reverting to the old top-packed vertical band layout stacks the headers down
+    /// one column and this side-by-side assertion fails.
     #[test]
-    fn populated_landing_fills_body_height() {
-        const FLOOR_W: u16 = 80;
-        const FLOOR_H: u16 = 24;
+    fn columns_spread_horizontally_across_the_board() {
+        const W: u16 = 120;
+        const H: u16 = 24;
         let top = 1u16;
-        let bottom = FLOOR_H - 1; // footer pinned on the last row
+        let bottom = H - 1; // footer pinned on the last row
 
-        // Sparse but populated: a few rows in each of the three status columns.
+        // A few rows in each of three columns so the board is populated.
         let mut rows = Vec::new();
         for i in 0..3 {
-            rows.push(row(&format!("t{i}"), "open", Some("agent:c")));
+            rows.push(row(&format!("b{i}"), "backlog", Some("agent:c")));
         }
         for i in 0..2 {
             rows.push(row(&format!("p{i}"), "in_progress", Some("agent:c")));
@@ -1263,41 +1436,41 @@ mod tests {
         }
         let s = IssueListState::with_rows(rows);
 
-        let mut buf = WireBuffer::new(FLOOR_W, FLOOR_H);
-        render_issue_list(&mut buf, FLOOR_W, top, bottom, &s, 0);
+        let mut buf = WireBuffer::new(W, H);
+        render_issue_list(&mut buf, W, top, bottom, &s, 0);
 
-        // The body band runs from the first column row (top + 1, below the chip
-        // bar) to `bottom`. The `Done` header is the last of the three sections; in
-        // a body-filling layout it sits in the lower portion, not the top cluster.
-        let body_top = top + 1;
-        let body_h = bottom - body_top;
-        let done_y =
-            header_row(&buf, body_top, bottom, "Done (").expect("Done header must be painted");
-        let done_frac = f64::from(done_y - body_top) / f64::from(body_h);
+        // Find the x of the Backlog header glyph and the Done header glyph; they
+        // sit on the same header row at opposite ends of the board.
+        let backlog_x = header_glyph_x(&buf, "Backlog (").expect("Backlog header painted");
+        let done_x = header_glyph_x(&buf, "Done (").expect("Done header painted");
         assert!(
-            done_frac >= 0.5,
-            "Done section must distribute into the lower half of the body \
-             (done_y={done_y}, body_top={body_top}, body_h={body_h}, frac={done_frac:.2}); \
-             the layout is still top-packed with a void below",
+            done_x > backlog_x,
+            "Done must sit to the RIGHT of Backlog (horizontal columns): \
+             backlog_x={backlog_x}, done_x={done_x}",
         );
-
-        // The lowest painted body row must reach near the bottom of the body, so
-        // there is no large empty band between the content and the footer.
-        let lowest = (body_top..bottom)
-            .rev()
-            .find(|&y| !row_text(&buf, y, FLOOR_W).trim().is_empty())
-            .expect("body must paint at least one row");
-        let fill_frac = f64::from(lowest - body_top + 1) / f64::from(body_h);
+        // Done sits in the rightmost fifth of a five-column board.
         assert!(
-            fill_frac >= 0.75,
-            "body content must reach at least 75% of the available height \
-             (lowest={lowest}, body_top={body_top}, body_h={body_h}, frac={fill_frac:.2}); \
-             a sparse void dominates the pane",
+            done_x >= W * 4 / 5 - 4,
+            "Done column must occupy the rightmost fifth (done_x={done_x}, w={W})",
         );
     }
 
-    /// e38.39 — the body-filling layout must NOT overflow at the 80×24 floor with a
-    /// dense fixture (the section bands clamp to their share, never past `bottom`).
+    /// The `(x, _)` start column of a header label painted anywhere in the buffer
+    /// (the column the card-board painted that header at), scanning row-major.
+    fn header_glyph_x(buf: &WireBuffer, label: &str) -> Option<u16> {
+        for y in 0..buf.height {
+            let line = row_text(buf, y, buf.width);
+            if let Some(byte_idx) = line.find(label) {
+                // `find` returns a byte index; the header labels are ASCII here, so
+                // the byte index equals the char column.
+                return u16::try_from(byte_idx).ok();
+            }
+        }
+        None
+    }
+
+    /// 63l.4 — the card-board must NOT overflow at the 80×24 floor with a dense
+    /// fixture (every column clips its cards to the body, never past `bottom`).
     #[test]
     fn body_fill_layout_does_not_overflow_at_floor() {
         const FLOOR_W: u16 = 80;
