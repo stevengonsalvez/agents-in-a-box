@@ -318,7 +318,7 @@ fn kanban_move_keystroke_transitions_db() {
     };
     let focused = focused.unwrap_or_else(|| {
         panic!(
-            "never focused the seeded card `{card_marker}` (no `▶ {card_marker}`):\n{}",
+            "never focused the seeded card `{card_marker}` (no heavy-border focus on `{card_marker}`):\n{}",
             sess.capture()
         )
     });
@@ -360,8 +360,12 @@ fn create_prompt_visible(capture: &str) -> bool {
     capture.contains("New issue") || capture.contains("Title:")
 }
 
-/// `true` when a rendered line carries the focus `▶` indicator AND the given card
-/// marker — i.e. that card is the focused one.
+/// `true` when the focused card's line carries the given card marker — i.e. that
+/// card is the focused one. 63l.6 replaced the old `▶` focus glyph with the
+/// card-board's heavy clay border (`┃`, U+2503) drawn around the focused card; an
+/// unfocused card uses the light rounded border (`│`, U+2502). So the focused
+/// card's id line is `┃#id…┃` while an unfocused one is `│#id…│` — gating on the
+/// heavy bar AND the marker on the same line pins it to the focused card.
 fn focus_on_card(capture: &str, card_marker: &str) -> bool {
-    capture.lines().any(|line| line.contains('▶') && line.contains(card_marker))
+    capture.lines().any(|line| line.contains('┃') && line.contains(card_marker))
 }
