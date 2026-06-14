@@ -64,10 +64,13 @@ smoke_keeps_daemon_tripwire() {
     # `ainb tui` + plugin subprocess launch and render a real screen (the macOS
     # AMFI/codesign "do the staged binaries actually run" signal). Deliberately
     # NOT included: heavy per-screen render + lifecycle tripwires (autopilots,
-    # create-flow, agent-picker, cross-screen, plugin-crash/reconnect) — they are
-    # load-sensitive on the small macOS runner and flake here; the Linux leg runs
-    # them all deterministically, and `plugin_crash_reconnect`'s parent-death
-    # path is being hardened separately before it can rejoin a gating leg.
+    # create-flow, agent-picker, cross-screen, plugin-crash/reconnect, the
+    # mouse-drag board tripwire) — they are load-sensitive on the small macOS
+    # runner and flake here; the Linux leg runs them all deterministically, and
+    # `plugin_crash_reconnect`'s parent-death path is being hardened separately
+    # before it can rejoin a gating leg. The mouse-drag tripwire
+    # (`tripwire_mouse_drag_moves_card`) drives a real SGR mouse drag against the
+    # live TUI — OS-agnostic render/protocol logic the Linux full leg authorises.
     case "$1" in
         tripwire_daemon_boots | tripwire_full_e2e | tripwire_p4_issue_list_renders)
             return 0 ;;
