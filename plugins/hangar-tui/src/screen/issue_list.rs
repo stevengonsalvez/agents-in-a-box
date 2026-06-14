@@ -628,6 +628,9 @@ const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
 const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
 /// Selection-row highlight.
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+/// The HGR-<n> display-id accent: a dim slate-blue so the id reads as metadata
+/// leading the title without competing with the row text (63l.3).
+const ID_ACCENT: Color = Color::rgb(150, 160, 190);
 
 /// Render the issue list into `buf` between `top` and `bottom`.
 ///
@@ -803,7 +806,34 @@ fn render_issue_row(
     );
 
     let text_color = if selected { SOFT_WHITE } else { MUTED_GRAY };
-    put_str(buf, 2, y, &clip(&r.title, cols.title_w), text_color, area_w);
+    // 63l.3: the HGR-<n> display id (when the daemon supplied one) leads the
+    // title in a dim id accent, then a `·` separator, then the title in the row
+    // text colour: `HGR-7 · Refactor API`. The id + separator + title share the
+    // title column, so a present id shortens the title's clip width by exactly
+    // what the id consumed — the row never overflows into the assignee column.
+    // A row with no display id paints the title verbatim at column 2 (the
+    // pre-63l.3 behaviour), so a legacy snapshot still reads cleanly.
+    let title_start = match r.display_id.as_deref() {
+        Some(display_id) if !display_id.is_empty() => {
+            let id_text = format!("{display_id} · ");
+            let id_clipped = clip(&id_text, cols.title_w);
+            let after_id = put_str(buf, 2, y, &id_clipped, ID_ACCENT, area_w);
+            after_id.min(2u16.saturating_add(cols.title_w))
+        }
+        _ => 2,
+    };
+    // The title takes whatever of the title column the id left (>= 0 columns).
+    let title_w = 2u16
+        .saturating_add(cols.title_w)
+        .saturating_sub(title_start);
+    put_str(
+        buf,
+        title_start,
+        y,
+        &clip(&r.title, title_w),
+        text_color,
+        area_w,
+    );
 
     let ax = 2u16.saturating_add(cols.title_w).saturating_add(1);
     let assignee = r.assignee.as_deref().unwrap_or("—");
@@ -977,6 +1007,52 @@ mod tests {
         );
     }
 
+    /// An issue row renders its HGR-<n> display id before the title (63l.3). The
+    /// daemon supplies the id; the plugin paints `HGR-7 · Issue i1` so a person
+    /// reading the board sees the human-facing id, not just the title.
+    #[test]
+    fn issue_row_renders_its_display_id_before_the_title() {
+        let mut r = row("i1", "todo", None);
+        r.display_id = Some("HGR-7".into());
+        let s = IssueListState::with_rows(vec![r]);
+
+        // Tall enough that the Todo band paints a header + the single issue row.
+        let mut buf = WireBuffer::new(80, 16);
+        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
+
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("HGR-7"),
+            "the row must render its display id: {painted:?}"
+        );
+        // The id sits before the title (the `id · title` order), so the substring
+        // `HGR-7` precedes `Issue i1` in row-major paint order.
+        let id_at = painted.find("HGR-7").expect("display id painted");
+        let title_at = painted.find("Issue i1").expect("title painted");
+        assert!(
+            id_at < title_at,
+            "display id must render before the title: {painted:?}"
+        );
+    }
+
+    /// A row with no display id (a pre-63l.3 snapshot) renders the title alone —
+    /// no stray separator, no panic.
+    #[test]
+    fn issue_row_without_display_id_renders_title_only() {
+        let s = IssueListState::with_rows(vec![row("i1", "todo", None)]);
+        let mut buf = WireBuffer::new(80, 16);
+        render_issue_list(&mut buf, 80, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("Issue i1"),
+            "the title must still render without a display id: {painted:?}"
+        );
+        assert!(
+            !painted.contains('·'),
+            "no id separator should appear when there is no display id: {painted:?}"
+        );
+    }
+
     /// Reconstruct the full painted text of a rendered buffer (every cell, in
     /// row-major order) so a render assertion can search for headers / glyphs.
     fn painted_text(buf: &WireBuffer) -> String {
@@ -1055,11 +1131,16 @@ mod tests {
         const FLOOR_H: u16 = 24;
         let rows: Vec<IssueRow> = (0..50)
             .map(|i| {
-                row(
+                let mut r = row(
                     &format!("i{i}"),
                     if i % 3 == 0 { "done" } else { "open" },
                     Some("agent:c"),
-                )
+                );
+                // Give every row a display id so the id+separator+title path is
+                // exercised at the floor — the id eats title width, and the row
+                // must still never overflow into the assignee column.
+                r.display_id = Some(format!("HGR-{i}"));
+                r
             })
             .collect();
         let s = IssueListState::with_rows(rows);
