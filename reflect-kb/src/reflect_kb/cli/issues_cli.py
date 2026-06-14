@@ -23,11 +23,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from reflect_kb import reflect_config
 from reflect_kb.issues import dedupe as dedupe_mod
 from reflect_kb.issues import manifest as manifest_mod
 from reflect_kb.issues.pipeline import run_issues
 
 console = Console(stderr=True)
+
+# Hard defaults used only when neither a flag nor the [issues] config supplies a
+# value. The [issues] block in reflect.toml takes precedence over these and is
+# itself overridden by an explicit flag.
+_DEFAULT_LIMIT = 20
+_DEFAULT_MODEL = "sonnet"
 
 
 def _parse_maps(pairs: tuple[str, ...]) -> dict[str, str]:
@@ -59,15 +66,22 @@ def issues_group():
     default=False,
     help="Print issue bodies that WOULD be filed; never call gh.",
 )
-@click.option("--repo", default=None, help="Target repo OWNER/NAME (defaults to cwd's repo).")
 @click.option(
-    "--limit",
-    default=20,
-    show_default=True,
-    help="Max recent transcripts to pull from the reflect queue.",
+    "--repo",
+    default=None,
+    help="Target repo OWNER/NAME. Falls back to [issues].repo, then gh's cwd repo.",
 )
 @click.option(
-    "--model", default="sonnet", show_default=True, help="Model passed to the analyzer (claude -p)."
+    "--limit",
+    default=None,
+    type=int,
+    help="Max recent transcripts to pull from the reflect queue. "
+    "Falls back to [issues].limit, then 20.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model passed to the analyzer (claude -p). Falls back to [issues].model, then sonnet.",
 )
 @click.option(
     "--map",
@@ -82,25 +96,34 @@ def issues_group():
 def issues_run(
     dry_run: bool,
     repo: Optional[str],
-    limit: int,
-    model: str,
+    limit: Optional[int],
+    model: Optional[str],
     maps: tuple[str, ...],
     output_format: str,
 ):
     """Distill recent transcripts and file (or preview) GitHub issues.
+
+    Resolution for repo/limit/model: an explicit flag wins; otherwise the
+    ``[issues]`` block in ``reflect.toml`` is consulted; otherwise a built-in
+    default is used.
 
     Examples:
         reflect issues run --dry-run
         reflect issues run --repo myorg/myrepo --limit 10
         reflect issues run --dry-run --map AcmeCorp=<company>
     """
+    cfg = reflect_config.issues_config()
+    eff_repo = repo if repo is not None else cfg.get("repo")
+    eff_limit = limit if limit is not None else int(cfg.get("limit", _DEFAULT_LIMIT))
+    eff_model = model if model is not None else str(cfg.get("model", _DEFAULT_MODEL))
+
     parsed_maps = _parse_maps(maps)
     result = run_issues(
-        repo=repo,
-        limit=limit,
+        repo=eff_repo,
+        limit=eff_limit,
         dry_run=dry_run,
         maps=parsed_maps or None,
-        model=model,
+        model=eff_model,
     )
 
     if output_format == "json":
@@ -124,6 +147,7 @@ def issues_run(
                 for d in result.skipped
             ],
             "previews": result.previews,
+            "audit": result.audit,
             "notes": result.notes,
         }
         click.echo(json.dumps(payload, indent=2))
@@ -159,6 +183,19 @@ def issues_run(
         console.print(f"\n[dim]Skipped {len(result.skipped)} duplicate(s):[/dim]")
         for d in result.skipped:
             console.print(f"  [dim]- {d.candidate.title}  ({d.reason})[/dim]")
+
+    if result.audit:
+        console.print(
+            f"\n[bold yellow]{len(result.audit)} residual-suspicious flag(s) "
+            f"for human review:[/bold yellow]"
+        )
+        for finding in result.audit:
+            cand = finding.get("candidate", "?")
+            console.print(
+                f"  [yellow]! {finding.get('kind')}[/yellow] "
+                f"in '{cand}' line {finding.get('line')}: "
+                f"[dim]{finding.get('snippet')}[/dim]"
+            )
 
     for note in result.notes:
         console.print(f"[dim]· {note}[/dim]")
