@@ -103,6 +103,7 @@ impl CommandRegistry {
         r.register(UsageCommand);
         r.register(StatuslineCommand);
         r.register(ClaudecodeCommand);
+        r.register(CodexCommand);
         r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
@@ -902,6 +903,61 @@ impl CliCommand for ClaudecodeCommand {
                 Some("statusline") => crate::cli::statusline::execute(cache_only),
                 _ => Err(anyhow::anyhow!(
                     "claudecode requires a subcommand (e.g. `statusline`)"
+                )),
+            }
+        })
+    }
+}
+
+/// Canonical `ainb codex <subcmd>` provider-namespaced surface — the Codex
+/// analog of [`ClaudecodeCommand`].
+///
+/// Today: only `statusline`, which pulls Codex OAuth quota
+/// (`chatgpt.com/backend-api/wham/usage`) and caches it for the ainb TUI
+/// top bar. Unlike `claudecode statusline` (Claude PUSHES its windows to a
+/// render-time subprocess), this command makes a throttled network call —
+/// it is driven by the Codex `stop` hook and the TUI background poller,
+/// never by a prompt render. Hide-on-fail; never errors out to the caller.
+pub struct CodexCommand;
+impl CliCommand for CodexCommand {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Codex-specific commands (statusline, etc.). \
+                     Provider-namespaced — the Codex analog of `claudecode`.",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("statusline")
+                        .about(
+                            "Pull Codex OAuth quota (5h + weekly) from \
+                             chatgpt.com and cache it for the ainb TUI top bar. \
+                             Throttled; hide-on-fail when Codex is not logged in.",
+                        )
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Bypass the throttle and pull now."),
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let (sub_name, force) = match matches.subcommand() {
+            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("force")),
+            _ => (None, false),
+        };
+        Box::pin(async move {
+            match sub_name.as_deref() {
+                Some("statusline") => crate::cli::codex_statusline::execute(force).await,
+                _ => Err(anyhow::anyhow!(
+                    "codex requires a subcommand (e.g. `statusline`)"
                 )),
             }
         })

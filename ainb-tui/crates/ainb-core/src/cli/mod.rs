@@ -8,6 +8,7 @@
 
 pub mod attach;
 pub mod auth;
+pub mod codex_statusline;
 pub mod config_cmd;
 pub mod deps;
 pub mod diff_review;
