@@ -11,6 +11,7 @@ pub mod chrome;
 pub mod connection;
 pub mod firstrun;
 pub mod jsonrpc_over_socket;
+pub mod mouse;
 pub mod plugin;
 pub mod screen;
 pub mod shell;
@@ -20,6 +21,7 @@ pub mod widgets;
 pub use chrome::{render_footer, render_top_bar, Presence};
 pub use connection::{ConnState, Connection};
 pub use firstrun::{reduce_first_run, FirstRunIntent, FirstRunModal, FirstRunReduction};
+pub use mouse::{HitMap, MouseFsm, MouseIntent, MouseState, Rect, Target};
 pub use plugin::{HangarPlugin, MANIFEST_TOML};
 pub use screen::autopilots::{
     reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
