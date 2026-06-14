@@ -29,6 +29,7 @@ The daemon skill describes a long-running watcher that scans each session's rece
 | `ainb-fleet:sequence` | Send ordered multi-step prompts, ack-gated between steps via JSONL turn-end detection |
 | `ainb-fleet:needs` | Center control panel — enumerate sessions blocked on ASK / ERR / IDLE / WAIT signals, render the Jarvis HUD |
 | `ainb-fleet:fleet-needs` | Workflow-backed `needs` — runs the `hangar` workflow, renders the HUD, fires `AskUserQuestion`, routes answers back |
+| `ainb-fleet:cost` | Per-session / model / day / group USD spend rollups sourced from burndown, plus `config.toml` budget caps that fire notifyd alerts |
 | `ainb-fleet:daemon` | Background watcher that auto-`continue`s sessions matching an API-error regex |
 
 ### Workflow
