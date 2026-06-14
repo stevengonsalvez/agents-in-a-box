@@ -99,20 +99,17 @@ async fn seed_populated(pool: &SqlitePool) {
 }
 
 /// Snapshot the pre-existing issue identity columns, ordered by id, as
-/// `(id, title, state)` rows — the data the column additions must not touch.
-async fn issue_identity_snapshot(pool: &SqlitePool) -> Vec<(String, String, String)> {
-    sqlx::query("SELECT id, title, state FROM issue ORDER BY id")
+/// `(id, title)` rows — the data 0014's column additions must not touch. The
+/// `state` column is deliberately excluded: a LATER migration (0023) legitimately
+/// canonicalises the lifecycle vocabulary (`open -> todo`), which is not 0014's
+/// concern; the post-chain states are asserted separately.
+async fn issue_identity_snapshot(pool: &SqlitePool) -> Vec<(String, String)> {
+    sqlx::query("SELECT id, title FROM issue ORDER BY id")
         .fetch_all(pool)
         .await
         .expect("snapshot issues")
         .iter()
-        .map(|r| {
-            (
-                r.get::<String, _>("id"),
-                r.get::<String, _>("title"),
-                r.get::<String, _>("state"),
-            )
-        })
+        .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("title")))
         .collect()
 }
 
@@ -136,9 +133,32 @@ async fn migration_0014_upgrades_populated_database_in_place() {
             .expect("read migration version");
     assert_eq!(recorded, 1, "0014 recorded as applied");
 
-    // 1. Every pre-existing row survives intact.
+    // 1. Every pre-existing row survives intact (id + title — 0014's additions
+    //    touch neither).
     let after = issue_identity_snapshot(&pool).await;
-    assert_eq!(after, before, "upgrade must not touch issue rows");
+    assert_eq!(
+        after, before,
+        "upgrade must not touch issue identity columns"
+    );
+
+    // The lifecycle vocabulary is canonicalised by the downstream 0023 migration
+    // the full chain applies: the seeded legacy `open` becomes `todo`, the
+    // already-terminal `done` is unchanged.
+    let states: Vec<(String, String)> = sqlx::query("SELECT id, state FROM issue ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .expect("read post-chain states")
+        .iter()
+        .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("state")))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            ("issue-1".to_string(), "todo".to_string()),
+            ("issue-2".to_string(), "done".to_string()),
+        ],
+        "0023 remaps legacy open -> todo; done stays done"
+    );
 
     // 2. Each pre-existing row reads back the new column DEFAULTS: priority 0,
     //    due_date NULL, labels '[]'.

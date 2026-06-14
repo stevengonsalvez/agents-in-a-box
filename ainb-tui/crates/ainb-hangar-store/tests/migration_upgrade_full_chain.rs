@@ -420,7 +420,22 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
     assert_eq!(
         ws_row.get::<Option<String>, _>("issue_prefix"),
         None,
-        "0020 workspace.issue_prefix default NULL"
+        "0020 workspace.issue_prefix default NULL (the HGR default is display-only)"
+    );
+}
+
+/// 0023 remaps the legacy issue `state` vocabulary forward in place: the issue
+/// seeded with `state = 'open'` reads `todo` after the upgrade, so it lands in a
+/// real canonical column rather than relying on display-layer tolerance forever.
+async fn assert_legacy_issue_state_remapped_forward(pool: &SqlitePool) {
+    let state: String = sqlx::query_scalar("SELECT state FROM issue WHERE id = ?")
+        .bind("issue-1")
+        .fetch_one(pool)
+        .await
+        .expect("issue row survives the upgrade");
+    assert_eq!(
+        state, "todo",
+        "0023 remaps the legacy 'open' state forward to 'todo'"
     );
 }
 
@@ -446,7 +461,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 22, "head is migration 0022");
+    assert_eq!(head_version, 23, "head is migration 0023");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
@@ -457,6 +472,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
 
     assert_seeded_identity_survives(&pool).await;
     assert_added_columns_read_defaults(&pool).await;
+    assert_legacy_issue_state_remapped_forward(&pool).await;
 
     // (c) Idempotency: a SECOND apply re-runs nothing and changes no row.
     let recorded_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
