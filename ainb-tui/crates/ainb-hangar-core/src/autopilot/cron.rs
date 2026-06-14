@@ -10,7 +10,7 @@
 //! # Field arity (POSIX 5-field vs `cron` 6-field)
 //!
 //! The [`cron`] crate parses **6- or 7-field** expressions, seconds-first
-//! (`sec min hour dom mon dow [year]`). Operators (and Multica's Go
+//! (`sec min hour dom mon dow [year]`). Operators (and the reference's Go
 //! `robfig/cron` heritage) write the familiar **5-field** POSIX form
 //! (`min hour dom mon dow`). [`parse_cron`] bridges the two: a 5-field
 //! expression is normalised to 6 fields by prepending a `0` seconds field, so

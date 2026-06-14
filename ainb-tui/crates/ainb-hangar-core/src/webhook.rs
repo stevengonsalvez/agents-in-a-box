@@ -138,7 +138,7 @@ pub fn verify_body_signature(secret: &[u8], body: &[u8], presented_signature: &s
 /// - `filter == None`  → fire on every signed request (no filter configured).
 /// - `filter == Some`  → fire only when `event == Some(filter)` (exact match).
 ///
-/// The event-name match is exact (the v1 collapse of Multica's richer filter
+/// The event-name match is exact (the v1 collapse of the reference's richer filter
 /// expression). A configured filter with no event on the request never fires.
 #[must_use]
 pub fn event_passes_filter(filter: Option<&str>, event: Option<&str>) -> bool {

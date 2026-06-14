@@ -2,7 +2,7 @@
 //!
 //! These exercise the legal-transition table, terminal invariants, the
 //! database string round-trip, and the lowercase serde wire contract that
-//! matches the Multica `agent_task_queue.status` column (`001_init.up.sql:132`).
+//! matches the reference `agent_task_queue.status` column (`001_init.up.sql:132`).
 
 use ainb_hangar_core::task::state::{IllegalTransition, TaskState};
 
@@ -17,7 +17,7 @@ const ALL_STATES: &[TaskState] = &[
     TaskState::Cancelled,
 ];
 
-/// The seven legal edges the Multica spec defines (`001_init.up.sql:132`). This
+/// The seven legal edges the reference spec defines (`001_init.up.sql:132`). This
 /// is the *expected* set; the production [`TaskState::legal_transitions`] table
 /// must equal it exactly — no more (an extra edge), no fewer (a dropped edge).
 const EXPECTED_LEGAL: &[(TaskState, TaskState)] = &[

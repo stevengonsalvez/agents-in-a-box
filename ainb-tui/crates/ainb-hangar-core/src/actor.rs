@@ -5,7 +5,7 @@
 //! (`member` and `agent`) without a real foreign key — the actor may live in
 //! either the `member` or `agent` table, which a single `SQLite` FK cannot
 //! express. The `(actor_type, actor_id)` invariant is therefore **FK-less by
-//! design** (per the Multica architecture review §7): the `_type` column's
+//! design** (per the reference architecture review §7): the `_type` column's
 //! `CHECK` constraint keeps the discriminant honest, and the service layer is
 //! responsible for the referential integrity of the `_id` half.
 //!
