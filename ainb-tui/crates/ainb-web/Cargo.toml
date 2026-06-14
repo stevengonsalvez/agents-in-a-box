@@ -1,0 +1,39 @@
+[package]
+name = "ainb-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read-only, SSE-live web dashboard for the ainb agent fleet (sessions + fleet needs + cost)"
+
+[lib]
+name = "ainb_web"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+subtle = { workspace = true }
+
+tokio = { workspace = true }
+# `sync` brings in BroadcastStream for the SSE fan-out.
+tokio-stream = { workspace = true, features = ["sync"] }
+async-stream = { workspace = true }
+futures-util = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `util` brings ServiceExt::oneshot for driving the router in route tests.
+tower = { workspace = true, features = ["util"] }
+serde_json = { workspace = true }

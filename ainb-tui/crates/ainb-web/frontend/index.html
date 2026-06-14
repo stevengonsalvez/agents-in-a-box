@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>ainb · fleet dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">◆</span>
+        <span class="brand-name">ainb</span>
+        <span class="brand-sub">fleet</span>
+      </div>
+      <div class="topbar-right">
+        <div class="stat">
+          <span class="stat-num" id="stat-sessions">–</span>
+          <span class="stat-label">sessions</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-needs">–</span>
+          <span class="stat-label">need attention</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-cost">–</span>
+          <span class="stat-label">cost</span>
+        </div>
+        <div class="conn" id="conn" title="live connection status">
+          <span class="conn-dot"></span>
+          <span class="conn-label">connecting…</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-sessions">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <span class="panel-meta" id="sessions-meta"></span>
+        </div>
+        <div class="panel-body" id="sessions"></div>
+      </section>
+
+      <section class="panel panel-needs">
+        <div class="panel-head">
+          <h2>Needs attention</h2>
+          <span class="panel-meta" id="needs-meta"></span>
+        </div>
+        <div class="panel-body" id="needs"></div>
+      </section>
+
+      <section class="panel panel-cost">
+        <div class="panel-head">
+          <h2>Cost</h2>
+          <span class="panel-meta" id="cost-meta"></span>
+        </div>
+        <div class="panel-body" id="cost"></div>
+      </section>
+    </main>
+
+    <footer class="footbar">
+      <span id="updated">—</span>
+      <span class="footbar-sep">·</span>
+      <span>read-only</span>
+      <span class="footbar-sep">·</span>
+      <span>SSE live</span>
+    </footer>
+  </div>
+
+  <div class="auth-prompt" id="auth-prompt" hidden>
+    <div class="auth-card">
+      <h3>Token required</h3>
+      <p>This dashboard requires a bearer token. Paste it to connect.</p>
+      <input type="password" id="auth-input" placeholder="bearer token" autocomplete="off" />
+      <button id="auth-go">Connect</button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

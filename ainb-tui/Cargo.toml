@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
+    "crates/ainb-web",
     "crates/ainb-plugin-burndown",
     "crates/ainb-plugin-learnings",
     "crates/ainb-plugin-notifyd",
@@ -124,6 +125,15 @@ fs2 = "0.4"
 
 # Filesystem watch for fleet JSONL transcript tail
 notify = "6.1"
+
+# Web dashboard (`ainb web` / ainb-web crate): axum HTTP + SSE, tower
+# middleware, and rust-embed for the no-build-step vanilla-JS frontend.
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+subtle = "2.6"
 
 # Dev / test
 mockall = "0.12"
