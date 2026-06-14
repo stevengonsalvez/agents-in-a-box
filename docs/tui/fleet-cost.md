@@ -24,7 +24,9 @@ ainb --format json fleet cost --period week      # today | week | 30days | month
 ```
 
 `--format` is a global flag — it precedes `fleet`. `--period` (default
-`month`) is passed through to the burndown plugin.
+`month`) scopes the reporting window: the burndown plugin date-bounds its
+call set and re-aggregates every rollup, so a narrower period returns less
+spend. `all` reports lifetime totals.
 
 ## JSON shape
 

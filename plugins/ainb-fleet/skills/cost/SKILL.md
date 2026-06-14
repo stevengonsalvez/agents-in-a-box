@@ -38,8 +38,9 @@ ainb --format json fleet cost --period week      # window: today|week|30days|mon
 ```
 
 `--format` is a **global** flag — it goes before `fleet`, not after `cost`.
-The `--period` window is passed through to the burndown plugin (default
-`month`).
+The `--period` window scopes the data (default `month`): burndown date-bounds
+its call set and re-aggregates, so a narrower period returns less spend; `all`
+reports lifetime totals.
 
 ## Output fields (JSON)
 
