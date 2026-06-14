@@ -18,9 +18,6 @@ use ainb_plugin_hangar::screen::autopilots::{
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
-/// `SELECTION_GREEN` from the TUI palette (the active-row marker colour).
-const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-
 fn autopilot(id: &str, name: &str, cron: &str, enabled: bool, last: Option<&str>) -> AutopilotRow {
     AutopilotRow {
         id: id.into(),
@@ -98,28 +95,44 @@ fn render_empty_list_shows_help() {
     assert!(full.contains("[a]dd"), "missing `[a]dd` hint:\n{full}");
 }
 
-/// Three autopilots render aligned, the first selected, with the action hints on
-/// the header row.
+/// Three autopilots render as card-board cards (63l.6), the first selected with
+/// the heavy clay highlight border, with the action hints on the header row.
 #[test]
-fn render_three_autopilots_table() {
+fn render_three_autopilots_as_card_board() {
+    /// The heavy clay highlight colour of the selected card-board card.
+    const CLAY: Color = Color::rgb(210, 130, 90);
     let state = AutopilotsState::new(three_autopilots());
-    let mut buf = WireBuffer::new(120, 12);
-    render_autopilots(&mut buf, 120, 0, 12, &state);
+    // A tall board so all three 6-row cards fit above the run-history pane.
+    let mut buf = WireBuffer::new(120, 28);
+    render_autopilots(&mut buf, 120, 0, 28, &state);
     let full = glyph_map(&buf, 120);
 
-    // POSITIVE: all three names render; the header columns are present.
-    assert!(full.contains("NAME"), "header NAME missing:\n{full}");
-    assert!(full.contains("CRON"), "header CRON missing:\n{full}");
-    assert!(full.contains("STATUS"), "header STATUS missing:\n{full}");
-    assert!(full.contains("daily-triage"), "row 1 missing:\n{full}");
-    assert!(full.contains("nightly-clean"), "row 2 missing:\n{full}");
-    assert!(full.contains("weekly-report"), "row 3 missing:\n{full}");
-    // The first row carries the selection marker + enabled badge.
+    // POSITIVE: the single `Autopilots (N)` card-board column header + glyph.
     assert!(
-        full.contains("▶ daily-triage"),
-        "selection marker missing:\n{full}"
+        full.contains("Autopilots (3)"),
+        "card-board column header missing:\n{full}"
     );
-    assert!(full.contains("enabled"), "enabled badge missing:\n{full}");
+    // Each autopilot renders as a card: its name on the id line, cron + state in
+    // the title.
+    assert!(
+        full.contains("daily-triage"),
+        "card 1 name missing:\n{full}"
+    );
+    assert!(
+        full.contains("nightly-clean"),
+        "card 2 name missing:\n{full}"
+    );
+    assert!(
+        full.contains("weekly-report"),
+        "card 3 name missing:\n{full}"
+    );
+    assert!(
+        full.contains("enabled"),
+        "enabled state in card title missing:\n{full}"
+    );
+    // The card-board paints bordered, rounded cards (the rounded corner glyph is
+    // the card-board signature).
+    assert!(full.contains('╭'), "rounded card borders missing:\n{full}");
     // The key hints sit next to the controls (keybinding-near-control).
     assert!(full.contains("[a]dd"), "missing [a]dd hint:\n{full}");
     assert!(full.contains("[r]un"), "missing [r]un hint:\n{full}");
@@ -129,14 +142,14 @@ fn render_three_autopilots_table() {
     );
     assert!(full.contains("[e]dit"), "missing [e]dit hint:\n{full}");
 
-    // NON-VACUOUS COLOUR CHECK: the selected row's `▶` marker is SELECTION_GREEN.
-    let green_marker = buf
+    // NON-VACUOUS COLOUR CHECK: the selected card carries the heavy clay border.
+    let heavy_in_clay = buf
         .cells
         .iter()
-        .any(|(_, cell)| cell.symbol == "▶" && cell.fg == Some(SELECTION_GREEN));
+        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
-        green_marker,
-        "the selected autopilot's `▶` marker must be painted in SELECTION_GREEN"
+        heavy_in_clay,
+        "the selected autopilot card must carry the heavy clay highlight border"
     );
 }
 

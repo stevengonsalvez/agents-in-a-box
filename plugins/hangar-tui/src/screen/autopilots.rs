@@ -44,6 +44,12 @@ pub struct AutopilotsState {
     runs: Vec<AutopilotRunRow>,
     /// The autopilot id `runs` belongs to (`None` until a history loads).
     runs_for: Option<String>,
+    /// First visible card index — the single board column's vertical scroll
+    /// offset (63l.6). A wheel-scroll over the list nudges it.
+    scroll_offset: usize,
+    /// The autopilot id the pointer is hovering over (63l.6), or `None` off every
+    /// card. The card-board render lifts the hovered card's border.
+    hovered_id: Option<String>,
 }
 
 impl AutopilotsState {
@@ -55,6 +61,8 @@ impl AutopilotsState {
             selected: 0,
             runs: Vec::new(),
             runs_for: None,
+            scroll_offset: 0,
+            hovered_id: None,
         }
     }
 
@@ -83,6 +91,86 @@ impl AutopilotsState {
         match (self.selected_autopilot(), &self.runs_for) {
             (Some(ap), Some(for_id)) if &ap.id == for_id => &self.runs,
             _ => &[],
+        }
+    }
+
+    /// Flatten the autopilots into a SINGLE card-board column (63l.6) the render
+    /// paints and the mouse layer hit-tests against. Autopilots are a flat list
+    /// (no status columns), so the board is one `Autopilots (N)` column of cards;
+    /// each card carries the autopilot name + cron + the enabled/disabled state and
+    /// last-run status in its title. The same geometry feeds the render and the
+    /// hit-map.
+    #[must_use]
+    pub fn board_columns(&self) -> Vec<crate::widgets::card_board::BoardColumn> {
+        use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip};
+        let cards = self
+            .autopilots
+            .iter()
+            .map(|ap| {
+                let last = ap.last_run_status.clone().unwrap_or_else(|| "never".into());
+                let state = if ap.enabled { "enabled" } else { "disabled" };
+                BoardCard {
+                    issue_id: ap.id.clone(),
+                    display_id: ap.name.clone(),
+                    title: format!("{} · {state} · last {last}", ap.cron_expr),
+                    priority: PriorityChip::from_priority(0),
+                    assignee_initial: ap.name.chars().next(),
+                }
+            })
+            .collect::<Vec<_>>();
+        vec![BoardColumn {
+            glyph: '◷',
+            name: "Autopilots".to_string(),
+            cards,
+            scroll_offset: self
+                .scroll_offset
+                .min(self.autopilots.len().saturating_sub(1)),
+        }]
+    }
+
+    /// The `(0, card)` slot the render draws with the heavy highlight border
+    /// (63l.6): the hovered card when the pointer is over one, else the keyboard
+    /// selection. `None` when the list is empty.
+    #[must_use]
+    pub fn highlight_board_card(&self) -> Option<(usize, usize)> {
+        if let Some(hover) = self.hovered_id.as_deref() {
+            if let Some(idx) = self.autopilots.iter().position(|a| a.id == hover) {
+                return Some((0, idx));
+            }
+        }
+        (!self.autopilots.is_empty()).then_some((0, self.selected))
+    }
+
+    /// Set (or clear) the hovered autopilot id (63l.6).
+    pub fn set_hover(&mut self, id: Option<String>) {
+        self.hovered_id = id;
+    }
+
+    /// The hovered autopilot id, if any (63l.6).
+    #[must_use]
+    pub fn hovered_id(&self) -> Option<&str> {
+        self.hovered_id.as_deref()
+    }
+
+    /// Scroll the single board column vertically by `delta` rows (63l.6),
+    /// saturating at `0` and capped at the last card. A wheel-scroll drives this.
+    pub fn scroll(&mut self, delta: i32) {
+        let next = if delta >= 0 {
+            self.scroll_offset
+                .saturating_add(delta.unsigned_abs() as usize)
+        } else {
+            self.scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize)
+        };
+        self.scroll_offset = next.min(self.autopilots.len().saturating_sub(1));
+    }
+
+    /// Move the list selection onto the autopilot carrying `id` (63l.6 mouse
+    /// click), so a pointer click lands the selection on the clicked card. A no-op
+    /// when no autopilot carries that id.
+    pub fn select_by_id(&mut self, id: &str) {
+        if let Some(idx) = self.autopilots.iter().position(|a| a.id == id) {
+            self.selected = idx;
         }
     }
 }
@@ -269,24 +357,18 @@ fn unchanged(state: &AutopilotsState) -> AutopilotsReduction {
 }
 
 // ---------------------------------------------------------------------------
-// Width-aware two-region render
+// Card-board upper region + run-history lower region (63l.6)
 // ---------------------------------------------------------------------------
-
-/// The fixed table column widths (NAME / CRON / NEXT TICK / LAST RUN / STATUS).
-/// The action-key hints sit to the right of the header row, beside the controls
-/// they affect (`feedback_keybinding_hints_near_control`).
-const NAME_W: u16 = 16;
-const CRON_W: u16 = 16;
-const NEXT_W: u16 = 14;
-const LAST_W: u16 = 14;
 
 /// Render the autopilot manager into `buf` between rows `top` and `bottom`.
 ///
-/// The upper region is the autopilot table (header + one row per autopilot with a
-/// `▶` selection marker + an enabled/disabled badge); the lower region (below a
-/// divider) is the run-history pane for the selected autopilot. The empty list
-/// shows the "No autopilots" help line. The action-key hints paint on the header
-/// row, right-aligned next to the controls they drive.
+/// The UPPER region renders the autopilots THROUGH the shared Linear-style
+/// card-board (63l.6) — a single `Autopilots (N)` column of bordered cards, each
+/// carrying the autopilot name (id line), its cron + enabled/disabled state +
+/// last-run status (title), with the hovered/selected card raised by the heavy
+/// clay border. The action-key hints paint on the header row. The LOWER region
+/// (below a divider) keeps the run-history pane for the selected autopilot. The
+/// empty list shows the "No autopilots" help line.
 pub fn render_autopilots(
     buf: &mut WireBuffer,
     area_w: u16,
@@ -294,21 +376,9 @@ pub fn render_autopilots(
     bottom: u16,
     state: &AutopilotsState,
 ) {
-    // Header row + action hints.
-    let header = format!(
-        "{:<nw$} {:<cw$} {:<xw$} {:<lw$} STATUS",
-        "NAME",
-        "CRON",
-        "NEXT TICK",
-        "LAST RUN",
-        nw = NAME_W as usize,
-        cw = CRON_W as usize,
-        xw = NEXT_W as usize,
-        lw = LAST_W as usize,
-    );
-    let header_end = u16::try_from(header.chars().count()).unwrap_or(0);
-    put_str(buf, 0, top, &header, MUTED_GRAY, area_w);
-    render_action_hints(buf, top, area_w, header_end);
+    // Action-key hints on the top row, right-aligned beside the controls they
+    // drive (`feedback_keybinding_hints_near_control`).
+    render_action_hints(buf, top, area_w);
 
     let body_top = top + 1;
 
@@ -324,23 +394,23 @@ pub fn render_autopilots(
         return;
     }
 
-    // The table occupies the upper half; the run-history pane the lower half,
-    // separated by a divider. Reserve at least 3 rows for the history pane.
+    // The card-board occupies the upper region; the run-history pane the lower
+    // region, separated by a divider. Reserve at least 4 rows for the history.
     let avail = bottom.saturating_sub(body_top);
-    let table_rows = (avail.saturating_sub(4))
-        .max(1)
-        .min(u16::try_from(state.autopilots.len()).unwrap_or(u16::MAX));
-    let mut row = body_top;
-    for (i, ap) in state.autopilots.iter().enumerate() {
-        if i >= table_rows as usize {
-            break;
-        }
-        render_row(buf, row, area_w, ap, i == state.selected);
-        row += 1;
-    }
+    let board_bottom = body_top.saturating_add(avail.saturating_sub(4).max(1));
+    let columns = state.board_columns();
+    let highlight = state.highlight_board_card();
+    let _ = crate::widgets::card_board::render_card_board(
+        buf,
+        area_w,
+        body_top,
+        board_bottom,
+        &columns,
+        highlight,
+    );
 
     // Divider + run-history pane.
-    let divider_row = row;
+    let divider_row = board_bottom;
     let label = state
         .selected_autopilot()
         .map_or_else(String::new, |ap| format!("─ Recent runs ({}) ", ap.name));
@@ -365,101 +435,17 @@ pub fn render_autopilots(
     }
 }
 
-/// Paint the action-key hints on the header row, right-aligned so each key sits
+/// Paint the action-key hints on the top row, right-aligned so each key sits
 /// beside the controls it drives (`feedback_keybinding_hints_near_control`).
-///
-/// Suppressed when the right-aligned hints would overlap the header text
-/// (`header_end`) — the table header always wins the column contest, so a narrow
-/// terminal drops the hint rather than clobbering `STATUS` (the footer still
-/// carries the same hints).
-fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16, header_end: u16) {
+/// Dropped on a terminal too narrow to hold them (the footer carries them too).
+fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
     const HINTS: &str = "[a]dd [r]un [d]isable [e]dit";
     let hint_w = u16::try_from(HINTS.chars().count()).unwrap_or(0);
     if hint_w >= area_w {
         return;
     }
     let start = area_w - hint_w;
-    // Keep a one-column gap after the header text; drop the hints if they'd
-    // collide with it.
-    if start <= header_end {
-        return;
-    }
     put_str(buf, start, row, HINTS, GOLD, area_w);
-}
-
-/// Render one autopilot table row with a `▶` marker on the selection and an
-/// enabled/disabled badge.
-fn render_row(buf: &mut WireBuffer, row: u16, area_w: u16, ap: &AutopilotRow, selected: bool) {
-    let marker = if selected { '▶' } else { ' ' };
-    let name_color = if selected {
-        SELECTION_GREEN
-    } else {
-        SOFT_WHITE
-    };
-
-    let next = ap
-        .next_tick_at
-        .map_or_else(|| "—".to_string(), |_| "scheduled".to_string());
-    let last = ap
-        .last_run_status
-        .clone()
-        .unwrap_or_else(|| "never".to_string());
-    let status = if ap.enabled { "enabled" } else { "disabled" };
-
-    // Marker + name in the selection colour; the rest in soft white.
-    let head = format!(
-        "{marker} {:<nw$}",
-        truncate(&ap.name, NAME_W as usize - 2),
-        nw = NAME_W as usize - 2
-    );
-    let mut x = put_str(buf, 0, row, &head, name_color, area_w);
-    x += 1;
-    x = put_str(
-        buf,
-        x,
-        row,
-        &format!(
-            "{:<cw$}",
-            truncate(&ap.cron_expr, CRON_W as usize),
-            cw = CRON_W as usize
-        ),
-        SOFT_WHITE,
-        area_w,
-    );
-    x += 1;
-    x = put_str(
-        buf,
-        x,
-        row,
-        &format!("{:<xw$}", next, xw = NEXT_W as usize),
-        SOFT_WHITE,
-        area_w,
-    );
-    x += 1;
-    let last_color = if last == "failed" || last == "skipped" {
-        WARN_RED
-    } else {
-        SOFT_WHITE
-    };
-    x = put_str(
-        buf,
-        x,
-        row,
-        &format!(
-            "{:<lw$}",
-            truncate(&last, LAST_W as usize),
-            lw = LAST_W as usize
-        ),
-        last_color,
-        area_w,
-    );
-    x += 1;
-    let status_color = if ap.enabled {
-        SELECTION_GREEN
-    } else {
-        MUTED_GRAY
-    };
-    put_str(buf, x, row, status, status_color, area_w);
 }
 
 /// Render one run-history line.
@@ -471,20 +457,6 @@ fn render_run(buf: &mut WireBuffer, row: u16, area_w: u16, run: &AutopilotRunRow
     };
     let line = format!("{}  {}", run.started_at, run.status);
     put_str(buf, 0, row, &line, color, area_w);
-}
-
-/// Truncate `s` to `max` chars with an ellipsis, char-safe (multi-byte aware).
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let take = max.saturating_sub(1);
-    let mut out: String = s.chars().take(take).collect();
-    out.push('…');
-    out
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
@@ -501,4 +473,98 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, area_w
         cx = cx.saturating_add(1);
     }
     cx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn autopilot(id: &str, name: &str, enabled: bool) -> AutopilotRow {
+        AutopilotRow {
+            id: id.into(),
+            workspace_id: "default".into(),
+            agent_id: "agent-1".into(),
+            name: name.into(),
+            cron_expr: "0 9 * * *".into(),
+            next_tick_at: Some(1),
+            enabled,
+            last_run_status: Some("completed".into()),
+            last_run_at: Some(1),
+        }
+    }
+
+    /// `board_columns` flattens the autopilots into a single card-board column
+    /// whose cards carry the name + cron + enabled/disabled state, so the screen
+    /// renders THROUGH the shared card-board (63l.6).
+    #[test]
+    fn board_columns_map_autopilots_to_a_single_column_of_cards() {
+        let state = AutopilotsState::new(vec![
+            autopilot("ap-1", "daily", true),
+            autopilot("ap-2", "nightly", false),
+        ]);
+        let cols = state.board_columns();
+        assert_eq!(cols.len(), 1, "autopilots are a single flat column");
+        assert_eq!(cols[0].name, "Autopilots");
+        assert_eq!(cols[0].cards.len(), 2);
+        assert_eq!(cols[0].cards[0].issue_id, "ap-1");
+        assert_eq!(cols[0].cards[0].display_id, "daily");
+        assert!(
+            cols[0].cards[0].title.contains("enabled"),
+            "the enabled autopilot's card title reads enabled: {:?}",
+            cols[0].cards[0].title
+        );
+        assert!(
+            cols[0].cards[1].title.contains("disabled"),
+            "the disabled autopilot's card title reads disabled: {:?}",
+            cols[0].cards[1].title
+        );
+    }
+
+    /// A hover overrides the selection for the card-board highlight; clearing it
+    /// falls back to the selection.
+    #[test]
+    fn highlight_resolves_hover_over_selection() {
+        let mut state = AutopilotsState::new(vec![
+            autopilot("ap-1", "a", true),
+            autopilot("ap-2", "b", true),
+        ]);
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+        state.set_hover(Some("ap-2".to_string()));
+        assert_eq!(state.highlight_board_card(), Some((0, 1)));
+        state.set_hover(None);
+        assert_eq!(state.highlight_board_card(), Some((0, 0)));
+    }
+
+    /// A wheel-scroll nudges the single column's offset, saturating at `0` and
+    /// capped at the last card.
+    #[test]
+    fn scroll_offsets_and_saturates() {
+        let aps: Vec<AutopilotRow> = (0..4)
+            .map(|i| autopilot(&format!("ap-{i}"), &format!("n{i}"), true))
+            .collect();
+        let mut state = AutopilotsState::new(aps);
+        state.scroll(1);
+        state.scroll(1);
+        assert_eq!(state.board_columns()[0].scroll_offset, 2);
+        state.scroll(-5);
+        assert_eq!(state.board_columns()[0].scroll_offset, 0);
+        for _ in 0..10 {
+            state.scroll(1);
+        }
+        assert_eq!(state.board_columns()[0].scroll_offset, 3);
+    }
+
+    /// A mouse click selects the clicked autopilot by id (a no-op for an unknown
+    /// id), so the run-history pane follows the click.
+    #[test]
+    fn select_by_id_moves_the_selection() {
+        let mut state = AutopilotsState::new(vec![
+            autopilot("ap-1", "a", true),
+            autopilot("ap-2", "b", true),
+        ]);
+        state.select_by_id("ap-2");
+        assert_eq!(state.selected_index(), 1);
+        state.select_by_id("ghost");
+        assert_eq!(state.selected_index(), 1, "an unknown id is a no-op");
+    }
 }
