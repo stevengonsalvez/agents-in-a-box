@@ -58,11 +58,14 @@ fn task_detail_opens_for_selected_issue() {
     // task-detail-only marker (the issue list has no such field), so its absence
     // proves we returned rather than the assignee VALUE (which legitimately shows
     // in the issue list's assignee column).
-    sess.send_key("1");
+    // Re-send the nav key until the issue list re-renders: a lone keypress can
+    // be dropped on a loaded CI runner.
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Todo (3)")
-        })
+        .switch_tab_until(
+            "1",
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains("Todo (3)"),
+        )
         .expect("issue list never returned from task detail");
     assert!(
         !back.contains("Project"),

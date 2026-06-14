@@ -24,11 +24,14 @@ fn settings_renders_sections() {
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
     let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
-    sess.send_key(",");
+    // Re-send the nav key until the screen switches: a lone keypress can be
+    // dropped on a loaded CI runner (the flake that reddened the Linux leg).
     let settings = sess
-        .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains("Daemon") && c.contains("Providers")
-        })
+        .switch_tab_until(
+            ",",
+            Instant::now() + Duration::from_secs(15 * common::budget_scale()),
+            |c| c.contains("Daemon") && c.contains("Providers"),
+        )
         .expect("settings never rendered");
 
     // POSITIVE: section headers + live socket basename. NEGATIVE: not the list.
@@ -49,12 +52,13 @@ fn settings_renders_sections() {
         "still on the issue list:\n{settings}"
     );
 
-    // Return navigation.
-    sess.send_key("1");
+    // Return navigation (re-send until the issue list re-renders).
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Refactor API")
-        })
+        .switch_tab_until(
+            "1",
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains("Refactor API"),
+        )
         .expect("issue list never returned from settings");
     assert!(
         !back.contains("Providers"),
