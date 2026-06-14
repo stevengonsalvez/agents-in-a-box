@@ -57,7 +57,7 @@ pub struct CostBucket {
 
 impl CostBucket {
     /// Total tokens across every category.
-    pub fn total_tokens(&self) -> u64 {
+    pub const fn total_tokens(&self) -> u64 {
         self.input_tokens
             + self.cache_creation_tokens
             + self.cache_read_tokens
@@ -67,7 +67,7 @@ impl CostBucket {
 
     /// Fold `other` into `self`, summing tokens/calls and adding cost when
     /// either side carries a priced value.
-    fn merge(&mut self, other: &CostBucket) {
+    fn merge(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
         self.cache_creation_tokens += other.cache_creation_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
@@ -87,21 +87,20 @@ impl CostBucket {
     }
 }
 
-/// Project rollup row. Only `name` + `path` matter here — they supply the
-/// project-name → cwd join. The `bucket` is intentionally not modelled (we
-/// derive project/group spend from the session rows instead), and serde
-/// ignores the extra key on the wire.
-#[derive(Debug, Clone, Deserialize)]
-struct ProjectRow {
-    name: String,
-    path: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct SessionRow {
     #[serde(default)]
     provider: String,
     project: String,
+    /// Raw working directory the session ran in — the cross-system join
+    /// key against the fleet `Session.cwd`. Burndown's `project` is the
+    /// sanitised name (folder basename for non-git, but the project
+    /// *rollup* is keyed on the resolved `owner/repo` slug); joining on
+    /// `name` therefore misses for every session in a git repo with a
+    /// remote. We join on this raw path instead. `#[serde(default)]` keeps
+    /// us tolerant of older burndown payloads that predate the field.
+    #[serde(default)]
+    project_path: String,
     session_id: String,
     bucket: CostBucket,
 }
@@ -120,8 +119,6 @@ pub struct UsageReportView {
     #[serde(default)]
     daily: Vec<(String, CostBucket)>,
     #[serde(default)]
-    projects: Vec<ProjectRow>,
-    #[serde(default)]
     sessions: Vec<SessionRow>,
     #[serde(default)]
     models: Vec<ModelRow>,
@@ -138,8 +135,9 @@ pub struct SessionCost {
     pub provider: String,
     /// Burndown project name (display label / aggregation key).
     pub project: String,
-    /// Working directory resolved via the project rollup, when known. This
-    /// is the cross-system join key to the fleet `Session`.
+    /// Raw working directory the session ran in (burndown's
+    /// `project_path`), when non-empty. This is the cross-system join key
+    /// to the fleet `Session.cwd`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// Workspace/group this session belongs to, resolved from the live
@@ -205,23 +203,28 @@ pub struct CostReport {
 /// the live fleet sessions, then evaluate budget caps.
 ///
 /// Pure — no I/O, no clock. `fleet_sessions` supplies the cwd→group join:
-/// a burndown session is attributed to a fleet group when its resolved cwd
-/// matches a fleet `Session.cwd`, using that session's `workspace_name`
-/// (falling back to the project name) as the group label.
+/// a burndown session is attributed to a fleet group when its raw
+/// `project_path` matches a fleet `Session.cwd`, using that session's
+/// `workspace_name` (falling back to the cwd basename) as the group label.
+///
+/// The join is keyed on the raw cwd, NOT the burndown project *name*: the
+/// project rollup is keyed on the resolved `owner/repo` slug while a
+/// session's name is the sanitised folder, so a name-based join misses for
+/// every session in a git repo with a remote. `project_path` is the same
+/// string on both sides (it's literally `ProviderCall.project_path`), so the
+/// join is exact.
 pub fn build_cost_report(
     view: &UsageReportView,
     fleet_sessions: &[Session],
     budget: &CostBudgetConfig,
 ) -> CostReport {
-    // project name -> cwd, from the project rollup (the only place cost
-    // data is tied to a path).
-    let project_cwd: BTreeMap<&str, &str> =
-        view.projects.iter().map(|p| (p.name.as_str(), p.path.as_str())).collect();
-
     // cwd -> group label, from the live fleet. workspace_name is the
     // group/workspace identity; fall back to the cwd basename when absent.
+    // Empty fleet cwds are skipped so they can't cross-join unrelated
+    // sessions whose path is also empty.
     let cwd_group: BTreeMap<&str, String> = fleet_sessions
         .iter()
+        .filter(|s| !s.cwd.is_empty())
         .map(|s| {
             let group =
                 s.workspace_name.clone().unwrap_or_else(|| cwd_basename(&s.cwd).to_string());
@@ -233,7 +236,14 @@ pub fn build_cost_report(
         .sessions
         .iter()
         .map(|row| {
-            let cwd = project_cwd.get(row.project.as_str()).map(|s| s.to_string());
+            // Treat an empty project_path as unjoinable: an empty cwd is
+            // never a meaningful path and would otherwise collide with any
+            // other empty-path session, fabricating a bogus group.
+            let cwd = if row.project_path.is_empty() {
+                None
+            } else {
+                Some(row.project_path.clone())
+            };
             let group = cwd.as_deref().and_then(|c| cwd_group.get(c).cloned());
             SessionCost {
                 session_id: row.session_id.clone(),
@@ -393,13 +403,12 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     let budget = AppConfig::load().unwrap_or_default().fleet.cost;
     let report = build_cost_report(&view, &fleet, &budget);
 
-    // Deliver an alert for every breach. Best-effort: a notifyd write
-    // failure must not fail the command (the report is still useful).
-    for breach in &report.budget_breaches {
-        if let Err(e) = budget_alert::emit(breach) {
-            eprintln!("warning: budget alert delivery failed: {e}");
-        }
-    }
+    // Deliver alerts, debounced so a standing breach doesn't re-page on
+    // every invocation: a breach only fires again when its spend crosses a
+    // new multiple of its cap (see `emit_debounced`). Best-effort — a
+    // notifyd write failure must not fail the command (the report is still
+    // useful).
+    budget_alert::emit_debounced(&report.budget_breaches);
 
     if matches!(format, OutputFormat::Text) {
         print_text(&report);
@@ -494,26 +503,18 @@ mod tests {
                 ("2026-06-13".to_string(), bucket(2.0, 100)),
                 ("2026-06-14".to_string(), bucket(4.0, 200)),
             ],
-            projects: vec![
-                ProjectRow {
-                    name: "alpha".to_string(),
-                    path: "/work/alpha".to_string(),
-                },
-                ProjectRow {
-                    name: "beta".to_string(),
-                    path: "/work/beta".to_string(),
-                },
-            ],
             sessions: vec![
                 SessionRow {
                     provider: "claude".to_string(),
                     project: "alpha".to_string(),
+                    project_path: "/work/alpha".to_string(),
                     session_id: "sess-a".to_string(),
                     bucket: bucket(4.0, 200),
                 },
                 SessionRow {
                     provider: "codex".to_string(),
                     project: "beta".to_string(),
+                    project_path: "/work/beta".to_string(),
                     session_id: "sess-b".to_string(),
                     bucket: bucket(2.0, 100),
                 },
@@ -597,11 +598,90 @@ mod tests {
         assert!(report.groups.is_empty());
     }
 
+    /// Regression for the production join bug: burndown keys its project
+    /// *rollup* on the resolved repo slug (`owner/repo`) while a session's
+    /// `project` is the sanitised folder basename (`repo`) — the two
+    /// diverge for every git repo with a remote. Joining on the name (the
+    /// old behaviour) therefore missed every such session, silently killing
+    /// group rollups + group budget caps in production. We now join on the
+    /// raw `project_path` instead; this fixture reproduces the divergent
+    /// shape and asserts cwd + group STILL resolve.
+    #[test]
+    fn session_resolves_cwd_and_group_when_name_diverges_from_repo_slug() {
+        let view = UsageReportView {
+            sessions: vec![SessionRow {
+                provider: "claude".to_string(),
+                // Sanitised basename — what a git-repo session carries.
+                project: "repo".to_string(),
+                // Raw cwd — matches the fleet Session.cwd exactly.
+                project_path: "/home/dev/code/repo".to_string(),
+                session_id: "sess-git".to_string(),
+                bucket: bucket(7.0, 300),
+            }],
+            ..UsageReportView::default()
+        };
+        // The fleet session lives at the same cwd; its workspace_name is
+        // the group label.
+        let fleet = vec![fleet_session("/home/dev/code/repo", "ws-repo")];
+        let report = build_cost_report(&view, &fleet, &CostBudgetConfig::default());
+
+        assert_eq!(
+            report.sessions[0].cwd.as_deref(),
+            Some("/home/dev/code/repo")
+        );
+        assert_eq!(
+            report.sessions[0].group.as_deref(),
+            Some("ws-repo"),
+            "group must resolve via project_path even when project name != repo slug"
+        );
+        assert_eq!(report.groups.len(), 1);
+        assert_eq!(report.groups[0].group, "ws-repo");
+        assert_eq!(report.groups[0].cost_usd, 7.0);
+
+        // And the group budget cap must fire (it was silently dead before).
+        let budget = CostBudgetConfig {
+            group_usd: Some(5.0),
+            ..CostBudgetConfig::default()
+        };
+        let report = build_cost_report(&view, &fleet, &budget);
+        let group_breach = report
+            .budget_breaches
+            .iter()
+            .find(|b| b.scope_label() == "group")
+            .expect("group breach must fire for divergent-name session");
+        assert_eq!(group_breach.subject, "ws-repo");
+        assert_eq!(group_breach.cost_usd, 7.0);
+    }
+
+    /// Fix #3: an empty `project_path` is unjoinable. It must map to
+    /// `cwd = None` and never collide with a fleet session whose cwd is
+    /// also empty, which would otherwise fabricate a bogus group.
+    #[test]
+    fn empty_project_path_is_unjoinable() {
+        let view = UsageReportView {
+            sessions: vec![SessionRow {
+                provider: "claude".to_string(),
+                project: String::new(),
+                project_path: String::new(),
+                session_id: "sess-empty".to_string(),
+                bucket: bucket(3.0, 100),
+            }],
+            ..UsageReportView::default()
+        };
+        // A fleet session with an empty cwd would have cross-joined under
+        // the old map; it must not now.
+        let fleet = vec![fleet_session("", "ws-bogus")];
+        let report = build_cost_report(&view, &fleet, &CostBudgetConfig::default());
+        assert!(report.sessions[0].cwd.is_none());
+        assert!(report.sessions[0].group.is_none());
+        assert!(report.groups.is_empty());
+    }
+
     #[test]
     fn two_sessions_in_one_group_sum_into_one_group_row() {
         let mut view = fixture_view();
-        // Point beta's session at alpha's project so both land in ws-alpha.
-        view.sessions[1].project = "alpha".to_string();
+        // Point beta's session at alpha's cwd so both land in ws-alpha.
+        view.sessions[1].project_path = "/work/alpha".to_string();
         let fleet = vec![fleet_session("/work/alpha", "ws-alpha")];
         let report = build_cost_report(&view, &fleet, &CostBudgetConfig::default());
         assert_eq!(report.groups.len(), 1);
@@ -629,7 +709,7 @@ mod tests {
     #[test]
     fn group_budget_breach_detected_when_cost_exceeds_cap() {
         let mut view = fixture_view();
-        view.sessions[1].project = "alpha".to_string();
+        view.sessions[1].project_path = "/work/alpha".to_string();
         let fleet = vec![fleet_session("/work/alpha", "ws-alpha")];
         let budget = CostBudgetConfig {
             group_usd: Some(5.0),
