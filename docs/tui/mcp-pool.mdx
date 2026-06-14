@@ -3,13 +3,29 @@ title: "Shared MCP pool"
 description: "ainb runs one MCP server process per server name, shared across every host session over a unix socket — so a swarm of Claude/Codex/Copilot sessions stops spawning a node/bun process per session per MCP. Configure with [mcp_pool], import from .mcp.json, install for other agent CLIs."
 ---
 
-import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Steps, Card, CardGrid, Aside } from '@astrojs/starlight/components';
 
 Every Claude Code session normally spawns its **own** node/bun process for each configured MCP server. Run a swarm of sessions and that multiplies into dozens of processes hogging CPU and RAM ([anthropics/claude-code#45880](https://github.com/anthropics/claude-code/issues/45880) reports kernel panics from 510 node processes). The **shared MCP pool** fixes this: a standalone `ainb mcp daemon` spawns each MCP server **once** behind a unix socket, and every session attaches through a tiny `ainb mcp proxy` stdio shim. N sessions, one backend process.
 
 ![ainb shared MCP pool — a project with only a .mcp.json (context7 via npx); ainb mcp import makes it poolable; the daemon starts; two independent sessions attach and both get real context7 tools; ainb mcp status shows clients: 2 sharing one child_pid; the process group proof shows a single shared context7 server for both sessions](../assets/screenshots/mcp-pool.gif)
 
 *Two sessions attach to a real context7 server and both receive its tools (`resolve-library-id`, `query-docs`). `ainb mcp status` reports `clients: 2` against one `child_pid` — a single shared process group. Without the pool, those two sessions would spawn two separate context7 servers.*
+
+<CardGrid>
+  <Card title="510 processes" icon="warning">
+    node procs that kernel-panicked a Mac — [claude-code#45880](https://github.com/anthropics/claude-code/issues/45880).
+  </Card>
+  <Card title="80% fewer" icon="approve-check">
+    processes measured by the community shared-proxy workaround (7 sessions × 5 servers).
+  </Card>
+  <Card title="11/11 green" icon="rocket">
+    live e2e assertions pass — `scripts/validate-mcp-pool.sh`.
+  </Card>
+</CardGrid>
+
+## The problem: MCP process explosion
+
+MCP's stdio transport is one-client-only by design — the client launches the server as a subprocess and owns its stdin/stdout pipe. So every session that wants a server spawns its own copy. Multiply by a swarm of worktree sessions and the math gets ugly fast: Anthropic issue `claude-code#45880` reports 15 sessions × 34 servers demanding up to 510 node processes — enough to trigger hardware-watchdog kernel panics. The community workaround (a shared HTTP proxy) measured an 80% process / 77% memory reduction. ainb bakes that win in natively, no extra runtime.
 
 ## Quick start
 
@@ -218,9 +234,44 @@ ainb mcp status
  session C ──stdio── ainb mcp proxy ──┘   (id-rewrite mux, init cache, refcount)
 ```
 
-The daemon multiplexes all clients onto the one child: it rewrites each session's JSON-RPC request ids so they never collide, answers every session's `initialize` from a cached copy of the backend's `InitializeResult` (the child sees exactly one initialize), and routes progress notifications back to the session that asked. When the last session detaches, the child is reaped after `idle_grace_secs`. If anything fails — daemon down, server not on PATH — the session silently falls back to spawning its own MCP, so a session never fails to start because of the pool.
+A tool call fans in: many stdio shims, one socket, one child.
 
-Host/tmux sessions only. Docker sessions keep their per-container MCP init.
+<Steps>
+
+1. **A session attaches.** At session create, `ainb run` ensures the daemon is up, then rewrites the worktree's `.mcp.json` so each pooled server's entry becomes the shim (`ainb mcp proxy <socket>`). When the agent launches that "server", it's really launching the shim — a line-framed stdio↔socket bridge with exponential-backoff reconnect, so a daemon blip recovers in seconds.
+
+2. **The daemon lazy-spawns the real server.** The first client to connect triggers the one-and-only spawn of the actual MCP command (e.g. `npx -y @upstash/context7-mcp`), in its own process group so npx/uvx grandchildren die with it. Restarts are rate-limited.
+
+3. **The mux multiplexes every client onto that one child.** Each client's JSON-RPC request `id` is rewritten to a mux-global counter so two sessions both opening at `id:1` never collide; the mapping is stored so responses can be addressed back.
+
+4. **Responses route to the right session.** The mux restores the original id and forwards the reply to only the owning session; progress notifications route by `progressToken`. When the last client detaches, a grace timer (`idle_grace_secs`) reaps the child.
+
+</Steps>
+
+If anything fails — daemon down, server not on PATH — the session silently falls back to spawning its own MCP, so a session never fails to start because of the pool. Host/tmux sessions only; Docker sessions keep their per-container MCP init.
+
+## The hard parts the mux had to solve
+
+A naive byte-pipe (the agent-deck approach this started from) leaks state across sessions. The ainb mux fixes the two worst cases so a shared server behaves correctly per-client.
+
+<Aside type="tip" title="Initialize cache">
+MCP servers expect exactly one `initialize` per process lifetime, but every session sends its own. The mux forwards the **first** one, caches the backend's `InitializeResult`, and answers every later session's `initialize` from that cache — the child sees one handshake, every client gets a valid reply with its own id. Errors aren't cached, so a failed handshake retries cleanly.
+</Aside>
+
+<Aside type="tip" title="progressToken routing">
+Progress notifications carry a token, not a request id. The mux records which session owns each token at call time and delivers progress to that session only — so session A's "50% done" doesn't broadcast to B and C.
+</Aside>
+
+<Aside type="caution" title="v1 limitations">
+Server-initiated requests (sampling, elicitation, roots) still broadcast — most pooled tool-servers don't use them. Stateful servers (browser/db bridges) should opt out of sharing with `shared = false` and keep spawning per-session, since env/credentials bake in at spawn and are shared by every attached session.
+</Aside>
+
+## Gotchas worth knowing
+
+- **Host/tmux sessions only.** Docker sessions keep their per-container MCP init — the pool doesn't touch that path.
+- **The daemon reads config at *its* cwd**, so sessions in other projects push their server definitions over the control socket (`register`) rather than relying on what the daemon saw at startup.
+- **Shared identity.** Env/credentials bake in at spawn and are shared by every attached session — fine for tool servers, a reason to set `shared = false` for anything per-user-authenticated.
+- **Failure never blocks a session.** Daemon down, server not on PATH, socket gone — the session silently falls back to spawning its own MCP, exactly like today.
 
 ## Commands
 
@@ -232,6 +283,36 @@ Host/tmux sessions only. Docker sessions keep their per-container MCP init.
 | `ainb mcp import [--user]` | Import stdio servers from `.mcp.json` / Claude user scope into config |
 | `ainb mcp install --codex --copilot` | Point other agent CLIs at the pool shim |
 | `ainb mcp proxy <socket>` | The stdio↔socket shim (used inside generated `.mcp.json`; you won't call it directly) |
+
+## FAQ
+
+<details>
+<summary>Does it work for any MCP, or just npm/npx?</summary>
+
+Any **stdio** server — npx, uvx, bun, a compiled binary, `docker run -i`. The mux speaks newline-delimited JSON-RPC over the child's stdio, which is identical regardless of runtime. Remote `http`/`sse` servers aren't pooled (there's no local process to share).
+
+</details>
+
+<details>
+<summary>What stops two sessions' requests from colliding?</summary>
+
+The mux rewrites every request id to a global counter and remembers which session owned the original id, so responses and progress route back to exactly one session. Claude Code always starts ids at 1 — that's the collision this prevents.
+
+</details>
+
+<details>
+<summary>How was "one process" actually proven?</summary>
+
+Two ways. The committed GIF drives real context7 with two shim attaches and reads `child_pid` + the process group. And `scripts/validate-mcp-pool.sh 3` spins up three real ainb Claude sessions and asserts one backend, three shims, a working tool call from every session, kill-one-survives resilience, and post-grace reaping — 11/11 green.
+
+</details>
+
+<details>
+<summary>What happens when a pooled server crashes mid-call?</summary>
+
+The daemon reaps the zombie and drops the clients; their shims reconnect with backoff while the health loop respawns the child (rate-limited). In-flight requests are lost and the agent retries — the same contract a per-session server gives you.
+
+</details>
 
 ## Verify it yourself
 
