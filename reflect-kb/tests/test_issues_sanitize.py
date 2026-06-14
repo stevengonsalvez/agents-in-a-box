@@ -138,6 +138,30 @@ def test_audit_flags_residual_suspicious_without_mutating():
     assert "possible_base64_blob" in kinds
 
 
+def test_audit_ignores_own_redaction_placeholders():
+    # The audit runs on ALREADY-redacted text. A fully-redacted env assignment
+    # like AWS_SECRET_ACCESS_KEY=<REDACTED:generic_secret> must NOT be re-flagged
+    # as a suspicious env_var_assignment (or base64 blob) — that noise would bury
+    # genuine residue. A line whose only "suspicious" content is the sanitizer's
+    # own placeholder produces zero audit findings.
+    res = sanitize("export AWS_SECRET_ACCESS_KEY=" + _BODY + "wJalrXUtnFEMI")
+    # Sanity: the value really was redacted to a placeholder.
+    assert "<REDACTED:generic_secret>" in res.text
+    # And the audit does not flag that placeholder line.
+    assert res.audit == []
+
+
+def test_audit_still_flags_genuine_residue_alongside_placeholders():
+    # Masking placeholders must not blind the audit to REAL residue on the same
+    # text: a redacted line plus a separate base64-ish blob still flags the blob.
+    blob = "Zm9vYmFyYmF6" * 5  # 60 chars base64-ish
+    res = sanitize("API_KEY=supersecretvalue12345\ndata: " + blob)
+    kinds = {f["kind"] for f in res.audit}
+    assert "possible_base64_blob" in kinds
+    # The redacted first line contributes no env_var_assignment noise.
+    assert all(f["line"] != 1 for f in res.audit)
+
+
 def test_secret_wins_over_hash_classification():
     # A GitHub token is also a long alphanumeric run; it must be redacted as a
     # token, never weakened to <REDACTED:hash>. Prefix assembled at runtime so
