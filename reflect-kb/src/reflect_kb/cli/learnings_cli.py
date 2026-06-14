@@ -760,9 +760,11 @@ def errors_append(severity, source, kind, message, context):
 # Register subcommand groups. Import here (after `cli` exists) to keep
 # circular-import risk at zero.
 from reflect_kb.cli.metrics_cli import metrics_group as _metrics_group  # noqa: E402
+from reflect_kb.cli.issues_cli import issues_group as _issues_group  # noqa: E402
 
 cli.add_command(_metrics_group)
 cli.add_command(errors_group)
+cli.add_command(_issues_group)
 
 
 if __name__ == "__main__":
