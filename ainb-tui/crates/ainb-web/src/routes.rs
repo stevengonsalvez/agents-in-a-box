@@ -55,17 +55,24 @@ pub struct AppState {
     /// Watch channel holding the latest cached snapshot. Handlers borrow it;
     /// SSE subscribers stream changes off it. Updated only by the poller.
     pub cache: watch::Sender<CachedSnapshot>,
+    /// A receiver kept alive for the whole server lifetime so the channel never
+    /// reports zero receivers. Without this, `watch::Sender::is_closed()` would
+    /// be `true` at startup (the SSE handler creates the only other receiver
+    /// lazily), and the background poller's shutdown guard would break on its
+    /// very first tick — freezing the cache as stale forever.
+    _cache_rx: watch::Receiver<CachedSnapshot>,
 }
 
 impl AppState {
     /// Build app state and spawn the background snapshot poller that maintains
     /// the cached snapshot every [`POLL_INTERVAL`].
     pub fn new(config: WebConfig, data: Arc<dyn DataSource>) -> Self {
-        let (tx, _rx) = watch::channel(None);
+        let (tx, rx) = watch::channel(None);
         let state = Self {
             config: Arc::new(config),
             data,
             cache: tx,
+            _cache_rx: rx,
         };
         state.spawn_poller();
         state
@@ -232,4 +239,88 @@ async fn events(
     });
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEPALIVE_INTERVAL).text("keepalive"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::{DataError, FleetSnapshot, SnapshotFuture};
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A data source whose snapshot fingerprint advances on every fetch, so we
+    /// can observe whether the background poller is actually refreshing the
+    /// cache over time.
+    struct FakeSource {
+        ticks: AtomicU64,
+    }
+
+    impl FakeSource {
+        fn new() -> Self {
+            Self {
+                ticks: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl DataSource for FakeSource {
+        fn snapshot(&self) -> SnapshotFuture<'_> {
+            Box::pin(async move {
+                let n = self.ticks.fetch_add(1, Ordering::SeqCst);
+                let sessions = json!([{ "tick": n }]);
+                let needs: Value = json!([]);
+                let cost = Value::Null;
+                let fingerprint =
+                    FleetSnapshot::compute_fingerprint(&sessions, &needs, &cost);
+                Ok::<_, DataError>(FleetSnapshot {
+                    sessions,
+                    needs,
+                    cost,
+                    fingerprint,
+                })
+            })
+        }
+    }
+
+    /// Regression: the background poller must keep refreshing the cache even
+    /// when no SSE client is ever connected. Previously the poller's
+    /// `is_closed()` guard tripped on tick #0 (AppState held only the Sender,
+    /// the seed Receiver was dropped), so the cache froze stale forever.
+    #[tokio::test(start_paused = true)]
+    async fn poller_refreshes_cache_without_any_sse_client() {
+        let config = WebConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: None,
+            insecure_bind: false,
+            read_only: true,
+        };
+        let state = AppState::new(config, Arc::new(FakeSource::new()));
+
+        // Let the poller run its first tick (fires immediately) and land an
+        // initial snapshot.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        let first = state
+            .cached()
+            .expect("poller should have seeded the cache on its first tick");
+        let first_tick = first.sessions[0]["tick"].clone();
+
+        // Advance well past the poll interval with NO SSE subscriber alive.
+        // If the `is_closed()` guard were still tripping, the cache would never
+        // change here.
+        tokio::time::advance(POLL_INTERVAL * 3).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let later = state
+            .cached()
+            .expect("cache must still be populated after later polls");
+        let later_tick = later.sessions[0]["tick"].clone();
+
+        assert_ne!(
+            first_tick, later_tick,
+            "background poller must refresh the cached snapshot over time even \
+             with no SSE client connected"
+        );
+    }
 }
