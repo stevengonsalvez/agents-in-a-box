@@ -99,11 +99,14 @@ fn autopilots_screen_renders_seeded_autopilot() {
         "seeded autopilot cron {AUTOPILOT_CRON:?} missing from the manager:\n{pane}"
     );
 
-    // POSITIVE: the table header rendered (the manager chrome, not just a stray
-    // row), so a match is a real autopilot table and not incidental text.
+    // POSITIVE: the manager body chrome rendered (not just a stray row), so a
+    // match is the real Autopilots manager and not incidental text. 63l.6
+    // replaced the NAME/CRON table with the card-board + a per-autopilot
+    // run-history pane (`─ Recent runs (<name>) ─`); that pane header is
+    // autopilots-body-specific (absent from the persistent tab strip).
     assert!(
-        pane.contains("NAME") && pane.contains("CRON"),
-        "the autopilot table header (NAME / CRON) is missing:\n{pane}"
+        pane.contains("Recent runs"),
+        "the autopilots manager body chrome (run-history pane) is missing:\n{pane}"
     );
 
     // NEGATIVE: no longer on the issue-list landing (the `5` switch happened).
