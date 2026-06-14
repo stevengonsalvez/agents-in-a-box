@@ -1,0 +1,271 @@
+"""End-to-end orchestration of ``reflect issues``.
+
+Wires the modules together::
+
+    gather (manifest)  →  distill (per transcript, ~30x, no LLM)
+        →  analyze (one bounded LLM call, gated on Claude auth)
+        →  sanitize EVERY candidate (regex, conservative)
+        →  dedupe (in-batch / local ledger / gh issue list)
+        →  file via `gh issue create`   [skipped under dry_run]
+
+Safety invariants enforced here (not left to callers):
+
+* The distilled timelines are sanitized BEFORE the analyzer sees them, and
+  every candidate's title+body are sanitized AGAIN before it can be printed
+  (dry-run) or filed. Nothing un-sanitized ever leaves :func:`run_issues`.
+* ``dry_run=True`` never invokes ``gh issue create`` — it prints the exact
+  bodies that WOULD be filed and returns.
+* Filing appends to the atomic ``filed_issues.json`` ledger so a second run
+  files zero duplicates even with ``gh`` offline.
+
+The ``gh`` and ``claude`` calls are injected (``gh_runner`` / ``analyze_fn``)
+so the whole flow is testable without a network or a model.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from reflect_kb.issues import analyze as analyze_mod
+from reflect_kb.issues import dedupe as dedupe_mod
+from reflect_kb.issues import manifest as manifest_mod
+from reflect_kb.issues.dedupe import CandidateIssue, DedupeDecision
+from reflect_kb.issues.distill import distill_text
+from reflect_kb.issues.sanitize import sanitize
+
+Runner = Callable[..., subprocess.CompletedProcess]
+AnalyzeFn = Callable[[list[str]], tuple[list[CandidateIssue], str]]
+
+
+@dataclass
+class FiledIssue:
+    title: str
+    fingerprint: str
+    gh_issue_number: Optional[int] = None
+    gh_url: Optional[str] = None
+
+
+@dataclass
+class IssuesRunResult:
+    """Summary of one ``reflect issues`` run."""
+
+    dry_run: bool
+    transcripts_seen: int = 0
+    transcripts_distilled: int = 0
+    analyze_reason: str = ""
+    candidates: int = 0
+    filed: list[FiledIssue] = field(default_factory=list)
+    skipped: list[DedupeDecision] = field(default_factory=list)
+    previews: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def filed_count(self) -> int:
+        return len(self.filed)
+
+
+def _default_gh_runner(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _sanitize_candidate(cand: CandidateIssue, maps: Optional[dict[str, str]]) -> CandidateIssue:
+    """Return a copy of ``cand`` with title+body sanitized for publication."""
+    s_title = sanitize(cand.title, maps=maps).text.strip()
+    s_body = sanitize(cand.body, maps=maps).text
+    return CandidateIssue(
+        title=s_title or cand.title,
+        body=s_body,
+        labels=list(cand.labels),
+        source_citation=cand.source_citation,
+    )
+
+
+def _filter_labels(
+    labels: list[str],
+    repo: Optional[str],
+    gh_runner: Runner,
+) -> list[str]:
+    """Drop labels that don't exist in the target repo.
+
+    Passing an unknown label to ``gh issue create`` fails the whole create
+    atomically (a real agent-deck footgun). We fetch the repo's label set and
+    keep only the intersection. On any error we return ``[]`` rather than risk
+    a hard failure.
+    """
+    if not labels:
+        return []
+    cmd = ["gh", "label", "list"]
+    if repo:
+        cmd += ["-R", repo]
+    cmd += ["--limit", "200", "--json", "name"]
+    try:
+        res = gh_runner(cmd)
+        import json as _json
+
+        valid = {str(r.get("name", "")) for r in _json.loads(res.stdout or "[]")}
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, ValueError):
+        return []
+    return [lab for lab in labels if lab in valid]
+
+
+_ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$")
+
+
+def _file_one(
+    cand: CandidateIssue,
+    repo: Optional[str],
+    gh_runner: Runner,
+) -> FiledIssue:
+    """Create one GitHub issue via ``gh issue create``. Caller has already
+    sanitized + deduped ``cand``."""
+    labels = _filter_labels(cand.labels, repo, gh_runner)
+    cmd = ["gh", "issue", "create"]
+    if repo:
+        cmd += ["-R", repo]
+    cmd += ["--title", cand.title, "--body", cand.body]
+    if labels:
+        cmd += ["--label", ",".join(labels)]
+    res = gh_runner(cmd)
+    url = (getattr(res, "stdout", "") or "").strip().splitlines()
+    gh_url = next((ln.strip() for ln in url if ln.strip().startswith("https://")), None)
+    number = None
+    if gh_url:
+        m = _ISSUE_URL_RE.search(gh_url)
+        if m:
+            number = int(m.group(1))
+    return FiledIssue(
+        title=cand.title,
+        fingerprint=cand.fingerprint,
+        gh_issue_number=number,
+        gh_url=gh_url,
+    )
+
+
+def _render_preview(cand: CandidateIssue) -> str:
+    labels = f" [{', '.join(cand.labels)}]" if cand.labels else ""
+    return f"### {cand.title}{labels}\n{cand.body}\n"
+
+
+def run_issues(
+    *,
+    repo: Optional[str] = None,
+    limit: int = 20,
+    dry_run: bool = False,
+    maps: Optional[dict[str, str]] = None,
+    model: str = "sonnet",
+    queue: Optional[Path] = None,
+    ledger_path: Optional[Path] = None,
+    analyze_fn: Optional[AnalyzeFn] = None,
+    gh_runner: Optional[Runner] = None,
+    fetch_titles: Optional[Callable[[], list[str]]] = None,
+) -> IssuesRunResult:
+    """Run the transcripts → issues pipeline once.
+
+    Args:
+        repo: ``owner/name`` for ``gh`` (defaults to the cwd's repo).
+        limit: max transcripts to pull from the queue.
+        dry_run: print bodies that WOULD be filed; never call ``gh``.
+        maps: caller-supplied sanitizer substitutions.
+        model: model passed to the analyzer.
+        queue / ledger_path: override state locations (tests).
+        analyze_fn / gh_runner / fetch_titles: injected for tests; default to
+            the real :mod:`reflect_kb.issues.analyze` / ``gh`` calls.
+
+    Returns:
+        An :class:`IssuesRunResult`.
+    """
+    result = IssuesRunResult(dry_run=dry_run)
+    gh_run = gh_runner or _default_gh_runner
+
+    # 1. Gather recent transcripts from the existing reflect queue.
+    refs = manifest_mod.gather_transcripts(queue=queue, limit=limit)
+    result.transcripts_seen = len(refs)
+    if not refs:
+        result.notes.append(
+            "no transcripts in the reflect queue (~/.reflect/pending_reflections.jsonl)"
+        )
+        return result
+
+    # 2. Distill each transcript and sanitize the timeline before the model.
+    timelines: list[str] = []
+    for ref in refs:
+        try:
+            raw = ref.transcript_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        markdown, stats = distill_text(raw)
+        if stats.kept_total == 0:
+            continue
+        safe_timeline = sanitize(markdown, maps=maps).text
+        timelines.append(safe_timeline)
+        result.transcripts_distilled += 1
+
+    if not timelines:
+        result.notes.append("transcripts distilled to zero signal; nothing to analyze")
+        return result
+
+    # 3. Analyze → candidate issues (gated on Claude auth; degrades to []).
+    if analyze_fn is not None:
+        candidates, reason = analyze_fn(timelines)
+    else:
+        candidates, reason = analyze_mod.analyze(timelines, model=model)
+    result.analyze_reason = reason
+    result.candidates = len(candidates)
+    if not candidates:
+        result.notes.append(f"analyzer produced no candidates (reason: {reason})")
+        return result
+
+    # 4. Sanitize EVERY candidate again (defence in depth) before it can leave.
+    safe_candidates = [_sanitize_candidate(c, maps) for c in candidates]
+
+    # 5. Dedupe: in-batch → local ledger → existing GitHub issues.
+    ledger = dedupe_mod.load_ledger(ledger_path)
+    if fetch_titles is not None:
+        existing = fetch_titles()
+    elif dry_run:
+        # Dry-run still consults gh for an accurate preview of what's new, but
+        # tolerates gh being absent.
+        existing = dedupe_mod.fetch_existing_titles(repo, runner=gh_run)
+    else:
+        existing = dedupe_mod.fetch_existing_titles(repo, runner=gh_run)
+
+    decisions = dedupe_mod.partition_candidates(
+        safe_candidates, ledger=ledger, existing_titles=existing
+    )
+    keepers = [d.candidate for d in decisions if d.keep]
+    result.skipped = [d for d in decisions if not d.keep]
+
+    # 6. File (or preview).
+    if dry_run:
+        for cand in keepers:
+            result.previews.append(_render_preview(cand))
+        result.notes.append(
+            f"dry-run: {len(keepers)} issue(s) WOULD be filed, "
+            f"{len(result.skipped)} skipped as duplicates"
+        )
+        return result
+
+    filed_any = False
+    for cand in keepers:
+        try:
+            filed = _file_one(cand, repo, gh_run)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            result.notes.append(f"gh issue create failed for '{cand.title}': {exc}")
+            continue
+        result.filed.append(filed)
+        dedupe_mod.record_filed(
+            ledger,
+            cand,
+            gh_issue_number=filed.gh_issue_number,
+            gh_url=filed.gh_url,
+        )
+        filed_any = True
+
+    if filed_any:
+        dedupe_mod.save_ledger(ledger, ledger_path)
+
+    return result
