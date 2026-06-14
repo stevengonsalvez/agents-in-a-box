@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from ainb_phone_bridge.ainb_client import (
     _assistant_text_from_row,
@@ -249,19 +250,17 @@ def test_send_keys_leading_dash_payload(monkeypatch):
 # --- wait_for_reply follows transcript rotation ---------------------------
 
 
-def _end_turn_blob(text: str) -> str:
-    return (
-        json.dumps(
-            {
-                "type": "assistant",
-                "message": {
-                    "stop_reason": "end_turn",
-                    "content": [{"type": "text", "text": text}],
-                },
-            }
-        )
-        + "\n"
-    )
+def _end_turn_blob(text: str, timestamp: str | None = None) -> str:
+    row: dict = {
+        "type": "assistant",
+        "message": {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+    if timestamp is not None:
+        row["timestamp"] = timestamp
+    return json.dumps(row) + "\n"
 
 
 def test_wait_for_reply_follows_rotated_transcript(tmp_path, monkeypatch):
@@ -293,3 +292,49 @@ def test_wait_for_reply_follows_rotated_transcript(tmp_path, monkeypatch):
 
     reply = wait_for_reply("/cwd", start_offset=0, transcript=old, timeout=5.0, poll_interval=0.01)
     assert reply == "rotated"
+
+
+def test_wait_for_reply_rejects_pre_send_backlog_after_rotation(tmp_path, monkeypatch):
+    """A rotated file carrying a PRE-send end_turn must not surface as the reply.
+
+    Regression: switching to a newer transcript reset the offset to 0 and the
+    whole file was re-scanned, so a rolled-up pre-send end_turn (resume /
+    compaction backlog) was returned as a STALE answer. With the send-time
+    guard, only the post-send end_turn is accepted.
+    """
+    import ainb_phone_bridge.ainb_client as client
+
+    old = tmp_path / "old.jsonl"
+    new = tmp_path / "new.jsonl"
+    old.write_text("", encoding="utf-8")
+
+    # The new file ALREADY contains a pre-send end_turn (rolled-up history). The
+    # post-send reply is appended only once polling starts.
+    new.write_text(_end_turn_blob("STALE backlog", timestamp="2020-01-01T00:00:00Z"))
+
+    send_time = datetime(2021, 1, 1, tzinfo=UTC).timestamp()
+
+    resolutions = iter([old, new, new])
+
+    def fake_latest(_cwd):
+        try:
+            return next(resolutions)
+        except StopIteration:
+            return new
+
+    def append_fresh(_s):
+        with new.open("a", encoding="utf-8") as fh:
+            fh.write(_end_turn_blob("fresh reply", timestamp="2021-06-14T12:00:00Z"))
+
+    monkeypatch.setattr(client, "latest_transcript_for_cwd", fake_latest)
+    monkeypatch.setattr(client.time, "sleep", append_fresh)
+
+    reply = wait_for_reply(
+        "/cwd",
+        start_offset=0,
+        transcript=old,
+        timeout=5.0,
+        poll_interval=0.01,
+        send_time=send_time,
+    )
+    assert reply == "fresh reply"

@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .routing import TargetSession, is_conductor_name
@@ -152,6 +153,28 @@ def send_keys(tmux_session: str, text: str) -> bool:
 _WS_RE = re.compile(r"\s+")
 
 
+def _row_timestamp(obj: dict) -> float | None:
+    """Parse a row's top-level ISO-8601 ``timestamp`` to epoch seconds, or ``None``.
+
+    Claude writes each JSONL row with a ``timestamp`` like
+    ``"2025-06-14T12:34:56.789Z"``. We compare it against the wall-clock send time
+    so backlog rows (a resume/compaction rotation rolls prior history — including
+    pre-send ``end_turn`` rows — into a new file) are never mistaken for the reply.
+    """
+    ts = obj.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    # ``fromisoformat`` accepts the ``+00:00`` offset but not a trailing ``Z``.
+    normalized = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
 def _assistant_text_from_row(obj: dict) -> tuple[str | None, str | None]:
     """Return ``(stop_reason, text)`` for an assistant row, else ``(None, None)``.
 
@@ -179,12 +202,22 @@ def _assistant_text_from_row(obj: dict) -> tuple[str | None, str | None]:
     return (stop_reason if isinstance(stop_reason, str) else None), (text or None)
 
 
-def _scan_new_rows_for_turn_end(path: Path, start_offset: int) -> tuple[int, str | None]:
+def _scan_new_rows_for_turn_end(
+    path: Path, start_offset: int, min_timestamp: float | None = None
+) -> tuple[int, str | None]:
     """Scan rows from ``start_offset``; return ``(new_offset, reply_text|None)``.
 
     ``reply_text`` is set only when an assistant row with
     ``stop_reason == "end_turn"`` is found in the new region. The last such
     turn wins (the most recent complete answer).
+
+    When ``min_timestamp`` (epoch seconds) is given, only rows whose JSONL
+    ``timestamp`` is strictly AFTER it are accepted. This rejects pre-send
+    backlog: a resume/compaction rotation rolls prior history — including
+    pre-send ``end_turn`` rows — into a new file, and offset-reset scanning
+    would otherwise return that stale answer as the reply. A row without a
+    parseable timestamp is also rejected once a guard is active, since it
+    cannot be proven to post-date the send.
 
     Only COMPLETE (newline-terminated) lines are consumed. A trailing partial
     write (no terminating ``\n`` yet) is left for the next poll: the returned
@@ -221,6 +254,11 @@ def _scan_new_rows_for_turn_end(path: Path, start_offset: int) -> tuple[int, str
             continue
         stop_reason, text = _assistant_text_from_row(obj)
         if stop_reason == "end_turn" and text:
+            if min_timestamp is not None:
+                row_ts = _row_timestamp(obj)
+                if row_ts is None or row_ts <= min_timestamp:
+                    # Backlog (or unprovable) row — predates the send, skip it.
+                    continue
             reply = text
     return new_offset, reply
 
@@ -241,6 +279,7 @@ def wait_for_reply(
     transcript: Path | None,
     timeout: float,
     poll_interval: float = 0.5,
+    send_time: float | None = None,
 ) -> str | None:
     """Poll the transcript for the next end-of-turn assistant reply.
 
@@ -249,7 +288,13 @@ def wait_for_reply(
     to a NEW ``*.jsonl`` mid-turn (resume / compaction), so on every poll we
     re-resolve the latest transcript: if it differs from the one we are reading,
     we switch to it and reset the offset to 0 so the end-of-turn row in the new
-    file is not missed. Returns the reply text or ``None`` on timeout.
+    file is not missed.
+
+    ``send_time`` (epoch seconds, captured by the caller right before the send) is
+    the backlog guard: only rows whose JSONL ``timestamp`` post-dates it count as
+    the reply. Without it, an offset-reset on rotation would surface a rolled-up
+    PRE-send ``end_turn`` (carried into the new file by resume/compaction) as the
+    answer. Returns the reply text or ``None`` on timeout.
     """
     deadline = time.monotonic() + timeout
     offset = start_offset
@@ -262,7 +307,7 @@ def wait_for_reply(
             path = latest
             offset = 0
         if path is not None:
-            offset, reply = _scan_new_rows_for_turn_end(path, offset)
+            offset, reply = _scan_new_rows_for_turn_end(path, offset, send_time)
             if reply is not None:
                 return reply
         time.sleep(poll_interval)
@@ -276,6 +321,8 @@ def send_and_capture(session: TargetSession, text: str, timeout: float) -> str |
     """
     transcript = latest_transcript_for_cwd(session.cwd)
     offset = current_offset(transcript)
+    # Wall-clock watermark: the reply must be a turn that ends AFTER this instant.
+    send_time = time.time()
     if not send_keys(session.tmux_session, text):
         return None
-    return wait_for_reply(session.cwd, offset, transcript, timeout)
+    return wait_for_reply(session.cwd, offset, transcript, timeout, send_time=send_time)

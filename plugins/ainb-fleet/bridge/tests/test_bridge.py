@@ -66,7 +66,9 @@ def _handler(config, monkeypatch, reply_text):
 
             return deco
 
-    monkeypatch.setattr(bridge, "Dispatcher", lambda: _FakeDispatcher())
+    # raising=False: when aiogram is absent bridge.Dispatcher doesn't exist, and
+    # the suite must still run without the optional dependency.
+    monkeypatch.setattr(bridge, "Dispatcher", lambda: _FakeDispatcher(), raising=False)
     # ParseMode is referenced in the handler; provide a stand-in if aiogram is
     # absent so the test runs without the optional dependency.
     if not bridge.HAS_AIOGRAM:
