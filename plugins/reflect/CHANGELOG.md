@@ -4,6 +4,25 @@ All notable changes to the **reflect** plugin. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [Unreleased]
+
+### Added
+- **`reflect issues` mode** (reflect-kb CLI) — distill recent session
+  transcripts into privacy-sanitized, deduplicated GitHub issues. A new mode
+  inside the existing `/reflect` ecosystem: it reuses the
+  `~/.reflect/pending_reflections.jsonl` queue and `REFLECT_STATE_DIR` (no
+  parallel DB/queue). Ports agent-deck's distill + privacy-sanitizer +
+  gh-dedupe logic onto reflect-kb's Python style.
+  - `reflect issues run [--dry-run] [--repo OWNER/NAME] [--limit N] [--model M]
+    [--map KEY=VALUE]` — `--dry-run` prints the exact issue bodies that *would*
+    be filed without calling `gh`; re-running files zero duplicates.
+  - `reflect issues ledger` / `reflect issues queue` — inspect the idempotency
+    ledger and the transcripts that would be analyzed.
+  - **GitHub-publish safety:** every distilled timeline and every candidate
+    issue passes through a conservative secrets/PII sanitizer before anything
+    leaves the machine; the analyzer degrades gracefully without Claude auth.
+- **`[issues]` config block** in `reflect.toml` (`repo`, `limit`, `model`).
+
 ## [4.0.0] — 2026-05-31 — Cost rearchitecture
 
 Major bump for the drain cost rearchitecture (W1–W5). Triggered by an incident:

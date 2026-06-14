@@ -77,8 +77,66 @@ reflect timeline --explain TOK
 | &nbsp;&nbsp;↳ [`reflect metrics stats`](docs/usage.md#reflect-metrics-stats) | Aggregate the recall-metrics JSONL log: total events, hit rate, p50/p95 latency, top tags |
 | `reflect errors` | Triage the error sink (`~/.reflect/errors.json`): `count` (un-acked, drives the statusline badge), `ack [ids…]`, `append`. Lets callers use the installed binary instead of bare `python3 -m reflect_kb.errors`. |
 | [`reflect timeline`](docs/usage.md#reflect-timeline) | Drill down on statusline dashboard rows (REC/MEM/ING/DRN/TOK/ERR/COM/AGT) |
+| `reflect issues` | Command group: distill recent transcripts into privacy-sanitized, deduplicated GitHub issues (subcommands below) |
+| &nbsp;&nbsp;↳ `reflect issues run` | Run the transcripts→issues pipeline. `--dry-run` prints the exact bodies that *would* be filed without calling `gh`; `--repo`, `--limit`, `--model`, `--map KEY=VALUE` |
+| &nbsp;&nbsp;↳ `reflect issues ledger` | Show issues already filed by this mode (the idempotency ledger) |
+| &nbsp;&nbsp;↳ `reflect issues queue` | List the recent transcripts `run` would analyze (the reflect queue) |
 
 See [docs/usage.md](docs/usage.md) for per-subcommand synopsis, all flags, examples, and common errors.
+
+### `reflect issues` — transcripts → GitHub issues
+
+A self-improvement mode that turns recurring friction, bugs, and capability
+gaps from your recent agent sessions into triaged GitHub issues — **without
+standing up a separate tool**. It is a new mode inside the existing `/reflect`
+ecosystem: it reads the same `~/.reflect/pending_reflections.jsonl` queue the
+Stop/PreCompact hooks already populate, and stores its idempotency ledger under
+`REFLECT_STATE_DIR` (default `~/.reflect/filed_issues.json`). No parallel
+database or queue is introduced.
+
+Pipeline:
+
+```
+queue → distill (~30× compression, no LLM)
+      → analyze (one bounded `claude -p` call; gated on Claude auth)
+      → sanitize (conservative privacy regex — see below)
+      → dedupe (in-batch · local ledger · gh issue list)
+      → gh issue create        [skipped entirely under --dry-run]
+```
+
+```bash
+# Always preview first — prints the exact, sanitized issue bodies, no gh calls:
+reflect issues run --dry-run
+
+# File for real against the cwd's repo (or pass --repo owner/name):
+reflect issues run
+
+# Re-running is idempotent: the local ledger + gh-title dedupe file zero
+# duplicates the second time.
+reflect issues run            # files 0 new issues if nothing changed
+
+reflect issues ledger         # what has been filed
+```
+
+**GitHub-publish safety model.** Filing an issue publishes content to an
+external service, so the posture is deliberately conservative — over-redact
+rather than under-redact. Every distilled timeline is sanitized *before* the
+analyzer sees it, and every candidate's title + body are sanitized *again*
+before they can be printed (dry-run) or filed. The sanitizer strips, in order:
+
+1. caller-supplied `--map KEY=VALUE` substitutions (business/project names);
+2. **secrets** (highest priority): Anthropic / OpenAI / GitHub / Slack / AWS /
+   Telegram tokens, JWTs, PEM private-key blocks, and generic
+   `KEY=<12+ char value>` assignments;
+3. emails, IPv4 addresses;
+4. home paths (`/Users/<u>` → `/Users/<user>`), `/tmp` and worktree paths;
+5. full UUIDs and long (≥20 char) hex strings.
+
+A non-mutating audit pass flags anything that still *looks* suspicious
+(base64-ish blobs, residual hex, env-var assignments, phone-shaped numbers,
+private IP ranges). The analyzer step degrades gracefully when no Claude auth
+context is present (it returns no candidates with a clear reason rather than
+failing). Filing is the *only* code path that calls `gh issue create`.
 
 ## Architecture
 
@@ -126,6 +184,12 @@ separate git repo (private; content not code).
 
 ## What's new in 0.1.1
 
+- **`reflect issues` mode** — distill recent session transcripts into
+  privacy-sanitized, deduplicated GitHub issues, reusing the existing reflect
+  queue and state dir (no parallel pipeline). `reflect issues run --dry-run`
+  previews the exact bodies without calling `gh`; re-running files zero
+  duplicates. See [`reflect issues` — transcripts → GitHub issues](#reflect-issues--transcripts--github-issues)
+  for the GitHub-publish safety model.
 - **`--force` flag on `reflect add`** — non-interactive overwrite for ingest pipelines and subprocess
   contexts where `click.confirm` cannot read a TTY. Without `--force`, non-TTY stdin now fails loudly
   rather than silently dropping the file.

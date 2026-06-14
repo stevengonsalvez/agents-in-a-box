@@ -358,6 +358,39 @@ Most users don't need to touch any of these. Power users adjust:
 - `recall.max_results` (default 3) — how many learnings get injected per session
 - `recall.confidence_threshold` (default 0.6) — minimum hybrid score for inclusion
 - `ingest.batch_size` — for bulk-importing large memory archives
+- `issues.repo` / `issues.limit` / `issues.model` — defaults for the
+  [`reflect issues`](#reflect-issues--transcripts--github-issues) mode (target
+  repo, transcripts per run, analyzer model)
+
+---
+
+## `reflect issues` — transcripts → GitHub issues
+
+Beyond capturing learnings, reflect can turn the **recurring friction, bugs, and
+capability gaps** in your recent sessions into triaged GitHub issues — reusing
+the same queue and state dir, not a separate tool.
+
+It reads the existing `~/.reflect/pending_reflections.jsonl` queue (the same one
+the Stop/PreCompact hooks populate), distills each transcript ~30× with no LLM,
+asks one bounded `claude -p` call for actionable findings, **privacy-sanitizes**
+every candidate, deduplicates against your already-filed issues and the repo's
+open issues, then files via `gh issue create`.
+
+```bash
+reflect issues run --dry-run      # preview exact, sanitized bodies; no gh calls
+reflect issues run                # file against the cwd's repo (idempotent)
+reflect issues ledger             # what has been filed
+```
+
+**Safety model.** Publishing an issue sends content off-machine, so sanitization
+is conservative (over-redact > under-redact) and runs *twice* — once on the
+distilled timeline before the model sees it, once on each candidate before it
+can be printed or filed. It strips secrets (Anthropic/OpenAI/GitHub/Slack/AWS/
+Telegram tokens, JWTs, PEM keys, generic `KEY=value`), emails, IPs, home/tmp/
+worktree paths, UUIDs, and long hex; a non-mutating audit flags anything still
+suspicious. The analyzer degrades gracefully without Claude auth, `--dry-run`
+never calls `gh`, and re-running files zero duplicates. Full detail in the
+[CLI README](../../reflect-kb/README.md#reflect-issues--transcripts--github-issues).
 
 ---
 
