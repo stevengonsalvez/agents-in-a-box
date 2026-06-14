@@ -52,6 +52,15 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "<REDACTED:anthropic_key>", "anthropic_key"),
     (re.compile(r"sk-proj-[A-Za-z0-9_\-]{20,}"), "<REDACTED:openai_key>", "openai_key"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "<REDACTED:openai_key>", "openai_key"),
+    # Fine-grained GitHub PATs (github_pat_<22>_<59>) must precede the classic
+    # gh[posru]_ rule — the underscore mid-body and the ``i`` after ``gh`` make
+    # them invisible to that pattern, so a bare token would otherwise pass
+    # through unredacted into a published issue.
+    (
+        re.compile(r"github_pat_[A-Za-z0-9_]{50,}"),
+        "<REDACTED:github_token>",
+        "github_token",
+    ),
     (re.compile(r"gh[posru]_[A-Za-z0-9]{20,}"), "<REDACTED:github_token>", "github_token"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"), "<REDACTED:slack_token>", "slack_token"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<REDACTED:aws_key>", "aws_key"),

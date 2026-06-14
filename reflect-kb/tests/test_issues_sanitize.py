@@ -146,3 +146,14 @@ def test_secret_wins_over_hash_classification():
     out = sanitize(token).text
     assert "<REDACTED:github_token>" in out
     assert "<REDACTED:hash>" not in out
+
+
+def test_fine_grained_github_pat_is_redacted():
+    # Fine-grained PATs (github_pat_<22>_<59>) are NOT matched by the classic
+    # gh[posru]_ rule (underscore mid-body, ``i`` after ``gh``) — a dedicated
+    # pattern must catch them or a live credential leaks into a published
+    # issue. Prefix assembled at runtime so no verbatim token lands in source.
+    token = "github" + "_pat_" + "1" * 22 + "_" + "b" * 59
+    out = sanitize(token).text
+    assert token not in out
+    assert "<REDACTED:github_token>" in out
