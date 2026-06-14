@@ -37,3 +37,5 @@ tempfile = { workspace = true }
 # `util` brings ServiceExt::oneshot for driving the router in route tests.
 tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
+# `test-util` brings tokio::time::{pause,advance} for deterministic poller tests.
+tokio = { workspace = true, features = ["test-util"] }

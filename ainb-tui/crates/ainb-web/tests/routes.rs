@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use ainb_web::data::{DataError, DataSource, FleetSnapshot, SnapshotFuture};
+use ainb_web::data::{
+    CoreFuture, CoreSnapshot, CostFuture, DataError, DataSource, FleetSnapshot, SnapshotFuture,
+};
 use ainb_web::{AppState, WebConfig, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -17,32 +19,39 @@ use tower::ServiceExt;
 /// Deterministic data source returning a fixed snapshot — no subprocess.
 struct FakeSource;
 
+impl FakeSource {
+    fn fixed_core() -> CoreSnapshot {
+        let sessions = json!([
+            {
+                "session_id": "abc",
+                "tmux_session_name": "tmux_demo",
+                "workspace_name": "demo",
+                "worktree_path": "/tmp/demo",
+                "created_at": "2026-06-14T00:00:00Z",
+                "is_running": true,
+                "claude_active": true
+            }
+        ]);
+        let needs = json!([
+            { "kind": "ASK", "context": { "question": "pick option 2" }, "session": { "cwd": "/tmp/demo" } }
+        ]);
+        CoreSnapshot { sessions, needs }
+    }
+}
+
 impl DataSource for FakeSource {
     fn snapshot(&self) -> SnapshotFuture<'_> {
         Box::pin(async {
-            let sessions = json!([
-                {
-                    "session_id": "abc",
-                    "tmux_session_name": "tmux_demo",
-                    "workspace_name": "demo",
-                    "worktree_path": "/tmp/demo",
-                    "created_at": "2026-06-14T00:00:00Z",
-                    "is_running": true,
-                    "claude_active": true
-                }
-            ]);
-            let needs = json!([
-                { "kind": "ASK", "context": { "question": "pick option 2" }, "session": { "cwd": "/tmp/demo" } }
-            ]);
-            let cost = Value::Null;
-            let fingerprint = FleetSnapshot::compute_fingerprint(&sessions, &needs, &cost);
-            Ok::<_, DataError>(FleetSnapshot {
-                sessions,
-                needs,
-                cost,
-                fingerprint,
-            })
+            Ok::<_, DataError>(FleetSnapshot::from_parts(Self::fixed_core(), Value::Null))
         })
+    }
+
+    fn core(&self) -> CoreFuture<'_> {
+        Box::pin(async { Ok::<_, DataError>(Self::fixed_core()) })
+    }
+
+    fn cost(&self) -> CostFuture<'_> {
+        Box::pin(async { Value::Null })
     }
 }
 
