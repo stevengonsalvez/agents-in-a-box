@@ -115,6 +115,19 @@ impl IssueColumn {
     }
 }
 
+/// The status glyph painted before a card-board column's name (63l.2): a small
+/// progress-arc family mirroring Linear's status icons — empty for backlog,
+/// filling through in-progress / in-review, solid for done.
+const fn column_glyph(column: IssueColumn) -> char {
+    match column {
+        IssueColumn::Backlog => '☰',
+        IssueColumn::Todo => '○',
+        IssueColumn::InProgress => '◔',
+        IssueColumn::InReview => '◑',
+        IssueColumn::Done => '●',
+    }
+}
+
 /// The filter chips that narrow which rows are visible (UX §1).
 ///
 /// `Members` / `Agents` filter by assignee actor kind; `Mine` is a placeholder
@@ -321,6 +334,46 @@ impl IssueListState {
     #[must_use]
     pub fn column_count(&self, column: IssueColumn) -> usize {
         self.rows_in_column(column).count()
+    }
+
+    /// Flatten the visible rows into the five card-board columns (63l.2) the
+    /// mouse layer hit-tests against. Each canonical [`IssueColumn`] becomes a
+    /// [`BoardColumn`](crate::widgets::card_board::BoardColumn) of
+    /// [`BoardCard`](crate::widgets::card_board::BoardCard)s, in left-to-right
+    /// order, carrying the per-card data a card paints (id, display id, title,
+    /// priority chip, assignee initial). The per-column scroll offset is `0` here
+    /// — the scroll model lands with the visible board swap (63l.4); this
+    /// adapter exists so `handle_mouse` can build a hit-map from the SAME board
+    /// geometry the render will paint.
+    #[must_use]
+    pub fn board_columns(&self) -> Vec<crate::widgets::card_board::BoardColumn> {
+        use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip};
+        IssueColumn::all()
+            .into_iter()
+            .map(|column| {
+                let cards =
+                    self.rows_in_column(column)
+                        .map(|r| BoardCard {
+                            issue_id: r.id.as_str().to_string(),
+                            display_id: r
+                                .display_id
+                                .clone()
+                                .unwrap_or_else(|| r.id.as_str().to_string()),
+                            title: r.title.clone(),
+                            priority: PriorityChip::from_priority(r.priority),
+                            assignee_initial: r.assignee.as_deref().and_then(|a| {
+                                a.split_once(':').map_or(a, |(_, id)| id).chars().next()
+                            }),
+                        })
+                        .collect();
+                BoardColumn {
+                    glyph: column_glyph(column),
+                    name: column.label().to_string(),
+                    cards,
+                    scroll_offset: 0,
+                }
+            })
+            .collect()
     }
 
     /// The currently selected visible row, if any.
