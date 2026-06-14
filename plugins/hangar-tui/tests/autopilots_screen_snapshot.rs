@@ -153,6 +153,34 @@ fn render_three_autopilots_as_card_board() {
     );
 }
 
+/// 63l.7 — the Autopilots board render golden: the single `Autopilots (N)`
+/// card-board column of bordered cards, pinned with an `insta` glyph snapshot so
+/// a regression to a bare table — or a dropped card / name / state — fails here.
+/// Paired with the explicit content + colour assertions in
+/// [`render_three_autopilots_as_card_board`] (this golden is the structural pin;
+/// that test is the cell-content proof).
+#[test]
+fn render_autopilots_board_snapshot() {
+    let state = AutopilotsState::new(three_autopilots());
+    // A tall board so all three 6-row cards fit above the run-history pane.
+    let mut buf = WireBuffer::new(120, 28);
+    render_autopilots(&mut buf, 120, 0, 28, &state);
+    let full = glyph_map(&buf, 120);
+
+    insta::assert_snapshot!(full);
+
+    // Non-vacuous backstop: the golden carries the card-board column header, every
+    // autopilot card name, and the rounded-card signature.
+    assert!(
+        full.contains("Autopilots (3)"),
+        "card-board header:\n{full}"
+    );
+    for name in ["daily-triage", "nightly-clean", "weekly-report"] {
+        assert!(full.contains(name), "card {name} missing:\n{full}");
+    }
+    assert!(full.contains('╭'), "rounded card borders:\n{full}");
+}
+
 /// Loading the selected autopilot's runs renders them in the lower history pane.
 #[test]
 fn render_run_history_below_selection() {
