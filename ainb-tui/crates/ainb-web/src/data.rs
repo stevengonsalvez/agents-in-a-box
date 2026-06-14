@@ -17,6 +17,23 @@ use serde_json::Value;
 pub type SnapshotFuture<'a> =
     Pin<Box<dyn Future<Output = Result<FleetSnapshot, DataError>> + Send + 'a>>;
 
+/// The sessions + needs pair fetched on the fast poll cadence (cost excluded).
+/// Returned by [`DataSource::core`].
+#[derive(Debug, Clone)]
+pub struct CoreSnapshot {
+    /// `ainb --format json list` — the live session list.
+    pub sessions: Value,
+    /// `ainb --format json fleet needs` — ASK/ERR/IDLE/WAIT cards.
+    pub needs: Value,
+}
+
+/// A `'static` boxed future, the return shape of [`DataSource::core`].
+pub type CoreFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CoreSnapshot, DataError>> + Send + 'a>>;
+
+/// A `'static` boxed future, the return shape of [`DataSource::cost`].
+pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
+
 /// A snapshot of everything the dashboard renders, as opaque JSON values
 /// proxied straight from the underlying `ainb` commands. Keeping these as
 /// [`Value`] (rather than re-deriving the CLI's structs) means new fields the
@@ -38,6 +55,21 @@ pub struct FleetSnapshot {
 }
 
 impl FleetSnapshot {
+    /// Assemble a full snapshot from a fast-cadence [`CoreSnapshot`] and a
+    /// (possibly stale) cost value, recomputing the fingerprint. Used by the
+    /// poller to stitch fresh sessions/needs onto the last-known cost on ticks
+    /// that skip the slow cost fetch.
+    #[must_use]
+    pub fn from_parts(core: CoreSnapshot, cost: Value) -> Self {
+        let fingerprint = Self::compute_fingerprint(&core.sessions, &core.needs, &cost);
+        Self {
+            sessions: core.sessions,
+            needs: core.needs,
+            cost,
+            fingerprint,
+        }
+    }
+
     /// Compute a stable fingerprint over the rendered payload. Two snapshots
     /// with identical sessions/needs/cost hash equal, so the SSE stream only
     /// emits on real change.
@@ -76,9 +108,26 @@ pub enum DataError {
 
 /// Produces [`FleetSnapshot`]s on demand. Implemented by [`AinbCliSource`] in
 /// production and by a fake in tests. Object-safe via boxed futures.
+///
+/// The poller fetches [`core`](DataSource::core) (sessions + needs) on the fast
+/// cadence and [`cost`](DataSource::cost) on a slower one, because
+/// `ainb fleet cost` cold-boots the burndown plugin runtime per call and cost
+/// data rolls up slowly. [`snapshot`](DataSource::snapshot) composes both for
+/// the cold-cache fallback path.
 pub trait DataSource: Send + Sync + 'static {
-    /// Build a fresh snapshot of the current fleet state.
+    /// Build a fresh full snapshot of the current fleet state (sessions, needs,
+    /// and cost). Used only on a cold cache before the poller's first tick.
     fn snapshot(&self) -> SnapshotFuture<'_>;
+
+    /// Fetch only the fast-cadence surfaces (sessions + needs). These are cheap
+    /// relative to cost and need ~2s freshness, so the poller refreshes them on
+    /// every tick.
+    fn core(&self) -> CoreFuture<'_>;
+
+    /// Fetch the slow-cadence cost rollup, best-effort: any failure or absent
+    /// verb resolves to [`Value::Null`] so the dashboard degrades gracefully.
+    /// The poller calls this only every Nth tick.
+    fn cost(&self) -> CostFuture<'_>;
 }
 
 /// Production data source: shells out to the `ainb` binary with
@@ -164,16 +213,27 @@ impl DataSource for AinbCliSource {
     fn snapshot(&self) -> SnapshotFuture<'_> {
         Box::pin(async move {
             // Required surfaces fail loudly; cost is best-effort.
+            let core = self.core().await?;
+            let cost = self.cost().await;
+            Ok(FleetSnapshot::from_parts(core, cost))
+        })
+    }
+
+    fn core(&self) -> CoreFuture<'_> {
+        Box::pin(async move {
+            // Required surfaces fail loudly.
             let sessions = self.run_json(&["list"], false).await?;
             let needs = self.run_json(&["fleet", "needs"], false).await?;
-            let cost = self.run_json(&["fleet", "cost"], true).await?;
-            let fingerprint = FleetSnapshot::compute_fingerprint(&sessions, &needs, &cost);
-            Ok(FleetSnapshot {
-                sessions,
-                needs,
-                cost,
-                fingerprint,
-            })
+            Ok(CoreSnapshot { sessions, needs })
+        })
+    }
+
+    fn cost(&self) -> CostFuture<'_> {
+        Box::pin(async move {
+            // Cost is best-effort: `run_json(.., allow_absent=true)` already
+            // resolves spawn errors / non-zero exits to `Value::Null`, so any
+            // residual error here also degrades to `Null` rather than failing.
+            self.run_json(&["fleet", "cost"], true).await.unwrap_or(Value::Null)
         })
     }
 }
