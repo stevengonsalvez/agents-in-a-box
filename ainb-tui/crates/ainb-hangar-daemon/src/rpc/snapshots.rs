@@ -40,10 +40,25 @@ use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
 /// snapshot carries the whole board. `IssueRepo` lists by `(workspace, state)`,
-/// so the snapshot unions the canonical states; an issue in an unknown state is
-/// still surfaced by the catch-all `"open"`-style buckets the plugin groups
-/// under Todo.
-const ISSUE_STATES: &[&str] = &["open", "todo", "in_progress", "done", "closed"];
+/// so the snapshot unions the FIVE canonical states (the
+/// [`IssueLifecycle`](ainb_hangar_proto::lifecycle::IssueLifecycle) vocabulary
+/// the board buckets through) plus the legacy `open` / `closed` tokens, which
+/// `issue_create` and the Beads inbound sync may still write until they adopt the
+/// canonical vocabulary. The legacy tokens still bucket forward via
+/// `IssueLifecycle::for_state` (`open -> Todo`, `closed -> Done`), so a row in
+/// either vocabulary lands in a real column; querying both ensures no row is
+/// missed by the per-state union. A `tests` assertion pins this list to a
+/// superset of `IssueLifecycle::ALL` so a new canonical status can never be added
+/// without the snapshot querying it.
+const ISSUE_STATES: &[&str] = &[
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "done",
+    "open",
+    "closed",
+];
 
 /// Snapshot every issue in `workspace_id`, mapped to wire [`IssueRow`]s.
 ///
@@ -1354,6 +1369,32 @@ pub enum AutopilotFireError {
     /// The fire/enqueue transaction failed (agent deleted, FK violation).
     #[error(transparent)]
     Fire(#[from] FireError),
+}
+
+#[cfg(test)]
+mod issue_states_contract_tests {
+    use super::ISSUE_STATES;
+    use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+    /// The snapshot's per-state query union covers every canonical lifecycle
+    /// status — so the single source of truth (`IssueLifecycle`) can never gain a
+    /// status the board silently fails to query (63l.3). The legacy `open` /
+    /// `closed` tokens are an additive tolerance on top.
+    #[test]
+    fn issue_states_is_a_superset_of_every_canonical_status() {
+        for status in IssueLifecycle::ALL {
+            assert!(
+                ISSUE_STATES.contains(&status.as_str()),
+                "ISSUE_STATES must query the canonical status {:?} ({})",
+                status,
+                status.as_str()
+            );
+        }
+        // The transition-period legacy tokens are queried too, so a not-yet-
+        // remapped row is never missed.
+        assert!(ISSUE_STATES.contains(&"open"), "legacy open queried");
+        assert!(ISSUE_STATES.contains(&"closed"), "legacy closed queried");
+    }
 }
 
 #[cfg(test)]
