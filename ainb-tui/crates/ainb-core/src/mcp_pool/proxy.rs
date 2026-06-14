@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
@@ -22,6 +22,11 @@ const MIN_RESTART_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RESTARTS_PER_MINUTE: usize = 3;
 const MAX_CUMULATIVE_FAILURES: usize = 10;
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Hard cap on a single JSON-RPC line. MCP payloads can be large (context7
+/// returns whole docs; agent-deck used 10 MB), but a line with no newline must
+/// not grow the shared daemon's memory without bound — that's a local DoS
+/// across every session. Over-cap → the connection is closed.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Live status snapshot, shared with the daemon's control socket.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -98,19 +103,16 @@ pub async fn run_server_proxy(
     let mut disabled = false;
     let mut spawn_count: u64 = 0;
 
-    let update_status = |clients: usize, pid: Option<u32>, state: &str, spawns: u64| {
-        let status = status.clone();
-        let name = server.name.clone();
-        let socket = socket_path.display().to_string();
-        let state = state.to_string();
-        tokio::spawn(async move {
-            status.lock().await.insert(
-                name.clone(),
-                ServerStatus { name, socket, clients, child_pid: pid, state, spawn_count: spawns },
-            );
-        });
-    };
-    update_status(0, None, "idle", 0);
+    let socket_str = socket_path.display().to_string();
+    // Status is written inline (awaited) rather than from a detached task, so
+    // a later logical state (e.g. "idle" after reap) can never be overwritten
+    // by an earlier-issued "running" task that happened to run later.
+    macro_rules! set_status {
+        ($clients:expr, $pid:expr, $state:expr) => {
+            write_status(&status, &server.name, &socket_str, $clients, $pid, $state, spawn_count).await
+        };
+    }
+    set_status!(0, None, "idle");
 
     loop {
         let idle_sleep = async {
@@ -138,14 +140,20 @@ pub async fn run_server_proxy(
                         kill_child(handle).await;
                         mux.reset_for_child_restart();
                     }
-                    update_status(0, None, "idle", spawn_count);
+                    set_status!(0, None, "idle");
                 }
             }
             event = rx.recv() => {
                 let Some(event) = event else { return Ok(()) };
                 match event {
                     Event::ClientConnected(stream) => {
-                        if disabled || clients.len() >= MAX_CLIENTS {
+                        if disabled {
+                            tracing::warn!("mcp_pool[{}]: refusing client — server disabled after repeated failures", server.name);
+                            drop(stream); // shim sees EOF → bounded reconnect then gives up
+                            continue;
+                        }
+                        if clients.len() >= MAX_CLIENTS {
+                            tracing::warn!("mcp_pool[{}]: refusing client — at MAX_CLIENTS ({MAX_CLIENTS})", server.name);
                             drop(stream);
                             continue;
                         }
@@ -157,10 +165,10 @@ pub async fn run_server_proxy(
                                     child = Some(handle);
                                 }
                                 Err(e) => {
-                                    tracing::warn!("mcp_pool[{}]: spawn refused: {e}", server.name);
+                                    tracing::warn!("mcp_pool[{}]: spawn refused ({} client(s) waiting): {e}", server.name, clients.len());
                                     if failures >= MAX_CUMULATIVE_FAILURES {
                                         disabled = true;
-                                        update_status(clients.len(), None, "disabled", spawn_count);
+                                        set_status!(clients.len(), None, "disabled");
                                     }
                                     drop(stream);
                                     continue;
@@ -173,11 +181,20 @@ pub async fn run_server_proxy(
                         let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
                         clients.insert(id, write_tx);
                         spawn_client_io(id, stream, tx.clone(), write_rx);
-                        update_status(clients.len(), child.as_ref().map(|c| c.process.id().unwrap_or(0)), "running", spawn_count);
+                        set_status!(clients.len(), child_pid(&child), "running");
                     }
                     Event::ClientLine(id, line) => {
+                        let mut child_write_failed = false;
                         for outcome in mux.on_client_line(id, &line) {
-                            apply_outcome(outcome, &mut child, &clients).await;
+                            if !apply_outcome(outcome, &mut child, &clients).await {
+                                child_write_failed = true;
+                            }
+                        }
+                        // A failed write to the child's stdin means it died
+                        // before ChildExited was processed. Trigger the reset
+                        // path so clients reconnect instead of hanging.
+                        if child_write_failed {
+                            let _ = tx.send(Event::ChildExited);
                         }
                     }
                     Event::ClientGone(id) => {
@@ -186,11 +203,17 @@ pub async fn run_server_proxy(
                         if clients.is_empty() && child.is_some() {
                             idle_deadline = Some(Instant::now() + idle_grace);
                         }
-                        update_status(clients.len(), child.as_ref().map(|c| c.process.id().unwrap_or(0)), if clients.is_empty() { "grace" } else { "running" }, spawn_count);
+                        set_status!(clients.len(), child_pid(&child), if clients.is_empty() { "grace" } else { "running" });
                     }
                     Event::ChildLine(line) => {
+                        let mut child_write_failed = false;
                         for outcome in mux.on_child_line(&line) {
-                            apply_outcome(outcome, &mut child, &clients).await;
+                            if !apply_outcome(outcome, &mut child, &clients).await {
+                                child_write_failed = true;
+                            }
+                        }
+                        if child_write_failed {
+                            let _ = tx.send(Event::ChildExited);
                         }
                     }
                     Event::ChildExited => {
@@ -207,7 +230,7 @@ pub async fn run_server_proxy(
                         if failures >= MAX_CUMULATIVE_FAILURES {
                             disabled = true;
                         }
-                        update_status(0, None, if disabled { "disabled" } else { "failed" }, spawn_count);
+                        set_status!(0, None, if disabled { "disabled" } else { "failed" });
                     }
                 }
             }
@@ -215,29 +238,100 @@ pub async fn run_server_proxy(
     }
 }
 
+/// Current child pid for status reporting, `None` if no child (avoids the
+/// confusing `0` a fallback would report).
+fn child_pid(child: &Option<ChildHandle>) -> Option<u32> {
+    child.as_ref().and_then(|c| c.process.id())
+}
+
+async fn write_status(
+    status: &StatusMap,
+    name: &str,
+    socket: &str,
+    clients: usize,
+    pid: Option<u32>,
+    state: &str,
+    spawns: u64,
+) {
+    status.lock().await.insert(
+        name.to_string(),
+        ServerStatus {
+            name: name.to_string(),
+            socket: socket.to_string(),
+            clients,
+            child_pid: pid,
+            state: state.to_string(),
+            spawn_count: spawns,
+        },
+    );
+}
+
+/// Returns `false` only when a write to the child's stdin failed — the signal
+/// the caller uses to drive the crash-reset path. Client/broadcast send
+/// failures are benign (a disconnected client is cleaned up via ClientGone).
 async fn apply_outcome(
     outcome: Outcome,
     child: &mut Option<ChildHandle>,
     clients: &HashMap<ClientId, mpsc::UnboundedSender<String>>,
-) {
+) -> bool {
     match outcome {
-        Outcome::ToChild(line) => {
-            if let Some(handle) = child {
-                let _ = handle.stdin.write_all(line.as_bytes()).await;
-                let _ = handle.stdin.write_all(b"\n").await;
+        Outcome::ToChild(line) => match child {
+            // A write error means the child's stdin pipe is broken — it died
+            // before ChildExited was processed. Report failure so the caller
+            // fires the reset path; the in-flight request is lost and the
+            // client retries (same contract as a per-session server).
+            Some(handle) => {
+                handle.stdin.write_all(line.as_bytes()).await.is_ok()
+                    && handle.stdin.write_all(b"\n").await.is_ok()
             }
-        }
+            // Already post-reset (child reaped). Benign no-op — the reset
+            // already ran; don't re-fire ChildExited and inflate `failures`.
+            None => true,
+        },
         Outcome::ToClient(id, line) => {
             if let Some(tx) = clients.get(&id) {
                 let _ = tx.send(line);
             }
+            true
         }
         Outcome::Broadcast(line) => {
             for tx in clients.values() {
                 let _ = tx.send(line.clone());
             }
+            true
         }
     }
+}
+
+/// Read one newline-delimited line with a hard size cap. A `take` adapter
+/// bounds each line to `MAX_LINE_BYTES + 1`, so an unterminated giant line
+/// can never balloon the shared daemon's memory. Returns `None` on EOF, read
+/// error, or over-cap (the caller closes the stream in all three cases).
+async fn read_capped_line<R>(reader: &mut R, who: &str) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut buf: Vec<u8> = Vec::new();
+    let n = reader
+        .take(MAX_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await
+        .ok()?;
+    if n == 0 {
+        return None; // EOF
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop(); // normal newline-terminated line
+    } else if buf.len() > MAX_LINE_BYTES {
+        // Hit the cap with no newline → over-long; close the stream.
+        tracing::warn!(
+            "mcp_pool: {who} sent a line over {MAX_LINE_BYTES} bytes with no newline — closing"
+        );
+        return None;
+    }
+    // else: a final, unterminated line at EOF — yield it as-is.
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn spawn_client_io(
@@ -251,8 +345,8 @@ fn spawn_client_io(
     {
         let events = events.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(read_half).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(read_half);
+            while let Some(line) = read_capped_line(&mut reader, "client").await {
                 if events.send(Event::ClientLine(id, line)).is_err() {
                     return;
                 }
@@ -320,8 +414,8 @@ fn try_spawn(
     {
         let events = events.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Some(line) = read_capped_line(&mut reader, "mcp child").await {
                 if events.send(Event::ChildLine(line)).is_err() {
                     return;
                 }
@@ -348,11 +442,26 @@ fn child_stderr_log(name: &str) -> std::process::Stdio {
         .map_or_else(std::process::Stdio::null, std::process::Stdio::from)
 }
 
-/// SIGTERM the process group, wait up to KILL_GRACE, then SIGKILL the group.
-/// Signals go via /bin/kill (the workspace forbids unsafe, so no libc::kill);
-/// `--` lets it accept the negative (process-group) pid.
+/// Reap the child and its process group. Signals go via `/bin/kill` (the
+/// workspace forbids `unsafe`, so no `libc::kill`); `--` lets it accept the
+/// negative (process-group) pid.
+///
+/// pgid == the child's pid (set via `process_group(0)`). While any group
+/// member is alive the kernel won't recycle that pid, so signaling the group
+/// is safe. The recycle race only exists once the group is fully empty — so
+/// we `try_wait` first: if the direct child is already dead we still TERM the
+/// group **once** to sweep any lingering npx/uvx grandchildren, but skip the
+/// wait+KILL escalation (the leader is gone; escalating would be the most
+/// likely moment to signal a recycled pid).
 async fn kill_child(mut handle: ChildHandle) {
+    let already_exited = matches!(handle.process.try_wait(), Ok(Some(_)));
+
     signal_group(handle.pgid, "TERM").await;
+
+    if already_exited {
+        // Leader reaped by try_wait; one best-effort group TERM is enough.
+        return;
+    }
     let waited = tokio::time::timeout(KILL_GRACE, handle.process.wait()).await;
     if waited.is_err() {
         signal_group(handle.pgid, "KILL").await;
@@ -365,4 +474,46 @@ async fn signal_group(pgid: i32, sig: &str) {
         .args([format!("-{sig}"), "--".to_string(), format!("-{pgid}")])
         .output()
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn capped_reader_splits_lines_and_strips_newline() {
+        let mut r = BufReader::new(Cursor::new(b"first\nsecond\n".to_vec()));
+        assert_eq!(read_capped_line(&mut r, "t").await.as_deref(), Some("first"));
+        assert_eq!(read_capped_line(&mut r, "t").await.as_deref(), Some("second"));
+        assert_eq!(read_capped_line(&mut r, "t").await, None); // EOF
+    }
+
+    #[tokio::test]
+    async fn capped_reader_yields_unterminated_final_line() {
+        let mut r = BufReader::new(Cursor::new(b"only-line-no-newline".to_vec()));
+        assert_eq!(
+            read_capped_line(&mut r, "t").await.as_deref(),
+            Some("only-line-no-newline")
+        );
+        assert_eq!(read_capped_line(&mut r, "t").await, None);
+    }
+
+    #[tokio::test]
+    async fn capped_reader_closes_on_oversize_line() {
+        // One byte over the cap, no newline → treated as over-long → None.
+        let huge = vec![b'x'; MAX_LINE_BYTES + 1];
+        let mut r = BufReader::new(Cursor::new(huge));
+        assert_eq!(read_capped_line(&mut r, "t").await, None);
+    }
+
+    #[tokio::test]
+    async fn capped_reader_accepts_line_at_the_limit() {
+        // Exactly MAX_LINE_BYTES of content + newline must still parse.
+        let mut data = vec![b'a'; MAX_LINE_BYTES];
+        data.push(b'\n');
+        let mut r = BufReader::new(Cursor::new(data));
+        let line = read_capped_line(&mut r, "t").await.unwrap();
+        assert_eq!(line.len(), MAX_LINE_BYTES);
+    }
 }
