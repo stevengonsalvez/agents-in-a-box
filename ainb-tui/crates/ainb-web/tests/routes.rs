@@ -138,6 +138,60 @@ async fn healthz_token_gated_too() {
     assert_eq!(body["tokenRequired"], true);
 }
 
+// ── Query-string token is honored ONLY on the SSE route. ─────────────
+//
+// Tokens in URLs leak via proxy/access logs, browser history, and `Referer`,
+// so the `?token=` fallback exists solely for `/api/events` (an `EventSource`
+// cannot set request headers). Every other route requires the bearer header.
+
+#[tokio::test]
+async fn query_token_rejected_on_non_sse_route() {
+    let app = app(Some("s3cret"));
+    // Correct token, but via query string on a JSON route → 401 (header required).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/snapshot?token=s3cret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "query token must NOT authorize a non-SSE route"
+    );
+
+    // Same route still works with the Authorization header.
+    let (status, _) = get(&app, "/api/snapshot", Some("s3cret")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn query_token_accepted_on_sse_route() {
+    let app = app(Some("s3cret"));
+    // No header, token via query string on the SSE route → 200.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/api/events?token=s3cret").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "SSE route must accept the token via query string"
+    );
+
+    // Wrong query token on the SSE route → 401.
+    let resp = app
+        .oneshot(Request::builder().uri("/api/events?token=wrong").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // ── Static asset (the SPA shell) is served without auth. ─────────────
 
 #[tokio::test]

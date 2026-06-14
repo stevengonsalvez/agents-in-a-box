@@ -13,6 +13,12 @@ use subtle::ConstantTimeEq;
 
 use crate::routes::AppState;
 
+/// The only route on which the `?token=` query-string fallback is honored.
+/// Browsers cannot set an `Authorization` header on an `EventSource`, so the
+/// SSE stream accepts the token via query string; every other route requires
+/// the header to keep tokens out of logs/history/`Referer`.
+const SSE_PATH: &str = "/api/events";
+
 /// JSON 401 body matching the API error envelope.
 fn unauthorized() -> Response {
     let body = axum::Json(serde_json::json!({
@@ -103,12 +109,16 @@ pub async fn require_bearer(
         return next.run(req).await;
     };
 
-    // Header is the primary path; query token is accepted only as a fallback
-    // for the SSE EventSource which cannot set request headers.
+    // Header is the primary path, honored on every route. The `?token=` query
+    // fallback is scoped to the SSE endpoint ONLY, because browsers cannot set
+    // headers on an `EventSource`. Tokens in URLs leak via proxy/access logs,
+    // browser history, and `Referer`, so we must not accept them on any other
+    // route — a header is required everywhere except `/api/events`.
     let header_ok = bearer_value(req.headers()).is_some_and(|t| token_matches(expected, t));
-    let query_ok = query_token(req.uri().query())
-        .as_deref()
-        .is_some_and(|t| token_matches(expected, t));
+    let query_ok = req.uri().path() == SSE_PATH
+        && query_token(req.uri().query())
+            .as_deref()
+            .is_some_and(|t| token_matches(expected, t));
 
     if header_ok || query_ok {
         next.run(req).await
