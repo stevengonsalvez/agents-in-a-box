@@ -246,3 +246,5 @@ A session present in two sources collapses into one record with
 - `ainb list` — lifecycle-only session list (no peer/jobs enrichment)
 - `ainb attach <workspace>` — drop into a session's tmux
 - `ainb kill <workspace>` — terminate a single session by exact name
+- [`bridge/`](bridge/README.md) — Telegram phone bridge: relay a named session
+  two-way to your phone, installable as a launchd/systemd service
