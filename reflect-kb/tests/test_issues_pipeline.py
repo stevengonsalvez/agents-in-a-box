@@ -154,7 +154,8 @@ def test_run_files_then_second_run_files_no_duplicates(tmp_path):
         fetch_titles=lambda: [],
     )
     assert first.filed_count == 1
-    assert fake_gh1.created == ["Reflect drain double-files issues"]
+    # Filed with the default "reflect: " provenance prefix.
+    assert fake_gh1.created == ["reflect: Reflect drain double-files issues"]
     assert ledger.exists()
 
     # Second run: same candidate. The local ledger must suppress it.
@@ -184,7 +185,9 @@ def test_existing_github_issue_suppresses_filing(tmp_path):
         ledger_path=tmp_path / "filed.json",
         analyze_fn=_analyzer([cand]),
         gh_runner=fake_gh,
-        fetch_titles=lambda: ["Sanitizer drops slack tokens"],
+        # An existing issue reflect filed earlier carries the "reflect: " prefix;
+        # the decorated candidate fingerprints to the same slug and is suppressed.
+        fetch_titles=lambda: ["reflect: Sanitizer drops slack tokens"],
     )
     assert result.filed_count == 0
     assert any(d.reason == "dup-on-github" for d in result.skipped)
@@ -284,7 +287,8 @@ def test_ledger_saved_incrementally_after_each_file(tmp_path):
     fps = {e["fingerprint"] for e in saved["filed_issues"]}
     from reflect_kb.issues.dedupe import fingerprint
 
-    assert fingerprint("First brand new finding") in fps
+    # Ledger records the fingerprint of the decorated (prefixed) title.
+    assert fingerprint("reflect: First brand new finding") in fps
 
 
 def test_empty_queue_returns_clean_result(tmp_path):
@@ -329,3 +333,115 @@ def test_unknown_labels_are_filtered_out(tmp_path):
     label_idx = create_call.index("--label") + 1
     assert "frobnicate" not in create_call[label_idx]
     assert "bug" in create_call[label_idx]
+
+
+class _LabelTrackingGh:
+    """gh fake that learns labels created via ``gh label create`` so a later
+    ``gh label list`` reports them (mirrors real gh behaviour)."""
+
+    def __init__(self, initial_labels=None, existing_titles=None):
+        self.calls: list[list[str]] = []
+        self.created: list[str] = []
+        self._labels = set(initial_labels or [])
+        self._existing = existing_titles or []
+        self._n = 200
+
+    def __call__(self, cmd):
+        self.calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            rows = [{"title": t} for t in self._existing]
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows), stderr="")
+        if cmd[:3] == ["gh", "label", "create"]:
+            self._labels.add(cmd[3])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["gh", "label", "list"]:
+            rows = [{"name": n} for n in sorted(self._labels)]
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows), stderr="")
+        if cmd[:3] == ["gh", "issue", "create"]:
+            self.created.append(cmd[cmd.index("--title") + 1])
+            self._n += 1
+            url = f"https://github.com/o/r/issues/{self._n}"
+            return subprocess.CompletedProcess(cmd, 0, stdout=url + "\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+def test_filed_issue_gets_reflect_prefix_and_label(tmp_path):
+    # Default provenance: every filed issue is titled "reflect: ..." and the
+    # reflect label is auto-created (so it survives _filter_labels) and applied.
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    cand = CandidateIssue(title="CLI crashes on missing config", body="b", labels=["bug"])
+    gh = _LabelTrackingGh(initial_labels={"bug"})
+    run_issues(
+        dry_run=False,
+        queue=qf,
+        ledger_path=tmp_path / "filed.json",
+        analyze_fn=_analyzer([cand]),
+        gh_runner=gh,
+        fetch_titles=lambda: [],
+    )
+    # The reflect label was auto-created.
+    assert any(c[:3] == ["gh", "label", "create"] and c[3] == "reflect" for c in gh.calls)
+    create = [c for c in gh.calls if c[:3] == ["gh", "issue", "create"]][0]
+    title = create[create.index("--title") + 1]
+    labels = create[create.index("--label") + 1]
+    assert title == "reflect: CLI crashes on missing config"
+    assert "reflect" in labels.split(",")
+    assert "bug" in labels.split(",")  # analyzer labels preserved alongside
+
+
+def test_reflect_prefix_is_idempotent(tmp_path):
+    # An analyzer that already emits a "reflect: " title must not be double-prefixed.
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    cand = CandidateIssue(title="reflect: already prefixed", body="b", labels=[])
+    gh = _LabelTrackingGh()
+    run_issues(
+        dry_run=False,
+        queue=qf,
+        ledger_path=tmp_path / "filed.json",
+        analyze_fn=_analyzer([cand]),
+        gh_runner=gh,
+        fetch_titles=lambda: [],
+    )
+    title = gh.created[0]
+    assert title == "reflect: already prefixed"
+    assert not title.startswith("reflect: reflect:")
+
+
+def test_provenance_can_be_disabled(tmp_path):
+    # Empty title_prefix + label opt out entirely (no prefix, no reflect label).
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    cand = CandidateIssue(title="Plain finding", body="b", labels=["bug"])
+    gh = _LabelTrackingGh(initial_labels={"bug"})
+    run_issues(
+        dry_run=False,
+        queue=qf,
+        ledger_path=tmp_path / "filed.json",
+        analyze_fn=_analyzer([cand]),
+        gh_runner=gh,
+        fetch_titles=lambda: [],
+        title_prefix="",
+        label="",
+    )
+    assert gh.created[0] == "Plain finding"
+    assert not any(c[:3] == ["gh", "label", "create"] for c in gh.calls)
+
+
+def test_reflect_prefix_shows_in_dry_run_preview(tmp_path):
+    # The dry-run preview must show exactly what would be filed — prefix included.
+    tp = _transcript(tmp_path, "a.jsonl", user="x", assistant="y")
+    qf = _queue(tmp_path, [tp])
+    cand = CandidateIssue(title="Preview finding", body="b", labels=[])
+    gh = _LabelTrackingGh()
+    result = run_issues(
+        dry_run=True,
+        queue=qf,
+        ledger_path=tmp_path / "filed.json",
+        analyze_fn=_analyzer([cand]),
+        gh_runner=gh,
+        fetch_titles=lambda: [],
+    )
+    assert "reflect: Preview finding" in result.previews[0]
+    assert "reflect" in result.previews[0]  # label shown in the preview bracket

@@ -132,6 +132,66 @@ def _filter_labels(
     return [lab for lab in labels if lab in valid]
 
 
+# Default provenance markers. Every issue this mode files is titled
+# ``reflect: <title>`` and carries a ``reflect`` label so it's obvious — in the
+# issue list, in search, and in filters — that it came from the reflect issues
+# pipeline rather than a human. Both are overridable via the ``[issues]`` config
+# (``title_prefix`` / ``label``) or CLI flags.
+DEFAULT_TITLE_PREFIX = "reflect: "
+DEFAULT_LABEL = "reflect"
+# GitHub label colour (clay) + description used when we auto-create the label.
+_LABEL_COLOR = "D97757"
+_LABEL_DESC = "Filed automatically by `reflect issues` from session transcripts"
+
+
+def _decorate(
+    cand: CandidateIssue,
+    title_prefix: str,
+    label: str,
+) -> CandidateIssue:
+    """Stamp provenance onto a candidate: ``reflect:`` title prefix + label.
+
+    Idempotent — a title that already starts with the prefix (case-insensitive)
+    is left as-is, and the label is only added once. Applied BEFORE dedupe so
+    the fingerprint (``slugify(title)``) is computed on the final, prefixed
+    title — keeping it consistent with previously-filed ``reflect: ...`` issues.
+    """
+    title = cand.title
+    if title_prefix and not title.lower().startswith(title_prefix.strip().lower()):
+        title = f"{title_prefix}{title}"
+    labels = list(cand.labels)
+    if label and label not in labels:
+        labels = [label, *labels]
+    return CandidateIssue(
+        title=title,
+        body=cand.body,
+        labels=labels,
+        source_citation=cand.source_citation,
+    )
+
+
+def _ensure_label(label: str, repo: Optional[str], gh_runner: Runner) -> None:
+    """Best-effort create the provenance label so ``_filter_labels`` keeps it.
+
+    ``_filter_labels`` drops labels absent from the repo (an unknown label fails
+    the whole ``gh issue create``), so the ``reflect`` label would silently
+    vanish on a repo that doesn't have it yet. Create it idempotently — ``gh
+    label create`` exits non-zero if it already exists, which we swallow. Never
+    raises; a failure just means the label may get filtered out (issues still
+    file, just unlabelled).
+    """
+    if not label:
+        return
+    cmd = ["gh", "label", "create", label, "--color", _LABEL_COLOR, "--description", _LABEL_DESC]
+    if repo:
+        cmd += ["-R", repo]
+    try:
+        gh_runner(cmd)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        # Already exists (most common) or gh unavailable — non-fatal.
+        return
+
+
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$")
 
 
@@ -177,6 +237,8 @@ def run_issues(
     dry_run: bool = False,
     maps: Optional[dict[str, str]] = None,
     model: str = "sonnet",
+    title_prefix: str = DEFAULT_TITLE_PREFIX,
+    label: str = DEFAULT_LABEL,
     queue: Optional[Path] = None,
     ledger_path: Optional[Path] = None,
     analyze_fn: Optional[AnalyzeFn] = None,
@@ -244,7 +306,9 @@ def run_issues(
     safe_candidates: list[CandidateIssue] = []
     for c in candidates:
         safe, audit = _sanitize_candidate(c, maps)
-        safe_candidates.append(safe)
+        # Stamp provenance (reflect: prefix + label) BEFORE dedupe so the
+        # fingerprint matches previously-filed `reflect: ...` issues.
+        safe_candidates.append(_decorate(safe, title_prefix, label))
         result.audit.extend(audit)
 
     # 5. Dedupe: in-batch → local ledger → existing GitHub issues.
@@ -273,6 +337,11 @@ def run_issues(
             f"{len(result.skipped)} skipped as duplicates"
         )
         return result
+
+    # Ensure the provenance label exists so it survives _filter_labels (an
+    # unknown label would otherwise be dropped). Best-effort, once per run.
+    if keepers and label:
+        _ensure_label(label, repo, gh_run)
 
     for cand in keepers:
         try:
