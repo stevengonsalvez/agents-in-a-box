@@ -3123,6 +3123,10 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
     let workspace_id = idgen.new_ulid();
     let user_id = idgen.new_ulid();
 
+    // The workspace's `issue_prefix` is left NULL ("no explicit prefix"): the
+    // HGR default issue id (63l.3) lives at the display layer
+    // (`issue_display_id`), not the stored column, so a fresh issue's TITLE stays
+    // verbatim while its display id still reads HGR-1, HGR-2, ….
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
         .bind(&workspace_id)
         .bind(DEFAULT_WORKSPACE_SLUG)

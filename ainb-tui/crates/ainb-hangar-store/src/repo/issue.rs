@@ -294,6 +294,52 @@ impl IssueRepo {
         rows.iter().map(issue_from_row).collect()
     }
 
+    /// The 1-based per-workspace creation ordinal of issue `id` — the `<n>` in
+    /// its `HGR-<n>` display id (63l.3).
+    ///
+    /// Counts the issues in the same workspace that were created at-or-before
+    /// this one, tie-broken by `id` so the ordering is total and stable: the
+    /// oldest issue is `1`, the next `2`, and so on. Workspace-scoped, so two
+    /// workspaces each number their issues from `1` independently. Returns
+    /// `Ok(None)` when no issue with `id` exists (a stale id), so the caller can
+    /// distinguish "issue absent" from "issue is number N".
+    ///
+    /// This is a read-time derivation, not a stored counter: an issue's display
+    /// number is its position in the workspace's creation order, which the
+    /// `(created_at, id)` total order pins deterministically without a sequence
+    /// column (and without a per-insert race).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn workspace_seq(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        id: &str,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        // COUNT the rows in the same workspace ordered at-or-before this issue by
+        // (created_at, id). The correlated subquery reads the target issue's
+        // (created_at, id); a non-existent id makes the inner SELECT empty, so
+        // the comparison is NULL and COUNT is 0 — distinguished from a real
+        // ordinal by the separate existence check.
+        let seq: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM issue AS sibling \
+             WHERE sibling.workspace_id = ?1 \
+               AND (sibling.created_at, sibling.id) <= ( \
+                   SELECT target.created_at, target.id FROM issue AS target \
+                   WHERE target.id = ?2 AND target.workspace_id = ?1 \
+               )",
+        )
+        .bind(workspace_id)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+        // COUNT always returns one row; a 0 means the id is absent in this
+        // workspace (the subquery matched nothing), so report None for an
+        // unknown id and the 1-based ordinal otherwise.
+        Ok(seq.filter(|n| *n > 0))
+    }
+
     /// Full-text-ish search: every issue in `workspace_id` whose title,
     /// description, OR any of its comment bodies contains `query`
     /// (case-insensitive substring), ranked title > description > comment
@@ -637,6 +683,67 @@ mod tests {
             ["i-both", "i-cmt"],
             "best surface per issue, no dup rows"
         );
+    }
+
+    /// An issue in a freshly-bootstrapped workspace (NULL prefix — no explicit
+    /// one) reads the display id `HGR-<n>`, numbered 1-based in creation order
+    /// (63l.3 user proof a). The HGR default lives at the display layer while the
+    /// stored title stays verbatim, and a second workspace numbers its own issues
+    /// from 1 independently.
+    #[tokio::test]
+    async fn issue_reads_hgr_display_id_in_a_fresh_workspace() {
+        use crate::repo::workspace::issue_display_id;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // A freshly-bootstrapped workspace has a NULL issue_prefix (no explicit
+        // prefix) — exactly what `ensure_default_workspace` writes.
+        seed_ws(pool, "ws-a").await;
+
+        // Three issues created in order → ordinals 1, 2, 3.
+        seed_issue(pool, "ws-a", "i-1", "first", None, 10).await;
+        seed_issue(pool, "ws-a", "i-2", "second", None, 20).await;
+        seed_issue(pool, "ws-a", "i-3", "third", None, 30).await;
+
+        // The column is NULL (no title-prefix mangling), yet the display id reads
+        // HGR-<n> via the display-layer default.
+        let prefix: Option<String> =
+            sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+                .bind("ws-a")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(prefix, None, "fresh workspace stores NO explicit prefix");
+
+        for (id, expected_seq, expected_display) in [
+            ("i-1", 1, "HGR-1"),
+            ("i-2", 2, "HGR-2"),
+            ("i-3", 3, "HGR-3"),
+        ] {
+            let seq = IssueRepo::workspace_seq(pool, "ws-a", id).await.unwrap();
+            assert_eq!(seq, Some(expected_seq), "{id} 1-based ordinal");
+            assert_eq!(
+                issue_display_id(prefix.as_deref(), seq.unwrap()),
+                expected_display,
+                "{id} reads {expected_display}"
+            );
+        }
+
+        // A stale id has no ordinal (distinguished from "is number N").
+        assert_eq!(
+            IssueRepo::workspace_seq(pool, "ws-a", "missing").await.unwrap(),
+            None,
+            "unknown id has no ordinal"
+        );
+
+        // A second workspace numbers its own issues from 1, independent of ws-a.
+        seed_ws(pool, "ws-b").await;
+        seed_issue(pool, "ws-b", "b-1", "b first", None, 5).await;
+        let seq_b = IssueRepo::workspace_seq(pool, "ws-b", "b-1").await.unwrap();
+        assert_eq!(seq_b, Some(1), "ws-b numbers from 1 independently");
+        assert_eq!(issue_display_id(None, seq_b.unwrap()), "HGR-1");
     }
 
     /// Search is workspace-scoped: a sibling tenant's matching issue is never

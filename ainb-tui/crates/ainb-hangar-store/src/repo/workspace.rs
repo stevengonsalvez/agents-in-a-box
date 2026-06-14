@@ -145,6 +145,24 @@ impl WorkspaceRepo {
     }
 }
 
+/// The default issue-id prefix a workspace reads its issues under when it has
+/// not configured an explicit one (63l.3): `HGR`, so a fresh workspace's issues
+/// read `HGR-1`, `HGR-2`, ….
+///
+/// This default lives at the DISPLAY-ID layer ([`issue_display_id`]), NOT in the
+/// stored `issue_prefix` column, and NOT as a value the workspace bootstrap
+/// binds. The reasoning is the e38.21 column overload: `issue_prefix` is ALSO
+/// the operator-set TITLE prefix that [`apply_issue_prefix`] prepends to a new
+/// issue's title (`[OPS] fix the build`). Were the column defaulted to `HGR`,
+/// every fresh issue's stored TITLE would become `HGRfix the build` — a bug, not
+/// a display id. Keeping the column NULL-by-default leaves the title verbatim
+/// (the e38.21 behaviour) while the display id still reads `HGR-<n>`: a NULL
+/// column means "no explicit prefix", which [`issue_display_id`] renders with
+/// this `HGR` fallback. An operator who configures `[OPS] ` gets both that title
+/// prefix AND an `[OPS] -<n>` display id; one who clears it keeps a bare-ordinal
+/// display id. This is the "None-default is cleaner" path 63l.3 invites.
+pub const DEFAULT_ISSUE_PREFIX: &str = "HGR";
+
 /// Prepend a workspace's `issue_prefix` to a newly-created issue `title`.
 ///
 /// The single place the prefix is applied so the CLI issue-create
@@ -152,13 +170,39 @@ impl WorkspaceRepo {
 /// agree byte-for-byte. `None` prefix returns the title verbatim; a present
 /// prefix is prepended as-is (a trailing space, if wanted, is part of the
 /// stored prefix — the prefix is used literally so the operator controls the
-/// separator).
+/// separator). Deliberately NOT defaulted to [`DEFAULT_ISSUE_PREFIX`]: that
+/// default belongs to the display id ([`issue_display_id`]), not the title.
 #[must_use]
 pub fn apply_issue_prefix(prefix: Option<&str>, title: &str) -> String {
     match prefix {
         Some(p) if !p.is_empty() => format!("{p}{title}"),
         _ => title.to_string(),
     }
+}
+
+/// Format an issue's human-facing display id from a workspace `prefix` and the
+/// issue's 1-based per-workspace `seq` number (63l.3).
+///
+/// A workspace with no explicit prefix (the NULL-column default) reads its
+/// issues under [`DEFAULT_ISSUE_PREFIX`] (`HGR`), so its first issue is `HGR-1`,
+/// its second `HGR-2`, and so on. An explicitly-configured prefix is used
+/// verbatim before the `-<seq>` (`OPS-1`). The single place the display id is
+/// assembled so the CLI, the RPC snapshot, and the plugin agree byte-for-byte.
+///
+/// `seq` is the issue's 1-based creation ordinal within its workspace (the
+/// caller supplies it; the store derives it via [`IssueRepo::workspace_seq`]).
+/// The `prefix` is trimmed of trailing whitespace before the join so a TITLE
+/// prefix that carries a trailing separator (`[OPS] `) does not leak a stray
+/// space into the display id (`[OPS]-1`, not `[OPS] -1`); the `HGR` default has
+/// none to trim.
+#[must_use]
+pub fn issue_display_id(prefix: Option<&str>, seq: i64) -> String {
+    let resolved = match prefix {
+        Some(p) if !p.trim().is_empty() => p.trim_end(),
+        // A NULL / blank column means "no explicit prefix" → the HGR default.
+        _ => DEFAULT_ISSUE_PREFIX,
+    };
+    format!("{resolved}-{seq}")
 }
 
 /// Parse a stored `repo_whitelist` JSON value into a `Vec<String>`, rejecting
@@ -334,6 +378,43 @@ mod tests {
         assert_eq!(
             apply_issue_prefix(Some("[OPS] "), "fix the build"),
             "[OPS] fix the build"
+        );
+    }
+
+    /// A workspace with no explicit prefix reads its issues under the `HGR`
+    /// default at the display layer — without storing `HGR` in the column
+    /// (so a fresh issue's TITLE is left verbatim, 63l.3).
+    #[test]
+    fn default_issue_prefix_is_hgr_at_the_display_layer() {
+        assert_eq!(DEFAULT_ISSUE_PREFIX, "HGR");
+        // A None / blank column (the fresh-workspace default) reads HGR-<n>.
+        assert_eq!(issue_display_id(None, 1), "HGR-1");
+        assert_eq!(issue_display_id(None, 42), "HGR-42");
+        assert_eq!(
+            issue_display_id(Some(""), 7),
+            "HGR-7",
+            "blank prefix -> HGR"
+        );
+        assert_eq!(
+            issue_display_id(Some("   "), 7),
+            "HGR-7",
+            "whitespace -> HGR"
+        );
+        // The default lives in the display helper, NOT the title prepend: an
+        // unset prefix leaves the title verbatim (no `HGRtitle` mangling).
+        assert_eq!(apply_issue_prefix(None, "fix the build"), "fix the build");
+    }
+
+    /// `issue_display_id` joins an explicit prefix + ordinal with a dash, trimming
+    /// a trailing separator so a TITLE prefix like `[OPS] ` does not leak a stray
+    /// space into the display id.
+    #[test]
+    fn issue_display_id_joins_explicit_prefix_and_ordinal() {
+        assert_eq!(issue_display_id(Some("OPS"), 12), "OPS-12");
+        assert_eq!(
+            issue_display_id(Some("[OPS] "), 3),
+            "[OPS]-3",
+            "trailing separator trimmed from the display id"
         );
     }
 }
