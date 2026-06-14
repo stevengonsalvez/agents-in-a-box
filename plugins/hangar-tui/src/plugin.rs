@@ -202,9 +202,17 @@ pub struct HangarPlugin {
     /// Mouse intents `handle_mouse` produced, drained on the next `render`
     /// (63l.2). `handle_mouse` runs INLINE on the reader loop, so it only stashes
     /// intents here; the spawned `render` applies the local board effects (select,
-    /// open) and (in 63l.4) binds the mutating ones to RPCs. A non-empty queue is
-    /// itself the [`Plugin::wants_redraw`] signal — no separate redraw bool.
+    /// open, move, reorder, scroll, hover) and binds the cross-column move to a
+    /// daemon RPC (63l.4). A non-empty queue is itself the [`Plugin::wants_redraw`]
+    /// signal — no separate redraw bool.
     pending_mouse_intents: Vec<crate::mouse::MouseIntent>,
+    /// A cross-column drag-drop (63l.4) that `drain_mouse_intents` resolved into a
+    /// real lifecycle move: the `(issue_id, to_status)` to fire as
+    /// `hangar/issue_update{state}` over the daemon socket. The board already moved
+    /// the card optimistically; this arms the RPC that makes the move durable.
+    /// Drained in `render` (the spawned task where host IO is safe), exactly like
+    /// the assign / comment / create deferred RPCs. `None` when no move is armed.
+    pending_issue_state_update: Option<(String, ainb_hangar_proto::lifecycle::IssueLifecycle)>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -242,6 +250,7 @@ impl Default for HangarPlugin {
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
+            pending_issue_state_update: None,
         }
     }
 }
@@ -1028,6 +1037,43 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire the deferred cross-column issue-move RPC raised by a board drag-drop
+    /// (63l.4).
+    ///
+    /// Maps the `(issue_id, to_status)` to `hangar/issue_update`, setting the
+    /// issue's lifecycle `state` to the destination column's canonical wire token
+    /// (`IssueLifecycle::as_str`), framed over the socket cap — the SAME
+    /// `ISSUE_UPDATE_REQ_ID` seam the agent picker uses for assignee edits. The
+    /// daemon's `IssueUpdated` push reconciles the optimistic local move (the board
+    /// already shows the card in the new column). A send failure is logged but
+    /// non-fatal — the next snapshot reconciles the (now-stale) optimistic move.
+    async fn apply_issue_state_update(
+        &mut self,
+        host: &HostClient,
+        issue_id: String,
+        to_status: ainb_hangar_proto::lifecycle::IssueLifecycle,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id, "state": to_status.as_str()
+        });
+        let Ok(body) = encode_request(
+            ISSUE_UPDATE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_UPDATE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: issue state move send failed: {e}"))
+                .await;
+        }
+    }
+
     /// Fire a deferred issue-comment RPC raised by the task-detail compose modal
     /// (e38.5).
     ///
@@ -1467,15 +1513,29 @@ impl HangarPlugin {
         }
     }
 
-    /// Drain the mouse intents stashed by `handle_mouse` (63l.2), applying the
-    /// ones this bead acts on. A `Select` highlights the pressed card; a
-    /// `ClickOpen` opens its task detail (reusing the keyboard `enter` glue so the
-    /// open flow is byte-identical). The mutating intents (move / reorder / new)
-    /// and the context-menu / pan / scroll / hover / focus / tab intents bind
-    /// their effects in 63l.4 (the visible board swap + the RPC binding) — here
-    /// they are consumed (cleared) so they never accumulate.
+    /// Drain the mouse intents stashed by `handle_mouse` (63l.2/63l.4), binding
+    /// each to its real board action so the Issues board is fully mouse-driven.
+    ///
+    /// - `Select` highlights the pressed card (local).
+    /// - `ClickOpen` opens the clicked issue's task detail (reusing the keyboard
+    ///   `enter` glue so the open flow is byte-identical).
+    /// - `MoveCard` is a cross-column drag-drop: the card moves optimistically into
+    ///   the destination column AND a `hangar/issue_update{state}` RPC is armed (the
+    ///   SAME daemon seam the agent picker / keyboard path uses) so the move is
+    ///   durable — the daemon's `IssueUpdated` push reconciles the optimistic move.
+    /// - `ReorderCard` reseats the card within its column (local display order; see
+    ///   [`IssueListState::reorder_within_column`] for why it is not a priority
+    ///   rewrite).
+    /// - `ScrollColumn` / `Hover` / `DragHover` update the local board state
+    ///   (per-column scroll, hover highlight) so the next render reflects them.
+    ///
+    /// The remaining intents (`OpenContextMenu`, `NewIssue`, `FocusColumn`,
+    /// `PanColumns`, `SwitchTab`) land in later board sub-beads (the context-menu
+    /// overlay, the seeded create flow); they are consumed here so they never
+    /// accumulate.
     fn drain_mouse_intents(&mut self) {
         use crate::mouse::MouseIntent;
+        use crate::screen::issue_list::IssueColumn;
         let app = self.app_state().clone();
         let intents = std::mem::take(&mut self.pending_mouse_intents);
         for intent in intents {
@@ -1489,8 +1549,41 @@ impl HangarPlugin {
                         self.apply_nav(&app, NavIntent::OpenTaskForIssue(issue_id));
                     }
                 }
-                // The remaining intents bind their effects in 63l.4.
-                _ => {}
+                // A cross-column drag-drop: move the card optimistically and arm
+                // the durable `hangar/issue_update{state}` RPC for the render drain.
+                MouseIntent::MoveCard {
+                    issue_id,
+                    to_status,
+                } => {
+                    if let Some(moved) = self.screens.issue_list.move_issue_to(&issue_id, to_status)
+                    {
+                        self.pending_issue_state_update = Some((moved, to_status));
+                    }
+                }
+                // A same-column drag: reseat the card locally (display order only).
+                MouseIntent::ReorderCard { issue_id, to_index } => {
+                    self.screens
+                        .issue_list
+                        .reorder_within_column(&issue_id, to_index);
+                }
+                // A wheel-scroll over a column nudges that column's scroll offset.
+                MouseIntent::ScrollColumn { status, delta } => {
+                    self.screens
+                        .issue_list
+                        .scroll_column(IssueColumn::from_lifecycle(status), delta);
+                }
+                // Hover (no button) highlights the card under the pointer; a live
+                // drag hover highlights the card being dragged.
+                MouseIntent::Hover(id) => self.screens.issue_list.set_hover(id),
+                MouseIntent::DragHover { card, .. } => {
+                    self.screens.issue_list.set_hover(Some(card));
+                }
+                // The remaining intents land in later board sub-beads.
+                MouseIntent::OpenContextMenu { .. }
+                | MouseIntent::NewIssue(_)
+                | MouseIntent::FocusColumn(_)
+                | MouseIntent::PanColumns { .. }
+                | MouseIntent::SwitchTab(_) => {}
             }
         }
     }
@@ -1801,11 +1894,17 @@ impl Plugin for HangarPlugin {
         } else {
             (params.viewport.width, params.viewport.height)
         };
-        // 63l.2: drain any mouse intents the inline `handle_mouse` stashed (the
-        // open-click reuses the keyboard task-open path; the mutating ones bind to
-        // RPCs in 63l.4), then rebuild the render-time hit-map for THIS frame's
-        // board geometry so the next pointer event hit-tests against what we paint.
+        // 63l.2/63l.4: drain any mouse intents the inline `handle_mouse` stashed
+        // (the open-click reuses the keyboard task-open path; a cross-column drag
+        // moves the card optimistically AND arms the durable issue-state RPC). Then
+        // fire that armed RPC over the daemon socket, and rebuild the render-time
+        // hit-map for THIS frame's board geometry so the next pointer event
+        // hit-tests against what we paint.
         self.drain_mouse_intents();
+        if let Some((issue_id, to_status)) = self.pending_issue_state_update.take() {
+            self.apply_issue_state_update(host, issue_id, to_status)
+                .await;
+        }
         self.rebuild_hit_map(w, h);
         Ok(self.compose_frame(w, h))
     }
@@ -2532,6 +2631,128 @@ mod tests {
             "a cross-column drag-drop must stash a MoveCard{{issue-1, InProgress}} intent, \
              got {:?}",
             p.pending_mouse_intents
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.4 — the drag TAKES EFFECT): draining a cross-column
+    /// `MoveCard` intent both (a) MOVES the card optimistically into the
+    /// destination column AND (b) arms the durable `hangar/issue_update{state}`
+    /// RPC for the next render — so a drag actually moves a real issue, not just a
+    /// local highlight. A `ClickOpen` on the same drain path opens the task detail.
+    #[test]
+    fn draining_move_card_moves_optimistically_and_arms_issue_update() {
+        use crate::screen::issue_list::IssueColumn;
+        use ainb_hangar_proto::events::IssueRow;
+        use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+        let mut p = connected_plugin_with_issue();
+        p.screens.set_issues(vec![IssueRow {
+            id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+            display_id: Some("HGR-1".into()),
+            workspace_id: "default".into(),
+            title: "Refactor API".into(),
+            description: None,
+            state: "backlog".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+        }]);
+        // The card starts in Backlog.
+        assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
+        assert_eq!(
+            p.screens.issue_list.column_count(IssueColumn::InProgress),
+            0
+        );
+
+        // Stash the MoveCard intent directly (the FSM origin is exercised by the
+        // sibling drag test) and drain it.
+        p.pending_mouse_intents
+            .push(crate::mouse::MouseIntent::MoveCard {
+                issue_id: "issue-1".into(),
+                to_status: IssueLifecycle::InProgress,
+            });
+        p.drain_mouse_intents();
+
+        // (a) The board moved the card optimistically: it now reads in In Progress.
+        assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 0);
+        assert_eq!(
+            p.screens.issue_list.column_count(IssueColumn::InProgress),
+            1,
+            "the drag moves the card optimistically into the destination column"
+        );
+        // (b) The durable issue_update{state:in_progress} RPC is armed for render.
+        assert_eq!(
+            p.pending_issue_state_update,
+            Some(("issue-1".to_string(), IssueLifecycle::InProgress)),
+            "a cross-column drag must arm the in_progress issue_update RPC"
+        );
+
+        // A click on the moved card opens its task detail (the open intent takes
+        // effect on the same drain path).
+        p.pending_mouse_intents
+            .push(crate::mouse::MouseIntent::ClickOpen("issue-1".into()));
+        p.drain_mouse_intents();
+        assert!(
+            matches!(p.app_state().screen, Screen::TaskDetail(_)),
+            "a click opens the issue's task detail, got {:?}",
+            p.app_state().screen
+        );
+    }
+
+    /// 63l.4 — a wheel-scroll over a column drains into a real per-column scroll
+    /// offset (the render reflects it), and a hover drains into the hover
+    /// highlight. Both are local board state, no RPC.
+    #[test]
+    fn draining_scroll_and_hover_updates_local_board_state() {
+        use ainb_hangar_proto::events::IssueRow;
+        use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+        let mut p = connected_plugin_with_issue();
+        // Several Todo cards so a scroll offset is observable.
+        let rows: Vec<IssueRow> = (0..4)
+            .map(|i| IssueRow {
+                id: ainb_hangar_core::ids::IssueId::from_str(format!("t{i}")).unwrap(),
+                display_id: Some(format!("HGR-{i}")),
+                workspace_id: "default".into(),
+                title: format!("Task {i}"),
+                description: None,
+                state: "todo".into(),
+                assignee: None,
+                creator: "member:me".into(),
+                created_at: 0,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                pr_url: None,
+            })
+            .collect();
+        p.screens.set_issues(rows);
+
+        // A wheel-scroll-down over the Todo column nudges its offset to 1.
+        p.pending_mouse_intents
+            .push(crate::mouse::MouseIntent::ScrollColumn {
+                status: IssueLifecycle::Todo,
+                delta: 1,
+            });
+        // A hover over t1 sets the hover highlight.
+        p.pending_mouse_intents
+            .push(crate::mouse::MouseIntent::Hover(Some("t1".into())));
+        p.drain_mouse_intents();
+
+        let cols = p.screens.issue_list.board_columns();
+        let todo = &cols[IssueLifecycle::Todo.order()];
+        assert_eq!(
+            todo.scroll_offset, 1,
+            "the wheel-scroll offsets the Todo column"
+        );
+        assert_eq!(
+            p.screens.issue_list.hovered_id(),
+            Some("t1"),
+            "the hover intent sets the hovered card"
         );
     }
 }
