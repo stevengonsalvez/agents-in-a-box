@@ -23,6 +23,7 @@ const fn key(ch: char) -> KeyEvent {
 fn issue(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
         id: IssueId::from_str("issue-1").unwrap(),
+        display_id: None,
         workspace_id: "default".into(),
         title: "Refactor API".into(),
         description: None,

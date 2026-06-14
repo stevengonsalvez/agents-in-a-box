@@ -203,6 +203,15 @@ pub enum PresenceState {
 pub struct IssueRow {
     /// Primary key.
     pub id: IssueId,
+    /// The human-facing display id (`HGR-<n>`): the issue's 1-based per-workspace
+    /// creation ordinal, prefixed with the workspace's configured `issue_prefix`
+    /// or the `HGR` default (63l.3). The daemon derives this read-side via
+    /// `IssueRepo::workspace_seq` + `issue_display_id`; the plugin renders it
+    /// beside the title. `None` only on a pre-63l.3 snapshot — omitted from the
+    /// wire when absent (`skip_serializing_if`) so the shape only grows for a
+    /// reader that supplies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<String>,
     /// Owning workspace.
     pub workspace_id: String,
     /// Issue title.

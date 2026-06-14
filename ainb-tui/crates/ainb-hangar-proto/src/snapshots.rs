@@ -794,6 +794,7 @@ mod tests {
         let issues = IssuesListResult {
             issues: vec![IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("i1").unwrap(),
+                display_id: None,
                 workspace_id: "ws-1".into(),
                 title: "Refactor API".into(),
                 description: None,

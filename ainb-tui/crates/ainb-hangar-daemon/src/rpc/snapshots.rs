@@ -81,6 +81,7 @@ pub async fn issues_list(
             let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
             out.push(IssueRow {
                 id,
+                display_id: None,
                 workspace_id: issue.workspace_id,
                 title: issue.title,
                 description: issue.description,
@@ -129,6 +130,7 @@ pub async fn issues_search(
         let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
         out.push(IssueRow {
             id,
+            display_id: None,
             workspace_id: issue.workspace_id,
             title: issue.title,
             description: issue.description,
@@ -913,6 +915,7 @@ pub async fn issue_update(
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
+        display_id: None,
         workspace_id: issue.workspace_id,
         title: issue.title,
         description: issue.description,
@@ -1001,6 +1004,7 @@ async fn read_issue_row(
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
+        display_id: None,
         workspace_id: issue.workspace_id,
         title: issue.title,
         description: issue.description,
@@ -1130,6 +1134,7 @@ pub async fn issue_create(
     })?;
     Ok(IssueRow {
         id: issue_id,
+        display_id: None,
         workspace_id: workspace_id.to_string(),
         title,
         description: description.map(ToString::to_string),

@@ -23,6 +23,7 @@ fn task() -> TaskId {
 fn issue_row() -> IssueRow {
     IssueRow {
         id: IssueId::from_str("i1").unwrap(),
+        display_id: None,
         workspace_id: "ws".into(),
         title: "Refactor API".into(),
         description: Some("desc".into()),

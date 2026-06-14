@@ -118,6 +118,7 @@ mod tests {
     fn issue(description: Option<&str>, assignee: Option<&str>) -> IssueRow {
         IssueRow {
             id: IssueId::from_str("i1").unwrap(),
+            display_id: None,
             workspace_id: "acme".into(),
             title: "Refactor API".into(),
             description: description.map(String::from),

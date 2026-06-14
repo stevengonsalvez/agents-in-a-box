@@ -204,6 +204,7 @@ mod tests {
     fn issue_row(id: &str, title: &str) -> IssueRow {
         IssueRow {
             id: IssueId::from_str(id).unwrap(),
+            display_id: None,
             workspace_id: "ws-a".into(),
             title: title.into(),
             description: None,

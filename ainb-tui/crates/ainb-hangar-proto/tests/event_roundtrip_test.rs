@@ -32,6 +32,7 @@ fn comment_id(s: &str) -> CommentId {
 fn sample_issue() -> IssueRow {
     IssueRow {
         id: issue_id("issue-1"),
+        display_id: None,
         workspace_id: "default".to_string(),
         title: "Refactor API".to_string(),
         description: Some("split the monolith".to_string()),

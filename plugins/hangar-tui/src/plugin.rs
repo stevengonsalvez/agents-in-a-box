@@ -2043,6 +2043,7 @@ mod tests {
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+            display_id: None,
             workspace_id: "default".into(),
             title: "Refactor API".into(),
             description: None,
