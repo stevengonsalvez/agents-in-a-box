@@ -1006,7 +1006,7 @@ pub struct IssueCreateArgs {
     ///
     /// Stamped onto BOTH the created issue and (when `--assign` enqueues one) the
     /// task: the daemon's claim loop drains `priority DESC, created_at, id`
-    /// (Multica ordering parity), so a higher value jumps the queue while equal
+    /// (reference ordering parity), so a higher value jumps the queue while equal
     /// priorities stay FIFO.
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..=3))]
     pub priority: i64,
