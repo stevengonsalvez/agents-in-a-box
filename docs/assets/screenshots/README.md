@@ -30,9 +30,10 @@ These are recorded with vhs driving `ainb diff-review <repo>` on a throwaway dem
 
 | File | Tape | What it shows |
 |---|---|---|
-| `mcp-pool.gif` | `mcp-pool.tape` | Two sessions attach to ONE real context7 (npx) server through the pool: `ainb mcp import`, daemon start, both sessions get context7 tools, `ainb mcp status` shows `clients: 2` against one `child_pid`, and the process-group proof confirms a single shared server. |
+| `mcp-pool.gif` | `mcp-pool.tape` | Compact proof — two sessions attach to ONE real context7 (npx) server: `ainb mcp import`, daemon start, both sessions get context7 tools, `ainb mcp status` shows `clients: 2` against one `child_pid`, process-group proof confirms a single shared server. |
+| `mcp-pool-journey.gif` | `mcp-pool-journey.tape` | Guide version — the same outcome narrated as a from-scratch user walkthrough (6 labelled steps: `.mcp.json` → `ainb mcp import` → daemon → two sessions attach → `ainb mcp status` → process-group proof). Doubles as the user guide. |
 
-`mcp-pool.tape` drives [`scripts/mcp-pool-demo.sh`](../../../scripts/mcp-pool-demo.sh), which is fully self-contained: it uses its own isolated `$HOME` (so it never touches your real pool sockets), spins up the daemon, attaches two `ainb mcp proxy` shims to a real context7 server, and prints the proof. No Claude auth or TUI involved — deterministic and re-runnable.
+`mcp-pool.tape` drives [`scripts/mcp-pool-demo.sh`](../../../scripts/mcp-pool-demo.sh) and `mcp-pool-journey.tape` drives [`scripts/mcp-pool-journey.sh`](../../../scripts/mcp-pool-journey.sh). Both are fully self-contained: they use their own isolated `$HOME` (so they never touch your real pool sockets), spin up the daemon, attach two `ainb mcp proxy` shims to a real context7 server, and print the proof. No Claude auth or TUI involved — deterministic and re-runnable.
 
 ## Regenerating
 
@@ -42,9 +43,12 @@ From `ainb-tui/`:
 just stage-plugins                                  # rebuild + re-sign plugin binaries (needed for burndown)
 vhs ../docs/assets/screenshots/home.tape            # → home.png (~80s wall-clock)
 vhs ../docs/assets/screenshots/burndown.tape        # → burndown.png (~140s wall-clock)
-cargo build --release                               # mcp-pool.tape drives the release binary
+cargo build --release                               # mcp-pool tapes drive the release binary
 vhs ../docs/assets/screenshots/mcp-pool.tape        # → mcp-pool.gif (~55s wall-clock, real context7 npx)
+vhs ../docs/assets/screenshots/mcp-pool-journey.tape # → mcp-pool-journey.gif (~70s, guide walkthrough)
 ```
+
+The two `mcp-pool*` GIFs are normalised with `gifsicle -O3 --lossy=60 --colors 200` after recording so Astro's image pipeline emits a real WebP.
 
 Each tape drives the real `target/debug/ainb` binary inside vhs's virtual pty, sends scripted keystrokes, snaps a PNG, and exits cleanly.
 

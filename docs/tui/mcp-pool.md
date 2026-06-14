@@ -32,6 +32,14 @@ idle_grace_secs = 300
 - **Stop the pool:** `ainb mcp stop`.
 - **Don't pool a stateful server** (browser/db bridge): set `shared = false` on its `[mcp_servers.<name>]` entry.
 
+## Walkthrough — from scratch
+
+The full journey in one recording: a project whose only MCP config is a plain `.mcp.json`, made poolable with `ainb mcp import`, two sessions attaching to a **real** context7 server, and the proof that both share **one** backend process.
+
+![Shared MCP pool walkthrough — Step 1: a project with a .mcp.json declaring context7 over npx. Step 2: `ainb mcp import --user` imports it into ainb config. Step 3: the pool daemon starts. Step 4: session-1 and session-2 each attach via `ainb mcp proxy` and both receive context7's tools (resolve-library-id, query-docs) from the same real server. Step 5: `ainb mcp status` reports clients: 2 against one child_pid in state running. Step 6: the process group listing shows one npm-exec + node pair — a single shared context7 server. Summary: 2 sessions, 1 shared context7 server; without the pool that would be 2 servers and ~4 node processes.](../assets/screenshots/mcp-pool-journey.gif)
+
+*Every command in the recording is one you'd run yourself. Reproduce it with `scripts/mcp-pool-journey.sh` (real context7, isolated `$HOME`, no Claude auth needed).*
+
 ## How it works
 
 ```
