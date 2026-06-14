@@ -1,6 +1,6 @@
 //! `@handle` mention parsing over a comment body (e38.7).
 //!
-//! Multica's collaboration loop lets a user `@`-mention an agent in a comment to
+//! The reference's collaboration loop lets a user `@`-mention an agent in a comment to
 //! trigger a task for that agent (`docs/hangar/research/01-codebase-archaeology.md`:
 //! "`@agent_name` mention in a comment triggers a new task run"). This module is
 //! the parser half: a pure scan over a comment body that extracts the distinct

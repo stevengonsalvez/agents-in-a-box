@@ -4,8 +4,8 @@
 //! [`ExecEnv`], with a **deny-by-default** env (only the 12-var allowlist passes
 //! through — see [`ENV_ALLOWLIST`]), streams its JSONL stdout line-by-line to
 //! `{logs}/claude.jsonl`, pins the first `session_id` it sees, and enforces a
-//! hard runtime deadline (kill on timeout). Mirrors Multica's `daemon.go`
-//! session-pinning + allowlisted-exec pattern.
+//! hard runtime deadline (kill on timeout). Mirrors the reference control plane's
+//! `daemon.go` session-pinning + allowlisted-exec pattern.
 //!
 //! # Provider abstraction
 //!
@@ -107,7 +107,7 @@ pub struct RunnerConfig {
     /// task simply never spawns it.
     pub codex_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
-    /// ([`FailureReason::Timeout`]). Multica default: 2.5h.
+    /// ([`FailureReason::Timeout`]). Reference default: 2.5h.
     pub max_runtime: Duration,
     /// How many trailing stdout/stderr lines to retain in [`RunnerResult`] for
     /// the audit/UI tail.

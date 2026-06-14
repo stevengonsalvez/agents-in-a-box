@@ -22,8 +22,8 @@
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
-//! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | Multica running TTL (2.5h) |
-//! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | Multica default |
+//! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
+//! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
 //!
@@ -32,7 +32,7 @@
 
 // The provider runtime deadline is a "hours" quantity but `Duration::from_hours`
 // is unstable; a raw second count is the clearest stable spelling (and matches
-// the Multica running-TTL value). Same rationale as `sweeper.rs`.
+// the reference running-TTL value). Same rationale as `sweeper.rs`.
 #![allow(clippy::duration_suboptimal_units)]
 
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ use crate::sweeper::{
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
 const DEFAULT_POLL_MS: u64 = 1_000;
-/// Provider runtime deadline (Multica running TTL: 2.5h).
+/// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
 const TAIL_LINES: usize = 200;
@@ -78,7 +78,7 @@ pub struct DaemonConfig {
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Hard wall-clock deadline for each provider run; the subprocess is killed
-    /// past it ([`FailureReason::Timeout`]). Defaults to the Multica running TTL
+    /// past it ([`FailureReason::Timeout`]). Defaults to the reference running TTL
     /// (2.5h); overridable via `HANGAR_PROVIDER_MAX_RUNTIME_MS` so an e2e test can
     /// drive the timeout-kill path within a bounded budget.
     pub provider_max_runtime: Duration,

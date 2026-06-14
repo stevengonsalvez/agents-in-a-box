@@ -60,7 +60,7 @@ pub enum TemplateUseError {
     #[error("workspace `{0}` not found")]
     WorkspaceNotFound(String),
     /// The workspace has no runtime to bind the new agent to. An agent's
-    /// `runtime_id` is required (Multica pattern), so a runtime must be
+    /// `runtime_id` is required (reference pattern), so a runtime must be
     /// registered first.
     #[error(
         "workspace `{workspace}` has no agent runtime registered; \

@@ -149,7 +149,7 @@ fn worktree_init_skipped_for_chat_task() {
     let result = prepare_worktree(&task, &env, cache.path()).expect("prepare_worktree");
 
     assert!(result.is_none(), "chat task (no issue) → no worktree");
-    // workdir stays empty (no .git), matching Multica's lazy `repo checkout`.
+    // workdir stays empty (no .git), matching the reference's lazy `repo checkout`.
     assert!(env.workdir.is_dir());
     assert!(
         !env.workdir.join(".git").exists(),

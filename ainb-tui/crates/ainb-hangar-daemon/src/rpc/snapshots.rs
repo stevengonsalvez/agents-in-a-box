@@ -1275,7 +1275,7 @@ pub async fn comment_add(
 /// comment spawns that agent's task on the comment's issue. The trigger fires
 /// after the write so a spawn-side failure can never roll back (or lose) the
 /// comment — matching the bead's "fires from inside `comment_add` after the
-/// comment commits" contract and side-stepping Multica's mid-write expansion race.
+/// comment commits" contract and side-stepping the reference's mid-write expansion race.
 ///
 /// Resolution is by agent **name**, **workspace-scoped**: the candidate set is
 /// [`AgentRepo::list_by_workspace`] for the comment's workspace, so a foreign

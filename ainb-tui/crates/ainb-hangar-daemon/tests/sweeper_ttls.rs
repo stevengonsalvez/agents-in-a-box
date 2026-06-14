@@ -6,7 +6,7 @@
 //! `tokio::time::sleep` here, so the suite is fully deterministic (a wall-clock
 //! leak would break the offset assertions immediately).
 //!
-//! Multica source-line references (the invariants these tests pin):
+//! Reference control-plane source-line references (the invariants these tests pin):
 //! - queued TTL = 2h            (`runtime_sweeper.go:52`)
 //! - running TTL = 2.5h         (`runtime_sweeper.go:40`)
 //! - dispatched reclaim window  = 90s for lost claim responses (`task.go:85`)
@@ -211,13 +211,13 @@ async fn dispatched_ttl_5min_fails_task() {
     assert_eq!(reason.as_deref(), Some("timeout"));
 }
 
-/// **Key Multica invariant** (`task.go:85`, `agent.sql.go:1979`
+/// **Key reference invariant** (`task.go:85`, `agent.sql.go:1979`
 /// `ReclaimStaleDispatchedTaskForRuntime`): a dispatch is reclaimed once it is
 /// *older* than the 90s recovery window — `dispatched_at < now - reclaim_window`
 /// — because the daemon's `StartTask` should have confirmed within that window;
 /// past it the claim response is presumed lost and the task is redelivered
 /// (status back to `queued`, attempt unchanged). A 100s-old dispatch (inside the
-/// 90s..5min reclaim band) is reclaimed. Mirrors Multica
+/// 90s..5min reclaim band) is reclaimed. Mirrors the reference
 /// `daemon_test.go:196 TestClaimTaskByRuntime_ReclaimsStaleDispatchedTask`
 /// (120s-old dispatch → reclaimed).
 #[tokio::test]
@@ -257,7 +257,7 @@ async fn dispatched_past_90s_window_reclaimed_not_failed() {
 /// A *fresh* dispatch (inside the 90s recovery window) is NOT reclaimed — the
 /// daemon may still be mid-`StartTask`, and reclaiming it would double-dispatch
 /// a healthy in-flight task (`task.go:82-85`: the recovery window must exceed
-/// the daemon client timeout). Mirrors Multica
+/// the daemon client timeout). Mirrors the reference
 /// `daemon_test.go:223 DoesNotReclaimFreshDispatchedTask` (75s-old → untouched).
 #[tokio::test]
 async fn dispatched_within_90s_window_not_reclaimed() {
@@ -341,7 +341,7 @@ async fn reclaim_window_boundary_is_age_greater_than_window() {
 
 /// A stale dispatch that has already been *started* (`started_at` stamped) is
 /// NOT reclaimed even past the window — it is racing a live run and re-queuing
-/// it would double-dispatch. Mirrors Multica
+/// it would double-dispatch. Mirrors the reference
 /// `daemon_test.go:250 TestClaimTaskByRuntime_DoesNotReclaimAlreadyStartedTask`
 /// and the `started_at IS NULL` guard in `agent.sql.go:1977`.
 #[tokio::test]
@@ -420,7 +420,10 @@ async fn sweeper_batch_caps_at_500() {
     }
     let clock = FixedClock(BASE_MS + QUEUED_TTL.as_millis() as i64 + 1_000);
     let cfg = SweeperConfig::default();
-    assert_eq!(cfg.batch_size, 500, "default batch size matches Multica");
+    assert_eq!(
+        cfg.batch_size, 500,
+        "default batch size matches the reference"
+    );
 
     let first = sweep_expired_queued(store.pool(), &clock, &cfg).await.expect("first pass");
     assert_eq!(first, 500, "first pass caps at the batch size");

@@ -104,7 +104,7 @@ fn gc_meta_json_contents() {
 
 #[test]
 fn short_id_is_ulid_short_form() {
-    // First 8 chars, deterministic (Multica shortID).
+    // First 8 chars, deterministic (the reference short-id form).
     assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX000");
     assert_eq!(
         short_id("01HZX0000000000000000ABCDE"),

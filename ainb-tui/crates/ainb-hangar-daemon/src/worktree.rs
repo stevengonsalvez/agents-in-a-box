@@ -3,7 +3,7 @@
 //! Issue-driven tasks execute inside a dedicated `git worktree` so the agent's
 //! checkout, branch, and dirty state are isolated from every other task and from
 //! the shared repo cache. Hangar shells out to the real `git` binary (simpler
-//! and truer to Multica's behaviour than a `git2` re-implementation, and the CI
+//! and truer to the reference's behaviour than a `git2` re-implementation, and the CI
 //! matrix + ainb-tui already require `git`).
 //!
 //! The branch is `hangar/task/{shortID}` so a human (or `git worktree list`) can
@@ -11,8 +11,8 @@
 //!
 //! # Chat tasks
 //!
-//! A task with **no** `issue_id` is a chat / autopilot task. Multica leaves its
-//! `workdir/` empty until the agent explicitly calls `multica repo checkout`, so
+//! A task with **no** `issue_id` is a chat / autopilot task. The reference leaves its
+//! `workdir/` empty until the agent explicitly calls its `repo checkout`, so
 //! [`prepare_worktree`] performs no git invocation and returns [`None`]. The
 //! [`crate::execenv::prepare_env`] step has already created the empty `workdir/`.
 //!
@@ -67,7 +67,7 @@ pub fn prepare_worktree(
     repo_cache: &Path,
 ) -> io::Result<Option<Worktree>> {
     // Chat tasks never get a worktree; their workdir stays empty until the agent
-    // checks something out itself (Multica `multica repo checkout`).
+    // checks something out itself (the reference's `repo checkout`).
     if task.issue_id.is_none() {
         return Ok(None);
     }

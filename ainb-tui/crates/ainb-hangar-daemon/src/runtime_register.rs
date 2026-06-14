@@ -24,7 +24,7 @@ use sqlx::SqlitePool;
 
 /// `daemon_id` recorded for a self-registered runtime.
 ///
-/// The Multica schema keys uniqueness on `(workspace_id, daemon_id, provider)`;
+/// The reference schema keys uniqueness on `(workspace_id, daemon_id, provider)`;
 /// a single host daemon advertises one provider, so a stable literal keeps the
 /// upsert deterministic (a restart targets the same tuple). The runtime's own
 /// id (the PK) is what callers route to; `daemon_id` is descriptive metadata.

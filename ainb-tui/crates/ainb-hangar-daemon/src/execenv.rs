@@ -2,7 +2,7 @@
 //!
 //! Every dispatched task gets an isolated on-disk sandbox so its working tree,
 //! emitted artifacts, and provider logs never collide with another task's. The
-//! layout mirrors Multica's (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
+//! layout mirrors the reference's (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
 //!
 //! ```text
 //! {home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/
@@ -12,7 +12,7 @@
 //! └── .gc_meta.json   # GC marker: who owns this dir + when it was seen
 //! ```
 //!
-//! `shortID` is the first 8 characters of the task ULID (Multica's short form).
+//! `shortID` is the first 8 characters of the task ULID (the reference short-id form).
 //! Because the ULID is injected via [`crate`]'s id-generation seam in tests, the
 //! path is deterministic across runs.
 //!
@@ -35,7 +35,7 @@ use ainb_hangar_store::repo::task::Task;
 use serde::{Deserialize, Serialize};
 
 /// Age (in milliseconds) past which an orphan dir (no `.gc_meta.json`) is
-/// removed by the orphan scanner. Matches Multica's 72h GC grace window.
+/// removed by the orphan scanner. Matches the reference's 72h GC grace window.
 pub const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
 
 /// The name of the per-task GC marker file. A `{shortID}` root carrying this
@@ -91,7 +91,7 @@ pub struct GcParent {
     pub id: String,
 }
 
-/// Contents of `.gc_meta.json` (Multica shape, `CLI_AND_DAEMON.md:185-193`).
+/// Contents of `.gc_meta.json` (reference shape, `CLI_AND_DAEMON.md:185-193`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcMeta {
     /// The owning task id.
@@ -126,7 +126,7 @@ pub enum CleanupKind {
     },
 }
 
-/// The Multica short form of a task id: its first 8 characters.
+/// The reference short-id form of a task id: its first 8 characters.
 ///
 /// Ids shorter than 8 chars are returned whole (defensive; real ULIDs are 26).
 /// ULIDs are ASCII (Crockford base32), so byte-slicing is safe here.
