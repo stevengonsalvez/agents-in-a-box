@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ainb_plugin_protocol::params::{UnixSocketEvent, UnixSocketEventKind};
 use bytes::Bytes;
@@ -131,6 +131,15 @@ impl UnixSocketRegistry {
     /// forwards every read into `plugin_inbox` as a
     /// `Command::HandleEvent` under topic `socket:<stream_id>`.
     ///
+    /// `render_dirty` is the dialling plugin's host render-dirty flag. The
+    /// read loop flips it BEFORE every forwarded socket event so the host's
+    /// `tick_plugin_renders` re-paints the plugin once the daemon data lands
+    /// — mirroring `send_key` / `send_mouse` / `publish_snapshot`. Without
+    /// this, a plugin that reads its own dialled socket (the Hangar control
+    /// plane reading daemon snapshots / pushed events) applies the data but
+    /// never gets re-rendered until an unrelated keystroke happens to mark it
+    /// dirty, so an async snapshot could sit unpainted (a blank board).
+    ///
     /// The caller is responsible for the cap gate + path whitelist check
     /// ([`path_allowed`]) — this method only connects an already-vetted
     /// path. Returns the host-minted [`SocketStreamId`].
@@ -144,6 +153,7 @@ impl UnixSocketRegistry {
         plugin: PluginId,
         path: &Path,
         plugin_inbox: Inbox,
+        render_dirty: Arc<AtomicBool>,
     ) -> Result<SocketStreamId, RuntimeError> {
         let stream = UnixStream::connect(path).await.map_err(RuntimeError::Io)?;
         let (mut read_half, write_half) = stream.into_split();
@@ -155,6 +165,10 @@ impl UnixSocketRegistry {
             loop {
                 match read_half.read(&mut buf).await {
                     Ok(0) => {
+                        // Mark dirty BEFORE the inbox send so the host's render
+                        // tick can't drain the flag between this event landing
+                        // and the next render kick.
+                        render_dirty.store(true, Ordering::Release);
                         let _ = plugin_inbox.send(Command::HandleEvent {
                             topic: topic.clone(),
                             payload: encode_event(&UnixSocketEvent {
@@ -167,6 +181,7 @@ impl UnixSocketRegistry {
                     }
                     Ok(n) => {
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
+                        render_dirty.store(true, Ordering::Release);
                         if plugin_inbox
                             .send(Command::HandleEvent {
                                 topic: topic.clone(),
@@ -182,6 +197,7 @@ impl UnixSocketRegistry {
                         }
                     }
                     Err(e) => {
+                        render_dirty.store(true, Ordering::Release);
                         let _ = plugin_inbox.send(Command::HandleEvent {
                             topic: topic.clone(),
                             payload: encode_event(&UnixSocketEvent {
@@ -383,6 +399,53 @@ mod tests {
         let b = g.allocate();
         assert_ne!(a, b);
         assert!(!a.is_empty());
+    }
+
+    /// The dial read loop MUST mark the dialling plugin render-dirty before it
+    /// forwards a daemon socket frame — otherwise a plugin reading its own
+    /// dialled socket (the Hangar control plane consuming daemon snapshots /
+    /// pushed events) applies the data but the host's `tick_plugin_renders`
+    /// skips the repaint (dirty=false), leaving an async snapshot unpainted (a
+    /// blank board) until an unrelated keystroke happens to mark it dirty.
+    #[tokio::test]
+    async fn dial_read_loop_marks_render_dirty_before_forwarding_data() {
+        use tokio::net::UnixListener;
+
+        // A throwaway listener the dial connects to; it writes one frame back.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(b"hello-from-daemon").await.unwrap();
+            // Hold the connection open briefly so the read lands as Data, not Eof.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let dirty = Arc::new(AtomicBool::new(false));
+        let reg = UnixSocketRegistry::new();
+        let _id = reg
+            .dial(PluginId::from("test-plugin"), &path, tx, dirty.clone())
+            .await
+            .expect("dial connects to the listener");
+
+        // The forwarded Data frame arrives as a `HandleEvent`, and the dirty
+        // flag is set BEFORE the inbox send, so by the time we observe the
+        // command the flag is already true.
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a forwarded socket command within 2s")
+            .expect("inbox stays open");
+        assert!(
+            matches!(cmd, Command::HandleEvent { .. }),
+            "the dial read loop forwards daemon reads as a HandleEvent"
+        );
+        assert!(
+            dirty.load(Ordering::Acquire),
+            "the dial read loop must mark the plugin render-dirty when daemon data arrives"
+        );
+        server.await.unwrap();
     }
 
     #[test]

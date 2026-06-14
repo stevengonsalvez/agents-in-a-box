@@ -1121,9 +1121,25 @@ impl PluginTask {
                 .with_data(serde_json::json!({ "path": p.path })));
         }
         let expanded = crate::unix_socket::expand_path(&p.path);
+        // The plugin's host render-dirty flag. Threaded into the dial read loop
+        // so each forwarded daemon socket event (snapshot result / pushed
+        // `hangar/event`) marks the plugin dirty and the host re-paints once the
+        // data lands — without it an async snapshot sits unpainted (blank board)
+        // until an unrelated keystroke happens to mark dirty.
+        let render_dirty = self
+            .dirty
+            .read()
+            .get(&self.plugin.id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let stream_id = self
             .unix_sockets
-            .dial(self.plugin.id.clone(), &expanded, self.self_inbox.clone())
+            .dial(
+                self.plugin.id.clone(),
+                &expanded,
+                self.self_inbox.clone(),
+                render_dirty,
+            )
             .await
             .map_err(|e| {
                 RpcError::new(ainb_plugin_protocol::errors::INVALID_PARAMS, e.to_string())
