@@ -825,7 +825,7 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let mut options: Vec<String> = state.available_presets.clone();
     options.push(CUSTOM_PRESET_LABEL.to_string());
 
-    let line = build_pills_line("Preset:  ", &options, &current, focused, area.width);
+    let line = build_pills_line("Preset:  ", &options, &current, focused, &[], area.width);
 
     // Tack on the modified badge to the same line (after the pills).
     let line = if modified {
@@ -873,14 +873,28 @@ fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
     let current = match preset.agent_provider.as_str() {
         "claude" => "Claude",
         "codex" => "Codex",
+        "gemini" => "Gemini",
+        "copilot" => "Copilot",
         "shell" => "Shell",
         "ssh" => "SSH",
         other => other,
     }
     .to_string();
-    let options: Vec<String> =
-        ["Claude", "Codex", "Shell", "SSH"].iter().map(|s| (*s).to_string()).collect();
-    let line = build_pills_line("Agent:   ", &options, &current, focused, area.width);
+    // Gemini is shown but greyed-out / non-selectable for now (kept out of the
+    // `AGENTS` cycle ring) — `build_pills_line` renders it muted with a
+    // `[soon]` tag. Copilot is a real, selectable option.
+    let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let line = build_pills_line(
+        "Agent:   ",
+        &options,
+        &current,
+        focused,
+        &["Gemini"],
+        area.width,
+    );
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -931,7 +945,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         return;
     }
 
-    let line = build_pills_line("Model:   ", &options, &current, focused, area.width);
+    let line = build_pills_line("Model:   ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1037,7 +1051,7 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
     let options = vec!["ON".to_string(), "OFF".to_string()];
-    let line = build_pills_line("Yolo:    ", &options, &current, focused, area.width);
+    let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1320,6 +1334,7 @@ fn build_pills_line(
     options: &[String],
     current: &str,
     focused: bool,
+    disabled: &[&str],
     _available_width: u16,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1330,7 +1345,19 @@ fn build_pills_line(
         if i > 0 {
             spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
         }
-        if opt == current {
+        if disabled.contains(&opt.as_str()) {
+            // Greyed-out, non-selectable option (e.g. Gemini): muted + italic
+            // with a `[soon]` tag so it reads as unavailable — distinct from a
+            // merely-not-current option, which is plain muted with no tag.
+            spans.push(Span::styled(
+                opt.clone(),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ));
+            spans.push(Span::styled(
+                " [soon]",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ));
+        } else if opt == current {
             spans.push(Span::styled(
                 "[",
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
@@ -1927,9 +1954,10 @@ fn ensure_overrides_seed(state: &mut ConfigureState) -> &mut CustomOverrides {
     state.custom_overrides.as_mut().expect("just seeded")
 }
 
-const AGENTS: &[&str] = &["claude", "codex", "shell", "ssh"];
+const AGENTS: &[&str] = &["claude", "codex", "copilot", "shell", "ssh"];
 
-/// Cycle agent for Custom selection: rotates through claude → codex → shell → ssh.
+/// Cycle agent for Custom selection: rotates through claude → codex → copilot → shell → ssh.
+/// Gemini is intentionally excluded — it renders greyed-out (non-selectable) in the Agent row.
 fn cycle_agent(state: &mut ConfigureState, delta: i32) {
     let prev_provider = {
         let overrides = ensure_overrides_seed(state);
@@ -2217,6 +2245,137 @@ mod tests {
             base_selection: None,
             branch_picker: None,
         }
+    }
+
+    #[test]
+    fn agent_pills_gemini_greyed_copilot_selectable() {
+        // The Agent row shows Gemini greyed-out (non-selectable, `[soon]` tag)
+        // and Copilot as a real, selectable pill. Current pill stays green/bold.
+        let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let line = build_pills_line("Agent:   ", &options, "Claude", false, &["Gemini"], 200);
+
+        let find = |needle: &str| {
+            line.spans.iter().find(|s| s.content.as_ref() == needle).unwrap_or_else(|| {
+                panic!(
+                    "no span with content {needle:?}; spans: {:?}",
+                    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+                )
+            })
+        };
+
+        // Current pill (Claude): green + bold, bracketed.
+        let claude = find("Claude");
+        assert_eq!(
+            claude.style.fg,
+            Some(SELECTION_GREEN),
+            "current pill must be green"
+        );
+        assert!(
+            claude.style.add_modifier.contains(Modifier::BOLD),
+            "current pill must be bold"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.content.as_ref() == "[" && s.style.fg == Some(SELECTION_GREEN)),
+            "current pill must be bracketed in green"
+        );
+
+        // Gemini: greyed-out (muted + italic) with a ` [soon]` tag, never green/bold.
+        let gemini = find("Gemini");
+        assert_eq!(
+            gemini.style.fg,
+            Some(MUTED_GRAY),
+            "Gemini must be muted grey"
+        );
+        assert!(
+            gemini.style.add_modifier.contains(Modifier::ITALIC),
+            "Gemini must be italic (disabled)"
+        );
+        assert!(
+            !gemini.style.add_modifier.contains(Modifier::BOLD),
+            "Gemini must not be bold"
+        );
+        let soon = find(" [soon]");
+        assert_eq!(soon.style.fg, Some(MUTED_GRAY));
+        assert!(soon.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            !line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == " [soon]" && s.style.fg == Some(SELECTION_GREEN)),
+            "the [soon] tag must never render as the green current pill"
+        );
+
+        // Copilot: a real, selectable (not current) pill — plain muted, no italic, no tag.
+        let copilot = find("Copilot");
+        assert_eq!(
+            copilot.style.fg,
+            Some(MUTED_GRAY),
+            "Copilot must be muted grey"
+        );
+        assert!(
+            !copilot.style.add_modifier.contains(Modifier::ITALIC),
+            "Copilot must not be italic (it is selectable, not disabled)"
+        );
+        assert!(!copilot.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn agent_cycle_ring_excludes_gemini_includes_copilot() {
+        // Copilot is selectable (in the cycle ring); Gemini is not.
+        assert!(
+            AGENTS.contains(&"copilot"),
+            "copilot must be a selectable agent"
+        );
+        assert!(
+            !AGENTS.contains(&"gemini"),
+            "gemini stays out of the cycle ring (greyed-out)"
+        );
+    }
+
+    #[test]
+    fn render_agent_row_shows_gemini_greyed_and_copilot() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = mk_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        terminal.draw(|f| render_agent_row(f, &state, f.size(), true)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains("Agent:"),
+            "agent row label missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Gemini"),
+            "Gemini pill missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("[soon]"),
+            "Gemini greyed [soon] tag missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Copilot"),
+            "Copilot pill missing: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn agents_picker_gemini_disabled_copilot_available() {
+        use crate::app::state::{AgentProvider, ProviderStatus};
+        assert_eq!(
+            AgentProvider::gemini().status,
+            ProviderStatus::Disabled,
+            "Gemini must be greyed-out / non-launchable in the Agents picker"
+        );
+        assert_eq!(
+            AgentProvider::copilot().status,
+            ProviderStatus::Available,
+            "Copilot stays selectable in the Agents picker"
+        );
     }
 
     #[test]

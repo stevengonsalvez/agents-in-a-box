@@ -1,5 +1,6 @@
 //! Tripwire: the Configure screen renders the Agent row as inline option
-//! pills (Claude · Codex · Shell · SSH) with the current one highlighted,
+//! pills (Claude · Codex · Gemini · Copilot · Shell · SSH) with the current
+//! one highlighted and Gemini greyed-out (`[soon]`),
 //! not as a single `◀ Claude ▶` cycle display.
 //!
 //! Discoverability fix from the 2026-05-27 redesign — users couldn't tell
@@ -133,6 +134,18 @@ fn agent_row_renders_inline_pills_in_custom() {
     assert!(
         agent_line.contains("SSH"),
         "Agent row missing SSH pill: {agent_line}"
+    );
+    assert!(
+        agent_line.contains("Copilot"),
+        "Agent row missing Copilot pill: {agent_line}"
+    );
+    assert!(
+        agent_line.contains("Gemini"),
+        "Agent row missing Gemini pill (greyed-out): {agent_line}"
+    );
+    assert!(
+        agent_line.contains("[soon]"),
+        "Gemini pill should carry the greyed-out [soon] tag: {agent_line}"
     );
     // Negative: should NOT be using the lone cycle-arrow display where the
     // OTHER pills are absent. Older render had `◀ Claude ▶` only.
