@@ -108,6 +108,78 @@ SLOT_TIER_MAX_CHARS = 4000
 CONVENTIONS_SYMLINK_FLAG = "REFLECT_CONVENTIONS_SYMLINK"
 
 
+# --- R11: forced-grounding short-circuit ---------------------------------
+#
+# Ported from Hindsight (agent.py:305 _all_mental_models_are_usable_and_fresh
+# + agent.py:993-1003). On a warm/familiar project the tier-1 (skills) hit is
+# usually fresh AND high-confidence — in that case the broad lower-tier recall
+# is pure noise and token cost. So if the top skills hit clears both the
+# freshness and the rerank-score gate, we short-circuit: SessionStart does ONE
+# skill lookup and is done, never spawning the lower-tier recall.py subprocess.
+#
+# The two knobs are deliberately separate so the proof can flip one at a time:
+#   * freshness:  the skill hit must be explicitly fresh (mirrors Hindsight's
+#                 `is_stale is not False` — unknown/missing freshness is unsafe).
+#   * score:      the skill's rerank score must be STRICTLY above the threshold.
+SHORT_CIRCUIT_SCORE_THRESHOLD = 0.8  # rerank-score gate; warm hits clear it
+SHORT_CIRCUIT_MAX_AGE_DAYS = 30  # a skill older than this is "stale" for boot
+
+
+def freshness_check(skill: dict, max_age_days: int = SHORT_CIRCUIT_MAX_AGE_DAYS) -> bool:
+    """Is this tier-1 skill hit explicitly fresh and usable?
+
+    Mirrors Hindsight's ``_all_mental_models_are_usable_and_fresh``: a hit is
+    fresh only when freshness is *explicitly* asserted (unknown/missing => not
+    fresh) and the body is non-empty. ``skill`` is a small dict the skills-tier
+    probe produces:
+
+        {"content": str, "age_days": float | None, "is_stale": bool | None}
+
+    Decision (all must hold):
+      * content is present and non-blank (an empty skill is never usable);
+      * the hit is not explicitly stale (``is_stale is True`` => not fresh);
+      * if an age is known, it is within ``max_age_days`` (older => stale).
+        A missing age is treated as unknown freshness => NOT fresh, so a hit
+        with no provenance can never short-circuit.
+    """
+    if not str(skill.get("content") or "").strip():
+        return False
+    if skill.get("is_stale") is True:
+        return False
+    age = skill.get("age_days")
+    if age is None:
+        return False  # unknown provenance is not "explicitly fresh"
+    try:
+        return float(age) <= max_age_days
+    except (TypeError, ValueError):
+        return False
+
+
+def should_short_circuit(
+    skill: dict | None,
+    *,
+    threshold: float = SHORT_CIRCUIT_SCORE_THRESHOLD,
+    max_age_days: int = SHORT_CIRCUIT_MAX_AGE_DAYS,
+) -> bool:
+    """Tier-1 short-circuit decision: fresh AND rerank-score above threshold.
+
+    Returns True iff the skills-tier hit exists, passes ``freshness_check``, and
+    its rerank score is STRICTLY greater than ``threshold``. The score gate is
+    the knob: the same fresh skill flips short-circuit on/off as its score
+    crosses ``threshold``. When True the caller emits the skills-only payload
+    and never runs the lower-tier recall.
+    """
+    if not skill:
+        return False
+    if not freshness_check(skill, max_age_days=max_age_days):
+        return False
+    try:
+        score = float(skill.get("score"))
+    except (TypeError, ValueError):
+        return False
+    return score > threshold
+
+
 # --- Context extraction --------------------------------------------------
 
 STOPWORDS = {
@@ -395,6 +467,153 @@ def find_recall_script() -> Path | None:
     return None
 
 
+def _rerank_score(rec: dict) -> float:
+    """Map a recall.py JSON result row to a 0..1 rerank score.
+
+    recall.py's JSON shape (render_json) carries ``confidence`` as a tier
+    string; we map it back to the same weights recall.py's rerank uses so the
+    short-circuit gate reasons over a comparable scale without re-running the
+    embedding model. HIGH -> 1.0, MEDIUM -> 0.7, LOW -> 0.4.
+    """
+    weights = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
+    return weights.get(str(rec.get("confidence", "")).upper(), 0.5)
+
+
+def _age_days(archived_at: str | None) -> float | None:
+    """Days since the skill's archive timestamp; None if unknown/unparseable."""
+    if not archived_at:
+        return None
+    from datetime import datetime
+
+    try:
+        ts = datetime.fromisoformat(str(archived_at).rstrip("Z"))
+    except (ValueError, TypeError):
+        return None
+    try:
+        return max(0.0, (datetime.now() - ts).days)
+    except (TypeError, ValueError):
+        return None
+
+
+def skills_tier_probe(query: str, tags: list[str], recall: Path) -> dict | None:
+    """R11: the single tier-1 (skills) lookup.
+
+    Runs ONE focused, HIGH-confidence recall (limit 1, JSON) — the "skills"
+    tier — and folds the top hit into the small dict ``freshness_check`` /
+    ``should_short_circuit`` consume. Returns None on any miss (no hit, recall
+    unavailable, bad JSON) so the caller falls through to the lower tiers.
+
+    This is deliberately the *only* probe that may run before the short-circuit
+    decision: on warm projects it is the entire SessionStart recall cost.
+    """
+    if not recall or not UV_BIN:
+        return None
+    try:
+        r = subprocess.run(
+            [
+                UV_BIN, "run", "--quiet", str(recall),
+                query,
+                "--limit", "1",
+                "--confidence", "HIGH",
+                "--format", "json",
+                "--max-chars", str(SESSION_START_MAX_CHARS),
+                "--tags", ",".join(tags),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    try:
+        envelope = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    results = envelope.get("results") if isinstance(envelope, dict) else None
+    if not results:
+        return None
+    top = results[0]
+    return {
+        "id": top.get("id"),
+        "content": top.get("key_insight") or top.get("title") or top.get("how_to_apply") or "",
+        "score": _rerank_score(top),
+        "age_days": _age_days(top.get("archived_at")),
+        "is_stale": None,
+    }
+
+
+def render_skills_only(skill: dict, query: str) -> str:
+    """The skills-only inject payload emitted when we short-circuit.
+
+    Distinct, tagged block so a consumer (and the proof) can tell a
+    short-circuited boot from a full lower-tier recall.
+    """
+    sid = skill.get("id") or "?"
+    body = str(skill.get("content") or "").strip()
+    return (
+        f"## Prior skill relevant to `{query[:80]}`\n"
+        f"- **[{sid}]** {body}\n"
+    )
+
+
+def run_lower_tier_recall(query: str, tags: list[str], recall: Path) -> str:
+    """The original (lower-tier) recall path: the broad fused GraphRAG+QMD pull.
+
+    Factored out of ``_main_body`` so the short-circuit orchestrator can choose
+    NOT to call it — and so the proof can spy on whether it ran. Carries the
+    shipped Phase-A enrichments the inline call had: A6 branch-shard pin (via
+    the ``RECALL_BRANCH`` the caller sets in the environment), R4/M8 token
+    budget (``--max-tokens``), the OOD floor (``--min-overlap``), and the
+    synthetic-query suppressors SG6 (``--no-gap-log``) and A4 (``--no-followup``).
+    Returns the inject string ("" on any failure — D9 silent-fail).
+    """
+    try:
+        r = subprocess.run(
+            [
+                UV_BIN, "run", "--quiet", str(recall),
+                query,
+                "--limit", str(SESSION_START_LIMIT),
+                "--confidence", SESSION_START_CONFIDENCE,
+                "--format", "markdown",
+                "--max-chars", str(SESSION_START_MAX_CHARS),
+                "--min-overlap", str(SESSION_START_MIN_OVERLAP),
+                "--max-tokens", str(SESSION_START_MAX_TOKENS),
+                "--tags", ",".join(tags),
+                # SG6: boot-time queries are synthetic — don't log them as gaps.
+                "--no-gap-log",
+                # A4: nor count a genuine first ask after boot as a followup.
+                "--no-followup",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=dict(os.environ),  # A6: inherit RECALL_BRANCH set by the caller
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def session_start_recall_payload(query: str, tags: list[str], recall: Path) -> str:
+    """Orchestrate R11 short-circuit then (only if needed) the lower tier.
+
+    1. Probe the tier-1 skills hit (ONE lookup).
+    2. If it is fresh AND high-score, emit the skills-only payload and STOP —
+       the lower-tier recall never runs (zero extra noise/token/latency).
+    3. Otherwise fall through to the original lower-tier recall.
+    """
+    skill = skills_tier_probe(query, tags, recall)
+    if should_short_circuit(skill):
+        return render_skills_only(skill, query)
+    return run_lower_tier_recall(query, tags, recall)
+
+
 def emit(additional_context: str) -> NoReturn:
     """Always exit 0 with valid JSON.
 
@@ -458,56 +677,20 @@ def _main_body() -> NoReturn:
     if not recall or not UV_BIN:
         emit(ambient_block)
 
-    # D9: SessionStart must feel instant. 10s cap — if recall is slower
-    # than that, prefer empty context over a stalled session boot. The
-    # recall cache makes repeat sessions fast; the first call absorbs
-    # the miss silently.
-    # A6: pin the branch recall.py shards on to the one THIS hook detected in
-    # the session cwd — so the boot-time inject reads the current worktree's
-    # branch sub-shard (~/.learnings/shards/<project>/branches/<branch>/) and
-    # never serves another worktree's learnings. current_branch() already
-    # collapses main/master to "" (the project-level shard); recall.py
-    # sanitizes the raw value. Worktrees are the literal layout
-    # agents-in-a-box runs in, so default-isolating here is the point of A6.
-    recall_env = dict(os.environ)
-    recall_env["RECALL_BRANCH"] = current_branch(cwd)
-    try:
-        r = subprocess.run(
-            [
-                UV_BIN, "run", "--quiet", str(recall),
-                query,
-                "--limit", str(SESSION_START_LIMIT),
-                "--confidence", SESSION_START_CONFIDENCE,
-                "--format", "markdown",
-                "--max-chars", str(SESSION_START_MAX_CHARS),
-                "--min-overlap", str(SESSION_START_MIN_OVERLAP),
-                "--max-tokens", str(SESSION_START_MAX_TOKENS),
-                "--tags", ",".join(tags),
-                # SG6: SessionStart queries are synthetic (cwd/branch/commit
-                # tokens, not a genuine ask) and come up empty on most
-                # sessions — recording them as knowledge gaps would surface
-                # the project name as a fake gap every session.
-                "--no-gap-log",
-                # A4: same synthetic-query reasoning for the followup-rate
-                # diagnostic — a boot-time inject chased by a genuine first
-                # ask within 30s would count as a fake followup every session.
-                "--no-followup",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=recall_env,  # A6: pin the branch shard scope
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        emit(ambient_block)
-
-    if r.returncode != 0:
-        emit(ambient_block)
-
-    recall_block = (r.stdout or "").strip()
-    # M8: append the one-line token-economics footer (sums the per-row
-    # D:/R: numbers recall.py rendered; "" when there are none).
+    # D9: SessionStart must feel instant. Each recall subprocess is 10s-capped
+    # (see run_lower_tier_recall / skills_tier_probe) — prefer empty context
+    # over a stalled boot. R11: a warm project short-circuits after the single
+    # tier-1 skills lookup and never pays for the lower-tier recall.
+    #
+    # A6: pin the branch shard for THIS worktree before any recall runs, so both
+    # the R11 skills probe and the lower-tier recall read the current branch
+    # sub-shard (~/.learnings/shards/<project>/branches/<branch>/) and never
+    # serve another worktree's learnings. run_lower_tier_recall inherits this
+    # via the environment; current_branch() collapses main/master to "".
+    os.environ["RECALL_BRANCH"] = current_branch(cwd)
+    recall_block = session_start_recall_payload(query, tags, recall)
+    # M8: append the one-line token-economics footer (sums the per-row D:/R:
+    # numbers recall.py rendered; "" for a short-circuited skills-only block).
     emit(join_blocks(ambient_block, recall_block, economics_footer(recall_block)))
 
 
