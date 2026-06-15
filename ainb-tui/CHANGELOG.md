@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-06-15
+### Added
+- **session-list**: state colours, blue folders, unboxed selected glyph
+
+### Fixed
+- **notifyd**: tolerate copilot + unknown agents in install.json
+- **session-list**: 1-cell Nerd Font pause glyph for stopped status
+
+
 ## [1.7.3] - 2026-06-15
 ### Added
 - Merge pull request #282 from stevengonsalvez/feat/statusline-ttl-10min
