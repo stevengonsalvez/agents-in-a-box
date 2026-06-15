@@ -19,6 +19,21 @@ use crate::routes::AppState;
 /// the header to keep tokens out of logs/history/`Referer`.
 const SSE_PATH: &str = "/api/events";
 
+/// Prefix of the WebSocket terminal route. Browsers cannot set an
+/// `Authorization` header on a `WebSocket` upgrade either, so — exactly like
+/// the SSE stream — the terminal accepts the token via query string. This is
+/// the *only* additional path beyond [`SSE_PATH`] that honors the query-token
+/// fallback; the exposure is deliberately kept to the two streaming surfaces
+/// that physically cannot send a header. Every JSON `/api/*` route still
+/// requires the bearer header so tokens never leak via logs/history/`Referer`.
+const WS_PREFIX: &str = "/ws/session/";
+
+/// True when `path` is one of the two streaming surfaces (SSE or the WS
+/// terminal) on which the `?token=` query-string fallback is honored.
+fn query_token_allowed(path: &str) -> bool {
+    path == SSE_PATH || path.starts_with(WS_PREFIX)
+}
+
 /// JSON 401 body matching the API error envelope.
 fn unauthorized() -> Response {
     let body = axum::Json(serde_json::json!({
@@ -110,12 +125,13 @@ pub async fn require_bearer(
     };
 
     // Header is the primary path, honored on every route. The `?token=` query
-    // fallback is scoped to the SSE endpoint ONLY, because browsers cannot set
-    // headers on an `EventSource`. Tokens in URLs leak via proxy/access logs,
-    // browser history, and `Referer`, so we must not accept them on any other
-    // route — a header is required everywhere except `/api/events`.
+    // fallback is scoped to the two streaming surfaces that physically cannot
+    // send an `Authorization` header — the SSE `EventSource` and the WebSocket
+    // terminal upgrade (see [`query_token_allowed`]). Tokens in URLs leak via
+    // proxy/access logs, browser history, and `Referer`, so we must not accept
+    // them on any other route — a header is required everywhere else.
     let header_ok = bearer_value(req.headers()).is_some_and(|t| token_matches(expected, t));
-    let query_ok = req.uri().path() == SSE_PATH
+    let query_ok = query_token_allowed(req.uri().path())
         && query_token(req.uri().query())
             .as_deref()
             .is_some_and(|t| token_matches(expected, t));
@@ -158,6 +174,21 @@ mod tests {
         assert_eq!(bearer_value(&h2), None);
 
         assert_eq!(bearer_value(&header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn query_token_allowed_only_on_streaming_surfaces() {
+        // The two surfaces that cannot send an Authorization header.
+        assert!(query_token_allowed("/api/events"));
+        assert!(query_token_allowed("/ws/session/abc-123"));
+        assert!(query_token_allowed("/ws/session/"));
+        // Every JSON route still requires the header — query token refused.
+        assert!(!query_token_allowed("/api/snapshot"));
+        assert!(!query_token_allowed("/api/sessions"));
+        assert!(!query_token_allowed("/api/push/subscribe"));
+        assert!(!query_token_allowed("/healthz"));
+        // Guard against a sneaky prefix that merely contains the WS segment.
+        assert!(!query_token_allowed("/api/ws/session/abc"));
     }
 
     #[test]
