@@ -198,32 +198,47 @@ impl OnboardingComponent {
         .alignment(Alignment::Center);
         frame.render_widget(welcome, content_layout[1]);
 
-        // Description
-        let description = vec![
-            "",
-            "This wizard will help you set up AINB by:",
-            "",
-            "  • Checking required dependencies",
-            "  • Configuring your project directories",
-            "  • Setting up authentication",
-            "",
-            "Press Enter or → to continue",
+        // Description + clear calls to action.
+        let blank = || Line::from("");
+        let bullet = |text: &str| {
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(GOLD)),
+                Span::styled(text.to_string(), Style::default().fg(SOFT_WHITE)),
+            ])
+        };
+
+        let mut desc_lines: Vec<Line> = vec![
+            blank(),
+            Line::from(Span::styled(
+                "Let's get you set up — just a few quick steps:",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            blank(),
+            bullet("Check required dependencies"),
+            bullet("Point AINB at your git projects"),
+            bullet("Configure agent authentication"),
+            bullet("Pick your preferred editor"),
+            blank(),
+            blank(),
         ];
 
-        let desc_lines: Vec<Line> = description
-            .iter()
-            .map(|line| {
-                if let Some(rest) = line.strip_prefix("  • ") {
-                    Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled("• ", Style::default().fg(GOLD)),
-                        Span::styled(rest, Style::default().fg(SOFT_WHITE)),
-                    ])
-                } else {
-                    Line::from(Span::styled(*line, Style::default().fg(MUTED_GRAY)))
-                }
-            })
-            .collect();
+        // Primary CTA — filled gold "button" for the main action.
+        desc_lines.push(Line::from(vec![
+            Span::styled(
+                " Enter ",
+                Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  or  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("→", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled("    Get started", Style::default().fg(SOFT_WHITE)),
+        ]));
+        // Secondary CTA — Esc backs out to the Setup menu.
+        desc_lines.push(Line::from(vec![
+            Span::styled("[", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled("Esc", Style::default().fg(GOLD)),
+            Span::styled("]", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled("    Open the Setup menu", Style::default().fg(MUTED_GRAY)),
+        ]));
 
         let desc_widget = Paragraph::new(desc_lines).alignment(Alignment::Center);
         frame.render_widget(desc_widget, content_layout[2]);
