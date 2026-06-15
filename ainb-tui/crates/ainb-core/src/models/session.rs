@@ -48,13 +48,18 @@ pub enum SessionAgentType {
 impl SessionAgentType {
     pub fn icon(&self) -> &'static str {
         match self {
-            SessionAgentType::Claude => "✻", // Claude's own starburst/pinwheel from its spinner
-            SessionAgentType::Shell => "🐚",
-            SessionAgentType::Ssh => "🔐",
-            SessionAgentType::Codex => "✦", // OpenAI geometric 4-pointed star
-            SessionAgentType::Gemini => "✨",
-            SessionAgentType::Copilot => "🐙",
-            SessionAgentType::Kiro => "🔮",
+            // Anthropic ships no Nerd Font brand mark; the six-point
+            // starburst (painted brand-orange at the render site) reads as
+            // Claude's sunburst. Single-cell.
+            SessionAgentType::Claude => "✻",
+            // OpenAI ships no Nerd Font brand mark; geometric 4-point star
+            // (painted near-white at the render site). Single-cell.
+            SessionAgentType::Codex => "✦",
+            SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot — real GitHub Copilot logo
+            SessionAgentType::Gemini => "\u{f1a0}",  // fa-google — Gemini is a Google product
+            SessionAgentType::Kiro => "\u{e62f}",    // seti-crystal — Kiro crystal motif
+            SessionAgentType::Shell => "\u{ea85}",   // cod-terminal
+            SessionAgentType::Ssh => "\u{f023}",     // fa-lock
         }
     }
 
