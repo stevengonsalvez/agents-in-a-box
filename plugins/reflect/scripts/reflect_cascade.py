@@ -110,6 +110,32 @@ try:
 except Exception:  # pragma: no cover
     detect_signals = None  # type: ignore[assignment]
 
+try:
+    import reflect_events  # noqa: E402
+except Exception:  # pragma: no cover
+    reflect_events = None  # type: ignore[assignment]
+
+
+def _emit_consolidation_completed(prep: "Prep") -> None:
+    """Fire the C4 ``consolidation.completed`` lifecycle event for this cascade
+    pass. Best-effort and additive — the cascade's gate+slice+dedup IS the
+    consolidation front-end, so its completion is the deterministic lifecycle
+    moment subscribers (auto-CLAUDE.md, Slack, digest) react to. Never raises."""
+    if reflect_events is None:
+        return
+    try:
+        reflect_events.emit(
+            "consolidation.completed",
+            {
+                "action": prep.action,
+                "reason": prep.reason,
+                "signal_count": prep.signal_count,
+                "signal_hash": prep.signal_hash,
+            },
+        )
+    except Exception:
+        pass
+
 
 _DEFAULT_CONTEXT_LINES = 3
 _MAX_SLICE_CHARS = 60_000  # ~15K tokens — the bounded input handed to /reflect
@@ -1133,8 +1159,10 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
     signal_hash = _signal_set_hash(signals)
     if _signal_hash_seen(signal_hash):
         bumped = _record_proof_for_hash(signal_hash, str(p))
-        return Prep("skip", "dup-signal-hash", len(signals), orig_tokens, 0,
-                    signal_hash=signal_hash, proof_bumped=bumped)
+        dup = Prep("skip", "dup-signal-hash", len(signals), orig_tokens, 0,
+                   signal_hash=signal_hash, proof_bumped=bumped)
+        _emit_consolidation_completed(dup)
+        return dup
 
     sliced = slice_dialogue(dialogue, signals, context_lines)
     if not sliced.strip():
@@ -1205,6 +1233,7 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
     body += _build_observation_block(observations, str(p))
     Path(out_path).write_text(body, encoding="utf-8")
     prep.slice_path = str(out_path)
+    _emit_consolidation_completed(prep)
     return prep
 
 
