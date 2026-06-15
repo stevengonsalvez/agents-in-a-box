@@ -30,8 +30,8 @@ flowchart TD
     subgraph Adapters["adapters/ (toolkit plugin)"]
         BA["base.py\nAdapterBase"]
         CA["claude_adapter.py\n+ SessionStart hook merge"]
-        XA["codex_adapter.py\npointer-only"]
-        PA["copilot_adapter.py\npointer-only"]
+        XA["codex_adapter.py\n+ hooks.json hook merge"]
+        PA["copilot_adapter.py\n+ hooks/reflect.json drop-in"]
         BA --> CA
         BA --> XA
         BA --> PA
@@ -283,14 +283,14 @@ Live filesystem as of the time this document was written:
 └── reflect-status/
     └── SKILL.md
 
-~/.codex/skills/                       # Codex pointer skills (pointer-only, no hooks)
+~/.codex/skills/                       # Codex skills (full SKILL.md content); hooks wired in ~/.codex/hooks.json
 ├── recall/SKILL.md                    # managed_by: reflect-kb/adapters/codex
 ├── reflect/SKILL.md
 ├── ingest/SKILL.md
 ├── consolidate/SKILL.md
 └── reflect-status/SKILL.md
 
-~/.copilot/skills/                     # Copilot pointer skills (pointer-only, no hooks)
+~/.copilot/skills/                     # Copilot skills (full SKILL.md content); hooks wired in ~/.copilot/hooks/reflect.json
 ├── recall/SKILL.md                    # managed_by: reflect-kb/adapters/copilot
 ├── reflect/SKILL.md
 ├── ingest/SKILL.md
@@ -569,8 +569,8 @@ sequenceDiagram
 |--------|------|------|---------|
 | `base.py` | toolkit | `adapters/base.py` | Shared `AdapterBase` — pointer write, sentinel guard, uninstall, argparse CLI skeleton |
 | `claude_adapter.py` | toolkit | `adapters/claude/` | Claude harness: extends base with `settings.json` SessionStart hook merge |
-| `codex_adapter.py` | toolkit | `adapters/codex/` | Codex harness: pointer-only install (no hook system) |
-| `copilot_adapter.py` | toolkit | `adapters/copilot/` | Copilot harness: pointer-only install (no hook system) |
+| `codex_adapter.py` | toolkit | `adapters/codex/` | Codex harness: full skill deploy + 6-hook merge into `~/.codex/hooks.json` |
+| `copilot_adapter.py` | toolkit | `adapters/copilot/` | Copilot harness: full skill deploy + copilot-native drop-in `~/.copilot/hooks/reflect.json` |
 | `session_start_recall.py` | toolkit | `skills/recall/hooks/` | SessionStart hook: builds git-context query, calls recall.py, emits additionalContext JSON |
 | `recall.py` (skills) | toolkit | `skills/recall/scripts/` | Hybrid recall engine: GraphRAG + qmd BM25 fan-out, RRF fuse, rerank, 1h cache |
 | `precompact_reflect.py` | toolkit | `hooks/` | PreCompact hook: reminder or auto-episode mode depending on reflect-state.yaml |
@@ -745,7 +745,13 @@ Every pointer contains a `managed_by:` YAML field unique to its harness (`reflec
 
 ### Hook parity
 
-Only Claude Code has a lifecycle hook system capable of running a subprocess on `SessionStart` and `PreCompact`. Codex and Copilot receive pointer-only installs. Their `SKILL.md` templates explicitly state "invocation-only — call `/recall`, `/reflect`, etc. manually." If those harnesses add hook support in the future, the relevant adapter subclass simply overrides `execute_extra` and `uninstall_extra` (as `ClaudeAdapter` does today).
+All three harnesses now have lifecycle hook systems, and each adapter wires reflect into its own:
+
+- **Claude Code** — `claude_adapter.py` merges a `SessionStart` hook into `~/.claude/settings.json` (or steps aside when the plugin runtime owns it via `plugin.json` autowire).
+- **Codex CLI** (hooks since ~0.114) — `codex_adapter.py` deploys full skill content into `~/.codex/skills/` and merges 6 hooks (SessionStart recall + bg-drain, PreCompact, UserPromptSubmit, PostToolUse, Stop) into `~/.codex/hooks.json`. Codex shares Claude's snake_case stdin and `additionalContext` support, so the hook scripts run unchanged.
+- **GitHub Copilot CLI** (hooks GA Feb 2026) — `copilot_adapter.py` deploys full skill content into `~/.copilot/skills/` and writes ONE copilot-native drop-in `~/.copilot/hooks/reflect.json` (`version:1`, flat per-event arrays, camelCase events `sessionStart`/`preCompact`/`postToolUse`/`agentStop`/`userPromptSubmitted`, `timeoutSec`). Copilot's hook format and camelCase stdin differ from Claude/Codex, so the adapter emits the native shape and the hook scripts read stdin tolerantly (`hook_input.py`) and gate their output envelope on `REFLECT_HARNESS=copilot`.
+
+Divergences worth knowing: Copilot **ignores `userPromptSubmitted` hook output**, so per-prompt auto-recall is not possible there — only manual `/recall` (SessionStart auto-recall still works via `additionalContext`). Codex has **no command-driven status line** (only the built-in `/statusline` item picker), so the rich status line ports to Copilot (same `statusLine.command` shape as Claude) but not to Codex.
 
 ### Upgrading pointer content
 
