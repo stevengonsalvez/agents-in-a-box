@@ -11,6 +11,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+// Shared border palette: focused panes are green, unfocused are a subtle grey
+// (matches the session list + preview), so the focused window reads clearly.
+const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
+const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
+const GOLD: Color = Color::Rgb(255, 215, 0);
+const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+
 pub struct LiveLogsStreamComponent {
     auto_scroll: bool,
     scroll_offset: usize,
@@ -80,8 +87,8 @@ impl LiveLogsStreamComponent {
         // Show focus indicator
         use crate::app::state::FocusedPane;
         let (border_color, title_color) = match state.focused_pane {
-            FocusedPane::LiveLogs | FocusedPane::Preview => (Color::Cyan, Color::Yellow), // Focused
-            FocusedPane::Sessions => (Color::Gray, Color::Blue), // Not focused
+            FocusedPane::LiveLogs | FocusedPane::Preview => (SELECTION_GREEN, GOLD), // Focused
+            FocusedPane::Sessions => (SUBDUED_BORDER, MUTED_GRAY),                   // Not focused
         };
 
         let block = Block::default()
