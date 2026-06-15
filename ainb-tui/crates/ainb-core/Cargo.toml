@@ -52,6 +52,8 @@ toml_edit = { workspace = true }
 # Claude API integration
 reqwest = { workspace = true }
 tokio-stream = { workspace = true }
+# Slack socket-mode WebSocket transport for `ainb fleet bridge`.
+tokio-tungstenite = { workspace = true }
 
 # Utils
 shell-escape = { workspace = true }
