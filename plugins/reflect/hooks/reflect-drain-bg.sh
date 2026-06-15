@@ -51,6 +51,9 @@
 # REFLECT_QUOTA_GATE          If "0", skip the subscription-quota     Default: 1
 #                             gate entirely (M3).
 # REFLECT_QUOTA_TTL_SEC       Quota snapshot freshness window (s).    Default: 3600
+# REFLECT_DRAIN_MAINTAIN_EVERY Run the C3 graph-maintenance sweep     Default: 10
+#                             (orphan/stale prune + relink) once per
+#                             N reindexing drains; 0 disables it.
 # REFLECT_DISABLED            If "1", drainer is a hard no-op.        Default: 0
 #
 # Circuit-breaker rationale (2026-05-31 incident: a single drain ran 223 Opus
@@ -94,6 +97,8 @@ CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
 DRAIN_CWD="${REFLECT_DRAIN_CWD:-$HOME}"          # W5: neutral cwd for claude -p
 INVALID_THRESHOLD="${REFLECT_DRAIN_INVALID_THRESHOLD:-3}"  # M2: writer-drift breaker
 QUOTA_GATE_ENABLED="${REFLECT_QUOTA_GATE:-1}"    # M3: subscription-quota gate
+MAINTAIN_EVERY="${REFLECT_DRAIN_MAINTAIN_EVERY:-10}"  # C3: graph maintenance once per N drains
+MAINTAIN_COUNTER_FILE="${STATE_DIR}/drain.maintain-count"  # C3: post-drain counter
 
 # Locate sibling scripts (cascade, classifier) relative to this hook, robust to symlinks.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -734,6 +739,29 @@ PY
     return 0
 }
 
+# ── Graph maintenance cadence (C3) ────────────────────────────────────────────
+# The post-delete graph sweep (orphan-entity + stale-edge prune, relink) is a
+# structural rewrite, not free I/O, so it runs once per N reindexing drains
+# rather than every drain. A tiny integer counter file, bumped after each
+# reindexing drain, decides when a sweep is due. Returns 0 (run) / 1 (skip).
+maintain_due() {
+    # 0 disables the sweep entirely.
+    [[ "$MAINTAIN_EVERY" =~ ^[0-9]+$ ]] || return 1
+    [[ "$MAINTAIN_EVERY" -eq 0 ]] && return 1
+    local n=0
+    if [[ -f "$MAINTAIN_COUNTER_FILE" ]]; then
+        n=$(cat "$MAINTAIN_COUNTER_FILE" 2>/dev/null || echo 0)
+        [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    fi
+    n=$((n + 1))
+    if [[ "$n" -ge "$MAINTAIN_EVERY" ]]; then
+        echo 0 > "$MAINTAIN_COUNTER_FILE"   # reset the cadence window
+        return 0
+    fi
+    echo "$n" > "$MAINTAIN_COUNTER_FILE"
+    return 1
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX invalid_threshold=$INVALID_THRESHOLD dry_run=$DRY_RUN) ────"
@@ -840,6 +868,18 @@ main() {
                 else
                     log "graphml corrupt + unrepairable; reindex may need --force rebuild"
                     emit_error warn graphml_corrupt "graphml unrepairable by truncate; full rebuild advised" ""
+                fi
+                # Graph maintenance sweep (C3): once per N reindexing drains,
+                # prune orphan entities + stale cooccurrence edges and relink
+                # nodes that lost neighbours, keeping the graph clean as
+                # learnings are deleted/superseded. Cheap, no LLM; never fatal.
+                if maintain_due; then
+                    log "graph maintenance due (every $MAINTAIN_EVERY drains); running --maintain sweep"
+                    if python3 "$repair_script" --maintain --quiet >>"$LOG_FILE" 2>&1; then
+                        log "graph maintenance OK"
+                    else
+                        log "graph maintenance non-zero (continuing; not fatal)"
+                    fi
                 fi
             fi
             log "running reflect reindex (incremental)"
