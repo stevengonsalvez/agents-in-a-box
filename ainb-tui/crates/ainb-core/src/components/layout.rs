@@ -993,7 +993,12 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
     let live = state.live_window_watcher.snapshot();
-    if live.source == Source::Tier1Cache {
+    // Render the widget when Claude Tier1 data is flowing OR Codex usage is
+    // present — Codex is overlaid independently (separate cache, its own
+    // poller), so a user who runs Codex but never wired the Claude
+    // statusline still sees their Codex burn instead of the CTA.
+    let has_codex = live.codex_five_hour_pct.is_some() || live.codex_seven_day_pct.is_some();
+    if live.source == Source::Tier1Cache || has_codex {
         return build_live_widget_spans(&live);
     }
 
@@ -1015,43 +1020,42 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
 fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = Vec::new();
 
-    if let Some(pct) = live.five_hour_pct {
-        out.push(Span::styled("5h ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_5h(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.five_hour_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
-        }
-    }
-    if let Some(pct) = live.seven_day_pct {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled("wk ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_7d(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.seven_day_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
-        }
-    }
+    // Claude windows (bare `5h`/`wk` labels — the established look).
+    push_window(
+        &mut out,
+        "5h",
+        live.five_hour_pct,
+        bar_color_5h,
+        live.five_hour_resets_at,
+    );
+    push_window(
+        &mut out,
+        "wk",
+        live.seven_day_pct,
+        bar_color_7d,
+        live.seven_day_resets_at,
+    );
+
+    // Codex windows, overlaid from `codex-live.json` (see
+    // `models::live_window::apply_codex_overlay`). Labelled `cx5h`/`cxwk`
+    // so the two providers are unambiguous on a single bar. Absent →
+    // nothing rendered (hide-on-fail). Same burn-colour thresholds as the
+    // Claude windows since the quota semantics match.
+    push_window(
+        &mut out,
+        "cx5h",
+        live.codex_five_hour_pct,
+        bar_color_5h,
+        live.codex_five_hour_resets_at,
+    );
+    push_window(
+        &mut out,
+        "cxwk",
+        live.codex_seven_day_pct,
+        bar_color_7d,
+        live.codex_seven_day_resets_at,
+    );
+
     // today_cost_usd intentionally not rendered: Claude Code's
     // /cost/total_cost_usd is the lifetime cost of a *single* session
     // (whichever invoked the statusline most recently), not today's
@@ -1060,6 +1064,40 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
     // was likewise dropped in favour of the absolute per-window reset
     // instants ("↻ <date> <time>") rendered next to each bar above.
     out
+}
+
+/// Push one quota window — `label ▰▱▱ NN% ↻ <reset>` — onto `out`, with a
+/// ` · ` separator when other windows precede it. No-op when `pct` is
+/// `None`. Shared by the Claude and Codex windows so both render
+/// identically (bar, colour thresholds, optional reset stamp).
+fn push_window(
+    out: &mut Vec<Span<'static>>,
+    label: &str,
+    pct: Option<u8>,
+    color: fn(u8) -> Color,
+    reset: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let Some(pct) = pct else {
+        return;
+    };
+    if !out.is_empty() {
+        out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
+    }
+    out.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(MUTED_GRAY),
+    ));
+    out.push(Span::styled(mini_bar(pct), Style::default().fg(color(pct))));
+    out.push(Span::styled(
+        format!(" {pct}%"),
+        Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(reset) = reset {
+        out.push(Span::styled(
+            format!(" ↻ {}", format_reset_at(reset)),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
 }
 
 fn build_cta_spans() -> Vec<Span<'static>> {
@@ -1147,6 +1185,7 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
         let spans = build_live_widget_spans(&live);
         let text = flatten(&spans);
@@ -1176,6 +1215,7 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
         let spans = build_live_widget_spans(&live);
         let text = flatten(&spans);
@@ -1184,6 +1224,65 @@ mod live_widget_tests {
         assert!(!text.contains("$"));
         assert!(!text.contains("⏱"));
         assert!(!text.contains("↻"), "no reset stamp when instants absent");
+    }
+
+    #[test]
+    fn live_widget_renders_codex_windows_next_to_claude() {
+        use chrono::{TimeZone, Utc};
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            source: Source::Tier1Cache,
+            codex_five_hour_pct: Some(10),
+            codex_five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 15, 0, 21, 0).unwrap()),
+            codex_seven_day_pct: Some(44),
+            codex_seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap()),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live));
+        // Claude windows still present...
+        assert!(text.contains("5h"));
+        assert!(text.contains("40%"));
+        assert!(text.contains("wk"));
+        assert!(text.contains("8%"));
+        // ...and the Codex windows render alongside them.
+        assert!(text.contains("cx5h"), "codex 5h label present: {text}");
+        assert!(text.contains("10%"));
+        assert!(text.contains("cxwk"), "codex weekly label present: {text}");
+        assert!(text.contains("44%"));
+        // Only the two Codex windows carry reset instants here → two ↻.
+        assert_eq!(text.matches('↻').count(), 2);
+    }
+
+    #[test]
+    fn live_widget_renders_codex_only_when_claude_absent() {
+        // User runs Codex but never wired the Claude statusline.
+        let live = LiveWindow {
+            source: Source::None,
+            codex_five_hour_pct: Some(10),
+            codex_seven_day_pct: Some(44),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live));
+        // Codex is the first (and only) window — no Claude bar precedes it.
+        assert!(
+            text.starts_with("cx5h"),
+            "codex leads when Claude absent: {text}"
+        );
+        assert!(text.contains("cxwk"));
+    }
+
+    #[test]
+    fn live_widget_omits_codex_when_absent() {
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            source: Source::Tier1Cache,
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live));
+        assert!(text.contains("5h"));
+        assert!(!text.contains("cx5h"));
+        assert!(!text.contains("cxwk"));
     }
 
     #[test]
