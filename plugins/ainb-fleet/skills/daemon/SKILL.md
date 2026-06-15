@@ -21,6 +21,13 @@ allowed-tools:
 
 # ainb fleet:daemon
 
+> **Superseded by [`/ainb-fleet:atc`](../atc/SKILL.md) for managed fleets.** ATC
+> absorbs this daemon's job — its ERR playbook does the same auto-`continue`, but
+> **with a per-session retry cap + escalate-on-exhaustion** that this daemon
+> lacks (see the sharp edge below). Prefer `ainb fleet atc setup <name>` for
+> unattended supervision. The daemon stays for unmanaged one-off recovery; do
+> **not** run it against sessions an ATC instance already manages — they race.
+
 Background watcher. Reads each session's tmux pane (`capture-pane`) and
 auto-continues sessions hitting API errors via `tmux send-keys`. It does
 **not** register as a peer — it is purely tmux-driven (broker health is
