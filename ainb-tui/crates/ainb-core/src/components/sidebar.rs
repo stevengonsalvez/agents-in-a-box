@@ -125,7 +125,7 @@ impl SidebarItem {
             Self::Sessions => "s",
             Self::Inbox => "b",
             Self::Recovery => "R",
-            Self::Mcp => "m",
+            Self::Mcp => "p",
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Witr => "w",

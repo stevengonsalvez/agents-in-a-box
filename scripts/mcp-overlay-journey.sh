@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Journey harness for the MCP pool overlay, recorded by vhs. Sets up an
 # isolated $HOME with a daemon + a fake server + two named sessions attached,
-# then execs the ainb TUI so vhs can drive it (`m` opens the overlay).
+# then execs the ainb TUI so vhs can drive it (`p` opens the overlay).
 #
 # Self-contained & deterministic: own $HOME (never touches your real env),
 # onboarding pre-completed so no wizard, a fake stdio MCP (no network).

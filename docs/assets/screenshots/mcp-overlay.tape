@@ -2,7 +2,7 @@
 #
 # Drives scripts/mcp-overlay-journey.sh — sets up an isolated $HOME with a
 # daemon + a fake context7 server + two named sessions (web-session,
-# api-session), launches the TUI, then opens the overlay with `m`. Proves the
+# api-session), launches the TUI, then opens the overlay with `p`. Proves the
 # live table shows the shared server and which sessions share it.
 #
 # Run from the ainb-tui/ workspace root:
@@ -30,8 +30,9 @@ Sleep 13s
 Escape
 Sleep 1s
 
-# Open the MCP pool overlay from the sidebar shortcut.
-Type "m"
+# Open the MCP pool overlay from the sidebar shortcut (`p` for pool;
+# `m` is the learnings/Memory browser).
+Type "p"
 Sleep 3s
 
 # Hold on the overlay so the recording lingers on the table (server,

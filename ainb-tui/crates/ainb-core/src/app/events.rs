@@ -907,7 +907,7 @@ impl EventHandler {
         // confirmation dialog, so a stop-confirmation sits on top of it).
         if state.mcp_overlay.is_some() {
             return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => Some(AppEvent::McpOverlayClose),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => Some(AppEvent::McpOverlayClose),
                 KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
                 KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
                 KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
@@ -2129,7 +2129,10 @@ impl EventHandler {
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
-            KeyCode::Char('m') => return Some(AppEvent::McpOverlayOpen),
+            // `p` for "pool" — opens the shared MCP pool observability
+            // overlay. `m` is taken by the learnings/Memory browser, so the
+            // pool tile + global keybind use `p` instead.
+            KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -5587,6 +5590,32 @@ mod panel_back_tests {
 
         assert_eq!(state.current_screen, ids::LEARNINGS);
         assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+    }
+
+    /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
+    /// the learnings/Memory browser. Locking both arms here guards against
+    /// a future refactor re-colliding the two on `m` (which silently made
+    /// the overlay unreachable when the Memory tile landed).
+    #[test]
+    fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(p, &mut state)
+            .expect("`p` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayOpen),
+            "`p` must open the MCP pool overlay, got {evt:?}"
+        );
+
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(m, &mut state)
+            .expect("`m` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must stay the learnings/Memory browser, got {evt:?}"
+        );
     }
 
     /// Re-firing the open event while already on the panel must not
