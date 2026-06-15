@@ -291,6 +291,12 @@ pub struct McpPoolConfig {
     /// detaches before the daemon reaps it. The next attach respawns it.
     #[serde(default = "default_idle_grace_secs")]
     pub idle_grace_secs: u64,
+
+    /// Auto-refresh cadence (seconds) for the TUI pool overlay while it's
+    /// OPEN. `0` = refresh on open + manual (`r`) only. The overlay never
+    /// polls when closed, so this only affects an actively-watched view.
+    #[serde(default = "default_monitor_refresh_secs")]
+    pub monitor_refresh_secs: u64,
 }
 
 impl Default for McpPoolConfig {
@@ -298,12 +304,17 @@ impl Default for McpPoolConfig {
         Self {
             enabled: true,
             idle_grace_secs: default_idle_grace_secs(),
+            monitor_refresh_secs: default_monitor_refresh_secs(),
         }
     }
 }
 
 fn default_idle_grace_secs() -> u64 {
     300
+}
+
+fn default_monitor_refresh_secs() -> u64 {
+    2
 }
 
 /// Where the single `presets.toml` file lives.
