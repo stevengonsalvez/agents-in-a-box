@@ -12,12 +12,14 @@ name = "ainb_web"
 path = "src/lib.rs"
 
 [dependencies]
-axum = { workspace = true }
+# `ws` adds the WebSocket extractor for the live terminal bridge.
+axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 tower-http = { workspace = true }
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 subtle = { workspace = true }
+dirs = { workspace = true }
 
 tokio = { workspace = true }
 # `sync` brings in BroadcastStream for the SSE fan-out.
@@ -32,6 +34,17 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# Live tmux terminal bridge: a real `tmux attach-session` PTY whose raw bytes
+# stream to xterm.js in the browser (mirrors agent-deck's tmuxPTYBridge).
+portable-pty = { workspace = true }
+
+# Web-push (VAPID): `hyper-client` avoids the libcurl/isahc default. Keypair
+# generation is done with p256 (the crate signs but does not generate keys).
+web-push = { version = "0.11", default-features = false, features = ["hyper-client"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+rand = "0.8"
+base64ct = { version = "1", features = ["alloc"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # `util` brings ServiceExt::oneshot for driving the router in route tests.
@@ -39,3 +52,7 @@ tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
 # `test-util` brings tokio::time::{pause,advance} for deterministic poller tests.
 tokio = { workspace = true, features = ["test-util"] }
+# Real WebSocket client for the terminal-upgrade integration test (oneshot
+# can't drive a 101 upgrade — it never reaches hyper's connection layer).
+tokio-tungstenite = "0.21"
+futures-util = { workspace = true }

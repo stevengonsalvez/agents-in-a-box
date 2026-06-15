@@ -69,6 +69,10 @@ pub struct AppState {
     /// Watch channel holding the latest cached snapshot. Handlers borrow it;
     /// SSE subscribers stream changes off it. Updated only by the poller.
     pub cache: watch::Sender<CachedSnapshot>,
+    /// Web-push state, when push is configured. `None` disables every
+    /// `/api/push/*` route (they answer `503 PUSH_NOT_CONFIGURED`) and the
+    /// delivery loop. Shared so handlers and the delivery task see one store.
+    pub push: Option<crate::push::PushState>,
     /// A receiver kept alive for the whole server lifetime so the channel never
     /// reports zero receivers. Without this, `watch::Sender::is_closed()` would
     /// be `true` at startup (the SSE handler creates the only other receiver
@@ -78,14 +82,25 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build app state and spawn the background snapshot poller that maintains
-    /// the cached snapshot every [`POLL_INTERVAL`].
+    /// Build app state (no push) and spawn the background snapshot poller that
+    /// maintains the cached snapshot every [`POLL_INTERVAL`].
     pub fn new(config: WebConfig, data: Arc<dyn DataSource>) -> Self {
+        Self::with_push(config, data, None)
+    }
+
+    /// Build app state with an optional web-push backend, then spawn the
+    /// background snapshot poller.
+    pub fn with_push(
+        config: WebConfig,
+        data: Arc<dyn DataSource>,
+        push: Option<crate::push::PushState>,
+    ) -> Self {
         let (tx, rx) = watch::channel(None);
         let state = Self {
             config: Arc::new(config),
             data,
             cache: tx,
+            push,
             _cache_rx: rx,
         };
         state.spawn_poller();
@@ -101,7 +116,9 @@ impl AppState {
     /// Resolve a snapshot for a request: prefer the cache; on a cold cache
     /// (before the first poll completes) fall back to a single direct fetch so
     /// the very first request after startup still succeeds.
-    async fn resolve_snapshot(&self) -> Result<Arc<FleetSnapshot>, crate::data::DataError> {
+    pub(crate) async fn resolve_snapshot(
+        &self,
+    ) -> Result<Arc<FleetSnapshot>, crate::data::DataError> {
         if let Some(snap) = self.cached() {
             return Ok(snap);
         }
@@ -178,6 +195,16 @@ impl AppState {
 
 /// Build the full router with state, auth middleware, and static assets.
 pub fn router(state: AppState) -> Router {
+    // Authenticated surface: JSON API, SSE, push endpoints, and the WS terminal
+    // upgrade. All gated by the bearer middleware (the WS terminal additionally
+    // gates on `--read-only` inside its handler).
+    // The WS terminal carries its own posture gate (`read_only_gate`) layered
+    // *under* the shared bearer auth, so the refusal order is: auth first
+    // (401), then read-only (403), then the upgrade.
+    let terminal = Router::new().route("/ws/session/:id", get(crate::terminal::session_ws)).layer(
+        middleware::from_fn_with_state(state.clone(), crate::terminal::read_only_gate),
+    );
+
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/snapshot", get(snapshot))
@@ -185,14 +212,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/needs", get(needs))
         .route("/api/cost", get(cost))
         .route("/api/events", get(events))
+        .merge(terminal)
+        .merge(crate::push::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
         ));
 
+    // Public shell: the SPA, static assets, and the PWA surface (manifest +
+    // service worker). These carry no secrets and must be reachable before the
+    // page can prompt for a token, so they are served without auth — exactly
+    // like the existing index/static routes.
     let assets = Router::new()
         .route("/", get(crate::assets::handler))
-        .route("/static/*path", get(crate::assets::handler));
+        .route("/static/*path", get(crate::assets::handler))
+        .route("/manifest.webmanifest", get(crate::assets::manifest))
+        .route("/sw.js", get(crate::assets::service_worker));
 
     api.merge(assets).with_state(state)
 }

@@ -1262,7 +1262,7 @@ impl CliCommand for WebCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             Command::new(self.name())
-                .about("Serve a read-only, SSE-live web dashboard for the fleet")
+                .about("Serve an SSE-live web dashboard (live terminal + web-push) for the fleet")
                 .arg(
                     clap::Arg::new("listen")
                         .long("listen")
@@ -1279,7 +1279,22 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("insecure-bind")
                         .long("insecure-bind")
                         .action(clap::ArgAction::SetTrue)
-                        .help("Allow a non-loopback bind with no token (NOT recommended)"),
+                        .help(
+                            "Allow a non-loopback bind with no token. DANGEROUS: an \
+                             unauthenticated bind exposes a control surface — the live WS \
+                             terminal is interactive shell access to every fleet session. \
+                             Only honored with --read-only (terminal disabled); otherwise \
+                             refused. Use --token instead to expose the write surface safely",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("read-only")
+                        .long("read-only")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Viewer-only: disable the live terminal write surface \
+                             (the WS terminal is refused with 403)",
+                        ),
                 ),
         )
     }
@@ -1292,6 +1307,7 @@ impl CliCommand for WebCommand {
             .unwrap_or_else(|| "127.0.0.1:8420".to_string());
         let token = matches.get_one::<String>("token").cloned();
         let insecure_bind = matches.get_flag("insecure-bind");
+        let read_only = matches.get_flag("read-only");
 
         Box::pin(async move {
             use std::net::ToSocketAddrs;
@@ -1305,7 +1321,7 @@ impl CliCommand for WebCommand {
                 listen,
                 token,
                 insecure_bind,
-                read_only: true,
+                read_only,
             };
 
             // Validate the bind policy before any socket is opened so the
@@ -1316,6 +1332,11 @@ impl CliCommand for WebCommand {
 
             let data = std::sync::Arc::new(ainb_web::AinbCliSource::new());
             eprintln!("ainb web dashboard → http://{listen}");
+            if config.read_only {
+                eprintln!("  read-only: live terminal disabled");
+            } else {
+                eprintln!("  live terminal enabled at /ws/session/{{id}}");
+            }
             if config.token.is_some() {
                 eprintln!("  bearer token required on /api/* routes");
             }

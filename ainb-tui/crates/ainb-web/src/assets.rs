@@ -51,3 +51,38 @@ pub fn serve(path: &str) -> Response {
 pub async fn handler(uri: Uri) -> Response {
     serve(uri.path())
 }
+
+/// `GET /manifest.webmanifest` — the PWA manifest, served at the site root so
+/// `start_url`/`scope` of `/` resolve correctly and the app is installable.
+pub async fn manifest() -> Response {
+    match Frontend::get("manifest.webmanifest") {
+        Some(content) => (
+            [(header::CONTENT_TYPE, "application/manifest+json")],
+            content.data.into_owned(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "manifest not found").into_response(),
+    }
+}
+
+/// `GET /sw.js` — the service worker. Must be served from the root scope with
+/// `Service-Worker-Allowed: /` so it can control navigations and receive push
+/// events for the whole origin.
+pub async fn service_worker() -> Response {
+    match Frontend::get("sw.js") {
+        Some(content) => (
+            [
+                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                (
+                    header::HeaderName::from_static("service-worker-allowed"),
+                    "/",
+                ),
+                // The SW itself must never be cached, or shell updates stick.
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            content.data.into_owned(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "service worker not found").into_response(),
+    }
+}
