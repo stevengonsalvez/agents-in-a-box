@@ -22,8 +22,12 @@ use crate::cli::statusline::{LiveCache, cache_path, read_cache};
 use crate::models::usage::ProviderCall;
 
 /// Maximum age of the Tier 1 cache before we consider it stale and fall
-/// back to Tier 2.
-pub const CACHE_MAX_AGE_SECS: u64 = 120;
+/// back to Tier 2. The Claude statusline cache is only rewritten while a
+/// Claude Code session is actively prompting (each render); 10 minutes
+/// keeps the last-known windows visible across a normal "tabbed away"
+/// gap instead of blinking out after a short idle. Matches the Codex
+/// cache TTL ([`CODEX_CACHE_MAX_AGE_SECS`]).
+pub const CACHE_MAX_AGE_SECS: u64 = 600;
 
 /// Default token cap for the Pro 5-hour window when Tier 2 has to
 /// estimate burn percentage. Override via `AINB_TOKEN_LIMIT`.
@@ -229,7 +233,7 @@ fn window_from_cache(cache: LiveCache) -> LiveWindow {
 /// Parse an ISO8601 `resets_at` into an absolute UTC instant. Returns
 /// `None` when the timestamp is unparseable. Unlike
 /// [`duration_until_iso8601`], a past instant is preserved so callers can
-/// decide how to render it — though the Tier 1 freshness gate (≤120s)
+/// decide how to render it — though the Tier 1 freshness gate (≤600s)
 /// means the cache's reset instants are effectively always in the future.
 pub fn instant_from_iso8601(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
@@ -507,6 +511,27 @@ mod tests {
             model: None,
         };
         assert!(cache_is_fresh(&cache));
+    }
+
+    #[test]
+    fn cache_stays_fresh_for_ten_minutes() {
+        // A 5-minute-old cache is fresh — keeps the Claude windows visible
+        // across a normal "tabbed away" gap (would have been stale under the
+        // old 120s window). Guards the 10-minute TTL against accidental revert.
+        assert!(CACHE_MAX_AGE_SECS >= 600, "TTL kept at >= 10 minutes");
+        let cache = LiveCache {
+            version: crate::cli::statusline::CACHE_SCHEMA_VERSION,
+            updated_at: (Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            five_hour: None,
+            seven_day: None,
+            today_cost_usd: None,
+            context_pct: None,
+            model: None,
+        };
+        assert!(
+            cache_is_fresh(&cache),
+            "5-minute-old cache must still be fresh"
+        );
     }
 
     #[test]
