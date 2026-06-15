@@ -35,6 +35,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -279,6 +280,68 @@ TEMPORAL_ARM_ENABLED = os.environ.get("RECALL_TEMPORAL_ARM", "1") != "0"
 # Corpus-scan bound: the arm reads frontmatter for every learning file, so
 # cap the walk — a runaway docs dir must never stall the recall path.
 TEMPORAL_ARM_MAX_FILES = 5000
+
+# R12: per-arm calibrated OOD floors (Hindsight per-strategy gating shape).
+# The retrieval arms are NOT score-comparable — vector cosine, BM25 score, and
+# graph budget live on different scales — so the single GLOBAL OOD gate (R7,
+# post-fusion) mis-calibrates at least three of them: a threshold that is right
+# for the dense vector arm is wrong for the lexical BM25 arm and meaningless for
+# the entity-graph arm. R12 gives each arm its OWN floor, applied to that arm's
+# candidates BEFORE RRF fusion, using the same cheap, backend-agnostic signal
+# R7 uses (lexical query-term coverage ∈ [0,1]) — the only score available per
+# candidate without normalizing across incomparable backends. R7's global gate
+# is UNCHANGED and still runs after fusion; R12 is an extra, tighter pre-fusion
+# layer.
+#
+# Runtime default is 0 (OFF) for every arm: a non-zero floor pruning candidates
+# pre-fusion would change R7's observable contract (an off-topic query whose
+# candidates are all pruned arrives at R7 already empty, so R7 reports
+# ood_gated=False instead of True). So the floors are OPT-IN — recall.py keeps
+# byte-identical pre-R12 behaviour until an operator wires them. The CALIBRATED
+# defaults live in reflect_config (`recall.arm.<name>.min_score`, derived by
+# `reflect calibrate-thresholds`) as the declarative surface that hooks/tools
+# read and push into the environment, exactly like the R2/R16 recall knobs. The
+# calibration script's CALIBRATED_FLOORS below are what it emits as suggested
+# values; they are NOT applied here automatically.
+_ARM_FLOOR_DEFAULTS = {
+    "vector": 0.0,
+    "bm25": 0.0,
+    "graph": 0.0,
+    "temporal": 0.0,
+}
+
+# R12: the calibrated values `reflect calibrate-thresholds` ships as defaults
+# (mirrored in reflect_config `recall.arm.<name>.min_score`). These are the
+# suggested floors an operator wires via RECALL_ARM_<NAME>_MIN_SCORE; the
+# calibration script seeds its output from these and refines vector/bm25 from a
+# live corpus sample. Kept separate from the runtime default (all-zero / off) so
+# enabling R12 is an explicit, observable choice.
+CALIBRATED_FLOORS = {
+    "vector": 0.1,
+    "bm25": 0.15,
+    "graph": 0.0,
+    "temporal": 0.05,
+}
+
+
+def _arm_floor(arm: str) -> float:
+    """R12: the active min_score floor for *arm*, env-overridable.
+
+    Defaults to 0 (OFF) — see _ARM_FLOOR_DEFAULTS — so R12 is opt-in and never
+    changes pre-R12 behaviour unless wired. RECALL_ARM_<NAME>_MIN_SCORE (e.g.
+    RECALL_ARM_VECTOR_MIN_SCORE) sets the arm's floor; malformed values fall
+    back to the default. Clamped to [0, 1] — the floor is a fraction of
+    query-term coverage, same units as R7's --min-overlap, so the two gates are
+    directly comparable.
+    """
+    default = _ARM_FLOOR_DEFAULTS.get(arm, 0.0)
+    raw = os.environ.get(f"RECALL_ARM_{arm.upper()}_MIN_SCORE")
+    if raw is None:
+        return default
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return default
 
 # R4: token-budget retrieval. Rough estimate — 1 token ≈ 4 chars — matching
 # Hindsight's budget-not-top-k contract (agents think in tokens).
@@ -1885,6 +1948,130 @@ def apply_ood_gate(
     return learnings, False
 
 
+def apply_arm_floor(
+    learnings: list[Learning], query: str, arm: str
+) -> list[Learning]:
+    """R12: drop an ARM's candidates whose query-term coverage is below that
+    arm's calibrated min_score floor, BEFORE the candidates enter RRF fusion.
+
+    Layered on R7 (which gates the FUSED set post-fusion with a single global
+    threshold): the global gate can't distinguish a vector-arm near-miss from a
+    BM25-arm near-miss because RRF erases the source. R12 gates each arm at the
+    source with its own floor, so a borderline hit one arm should drop (its
+    native score barely clears that arm's bar) is removed before it can win a
+    fusion rank — while the SAME hit survives on an arm whose floor is lower.
+
+    Per-candidate (not best-only like R7): every candidate the arm emits is
+    individually tested, so the gate tightens which candidates from this arm
+    reach fusion rather than all-or-nothing suppressing the arm. A floor of 0
+    is a no-op (returns the list unchanged — pre-R12 behaviour)."""
+    floor = _arm_floor(arm)
+    if floor <= 0 or not learnings:
+        return learnings
+    return [lrn for lrn in learnings if lexical_overlap(query, lrn) >= floor]
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    """The *pct* (0–100) percentile of *values* (nearest-rank). [] => 0.0."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = int(round((pct / 100.0) * (len(ordered) - 1)))
+    return ordered[max(0, min(len(ordered) - 1, idx))]
+
+
+def calibrate_thresholds(
+    *,
+    scope_global: bool = False,
+    all_branches: bool = False,
+    sample_size: int = 40,
+    percentile: float = 10.0,
+) -> str:
+    """R12: sample the corpus to DERIVE per-arm min_score floors.
+
+    For each of a random sample of corpus documents we build an in-domain probe
+    query from that document's own title + key_insight (these terms ARE in the
+    note, so a healthy arm should surface it), run the relevant arm, and record
+    the query-term coverage of the candidates that arm returns. The arm's floor
+    is then set just below the in-domain distribution — the ``percentile``-th
+    percentile of observed in-domain coverage — so genuine in-domain hits clear
+    the floor while out-of-domain near-misses (which score below the in-domain
+    body) are dropped. Because the arms produce different coverage distributions
+    (the dense vector arm surfaces lexically-distant neighbours the lexical BM25
+    arm never would), each arm gets its OWN derived floor — which is the whole
+    point of R12.
+
+    The entity-graph and temporal arms are not lexically calibrated: the graph
+    arm expands by entity neighbourhood (a related note can share zero query
+    terms), so a lexical floor would wrongly drop its legitimate hits — it ships
+    at 0 (open). The temporal arm is already date-window scoped, so it keeps the
+    light default floor. Output is paste-ready TOML + env exports.
+    """
+    cli = find_learnings_cli()
+    subproc_env, kb_root = recall_env(scope_global, all_branches)
+    docs_root = _docs_root_for(kb_root)
+    floors = dict(CALIBRATED_FLOORS)  # graph/temporal keep their shipped values
+    samples: dict[str, list[float]] = {"vector": [], "bm25": []}
+
+    docs = sorted(docs_root.rglob("*.md")) if docs_root.is_dir() else []
+    if cli and docs:
+        random.shuffle(docs)
+        for path in docs[:sample_size]:
+            try:
+                content = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            fm, _body = parse_frontmatter(content)
+            lrn = Learning(chunk_text=content, frontmatter=fm)
+            probe = " ".join(filter(None, [lrn.title, lrn.key_insight])).strip()
+            if not probe or probe == "(no title)":
+                continue
+            # Vector arm = the primary `reflect search` mode.
+            try:
+                proc = subprocess.run(
+                    [str(cli), "search", probe, "--mode", DEFAULT_MODE,
+                     "--format", "json", "--limit", "10"],
+                    capture_output=True, text=True, timeout=60, check=False,
+                    env=subproc_env,
+                )
+                if proc.returncode == 0:
+                    for cand in parse_learnings_output(proc.stdout):
+                        samples["vector"].append(lexical_overlap(probe, cand))
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            # BM25 arm = qmd.
+            for cand in fetch_qmd(probe, 10, docs_root=docs_root):
+                samples["bm25"].append(lexical_overlap(probe, cand))
+
+    for arm in ("vector", "bm25"):
+        if samples[arm]:
+            # Floor sits just under the in-domain distribution: the low
+            # percentile of observed in-domain coverage. Clamp to [0, 1].
+            floors[arm] = round(min(1.0, max(0.0, _percentile(samples[arm], percentile))), 3)
+
+    lines = [
+        "# R12: per-arm calibrated OOD floors derived by `reflect "
+        "calibrate-thresholds`.",
+        f"# sampled docs={min(sample_size, len(docs))} percentile={percentile} "
+        f"(vector n={len(samples['vector'])}, bm25 n={len(samples['bm25'])})",
+        "[recall.arm.vector]",
+        f"min_score = {floors['vector']}",
+        "[recall.arm.bm25]",
+        f"min_score = {floors['bm25']}",
+        "[recall.arm.graph]",
+        f"min_score = {floors['graph']}  # entity-neighbourhood arm — open",
+        "[recall.arm.temporal]",
+        f"min_score = {floors['temporal']}  # date-window scoped — light floor",
+        "",
+        "# env-var form (recall.py reads these directly):",
+        f"# export RECALL_ARM_VECTOR_MIN_SCORE={floors['vector']}",
+        f"# export RECALL_ARM_BM25_MIN_SCORE={floors['bm25']}",
+        f"# export RECALL_ARM_GRAPH_MIN_SCORE={floors['graph']}",
+        f"# export RECALL_ARM_TEMPORAL_MIN_SCORE={floors['temporal']}",
+    ]
+    return "\n".join(lines)
+
+
 def filter_by_token_budget(
     learnings: list[Learning], max_tokens: int
 ) -> list[Learning]:
@@ -2541,8 +2728,20 @@ def recall(
     if graph_err and not qmd_results and not entity_results and not temporal_results:
         return RecallResult([], query, mode, error=graph_err, temporal=temporal)
 
+    # R12: gate EACH arm by its own calibrated floor before fusion. The arms'
+    # native scores are not comparable, so a single global gate (R7) can't be
+    # right for all of them at once; each arm drops its own sub-floor candidates
+    # here, then R7 still gates the fused set globally below. `graph_results` is
+    # the PRIMARY mode's output — the dense vector arm in the default `naive`
+    # mode — so it carries the "vector" floor; `entity_results` is the `--mode
+    # local` entity-graph expansion arm.
     learnings = rrf_fuse(
-        [graph_results, qmd_results, entity_results, temporal_results]
+        [
+            apply_arm_floor(graph_results, query, "vector"),
+            apply_arm_floor(qmd_results, query, "bm25"),
+            apply_arm_floor(entity_results, query, "graph"),
+            apply_arm_floor(temporal_results, query, "temporal"),
+        ]
     )
     # R2: cross-encoder scores for the fused top candidates. R3: mpnet
     # embeddings for the same window (MMR diversity). Both shell out to the
@@ -2628,7 +2827,17 @@ def recall(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("query", nargs="+", help="Search query")
+    ap.add_argument("query", nargs="*", help="Search query")
+    ap.add_argument(
+        "--calibrate-thresholds", action="store_true",
+        help="R12: instead of querying, SAMPLE the corpus to derive per-arm "
+             "min_score floors and print them as TOML ([recall.arm.<name>]) "
+             "plus the matching RECALL_ARM_<NAME>_MIN_SCORE env exports. "
+             "Each arm's floor is set at a conservative low percentile of the "
+             "in-domain query-term coverage distribution that arm produces — "
+             "so genuine in-domain hits clear it while out-of-domain near-"
+             "misses are dropped. The arms are not score-comparable, so each "
+             "gets its own floor.")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     ap.add_argument("--mode", choices=["naive", "local", "global"], default=DEFAULT_MODE)
     ap.add_argument("--confidence", choices=["HIGH", "MEDIUM", "LOW", "ANY"], default="ANY")
@@ -2676,6 +2885,12 @@ def main() -> int:
                          "the current project. Default scope is the current "
                          "branch only (worktree isolation).")
     args = ap.parse_args()
+
+    if args.calibrate_thresholds:  # R12
+        print(calibrate_thresholds(
+            scope_global=args.scope_global, all_branches=args.all_branches,
+        ))
+        return 0
 
     query = " ".join(args.query).strip()
     if not query:
