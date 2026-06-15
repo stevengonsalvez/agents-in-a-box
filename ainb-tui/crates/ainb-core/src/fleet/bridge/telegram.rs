@@ -121,8 +121,15 @@ fn is_addressed(cfg: &TelegramConfig, bot_username: Option<&str>, message: &TgMe
             return true;
         }
     }
-    if let (Some(username), Some(text)) = (bot_username, &message.text) {
-        return text.to_lowercase().contains(&format!("@{}", username.to_lowercase()));
+    // Media messages carry their text in `caption`; `handle_message` falls back
+    // to it, so the mention check must scan both fields to stay consistent.
+    if let Some(username) = bot_username {
+        let needle = format!("@{}", username.to_lowercase());
+        return message
+            .text
+            .iter()
+            .chain(message.caption.iter())
+            .any(|s| s.to_lowercase().contains(&needle));
     }
     false
 }
@@ -292,6 +299,15 @@ mod tests {
             Some("MyBot"),
             &msg("group", Some("@mybot status"))
         ));
+    }
+
+    #[test]
+    fn group_caption_mention_is_addressed() {
+        // A media message carries its only text in `caption`; the mention there
+        // must address the bot just as it would in `text`.
+        let mut m = msg("group", None);
+        m.caption = Some("@mybot look at this".into());
+        assert!(is_addressed(&cfg(true), Some("MyBot"), &m));
     }
 
     #[test]
