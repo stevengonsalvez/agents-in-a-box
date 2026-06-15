@@ -64,34 +64,43 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
     let (register_tx, mut register_rx) = mpsc::unbounded_channel::<Vec<PooledServer>>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
 
-    // Per-server stop signal. Firing one returns just that proxy (reaps its
-    // child + removes its socket); global shutdown fires all of them.
-    let mut proxy_stops: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
+    use super::proxy::ProxySignal;
+    // Per-server signal channel. `stop_server` sends `Reap` (kill the child,
+    // keep the listener — next attach respawns it); global shutdown sends
+    // `Shutdown` to all (full teardown). The proxy stays registered across a
+    // reap, so there's no stop→re-register socket race.
+    let mut proxy_sigs: HashMap<String, tokio::sync::watch::Sender<ProxySignal>> = HashMap::new();
     let mut running: HashSet<String> = HashSet::new();
     let spawn_proxy = |server: PooledServer,
                        status: StatusMap,
                        idle_grace: Duration|
-     -> tokio::sync::watch::Sender<bool> {
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+     -> Option<tokio::sync::watch::Sender<ProxySignal>> {
+        let (sig_tx, sig_rx) = tokio::sync::watch::channel(ProxySignal::Run);
         let name = server.name.clone();
         match paths::server_socket(&server.name) {
             Ok(socket_path) => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_server_proxy(server, socket_path, idle_grace, status, stop_rx).await {
+                    if let Err(e) = run_server_proxy(server, socket_path, idle_grace, status, sig_rx).await {
                         tracing::error!("mcp_pool[{name}]: proxy exited: {e}");
                     }
                 });
+                Some(sig_tx)
             }
-            Err(e) => tracing::error!("mcp_pool[{name}]: socket path: {e}"),
+            // Socket-path resolution failed → no task; don't register the
+            // name so it stays re-registerable.
+            Err(e) => {
+                tracing::error!("mcp_pool[{name}]: socket path: {e}");
+                None
+            }
         }
-        stop_tx
     };
 
     for server in pooled_servers(&config) {
         let name = server.name.clone();
-        let stop_tx = spawn_proxy(server, status.clone(), idle_grace);
-        running.insert(name.clone());
-        proxy_stops.insert(name, stop_tx);
+        if let Some(sig_tx) = spawn_proxy(server, status.clone(), idle_grace) {
+            running.insert(name.clone());
+            proxy_sigs.insert(name, sig_tx);
+        }
     }
 
     eprintln!("mcp daemon: listening (control: {})", control_path.display());
@@ -107,20 +116,22 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
                     if !running.contains(&server.name) && server.resolvable_on_host() {
                         eprintln!("mcp daemon: registered '{}'", server.name);
                         let name = server.name.clone();
-                        let stop_tx = spawn_proxy(server, status.clone(), idle_grace);
-                        running.insert(name.clone());
-                        proxy_stops.insert(name, stop_tx);
+                        if let Some(sig_tx) = spawn_proxy(server, status.clone(), idle_grace) {
+                            running.insert(name.clone());
+                            proxy_sigs.insert(name, sig_tx);
+                        }
                     }
                 }
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(DaemonCmd::StopServer(name)) => {
-                        if let Some(stop_tx) = proxy_stops.remove(&name) {
-                            let _ = stop_tx.send(true); // reaps child + removes socket
-                            running.remove(&name);
-                            status.lock().await.remove(&name);
-                            eprintln!("mcp daemon: stopped server '{name}'");
+                        // Reap-only: kill the child but keep the proxy + socket
+                        // alive (server stays registered, status → idle). The
+                        // next attach respawns it; no teardown race.
+                        if let Some(sig_tx) = proxy_sigs.get(&name) {
+                            let _ = sig_tx.send(ProxySignal::Reap);
+                            eprintln!("mcp daemon: stopped (reaped) server '{name}'");
                         }
                     }
                     Some(DaemonCmd::Shutdown) | None => break,
@@ -138,9 +149,9 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
         }
     }
 
-    // Graceful: fire every per-server stop → kill children + remove sockets.
-    for stop_tx in proxy_stops.values() {
-        let _ = stop_tx.send(true);
+    // Graceful: full teardown of every proxy → kill children + remove sockets.
+    for sig_tx in proxy_sigs.values() {
+        let _ = sig_tx.send(ProxySignal::Shutdown);
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&control_path);

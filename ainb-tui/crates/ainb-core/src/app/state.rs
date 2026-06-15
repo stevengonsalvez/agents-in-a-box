@@ -4106,18 +4106,38 @@ impl AppState {
     /// Stop the selected pooled server (off-thread), then refresh.
     pub fn mcp_stop_server(&mut self, name: &str) {
         let name = name.to_string();
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || crate::mcp_pool::client::stop_server(&name)).await;
+        self.mcp_stop_then_refresh(move || {
+            let _ = crate::mcp_pool::client::stop_server(&name);
         });
-        self.spawn_mcp_fetch();
     }
 
     /// Stop the whole pool daemon (off-thread), then refresh.
     pub fn mcp_stop_daemon(&mut self) {
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(crate::mcp_pool::client::daemon_stop).await;
+        self.mcp_stop_then_refresh(|| {
+            let _ = crate::mcp_pool::client::daemon_stop();
         });
-        self.spawn_mcp_fetch();
+    }
+
+    /// Run a blocking stop action off-thread, then fetch fresh status and
+    /// deliver it through the overlay's channel — so the table reflects the
+    /// change as soon as the stop completes (no immediate-fetch race that
+    /// reads pre-stop state).
+    fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
+        let Some(o) = self.mcp_overlay.as_mut() else { return };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch (its result is discarded)
+        o.loading = true;
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(stop).await;
+            let result = tokio::task::spawn_blocking(mcp_fetch_blocking)
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("fetch task failed: {e}")),
+                });
+            let _ = tx.send(result);
+        });
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from

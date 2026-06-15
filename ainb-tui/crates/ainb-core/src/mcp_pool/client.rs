@@ -37,8 +37,10 @@ pub fn register_servers(servers: &[super::PooledServer]) -> Result<String> {
     query(&path, &msg.to_string())
 }
 
-/// Stop one pooled server: the daemon reaps that server's child + removes its
-/// socket. The next attach respawns it (same semantics as idle reap).
+/// Stop one pooled server: the daemon reaps that server's child but KEEPS the
+/// listener and registration (same semantics as idle reap), so attached shims
+/// reconnect and the next attach respawns it. No socket teardown, no
+/// stop→re-register race.
 pub fn stop_server(name: &str) -> Result<String> {
     let path = paths::control_socket()?;
     let msg = serde_json::json!({"cmd": "stop_server", "name": name});

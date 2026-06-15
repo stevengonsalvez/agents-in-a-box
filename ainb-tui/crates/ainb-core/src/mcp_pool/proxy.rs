@@ -50,6 +50,22 @@ pub struct ServerStatus {
 
 pub type StatusMap = Arc<Mutex<HashMap<String, ServerStatus>>>;
 
+/// Per-server control signal sent by the daemon over a watch channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProxySignal {
+    /// Normal running.
+    #[default]
+    Run,
+    /// Reap the child but KEEP listening (like idle-reap): the next attach
+    /// respawns it. This is what `stop_server` sends — it must not remove the
+    /// socket or tear down the listener, so reconnecting shims + new sessions
+    /// keep working and no stop→re-register race exists.
+    Reap,
+    /// Full teardown: kill the child, remove the socket, end the task. Sent on
+    /// daemon shutdown.
+    Shutdown,
+}
+
 enum Event {
     ClientConnected(UnixStream),
     /// First line was an ainb attach frame naming the session.
@@ -73,7 +89,7 @@ pub async fn run_server_proxy(
     socket_path: PathBuf,
     idle_grace: Duration,
     status: StatusMap,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut signal: tokio::sync::watch::Receiver<ProxySignal>,
 ) -> Result<()> {
     if super::paths::socket_alive_or_cleanup(&socket_path) {
         anyhow::bail!("socket {} already served by another daemon", socket_path.display());
@@ -145,13 +161,31 @@ pub async fn run_server_proxy(
         };
 
         tokio::select! {
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    if let Some(handle) = child.take() {
-                        kill_child(handle).await;
+            _ = signal.changed() => {
+                // Copy out + drop the Ref before any await (Ref isn't Send).
+                let sig = *signal.borrow_and_update();
+                match sig {
+                    ProxySignal::Run => {}
+                    ProxySignal::Reap => {
+                        // Kill the child but keep listening — next attach
+                        // respawns it. No socket removal, no re-register race.
+                        if let Some(handle) = child.take() {
+                            tracing::info!("mcp_pool[{}]: stop requested, reaping child (listener kept)", server.name);
+                            kill_child(handle).await;
+                            mux.reset_for_child_restart();
+                        }
+                        clients.clear();
+                        client_sessions.clear();
+                        idle_deadline = None;
+                        set_status!(0, None, "idle");
                     }
-                    let _ = std::fs::remove_file(&socket_path);
-                    return Ok(());
+                    ProxySignal::Shutdown => {
+                        if let Some(handle) = child.take() {
+                            kill_child(handle).await;
+                        }
+                        let _ = std::fs::remove_file(&socket_path);
+                        return Ok(());
+                    }
                 }
             }
             _ = idle_sleep => {
@@ -276,8 +310,10 @@ fn child_pid(child: &Option<ChildHandle>) -> Option<u32> {
     child.as_ref().and_then(|c| c.process.id())
 }
 
-/// Sorted, deduped session labels for the currently-connected clients.
-/// A connected client that never sent an attach frame is `anonymous`.
+/// Sorted session labels for the currently-connected clients (one per live
+/// client; duplicates are kept — two shims sharing a `--session` label show
+/// twice, which is more informative than collapsing them). A connected client
+/// that never sent an attach frame is `anonymous`.
 fn session_labels(
     clients: &HashMap<ClientId, mpsc::UnboundedSender<String>>,
     client_sessions: &HashMap<ClientId, String>,
