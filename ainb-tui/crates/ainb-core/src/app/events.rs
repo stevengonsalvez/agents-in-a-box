@@ -301,7 +301,7 @@ pub enum AppEvent {
     // Onboarding wizard events
     OnboardingNext,            // Go to next step (Enter/Right Arrow)
     OnboardingBack,            // Go to previous step (Backspace/Left Arrow)
-    OnboardingCancel,          // Cancel onboarding (Esc)
+    OnboardingToMenu,          // Leave wizard for the Setup menu (Esc)
     OnboardingInputChar(char), // Input character for git directories
     OnboardingBackspace,       // Backspace in git directories input
     OnboardingDelete,          // Delete character in input
@@ -1703,7 +1703,7 @@ impl EventHandler {
                     // Note: Left/Backspace used for text editing, use Up arrow to go back
                     match key_event.code {
                         KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Up => Some(AppEvent::OnboardingBack), // Go back (since Left is cursor)
                         KeyCode::Backspace => Some(AppEvent::OnboardingBackspace),
                         KeyCode::Delete => Some(AppEvent::OnboardingDelete),
@@ -1725,7 +1725,7 @@ impl EventHandler {
                                 Some(AppEvent::OnboardingNext)
                             }
                         }
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                             Some(AppEvent::OnboardingBack)
                         }
@@ -1738,7 +1738,7 @@ impl EventHandler {
                 }
                 OnboardingStep::Authentication => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
                     }
@@ -1747,7 +1747,7 @@ impl EventHandler {
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                     KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
                     KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
@@ -1757,7 +1757,7 @@ impl EventHandler {
                 },
                 OnboardingStep::Summary => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
                     }
@@ -1767,7 +1767,7 @@ impl EventHandler {
                     // Welcome and other steps - basic navigation
                     match key_event.code {
                         KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                             Some(AppEvent::OnboardingBack)
                         }
@@ -4984,9 +4984,9 @@ impl EventHandler {
                     onboarding_state.go_back();
                 }
             }
-            AppEvent::OnboardingCancel => {
-                tracing::debug!("Onboarding cancelled");
-                state.cancel_onboarding();
+            AppEvent::OnboardingToMenu => {
+                tracing::debug!("Leaving onboarding wizard for the Setup menu");
+                state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
                 if let Some(ref mut onboarding_state) = state.onboarding_state {

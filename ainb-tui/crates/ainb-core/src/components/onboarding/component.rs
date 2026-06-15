@@ -888,12 +888,12 @@ impl OnboardingComponent {
             },
         ));
 
-        // Escape hint
+        // Escape hint — backs out to the Setup menu (see `onboarding_to_menu`)
         spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
         spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
         spans.push(Span::styled("Esc", Style::default().fg(GOLD)));
         spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
-        spans.push(Span::styled(" Cancel", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(" Menu", Style::default().fg(MUTED_GRAY)));
 
         let nav = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
         frame.render_widget(nav, inner);
