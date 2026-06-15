@@ -37,6 +37,7 @@ pub enum SidebarItem {
     Sessions,  // Session manager
     Inbox,     // ainb-hooks notification inbox
     Recovery,  // Recover orphaned sessions
+    Mcp,       // Shared MCP pool overlay
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
     Witr,      // Process causality (witr plugin)
@@ -58,6 +59,7 @@ impl SidebarItem {
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
             Self::Recovery => "🔄",
+            Self::Mcp => "🧬",
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Witr => "🌳",
@@ -79,6 +81,7 @@ impl SidebarItem {
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
             Self::Recovery => "Recovery",
+            Self::Mcp => "MCP",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Witr => "Witr",
@@ -100,6 +103,7 @@ impl SidebarItem {
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
+            Self::Mcp => "Shared Pool",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
@@ -121,6 +125,7 @@ impl SidebarItem {
             Self::Sessions => "s",
             Self::Inbox => "b",
             Self::Recovery => "R",
+            Self::Mcp => "p",
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Witr => "w",
@@ -142,6 +147,7 @@ impl SidebarItem {
             Self::Sessions,
             Self::Inbox,
             Self::Recovery,
+            Self::Mcp,
             Self::Logs,
             Self::Stats,
             Self::Witr,

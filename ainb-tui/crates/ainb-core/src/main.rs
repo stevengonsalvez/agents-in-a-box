@@ -42,6 +42,7 @@ mod editors;
 mod fleet;
 mod git;
 mod interactive;
+mod mcp_pool;
 mod models;
 mod perf;
 mod plugins;

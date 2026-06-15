@@ -27,6 +27,7 @@ pub mod log_reader;
 pub mod log_writer;
 pub mod logs_viewer;
 pub mod mascot;
+pub mod mcp_overlay;
 pub mod new_session;
 pub mod onboarding;
 pub mod session_list;

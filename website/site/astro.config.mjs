@@ -1,4 +1,5 @@
 // @ts-check
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightImageZoom from 'starlight-image-zoom';
@@ -8,6 +9,24 @@ export default defineConfig({
   site: 'https://stevengonsalvez.github.io',
   base: '/agents-in-a-box',
   trailingSlash: 'never',
+  // Docs live in the repo-root `docs/` tree (outside this site dir), so MDX
+  // there can't resolve `@astrojs/starlight/components` from its own folder.
+  // Alias the bare specifier to the package file in this site's node_modules.
+  vite: {
+    resolve: {
+      // Exact-match (end-anchored) so we don't clobber Starlight's own
+      // `@astrojs/starlight/components/Banner.astro` etc. — only the bare
+      // `@astrojs/starlight/components` specifier used by external docs MDX.
+      alias: [
+        {
+          find: /^@astrojs\/starlight\/components$/,
+          replacement: fileURLToPath(
+            new URL('./node_modules/@astrojs/starlight/components.ts', import.meta.url)
+          ),
+        },
+      ],
+    },
+  },
   integrations: [
     starlight({
       title: 'agents-in-a-box',
@@ -55,6 +74,7 @@ export default defineConfig({
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
+            { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
             { label: 'CLI reference', slug: 'tui/cli' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },

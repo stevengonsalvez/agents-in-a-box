@@ -98,6 +98,11 @@ impl LayoutComponent {
             // without this the dialog could be live + interactive but
             // invisible (e.g. the first-run notify-install prompt fired
             // on the HomeScreen).
+            // MCP pool overlay paints above the screen, below a confirmation
+            // dialog (so a stop confirmation sits on top of it).
+            if let Some(ref overlay) = state.mcp_overlay {
+                crate::components::mcp_overlay::render(frame, frame_size, overlay);
+            }
             if state.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
@@ -193,6 +198,11 @@ impl LayoutComponent {
         if state.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
+        }
+
+        // MCP pool overlay (above the screen, below the confirmation dialog).
+        if let Some(ref overlay) = state.mcp_overlay {
+            crate::components::mcp_overlay::render(frame, frame.size(), overlay);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
