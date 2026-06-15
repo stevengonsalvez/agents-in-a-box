@@ -1,4 +1,13 @@
-# ainb phone bridge (Telegram)
+# ainb phone bridge (Telegram) — DEPRECATED
+
+> **Deprecated — superseded by the native Rust bridge `ainb fleet bridge`.**
+> The single-binary Rust daemon (in `ainb-core`, run via `ainb fleet bridge run`)
+> ports this bridge's verified behaviour AND adds a Slack (socket-mode) channel,
+> with no separate Python runtime to install or manage. Prefer it for new setups.
+> See [`docs/fleet-bridge.md`](../../../docs/fleet-bridge.md) for config + a
+> Python→Rust migration guide. This Python implementation is retained (not
+> deleted) for existing installs and as the behavioral reference spec; it will be
+> removed in a later release.
 
 A standalone Python daemon that relays messages **two-way** between Telegram and a
 named `ainb` session — a conductor session when one is present, any running
