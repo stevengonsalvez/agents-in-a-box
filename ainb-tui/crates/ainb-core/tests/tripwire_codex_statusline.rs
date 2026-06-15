@@ -186,20 +186,21 @@ fn tui_top_bar_shows_codex_quota_when_cache_present() {
     launch_and_goto_sessions(home_tmp.path(), &session);
 
     // The watcher refreshes the snapshot every 5s; give it a few ticks to
-    // overlay the seeded codex cache and the status bar to repaint.
+    // overlay the seeded codex cache and the status bar to repaint. The
+    // rendered cluster is `codex 5h 24% ↻ … · wk 50% ↻ …`.
     let deadline = Instant::now() + Duration::from_secs(20);
     let shown = poll(&session, deadline, |c| {
-        c.contains("cx5h") && c.contains("cxwk")
+        c.contains("codex 5h") && c.contains("50%")
     });
 
     let final_cap = shown.unwrap_or_else(|| capture(&session));
     assert!(
-        final_cap.contains("cx5h"),
-        "codex 5h segment (cx5h) never rendered on the top bar.\n{final_cap}"
+        final_cap.contains("codex 5h"),
+        "codex cluster (codex 5h) never rendered on the top bar.\n{final_cap}"
     );
     assert!(
-        final_cap.contains("cxwk"),
-        "codex weekly segment (cxwk) never rendered on the top bar.\n{final_cap}"
+        final_cap.contains("wk"),
+        "codex weekly window (wk) not rendered.\n{final_cap}"
     );
     // The seeded percentages must be visible too.
     assert!(
@@ -209,6 +210,11 @@ fn tui_top_bar_shows_codex_quota_when_cache_present() {
     assert!(
         final_cap.contains("50%"),
         "codex weekly percentage (50%) not visible.\n{final_cap}"
+    );
+    // And the critical reset date/time stamp is present.
+    assert!(
+        final_cap.contains('↻'),
+        "codex reset stamp (↻) not visible.\n{final_cap}"
     );
 }
 
@@ -239,7 +245,7 @@ fn tui_top_bar_hides_codex_when_no_cache() {
         "expected to still be on sessions screen.\n{cap}"
     );
     assert!(
-        !cap.contains("cx5h") && !cap.contains("cxwk"),
+        !cap.contains("codex 5h"),
         "codex segment rendered despite no cache / no auth (hide-on-fail broken).\n{cap}"
     );
 }

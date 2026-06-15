@@ -1020,76 +1020,88 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
 fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = Vec::new();
 
-    // Claude windows (bare `5h`/`wk` labels — the established look).
-    push_window(
+    // Compact, provider-grouped, each window carrying its reset instant:
+    //   claude 5h 40% ↻ Jun 15 12:24 · wk 8% ↻ Jun 20 10:24   codex 5h 24% ↻ …
+    // One cluster per provider — percentage + the critical reset date/time
+    // (the bars were dropped to fit both providers on one line). Codex is
+    // overlaid from `codex-live.json` (see
+    // `models::live_window::apply_codex_overlay`); an absent provider
+    // renders nothing (hide-on-fail).
+    push_provider(
         &mut out,
-        "5h",
+        "claude",
         live.five_hour_pct,
-        bar_color_5h,
         live.five_hour_resets_at,
-    );
-    push_window(
-        &mut out,
-        "wk",
         live.seven_day_pct,
-        bar_color_7d,
         live.seven_day_resets_at,
     );
-
-    // Codex windows, overlaid from `codex-live.json` (see
-    // `models::live_window::apply_codex_overlay`). Labelled `cx5h`/`cxwk`
-    // so the two providers are unambiguous on a single bar. Absent →
-    // nothing rendered (hide-on-fail). Same burn-colour thresholds as the
-    // Claude windows since the quota semantics match.
-    push_window(
+    push_provider(
         &mut out,
-        "cx5h",
+        "codex",
         live.codex_five_hour_pct,
-        bar_color_5h,
         live.codex_five_hour_resets_at,
-    );
-    push_window(
-        &mut out,
-        "cxwk",
         live.codex_seven_day_pct,
-        bar_color_7d,
         live.codex_seven_day_resets_at,
     );
 
     // today_cost_usd intentionally not rendered: Claude Code's
-    // /cost/total_cost_usd is the lifetime cost of a *single* session
-    // (whichever invoked the statusline most recently), not today's
-    // total. Misleading at a glance — keep the field on the cache
-    // schema but don't surface it. The old combined "⏱ Xh Ym" countdown
-    // was likewise dropped in favour of the absolute per-window reset
-    // instants ("↻ <date> <time>") rendered next to each bar above.
+    // /cost/total_cost_usd is the lifetime cost of a *single* session, not
+    // today's total — misleading at a glance. Kept on the cache schema but
+    // not surfaced.
     out
 }
 
-/// Push one quota window — `label ▰▱▱ NN% ↻ <reset>` — onto `out`, with a
-/// ` · ` separator when other windows precede it. No-op when `pct` is
-/// `None`. Shared by the Claude and Codex windows so both render
-/// identically (bar, colour thresholds, optional reset stamp).
-fn push_window(
+/// Render one provider cluster — `claude 5h NN% ↻ <reset> · wk MM% ↻ <reset>`
+/// — onto `out`, separated from a preceding cluster by a wide gap. No-op
+/// when both windows are absent (hide-on-fail).
+fn push_provider(
+    out: &mut Vec<Span<'static>>,
+    label: &str,
+    five_pct: Option<u8>,
+    five_reset: Option<chrono::DateTime<chrono::Utc>>,
+    seven_pct: Option<u8>,
+    seven_reset: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    if five_pct.is_none() && seven_pct.is_none() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push(Span::styled("   ", Style::default()));
+    }
+    out.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+    ));
+    let mut first = true;
+    push_quota_window(out, "5h", five_pct, bar_color_5h, five_reset, &mut first);
+    push_quota_window(out, "wk", seven_pct, bar_color_7d, seven_reset, &mut first);
+}
+
+/// Push one window — `5h NN% ↻ <reset>` — within a provider cluster, with a
+/// ` · ` separator before all but the first window. The reset date/time is
+/// rendered when known (it's the critical "when does my quota come back"
+/// signal). No-op when `pct` is `None`.
+fn push_quota_window(
     out: &mut Vec<Span<'static>>,
     label: &str,
     pct: Option<u8>,
     color: fn(u8) -> Color,
     reset: Option<chrono::DateTime<chrono::Utc>>,
+    first: &mut bool,
 ) {
     let Some(pct) = pct else {
         return;
     };
-    if !out.is_empty() {
+    if !*first {
         out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
     }
+    *first = false;
     out.push(Span::styled(
         format!("{label} "),
         Style::default().fg(MUTED_GRAY),
     ));
-    out.push(Span::styled(mini_bar(pct), Style::default().fg(color(pct))));
     out.push(Span::styled(
-        format!(" {pct}%"),
+        format!("{pct}%"),
         Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
     ));
     if let Some(reset) = reset {
@@ -1107,21 +1119,6 @@ fn build_cta_spans() -> Vec<Span<'static>> {
         Span::styled("Live Claude Code usage off", Style::default().fg(red)),
         Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
-}
-
-/// Three-cell mini-bar: ▰ for filled, ▱ for empty. Matches the brief.
-fn mini_bar(pct: u8) -> String {
-    let cells = ((pct as f64 / 100.0) * 3.0).round() as usize;
-    let filled = cells.min(3);
-    let empty = 3 - filled;
-    let mut s = String::with_capacity(3);
-    for _ in 0..filled {
-        s.push('▰');
-    }
-    for _ in 0..empty {
-        s.push('▱');
-    }
-    s
 }
 
 fn bar_color_5h(pct: u8) -> Color {
@@ -1189,6 +1186,7 @@ mod live_widget_tests {
         };
         let spans = build_live_widget_spans(&live);
         let text = flatten(&spans);
+        assert!(text.contains("claude"), "provider label present: {text}");
         assert!(text.contains("5h"));
         assert!(text.contains("40%"));
         assert!(text.contains("wk"));
@@ -1197,8 +1195,8 @@ mod live_widget_tests {
         // it's a single session's lifetime cost, not today's total.
         assert!(!text.contains("$"));
         assert!(!text.contains("today"));
-        // The combined "⏱ Xh Ym" countdown is gone; each window now carries
-        // its own absolute reset stamp prefixed by ↻ (local-tz date+time).
+        // The combined "⏱ Xh Ym" countdown is gone; each window carries its
+        // own absolute reset stamp prefixed by ↻ (local-tz date+time).
         assert!(!text.contains("⏱"));
         assert_eq!(text.matches('↻').count(), 2, "one reset stamp per window");
     }
@@ -1219,6 +1217,7 @@ mod live_widget_tests {
         };
         let spans = build_live_widget_spans(&live);
         let text = flatten(&spans);
+        assert!(text.contains("claude"));
         assert!(text.contains("5h"));
         assert!(!text.contains("wk"));
         assert!(!text.contains("$"));
@@ -1240,16 +1239,17 @@ mod live_widget_tests {
             ..Default::default()
         };
         let text = flatten(&build_live_widget_spans(&live));
-        // Claude windows still present...
-        assert!(text.contains("5h"));
+        // Both provider clusters render: `claude 5h 40% · wk 8%   codex …`.
+        assert!(text.contains("claude"), "claude cluster present: {text}");
         assert!(text.contains("40%"));
-        assert!(text.contains("wk"));
         assert!(text.contains("8%"));
-        // ...and the Codex windows render alongside them.
-        assert!(text.contains("cx5h"), "codex 5h label present: {text}");
+        assert!(text.contains("codex"), "codex cluster present: {text}");
         assert!(text.contains("10%"));
-        assert!(text.contains("cxwk"), "codex weekly label present: {text}");
         assert!(text.contains("44%"));
+        // Claude leads, Codex follows (overlaid second).
+        assert!(text.starts_with("claude"), "claude leads: {text}");
+        let (claude_at, codex_at) = (text.find("claude").unwrap(), text.find("codex").unwrap());
+        assert!(claude_at < codex_at, "claude before codex: {text}");
         // Only the two Codex windows carry reset instants here → two ↻.
         assert_eq!(text.matches('↻').count(), 2);
     }
@@ -1264,12 +1264,12 @@ mod live_widget_tests {
             ..Default::default()
         };
         let text = flatten(&build_live_widget_spans(&live));
-        // Codex is the first (and only) window — no Claude bar precedes it.
+        // Codex is the first (and only) cluster — no Claude cluster precedes it.
         assert!(
-            text.starts_with("cx5h"),
+            text.starts_with("codex"),
             "codex leads when Claude absent: {text}"
         );
-        assert!(text.contains("cxwk"));
+        assert!(!text.contains("claude"));
     }
 
     #[test]
@@ -1280,18 +1280,8 @@ mod live_widget_tests {
             ..Default::default()
         };
         let text = flatten(&build_live_widget_spans(&live));
-        assert!(text.contains("5h"));
-        assert!(!text.contains("cx5h"));
-        assert!(!text.contains("cxwk"));
-    }
-
-    #[test]
-    fn mini_bar_clamps_and_buckets() {
-        assert_eq!(mini_bar(0), "▱▱▱");
-        assert_eq!(mini_bar(33), "▰▱▱");
-        assert_eq!(mini_bar(50), "▰▰▱");
-        assert_eq!(mini_bar(99), "▰▰▰");
-        assert_eq!(mini_bar(100), "▰▰▰");
+        assert!(text.contains("claude"));
+        assert!(!text.contains("codex"));
     }
 
     #[test]
