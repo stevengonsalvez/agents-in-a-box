@@ -1,10 +1,18 @@
 // ABOUTME: Filesystem layout for ATC instances.
 //
 // Every instance lives under `~/.agents-in-a-box/atc/<name>/`:
-//   meta.json    — AtcMeta config
-//   CLAUDE.md    — rendered policy the ATC session reads
-//   state.json   — ATC-maintained durable state (survives context compaction)
-//   task-log.md  — ATC-maintained running log
+//   meta.json            — AtcMeta config
+//   CLAUDE.md            — rendered policy the ATC session reads
+//   state.json           — single-writer ATC-session durable state (retry_counts /
+//                          escalated / notes); survives context compaction
+//   heartbeat-state.json — single-writer heartbeat-process bookkeeping
+//                          (last_heartbeat_ms / last_active_ms / continue_counts)
+//   task-log.md          — ATC-maintained running log
+//
+// state.json and heartbeat-state.json are deliberately SEPARATE files with
+// disjoint writers: the ATC Claude session owns state.json, the heartbeat
+// process owns heartbeat-state.json. This avoids the lost-update race that
+// existed when both writers performed unlocked read-modify-write on one file.
 // The home root honours `AINB_HOME` so tests can isolate to a tempdir.
 
 use std::path::{Path, PathBuf};
@@ -19,6 +27,8 @@ pub struct AtcPaths {
     pub meta: PathBuf,
     pub claude_md: PathBuf,
     pub state: PathBuf,
+    /// Heartbeat-process-owned bookkeeping (separate writer from `state`).
+    pub heartbeat_state: PathBuf,
     pub task_log: PathBuf,
 }
 
@@ -31,6 +41,7 @@ impl AtcPaths {
             meta: dir.join("meta.json"),
             claude_md: dir.join("CLAUDE.md"),
             state: dir.join("state.json"),
+            heartbeat_state: dir.join("heartbeat-state.json"),
             task_log: dir.join("task-log.md"),
             dir,
         }
@@ -98,6 +109,7 @@ mod tests {
         assert_eq!(p.meta, root.join("tower/meta.json"));
         assert_eq!(p.claude_md, root.join("tower/CLAUDE.md"));
         assert_eq!(p.state, root.join("tower/state.json"));
+        assert_eq!(p.heartbeat_state, root.join("tower/heartbeat-state.json"));
         assert_eq!(p.task_log, root.join("tower/task-log.md"));
     }
 

@@ -145,6 +145,153 @@ fn atc_setup_status_list_teardown_lifecycle() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Teardown must kill the running ATC session **non-interactively**: it has to
+/// pass `--force` (otherwise `ainb kill` hits a `[y/N]` prompt, reads EOF,
+/// cancels, and leaves the session alive) and it must report the *real* kill
+/// result rather than blindly setting `killed=true`.
+///
+/// We make this hermetic by:
+///  * spawning a real, uniquely-named tmux session that matches the session
+///    name teardown targets (`tmux_<name>`), so the kill branch actually runs,
+///  * pointing `AINB_BIN` at a fake `ainb` that records its argv to a file and
+///    really kills that one tmux session by exact name (simulating a real kill).
+/// We then assert teardown invoked `kill --force <name>` and reported
+/// `session_killed: true`. A second pass with a fake that *fails* proves
+/// `killed` reflects reality (false), not an unconditional `true`.
+#[cfg(unix)]
+#[test]
+fn atc_teardown_kills_with_force_and_reports_real_result() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // tmux is required for this hermetic test; skip cleanly if absent.
+    if Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("tmux unavailable — skipping teardown --force test");
+        return;
+    }
+
+    let uniq = format!("atcforce{}", std::process::id());
+    let home = std::env::temp_dir().join(format!("atc-force-{}", std::process::id()));
+    let atc_dir = home.join("atc").join(&uniq);
+    let session = format!("tmux_{uniq}"); // what teardown will target
+
+    // Always tear down the real tmux session we create, even on assert failure.
+    struct TmuxGuard(String);
+    impl Drop for TmuxGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).status();
+        }
+    }
+    let _guard = TmuxGuard(session.clone());
+
+    // Provision instance files (no real timer, no real spawn).
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "fleet",
+            "atc",
+            "setup",
+            &uniq,
+            "--no-spawn",
+            "--no-heartbeat",
+        ])
+        .output()
+        .expect("setup");
+    assert!(
+        out.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Spawn the real session teardown will detect + try to kill.
+    let started = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "sleep", "300"])
+        .status()
+        .expect("spawn tmux session");
+    assert!(started.success(), "could not start fake tmux session");
+
+    // --- Pass 1: fake `ainb kill --force` that SUCCEEDS (really kills it) -----
+    let argv_log = home.join("kill-argv.txt");
+    let fake = home.join("fake-ainb-ok.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s ' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\n\
+# Simulate a real, forced kill of exactly our session.\n\
+tmux kill-session -t '{}' 2>/dev/null\nexit 0\n",
+            argv_log.display(),
+            argv_log.display(),
+            session,
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).unwrap();
+
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_BIN", &fake)
+        .args(["--format", "json", "fleet", "atc", "teardown", &uniq])
+        .output()
+        .expect("teardown");
+    assert!(
+        out.status.success(),
+        "teardown failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The fake was invoked with `kill --force <name>` — proves --force is passed.
+    let argv = std::fs::read_to_string(&argv_log).unwrap_or_default();
+    assert!(
+        argv.contains("kill --force ") && argv.contains(&uniq),
+        "kill was not invoked with --force <name>: {argv:?}"
+    );
+
+    // And teardown reported the real result: the session was actually killed.
+    let td: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        td["session_killed"], true,
+        "killed should reflect a successful kill"
+    );
+
+    // --- Pass 2: fake `ainb kill` that FAILS → killed must be false ----------
+    // Re-create the session so the kill branch runs again.
+    let started = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "sleep", "300"])
+        .status()
+        .expect("respawn tmux session");
+    assert!(started.success());
+
+    let fake_fail = home.join("fake-ainb-fail.sh");
+    std::fs::write(&fake_fail, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut perms = std::fs::metadata(&fake_fail).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake_fail, perms).unwrap();
+
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_BIN", &fake_fail)
+        .args(["--format", "json", "fleet", "atc", "teardown", &uniq])
+        .output()
+        .expect("teardown 2");
+    assert!(
+        out.status.success(),
+        "teardown should not abort on kill failure"
+    );
+    let td: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        td["session_killed"], false,
+        "killed must reflect the failed kill, not an unconditional true"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The heartbeat verb is poll-mode: it shells `ainb fleet needs`, builds the
 /// nudge, and (when the fleet is quiet long enough) idle-pauses. Here we point
 /// `AINB_BIN` at a fake that returns an empty needs list, pre-age the
@@ -185,9 +332,11 @@ fn atc_heartbeat_idle_pauses_when_fleet_quiet() {
         .expect("setup");
     assert!(out.status.success(), "setup failed");
 
+    // Idle-pause bookkeeping now lives in the heartbeat-owned file (separate
+    // writer from the session's state.json). Pre-age last_active_ms there.
     let long_ago = 0i64; // epoch → guaranteed older than any idle-pause window
     std::fs::write(
-        atc_dir.join("state.json"),
+        atc_dir.join("heartbeat-state.json"),
         format!(r#"{{"last_active_ms":{long_ago}}}"#),
     )
     .unwrap();
@@ -209,12 +358,13 @@ fn atc_heartbeat_idle_pauses_when_fleet_quiet() {
     assert_eq!(hb["idle_paused"], true, "should idle-pause on quiet fleet");
     assert_eq!(hb["delivered"], false, "paused → nothing delivered");
 
-    // state.json was updated with a fresh last_heartbeat_ms.
-    let state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(atc_dir.join("state.json")).unwrap())
-            .unwrap();
+    // The heartbeat-owned file was updated with a fresh last_heartbeat_ms.
+    let hb_state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(atc_dir.join("heartbeat-state.json")).unwrap(),
+    )
+    .unwrap();
     assert!(
-        state["last_heartbeat_ms"].as_i64().unwrap() > 0,
+        hb_state["last_heartbeat_ms"].as_i64().unwrap() > 0,
         "heartbeat did not stamp last_heartbeat_ms"
     );
 

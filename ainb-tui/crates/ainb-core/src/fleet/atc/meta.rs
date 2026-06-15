@@ -44,9 +44,13 @@ impl AtcMeta {
 
     /// The tmux session name ATC runs under (`ainb run --name <name>` →
     /// `tmux_<name>`).
+    ///
+    /// Uses the same sanitization the real spawner ([`crate::tmux::TmuxSession`])
+    /// applies, so names containing a space, `.`, `/`, or `:` resolve to the
+    /// identical session for status/teardown instead of targeting the wrong one.
     #[must_use]
     pub fn tmux_session(&self) -> String {
-        format!("tmux_{}", self.name)
+        crate::tmux::sanitize_session_name(&self.name)
     }
 
     /// Serialize to pretty JSON for `meta.json`.
@@ -97,6 +101,19 @@ mod tests {
     #[test]
     fn tmux_session_prefixes_name() {
         assert_eq!(AtcMeta::new("tower").tmux_session(), "tmux_tower");
+    }
+
+    #[test]
+    fn tmux_session_sanitizes_unsafe_chars_like_the_spawner() {
+        // A name with space/./ /: must resolve to the SAME session the real
+        // spawner (TmuxSession::sanitize_name) produces, so status/teardown
+        // never target the wrong session.
+        let m = AtcMeta::new("test.name/with:chars");
+        assert_eq!(m.tmux_session(), "tmux_test_name_with_chars");
+        assert_eq!(
+            m.tmux_session(),
+            crate::tmux::session::TmuxSession::sanitize_name("test.name/with:chars")
+        );
     }
 
     #[test]

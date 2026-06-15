@@ -75,15 +75,8 @@ impl TmuxSession {
     ///
     /// # Returns
     /// * A sanitized name with "tmux_" prefix and invalid characters replaced
-    fn sanitize_name(name: &str) -> String {
-        let base_name = name.strip_prefix("tmux_").unwrap_or(name);
-
-        let cleaned = base_name
-            .replace(' ', "_")
-            .replace('.', "_")
-            .replace('/', "_")
-            .replace(':', "_");
-        format!("tmux_{}", cleaned)
+    pub fn sanitize_name(name: &str) -> String {
+        crate::tmux::sanitize_session_name(name)
     }
 
     /// Start the tmux session

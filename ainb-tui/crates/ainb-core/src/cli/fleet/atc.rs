@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::cli::OutputFormat;
 use crate::fleet::atc::{
-    AtcMeta, AtcPaths, DEFAULT_ERR_RETRY_CAP, RetryLedger, build_heartbeat_with_ledger,
+    AtcMeta, AtcPaths, DEFAULT_ERR_RETRY_CAP, HeartbeatState, build_heartbeat_enforcing_cap,
     render_claude_md, should_pause_for_idle, timer,
 };
 use crate::fleet::read::NeedsRow;
@@ -120,12 +120,7 @@ async fn spawn_session(meta: &AtcMeta, paths: &AtcPaths) -> Result<bool> {
     if tmux_session_exists(&meta.tmux_session()).await {
         return Ok(false);
     }
-    let bin = std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .unwrap_or_else(|| "ainb".to_string())
-    });
+    let bin = atc_bin();
     let bootstrap = format!(
         "You are ATC. Read {} as your operating policy, then read state.json and \
 task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
@@ -160,18 +155,22 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     // Remove the timer first (idempotent, safe when absent).
     let removed = timer::teardown(&name).context("removing heartbeat timer")?;
 
-    // Best-effort kill the running session.
-    let meta_session = format!("tmux_{name}");
+    // Best-effort kill the running session. Use the same sanitization the
+    // spawner applies so we target the right session for unsafe names.
+    let meta_session = crate::tmux::sanitize_session_name(&name);
     let mut killed = false;
     if tmux_session_exists(&meta_session).await {
-        let bin = std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.to_str().map(str::to_string))
-                .unwrap_or_else(|| "ainb".to_string())
-        });
-        let _ = tokio::process::Command::new(&bin).args(["kill", &name]).status().await;
-        killed = true;
+        let bin = atc_bin();
+        // `--force` is mandatory: without it, `ainb kill` prints a `[y/N]`
+        // prompt, reads EOF non-interactively, cancels, and leaves the session
+        // running. We also check the real exit status instead of assuming
+        // success, so `killed` reflects what actually happened.
+        let output = tokio::process::Command::new(&bin)
+            .args(["kill", "--force", &name])
+            .output()
+            .await
+            .context("invoking `ainb kill --force`")?;
+        killed = output.status.success();
     }
 
     // Remove the instance dir only when --purge (default keeps state/task-log).
@@ -331,22 +330,27 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     let rows = fetch_needs().await.unwrap_or_default();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
+    // Load the heartbeat process's OWN bookkeeping file. This is a single-writer
+    // file (only the heartbeat writes it), separate from state.json which the
+    // ATC Claude session owns — so the two writers never clobber each other.
+    let mut hb_state = read_heartbeat_state(&paths);
+
     // Idle-pause: when the fleet has been quiet past the threshold, downgrade to
     // a cheap idle ping so ATC spends no tokens. `last_active_ms` is the last
-    // time the fleet had something needing attention, tracked in state.json.
-    let last_active_ms = read_last_active_ms(&paths);
+    // time the fleet had something needing attention.
+    let last_active_ms = hb_state.last_active_ms;
     let paused = should_pause_for_idle(rows.len(), last_active_ms, meta.idle_pause_min, now_ms);
-    // Reconstruct the ERR retry ledger from state.json so the cap is enforced
-    // across timer firings: any ERR session already at the cap is flagged
-    // ESCALATE in the body instead of being auto-continued again.
-    let ledger = read_retry_ledger(&paths);
+
+    // Build the body. The cap is CODE-ENFORCED here: build_heartbeat_enforcing_cap
+    // owns continue_counts (in hb_state) and presents any ERR past the cap as
+    // ESCALATE-ONLY regardless of model discipline, then mutates hb_state in place.
     let body = if paused {
         format!(
             "[HEARTBEAT {now_ms}] fleet idle-paused (quiet ≥ {}m) — standing by, no token spend.",
             meta.idle_pause_min
         )
     } else {
-        build_heartbeat_with_ledger(&rows, now_ms, Some(&ledger))
+        build_heartbeat_enforcing_cap(&rows, now_ms, DEFAULT_ERR_RETRY_CAP, &mut hb_state)
     };
 
     // If the session is gone, do not send into a dead pane — report and exit 0
@@ -358,9 +362,15 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
         delivered = true;
     }
 
-    // Persist heartbeat bookkeeping so the idle-pause window + retry cap survive
-    // across timer firings and context compaction.
-    update_state(&paths, now_ms, rows.len(), last_active_ms);
+    // Persist heartbeat bookkeeping (continue_counts already mutated above) so
+    // the idle-pause window + code-enforced cap survive across timer firings.
+    hb_state.last_heartbeat_ms = now_ms;
+    hb_state.last_active_ms = if rows.is_empty() {
+        last_active_ms.or(Some(now_ms))
+    } else {
+        Some(now_ms)
+    };
+    write_heartbeat_state(&paths, &hb_state);
 
     let summary = json!({
         "action": "heartbeat",
@@ -389,56 +399,21 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     Ok(())
 }
 
-/// Read `last_active_ms` from state.json (the last heartbeat that saw needs).
-/// Missing/corrupt → None (the idle-pause logic then stays conservative).
-fn read_last_active_ms(paths: &AtcPaths) -> Option<i64> {
-    let raw = std::fs::read_to_string(&paths.state).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("last_active_ms").and_then(serde_json::Value::as_i64)
-}
-
-/// Rebuild the ERR retry ledger from state.json's `retry_counts` map. The ATC
-/// session owns the counts (it increments on each `continue` it sends, per the
-/// CLAUDE.md policy); the heartbeat reads them back to flag cap-exhausted ERR
-/// sessions for escalation. Missing/corrupt → an empty ledger at the default cap.
-fn read_retry_ledger(paths: &AtcPaths) -> RetryLedger {
-    let mut ledger = RetryLedger::new(DEFAULT_ERR_RETRY_CAP);
-    let Some(raw) = std::fs::read_to_string(&paths.state).ok() else {
-        return ledger;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return ledger;
-    };
-    if let Some(map) = v.get("retry_counts").and_then(serde_json::Value::as_object) {
-        for (session_id, count) in map {
-            let n = count.as_u64().unwrap_or(0);
-            for _ in 0..n {
-                ledger.record(session_id);
-            }
-        }
-    }
-    ledger
-}
-
-/// Update state.json bookkeeping: stamp `last_heartbeat_ms` always, and refresh
-/// `last_active_ms` to now whenever the fleet currently has needs (so the
-/// idle-pause window is measured from the last genuinely-busy moment).
-fn update_state(paths: &AtcPaths, now_ms: i64, needs_count: usize, prev_active: Option<i64>) {
-    let mut v: serde_json::Value = std::fs::read_to_string(&paths.state)
+/// Read the heartbeat process's own bookkeeping (`heartbeat-state.json`).
+/// Missing/corrupt → defaults (idle-pause then stays conservative; cap counters
+/// start fresh). This file is single-writer: only the heartbeat touches it.
+fn read_heartbeat_state(paths: &AtcPaths) -> HeartbeatState {
+    std::fs::read_to_string(&paths.heartbeat_state)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("last_heartbeat_ms".into(), json!(now_ms));
-        let active = if needs_count > 0 {
-            now_ms
-        } else {
-            prev_active.unwrap_or(now_ms)
-        };
-        obj.insert("last_active_ms".into(), json!(active));
-    }
-    if let Ok(s) = serde_json::to_string_pretty(&v) {
-        let _ = std::fs::write(&paths.state, s);
+        .map(|s| HeartbeatState::from_json_or_default(&s))
+        .unwrap_or_default()
+}
+
+/// Persist the heartbeat process's own bookkeeping. Best-effort: a write failure
+/// degrades the next firing to conservative defaults rather than aborting.
+fn write_heartbeat_state(paths: &AtcPaths, state: &HeartbeatState) {
+    if let Ok(s) = state.to_json() {
+        let _ = std::fs::write(&paths.heartbeat_state, s);
     }
 }
 
@@ -446,12 +421,7 @@ fn update_state(paths: &AtcPaths, now_ms: i64, needs_count: usize, prev_active: 
 /// `--no-enrich` keeps the read 0-token; any failure degrades to an empty
 /// fleet (the heartbeat then reports "quiet").
 async fn fetch_needs() -> Result<Vec<NeedsRow>> {
-    let bin = std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .unwrap_or_else(|| "ainb".to_string())
-    });
+    let bin = atc_bin();
     let out = tokio::process::Command::new(&bin)
         .args(["--format", "json", "fleet", "needs", "--no-enrich"])
         .output()
@@ -471,9 +441,23 @@ fn require_name(matches: &clap::ArgMatches) -> Result<String> {
     matches.get_one::<String>("name").cloned().context("missing <name> argument")
 }
 
+/// Resolve the `ainb` binary to shell out to: `$AINB_BIN` if set (tests point it
+/// at a fake / the test binary), else this executable, else the literal `ainb`
+/// on `$PATH`.
+fn atc_bin() -> String {
+    std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_else(|| "ainb".to_string())
+    })
+}
+
+/// Seed state.json — the ATC Claude session's single-writer durable state.
+/// Heartbeat bookkeeping (last_heartbeat_ms / last_active_ms / continue_counts)
+/// deliberately lives in a separate heartbeat-owned file, not here.
 fn seed_state_json() -> String {
     serde_json::to_string_pretty(&json!({
-        "last_heartbeat_ms": 0,
         "retry_counts": {},
         "escalated": {},
         "notes": {}

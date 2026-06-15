@@ -18,8 +18,8 @@ pub mod render;
 pub mod timer;
 
 pub use heartbeat::{
-    DEFAULT_ERR_RETRY_CAP, RetryLedger, build_heartbeat, build_heartbeat_with_ledger,
-    should_pause_for_idle,
+    DEFAULT_ERR_RETRY_CAP, HeartbeatState, RetryLedger, build_heartbeat,
+    build_heartbeat_enforcing_cap, build_heartbeat_with_ledger, should_pause_for_idle,
 };
 pub use meta::AtcMeta;
 pub use paths::AtcPaths;

@@ -19,6 +19,24 @@ use anyhow::Result;
 use tokio::process::Command;
 use tracing::debug;
 
+/// Sanitize a name into the tmux session name `ainb` actually spawns under.
+///
+/// This is the single source of truth shared by [`session::TmuxSession`] (the
+/// real spawner) and any caller that must *target* a session it did not spawn
+/// (status / teardown). Keeping one implementation means a name containing a
+/// space, `.`, `/`, or `:` resolves to the same session everywhere, instead of
+/// the spawner and the targeter disagreeing and operating on the wrong session.
+#[must_use]
+pub fn sanitize_session_name(name: &str) -> String {
+    let base_name = name.strip_prefix("tmux_").unwrap_or(name);
+    let cleaned = base_name
+        .replace(' ', "_")
+        .replace('.', "_")
+        .replace('/', "_")
+        .replace(':', "_");
+    format!("tmux_{cleaned}")
+}
+
 /// Known valid shells that we allow for reattach-to-user-namespace.
 /// This prevents shell injection attacks via malicious $SHELL values.
 const VALID_SHELLS: &[&str] = &[
