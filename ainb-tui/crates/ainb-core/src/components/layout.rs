@@ -163,8 +163,24 @@ impl LayoutComponent {
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
+        } else if state.has_preview_embed() {
+            // Read-only live mirror: a (non-armed) embed exists for the selected
+            // session, so the preview is byte-exact to `tmux attach` instead of
+            // the lossy capture render. Same resize/publish path as the armed
+            // branch; only the chrome and input-gating differ.
+            let area = content_chunks[1];
+            let inner = area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            if let Some(e) = state.embed.as_mut() {
+                let _ = e.resize(inner.height, inner.width);
+            }
+            state.embed_pane_area = Some(inner);
+            self.tmux_preview.render_live_readonly(frame, area, state);
         } else if selected_has_tmux {
-            // Render tmux preview pane (read-only capture)
+            // Read-only capture fallback (embed not yet attached / attach failed /
+            // settling during selection debounce).
             self.tmux_preview.render(frame, content_chunks[1], state);
         } else {
             // Render traditional live logs stream

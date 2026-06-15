@@ -385,6 +385,25 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
+        // Keep a READ-ONLY live embed mirroring the selected tmux session so the
+        // preview is byte-exact to `tmux attach` (real status line + chrome, no
+        // re-wrap) rather than the lossy capture render. Debounced + backed-off
+        // inside `sync_preview_embed`; (re)attaching changes the layout, so a
+        // state change is a repaint trigger. Sized to the exact interactive
+        // layout — the render path resizes each frame for terminal resizes.
+        {
+            let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                width: 80,
+                height: 24,
+            });
+            let sidebar = app.state.sessions_pane_state.effective_width(sz.width);
+            let (rows, cols) =
+                crate::components::layout::interactive_embed_size(sz.width, sz.height, sidebar);
+            if app.state.sync_preview_embed(rows, cols) {
+                needs_redraw = true;
+            }
+        }
+
         if needs_redraw {
             let draw_start = Instant::now();
             terminal.draw(|frame| {
@@ -433,18 +452,21 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
-                    // Interactive embed escape hatch: Ctrl+Q releases focus and
-                    // kills the ephemeral tmux client. Keyed off the RESOURCE
-                    // (embed exists), never the mode flag, so the hatch works
-                    // even from a leaked state where the embed is alive but
-                    // focus drifted off the preview pane.
+                    // Interactive embed escape hatch: Ctrl+Q DISARMS the embed
+                    // back to the read-only live mirror (it does NOT tear the
+                    // client down — the embed is eager now, so a release would
+                    // just flash the capture preview before sync_preview_embed
+                    // respawned it). Still keyed off the RESOURCE (embed exists)
+                    // so Ctrl+Q is always swallowed while a live client is
+                    // present and never leaks to the quit handler; the action is
+                    // a no-op when the embed is already read-only (not armed).
                     {
                         use crossterm::event::KeyModifiers;
                         if app.state.embed.is_some()
                             && key_event.code == KeyCode::Char('q')
                             && key_event.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            app.state.release_interactive_pane();
+                            app.state.disarm_interactive_pane();
                             continue;
                         }
                     }
@@ -916,6 +938,17 @@ async fn run_tui_loop(
             if let Some(action) = app.state.pending_async_action.take() {
                 use crate::app::state::AsyncAction;
                 use tracing::{debug, error, info, warn};
+
+                // Actions that suspend the TUI to run a full-screen program
+                // (a `tmux attach`, a shell, an editor) must drop the eager
+                // read-only preview embed first so its background `tmux attach`
+                // client doesn't fight the foreground program for the session's
+                // window size (or burn CPU parsing output nobody sees).
+                // `sync_preview_embed` respawns it on return. Non-suspending
+                // actions leave the mirror untouched (no needless churn).
+                if action.suspends_tui() && app.state.has_preview_embed() {
+                    app.state.release_interactive_pane();
+                }
 
                 match action {
                     AsyncAction::AttachToOtherTmux(session_name) => {

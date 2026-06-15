@@ -107,6 +107,62 @@ impl TmuxPreviewPane {
         }
     }
 
+    /// Render the live READ-ONLY embed mirror — the default preview for the
+    /// selected tmux session. Draws the same embedded vt100 screen as
+    /// [`Self::render_interactive`] (so the pane is byte-exact to `tmux attach`,
+    /// real status line + chrome, no re-wrap) but with non-interactive chrome:
+    /// keystrokes are NOT forwarded here, so the border/badge are calm
+    /// (cornflower, not the green INTERACTIVE cue) and the bottom title carries
+    /// the keys that act on it (`a` attach, `A` interact, `k` kill).
+    pub fn render_live_readonly(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let name = state.embed_session.as_deref().unwrap_or("");
+        let title = Line::from(vec![
+            Span::styled(
+                " ● ",
+                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "LIVE ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{name} "), Style::default().fg(SOFT_WHITE)),
+        ]);
+        let hints = Line::from(vec![
+            Span::styled(" a", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" attach ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled(
+                " A",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" interact ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled(
+                " k",
+                Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" kill ", Style::default().fg(MUTED_GRAY)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CORNFLOWER_BLUE))
+            .style(Style::default().bg(DARK_BG))
+            .title(title)
+            .title_bottom(hints);
+
+        match state.embed.as_ref() {
+            Some(embed) => match embed.parser().read() {
+                Ok(g) => {
+                    let term = tui_term::widget::PseudoTerminal::new(g.screen()).block(block);
+                    frame.render_widget(term, area);
+                }
+                Err(_) => frame.render_widget(block, area),
+            },
+            None => frame.render_widget(block, area),
+        }
+    }
+
     /// Render the preview pane
     ///
     /// # Arguments

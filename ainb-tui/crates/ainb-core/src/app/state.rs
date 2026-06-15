@@ -433,6 +433,15 @@ pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
+/// How long the selected tmux row must stay put before `sync_preview_embed`
+/// spawns its read-only live client. Stops arrow-spam from spawning a storm of
+/// `tmux attach` clients (each attach is a real subprocess + reflow). Public so
+/// tripwires can sleep exactly past it instead of guessing.
+pub const PREVIEW_EMBED_DEBOUNCE: Duration = Duration::from_millis(200);
+/// After a failed read-only attach (e.g. the session just died), wait this long
+/// before retrying the same name instead of hammering tmux every frame.
+const PREVIEW_EMBED_FAIL_BACKOFF: Duration = Duration::from_secs(5);
+
 impl AppState {
     /// Enter interactive mode: attach a live embed client to the selected
     /// session's tmux session and focus the preview pane. Returns false (no-op)
@@ -545,9 +554,14 @@ impl AppState {
         }
         let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
         let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        // Only toast when the user was actively INTERACTING (armed). A
+        // read-only preview mirror exiting (the browsed session just died) is
+        // not worth a notification — the pane silently falls back to the
+        // capture/empty render. Captured before release flips focus.
+        let was_armed = self.is_interactive_pane();
         if exited || invisible {
             self.release_interactive_pane();
-            if exited {
+            if exited && was_armed {
                 self.add_info_notification("Live session ended — released".to_string());
             }
             return true;
@@ -561,6 +575,115 @@ impl AppState {
     /// otherwise hold the pane at the 250ms animation floor.
     pub fn embed_take_dirty(&self) -> bool {
         self.embed.as_ref().is_some_and(|e| e.take_dirty())
+    }
+
+    /// True whenever a live embed exists — the read-only preview mirror OR the
+    /// armed interactive pane. The render path uses this to pick the live
+    /// vt100 render over the lossy `capture-pane` string render.
+    pub fn has_preview_embed(&self) -> bool {
+        self.embed.is_some()
+    }
+
+    /// Disarm the interactive embed: stop forwarding input but KEEP the live
+    /// client so the pane stays a byte-exact READ-ONLY mirror. This is the
+    /// Ctrl+Q target now that the embed is eager — releasing it would just
+    /// flash the capture preview before `sync_preview_embed` respawned it.
+    /// No-op when not currently armed.
+    pub fn disarm_interactive_pane(&mut self) {
+        if self.focused_pane == FocusedPane::Preview {
+            self.focused_pane = FocusedPane::Sessions;
+        }
+    }
+
+    /// Attach a READ-ONLY live embed to the selected tmux session — input stays
+    /// off (`focused_pane` is left untouched, so it is NOT armed). Internal
+    /// helper for [`sync_preview_embed`]. Returns true if a client attached.
+    fn attach_preview_embed(&mut self, rows: u16, cols: u16) -> bool {
+        let Some(name) = self.selected_tmux_name() else {
+            return false;
+        };
+        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
+            Ok(client) => {
+                self.embed = Some(client);
+                self.embed_session = Some(name);
+                self.preview_embed_failed = None;
+                true
+            }
+            Err(e) => {
+                tracing::warn!("read-only preview embed attach to {name} failed: {e}");
+                self.preview_embed_failed = Some((name, std::time::Instant::now()));
+                false
+            }
+        }
+    }
+
+    /// Keep a READ-ONLY live embed mirroring the SELECTED tmux session so the
+    /// preview is byte-exact to `tmux attach` (real status line + chrome, no
+    /// re-wrap). Called once before every paint.
+    ///
+    /// Invariants:
+    ///  - While armed (`is_interactive_pane`) the user owns the embed — never
+    ///    touch it.
+    ///  - Only mirror on the session-list screen; `poll_embed_exit` already
+    ///    releases embeds on other screens.
+    ///  - Selecting a different tmux row (or a non-tmux row) drops the stale
+    ///    client immediately, then a fresh one attaches only after the
+    ///    selection settles for [`PREVIEW_EMBED_DEBOUNCE`] — arrow-spam must
+    ///    not spawn a storm of `tmux attach` clients.
+    ///  - A failed attach backs off for [`PREVIEW_EMBED_FAIL_BACKOFF`] so a
+    ///    dead/unreachable session is not hammered every frame.
+    ///
+    /// Returns true when embed state changed (caller repaints).
+    pub fn sync_preview_embed(&mut self, rows: u16, cols: u16) -> bool {
+        // The armed interactive embed is user-owned; leave it entirely.
+        if self.is_interactive_pane() {
+            return false;
+        }
+        // Only mirror while the session list is on screen.
+        if self.current_screen != screen_ids::SESSION_LIST {
+            return false;
+        }
+
+        let want = self.selected_tmux_name();
+
+        // Already mirroring the right session — nothing to do.
+        if self.embed.is_some() && self.embed_session == want {
+            return false;
+        }
+
+        // Selection changed vs the pending target: restart the debounce window
+        // and drop any stale client now (don't show the wrong session live).
+        if self.preview_embed_target != want {
+            self.preview_embed_target = want.clone();
+            self.preview_embed_target_since = Some(std::time::Instant::now());
+            if self.embed.is_some() {
+                self.release_interactive_pane();
+                return true;
+            }
+            return false;
+        }
+
+        // Non-tmux selection: nothing to attach (capture / live-logs fallback
+        // renders instead).
+        let Some(name) = want else {
+            return false;
+        };
+
+        // Debounce: wait for the selection to settle.
+        if let Some(since) = self.preview_embed_target_since {
+            if since.elapsed() < PREVIEW_EMBED_DEBOUNCE {
+                return false;
+            }
+        }
+
+        // Failure back-off: don't re-spawn against a name that just failed.
+        if let Some((failed_name, at)) = &self.preview_embed_failed {
+            if *failed_name == name && at.elapsed() < PREVIEW_EMBED_FAIL_BACKOFF {
+                return false;
+            }
+        }
+
+        self.attach_preview_embed(rows, cols)
     }
 }
 
@@ -2613,6 +2736,15 @@ pub struct AppState {
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
     // None whenever the embed is not rendering.
     pub embed_pane_area: Option<Rect>,
+    // Read-only preview-embed lifecycle. The embed is now created EAGERLY for
+    // the selected tmux row (input OFF) so the preview is a byte-exact mirror
+    // of `tmux attach`; `A` arms it (focused_pane=Preview), Ctrl+Q disarms back
+    // to read-only. These fields debounce (re)attach on rapid selection
+    // movement (`sync_preview_embed`) and back off after a failed attach so a
+    // dead/unreachable session is not hammered every frame.
+    pub preview_embed_target: Option<String>,
+    pub preview_embed_target_since: Option<Instant>,
+    pub preview_embed_failed: Option<(String, Instant)>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -3127,6 +3259,52 @@ pub enum AsyncAction {
     OnboardingCheckDeps, // Run dependency check during onboarding
 }
 
+impl AsyncAction {
+    /// Does handling this action SUSPEND the TUI to run a full-screen program
+    /// in this terminal — a `tmux attach`, a workspace shell, or an editor?
+    ///
+    /// The eager read-only preview embed (`sync_preview_embed`) is a background
+    /// `tmux attach` client; before suspending we drop it so it doesn't fight
+    /// the foreground program for the session's window size or burn CPU parsing
+    /// output nobody sees. Exhaustive (no wildcard arm) so a NEW variant must
+    /// consciously classify itself, and biased to `true` when unsure: releasing
+    /// the embed is always safe (it respawns next frame), whereas SKIPPING a
+    /// release before a real suspend risks two clients fighting one session.
+    pub fn suspends_tui(&self) -> bool {
+        match self {
+            AsyncAction::AttachToContainer(_)
+            | AsyncAction::AttachToTmuxSession(_)
+            | AsyncAction::AttachToOtherTmux(_)
+            | AsyncAction::AttachWitr
+            | AsyncAction::AttachAbtop
+            | AsyncAction::SetupAbtopRateLimits
+            | AsyncAction::OpenWorkspaceShell { .. }
+            | AsyncAction::OpenShellAtPath(_)
+            | AsyncAction::OpenInEditor(_) => true,
+            AsyncAction::CreateSessionFromConfigure(_)
+            | AsyncAction::CheckGitAuth
+            | AsyncAction::DeleteSession(_)
+            | AsyncAction::StopSession(_)
+            | AsyncAction::ResumeSession(_, _)
+            | AsyncAction::BulkResumeSessions(_, _)
+            | AsyncAction::BulkDeleteSessions(_)
+            | AsyncAction::RefreshWorkspaces
+            | AsyncAction::FetchContainerLogs(_)
+            | AsyncAction::KillContainer(_)
+            | AsyncAction::AuthSetupOAuth
+            | AsyncAction::AuthSetupApiKey
+            | AsyncAction::ReauthenticateCredentials
+            | AsyncAction::RestartSession(_)
+            | AsyncAction::CleanupOrphaned
+            | AsyncAction::KillOtherTmux(_)
+            | AsyncAction::KillOtherTmuxSessions(_)
+            | AsyncAction::ConfirmOtherTmuxRename
+            | AsyncAction::KillWorkspaceShell(_)
+            | AsyncAction::OnboardingCheckDeps => false,
+        }
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         // Load persistent configuration
@@ -3164,6 +3342,9 @@ impl Default for AppState {
             embed: None,
             embed_session: None,
             embed_pane_area: None,
+            preview_embed_target: None,
+            preview_embed_target_since: None,
+            preview_embed_failed: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
@@ -9440,12 +9621,12 @@ impl AppState {
 
             let is_selected = selected_session_id == Some(*session_id);
 
-            // While the interactive embed is live, the selected session's
-            // pane renders straight from the embed's vt100 screen — the full
-            // capture would be pure subprocess waste. Fall through to the
-            // cheap status-dot check instead (the collapsed rail still needs
-            // those for every session).
-            if is_selected && !self.is_interactive_pane() {
+            // While a live embed (read-only mirror OR armed interactive) is
+            // attached, the selected session's pane renders straight from the
+            // embed's vt100 screen — the full capture would be pure subprocess
+            // waste. Fall through to the cheap status-dot check instead (the
+            // collapsed rail still needs those for every session).
+            if is_selected && !self.has_preview_embed() {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
