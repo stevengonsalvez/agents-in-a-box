@@ -3742,6 +3742,20 @@ impl AppState {
         self.current_screen = screen_ids::HOME.to_string();
     }
 
+    /// Leave the onboarding wizard and drop into the Setup menu.
+    ///
+    /// This is the wizard's `Esc` behaviour: rather than abandoning setup all
+    /// the way back to Home, the user lands on the Setup menu where they can
+    /// pick a specific step (re-run wizard, check deps, configure paths, …) or
+    /// back out to Home from there. The menu state is reset so the landing is
+    /// always clean (selection at the top, no stale confirmation open).
+    pub fn onboarding_to_menu(&mut self) {
+        use crate::components::setup_menu::SetupMenuState;
+        self.onboarding_state = None;
+        self.setup_menu_state = SetupMenuState::new();
+        self.current_screen = screen_ids::SETUP_MENU.to_string();
+    }
+
     /// Refresh OAuth tokens using the refresh token
     pub async fn refresh_oauth_tokens(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Attempting to refresh OAuth tokens");
