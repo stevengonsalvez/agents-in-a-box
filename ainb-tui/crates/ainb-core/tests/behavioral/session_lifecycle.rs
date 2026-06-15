@@ -195,15 +195,9 @@ fn test_claude_model_cli_values() {
     );
 
     // Assert: Display names are the full model ids with ctx hints.
-    assert_eq!(
-        ClaudeModel::Sonnet.display_name(),
-        "claude-sonnet-4-6 [1M]"
-    );
+    assert_eq!(ClaudeModel::Sonnet.display_name(), "claude-sonnet-4-6 [1M]");
     assert_eq!(ClaudeModel::Opus.display_name(), "claude-opus-4-7 [1M]");
-    assert_eq!(
-        ClaudeModel::Haiku.display_name(),
-        "claude-haiku-4-5 [200K]"
-    );
+    assert_eq!(ClaudeModel::Haiku.display_name(), "claude-haiku-4-5 [200K]");
 
     // Assert: All models have descriptions and icons
     for model in ClaudeModel::all() {
