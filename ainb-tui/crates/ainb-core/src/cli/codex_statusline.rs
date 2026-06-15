@@ -217,7 +217,12 @@ pub fn write_codex_cache(path: &std::path::Path, cache: &CodexLiveCache) -> Resu
         }
     }
     let json = serde_json::to_vec_pretty(cache)?;
-    let tmp = path.with_extension("json.tmp");
+    // Per-process tmp name so concurrent writers — the Codex `stop` hook
+    // (a separate process) and the TUI poller, or two TUI instances —
+    // never share one tmp inode. A shared tmp defeats the write-tmp+rename
+    // atomicity: two writers would interleave bytes and one's rename would
+    // expose the other's half-written file to a concurrent reader.
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(&json)?;
@@ -443,7 +448,7 @@ mod tests {
         let cache = parse_usage(REAL_BODY, "2026-06-14T00:00:00Z".to_string()).unwrap();
         write_codex_cache(&path, &cache).unwrap();
         assert!(
-            !path.with_extension("json.tmp").exists(),
+            !path.with_extension(format!("json.tmp.{}", std::process::id())).exists(),
             "tmp renamed away"
         );
         assert_eq!(read_codex_cache(&path).unwrap(), cache);
