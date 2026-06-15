@@ -49,13 +49,44 @@ fn test_navigation_key_events() {
     assert!(right_event.is_some());
 }
 
-// test_n_key_triggers_new_session removed — it asserted against the legacy
-// `AsyncAction::NewSessionNormal` variant, which was deleted in the Phase-6
-// new-session redesign (the 2-screen preset-driven wizard; see
-// `48c1ea99 feat(tui): redesign new-session flow`). The whole legacy
-// new-session async-action set is gone, so this test no longer compiles.
-// The 'n' keypress is still covered by `test_action_key_events` below
-// (asserts the event fires); the wizard flow has its own coverage.
+#[tokio::test]
+async fn test_n_key_triggers_new_session() {
+    use ainb::app::state::NewSessionStep;
+
+    let mut state = AppState::default();
+
+    // Simulate pressing 'n' key
+    let key_event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+
+    // Handle the key event
+    let app_event = EventHandler::handle_key_event(key_event, &mut state);
+
+    // Should return a NewSession event
+    assert!(app_event.is_some());
+
+    // Process the event. Post-Phase-6 the new-session flow is synchronous:
+    // `AppEvent::NewSession` opens the unified PickRepo screen directly rather
+    // than queueing a `pending_async_action`. (It still spawns a background
+    // repo rescan via `spawn_blocking`, hence `#[tokio::test]`.)
+    if let Some(event) = app_event {
+        EventHandler::process_event(event, &mut state);
+    }
+
+    // Should have navigated to the NEW_SESSION screen at the PickRepo step.
+    assert_eq!(state.current_screen, screen_ids::NEW_SESSION);
+    let ns = state
+        .new_session_state
+        .as_ref()
+        .expect("new_session_state should be primed after pressing 'n'");
+    assert_eq!(ns.step, NewSessionStep::PickRepo);
+    assert!(
+        ns.pick_repo_state.is_some(),
+        "PickRepo state should be initialised"
+    );
+
+    // The legacy async-action queue is not used by this flow.
+    assert!(state.pending_async_action.is_none());
+}
 
 #[test]
 fn test_arrow_key_navigation() {
