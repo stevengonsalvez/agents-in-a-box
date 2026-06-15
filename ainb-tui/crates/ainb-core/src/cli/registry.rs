@@ -1279,7 +1279,13 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("insecure-bind")
                         .long("insecure-bind")
                         .action(clap::ArgAction::SetTrue)
-                        .help("Allow a non-loopback bind with no token (NOT recommended)"),
+                        .help(
+                            "Allow a non-loopback bind with no token. DANGEROUS: an \
+                             unauthenticated bind exposes a control surface — the live WS \
+                             terminal is interactive shell access to every fleet session. \
+                             Only honored with --read-only (terminal disabled); otherwise \
+                             refused. Use --token instead to expose the write surface safely",
+                        ),
                 )
                 .arg(
                     clap::Arg::new("read-only")

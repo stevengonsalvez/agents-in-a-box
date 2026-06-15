@@ -46,7 +46,7 @@ strips it from the address bar.
 |------|---------|---------|
 | `--listen <ADDR>` | `127.0.0.1:8420` | Address to bind. Non-loopback requires `--token`. |
 | `--token <SECRET>` | _(none)_ | Bearer token required on every `/api/*` route + the WS terminal. Enables a non-loopback bind. |
-| `--insecure-bind` | `false` | Allow a non-loopback bind with **no** token. Not recommended. |
+| `--insecure-bind` | `false` | Allow a non-loopback bind with **no** token. **Dangerous** — only honored with `--read-only`; refused otherwise, because an unauthenticated write surface exposes the live WS terminal (shell access to every session). |
 | `--read-only` | `false` | Viewer-only: disable the live terminal (the `/ws/session/{id}` upgrade is refused with `403`). |
 
 ---
@@ -59,7 +59,10 @@ The bind policy mirrors agent-deck's `CheckBindSecurity` and is enforced
 First matching rule wins:
 
 1. A bearer `--token` is configured → **allow** (the surface is authenticated).
-2. `--insecure-bind` was passed → **allow** (explicit operator override).
+2. `--insecure-bind` was passed → **allow only with `--read-only`**; a
+   write-enabled `--insecure-bind` (no token) is **refused**, because the live
+   WS terminal is interactive shell access to every fleet session and must
+   never be exposed unauthenticated.
 3. The host is loopback (`127.0.0.0/8`, `::1`) → **allow**.
 4. Otherwise → **refuse** with a clear message.
 
@@ -68,6 +71,12 @@ $ ainb web --listen 0.0.0.0:8420
 Error: refusing to bind to non-loopback address 0.0.0.0:8420 without authentication.
 This would expose the dashboard to your network unauthenticated.
 Pass --token <secret> to require a bearer token, or --insecure-bind to override.
+
+$ ainb web --listen 0.0.0.0:8420 --insecure-bind
+Error: refusing --insecure-bind on 0.0.0.0:8420 while the live terminal write surface is enabled.
+An unauthenticated --insecure-bind would expose interactive shell access to every
+fleet session to your whole network. Pair --insecure-bind with --read-only (viewer
+only, terminal disabled), or pass --token <secret> to require a bearer token.
 ```
 
 When a token is configured:
@@ -152,8 +161,8 @@ Resize is clamped to a minimum 10×3 to keep tmux out of a degenerate pane.
 
 A background task reads the same cached `needs` snapshot the dashboard renders
 and sends a push the moment a session **transitions into** an attention state
-(`ASK` / `ERR` / `WAIT` / `NEEDS_PERMISSION` — the same `AlertKind`
-classification notifyd uses). The first tick is a baseline, so there's no flood
+(`ASK` / `ERR` / `WAIT` — the kinds `ainb fleet needs` emits; a permission
+prompt surfaces as `ASK`). The first tick is a baseline, so there's no flood
 on startup. Pushes are suppressed for any subscription whose tab reports itself
 focused (via `/api/push/presence`), and dead endpoints (404/410) are pruned
 automatically.
