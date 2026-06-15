@@ -175,27 +175,35 @@ fn test_session_agent_type_availability() {
 /// and that all models provide proper display information.
 #[test]
 fn test_claude_model_cli_values() {
-    // Assert: CLI values match expected strings
+    // Assert: CLI values match the full `claude --model` IDs. `cli_value()`
+    // returns `Option<&str>` (None for the system-default/no-flag variant), so
+    // concrete models compare against `Some(<full-id>)`.
     assert_eq!(
         ClaudeModel::Sonnet.cli_value(),
-        "sonnet",
-        "Sonnet CLI value should be 'sonnet'"
+        Some("claude-sonnet-4-6"),
+        "Sonnet CLI value should be the full model id"
     );
     assert_eq!(
         ClaudeModel::Opus.cli_value(),
-        "opus",
-        "Opus CLI value should be 'opus'"
+        Some("claude-opus-4-7"),
+        "Opus CLI value should be the full model id"
     );
     assert_eq!(
         ClaudeModel::Haiku.cli_value(),
-        "haiku",
-        "Haiku CLI value should be 'haiku'"
+        Some("claude-haiku-4-5"),
+        "Haiku CLI value should be the full model id"
     );
 
-    // Assert: Display names are capitalized versions
-    assert_eq!(ClaudeModel::Sonnet.display_name(), "Sonnet");
-    assert_eq!(ClaudeModel::Opus.display_name(), "Opus");
-    assert_eq!(ClaudeModel::Haiku.display_name(), "Haiku");
+    // Assert: Display names are the full model ids with ctx hints.
+    assert_eq!(
+        ClaudeModel::Sonnet.display_name(),
+        "claude-sonnet-4-6 [1M]"
+    );
+    assert_eq!(ClaudeModel::Opus.display_name(), "claude-opus-4-7 [1M]");
+    assert_eq!(
+        ClaudeModel::Haiku.display_name(),
+        "claude-haiku-4-5 [200K]"
+    );
 
     // Assert: All models have descriptions and icons
     for model in ClaudeModel::all() {
@@ -211,12 +219,13 @@ fn test_claude_model_cli_values() {
         );
     }
 
-    // Assert: Sonnet is the default model
-    assert_eq!(ClaudeModel::default(), ClaudeModel::Sonnet);
+    // Assert: SystemDefault is the default model (omits the --model flag).
+    assert_eq!(ClaudeModel::default(), ClaudeModel::SystemDefault);
 
-    // Assert: all() returns all three models
+    // Assert: all() returns every variant.
     let all_models = ClaudeModel::all();
-    assert_eq!(all_models.len(), 3);
+    assert_eq!(all_models.len(), 6);
+    assert!(all_models.contains(&ClaudeModel::SystemDefault));
     assert!(all_models.contains(&ClaudeModel::Sonnet));
     assert!(all_models.contains(&ClaudeModel::Opus));
     assert!(all_models.contains(&ClaudeModel::Haiku));
