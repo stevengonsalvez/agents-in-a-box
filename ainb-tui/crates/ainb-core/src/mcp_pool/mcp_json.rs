@@ -11,7 +11,13 @@ use super::PooledServer;
 
 /// Write/merge `.mcp.json` in `worktree` so each pooled server points at the
 /// `ainb mcp proxy <socket>` shim. Returns the list of server names wired.
-pub fn write_session_mcp_json(worktree: &Path, pooled: &[PooledServer]) -> Result<Vec<String>> {
+/// `session` (when set) is announced to the pool by each shim so
+/// `ainb mcp status` can show which sessions share a server.
+pub fn write_session_mcp_json(
+    worktree: &Path,
+    pooled: &[PooledServer],
+    session: Option<&str>,
+) -> Result<Vec<String>> {
     if pooled.is_empty() {
         return Ok(vec![]);
     }
@@ -42,7 +48,7 @@ pub fn write_session_mcp_json(worktree: &Path, pooled: &[PooledServer]) -> Resul
     let mut wired = Vec::new();
     for server in pooled {
         let socket = super::paths::server_socket(&server.name)?;
-        servers.insert(server.name.clone(), shim_entry(&ainb_exe, &socket));
+        servers.insert(server.name.clone(), shim_entry(&ainb_exe, &socket, session));
         wired.push(server.name.clone());
     }
 
@@ -54,11 +60,20 @@ pub fn write_session_mcp_json(worktree: &Path, pooled: &[PooledServer]) -> Resul
     Ok(wired)
 }
 
-fn shim_entry(ainb_exe: &Path, socket: &Path) -> Value {
+fn shim_entry(ainb_exe: &Path, socket: &Path, session: Option<&str>) -> Value {
+    let mut args = vec![
+        "mcp".to_string(),
+        "proxy".to_string(),
+        socket.display().to_string(),
+    ];
+    if let Some(session) = session {
+        args.push("--session".to_string());
+        args.push(session.to_string());
+    }
     json!({
         "type": "stdio",
         "command": ainb_exe.display().to_string(),
-        "args": ["mcp", "proxy", socket.display().to_string()],
+        "args": args,
     })
 }
 
@@ -145,7 +160,7 @@ mod tests {
         )
         .unwrap();
 
-        let wired = write_session_mcp_json(dir.path(), &[pooled("context7")]).unwrap();
+        let wired = write_session_mcp_json(dir.path(), &[pooled("context7")], None).unwrap();
         assert_eq!(wired, vec!["context7".to_string()]);
 
         let written: Value =
@@ -190,10 +205,10 @@ mod tests {
     #[test]
     fn creates_file_when_absent_and_noop_when_no_pooled() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(write_session_mcp_json(dir.path(), &[]).unwrap().is_empty());
+        assert!(write_session_mcp_json(dir.path(), &[], None).unwrap().is_empty());
         assert!(!dir.path().join(".mcp.json").exists(), "no servers → no file");
 
-        write_session_mcp_json(dir.path(), &[pooled("ctx")]).unwrap();
+        write_session_mcp_json(dir.path(), &[pooled("ctx")], None).unwrap();
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap())
                 .unwrap();

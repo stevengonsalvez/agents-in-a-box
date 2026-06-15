@@ -16,7 +16,7 @@ const BACKOFF_START: Duration = Duration::from_millis(100);
 const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const RETRY_BUDGET: Duration = Duration::from_secs(60);
 
-pub async fn execute(socket_path: PathBuf) -> Result<()> {
+pub async fn execute(socket_path: PathBuf, session: Option<String>) -> Result<()> {
     // Single persistent stdin reader; lines survive socket reconnects.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(256);
     tokio::spawn(async move {
@@ -39,6 +39,15 @@ pub async fn execute(socket_path: PathBuf) -> Result<()> {
         };
         let (read_half, mut write_half) = stream.into_split();
         let mut sock_lines = BufReader::new(read_half).lines();
+
+        // Announce our session as the first line on every (re)connect — the
+        // daemon treats each connection as a fresh client, so the label must
+        // be re-sent after a reconnect. The proxy strips this before the mux.
+        if let Some(ref s) = session {
+            if write_line(&mut write_half, &super::proxy::attach_frame(s)).await.is_err() {
+                continue 'reconnect;
+            }
+        }
 
         // Flush any line that was in hand when the previous socket died.
         if let Some(line) = pending.take() {

@@ -81,7 +81,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // .mcp.json so pooled servers point at the `ainb mcp proxy` shim.
     // Any failure falls back to today's per-session behavior.
     if matches!(args.tool.to_cli_provider(), CliProvider::Claude) {
-        setup_mcp_pool(&work_dir);
+        setup_mcp_pool(&work_dir, &session_name);
     }
 
     // Step 6: Build Claude command
@@ -153,7 +153,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 /// eligible servers, daemon spawn failure, or .mcp.json write failure all
 /// degrade to per-session MCP spawning — a session must never fail to start
 /// because of the pool.
-fn setup_mcp_pool(work_dir: &std::path::Path) {
+fn setup_mcp_pool(work_dir: &std::path::Path, session_name: &str) {
     use crate::config::AppConfig;
     use crate::mcp_pool;
 
@@ -196,7 +196,7 @@ fn setup_mcp_pool(work_dir: &std::path::Path) {
         warn!("mcp pool: register failed, falling back to per-session MCP: {e}");
         return;
     }
-    match mcp_pool::mcp_json::write_session_mcp_json(work_dir, &pooled) {
+    match mcp_pool::mcp_json::write_session_mcp_json(work_dir, &pooled, Some(session_name)) {
         Ok(wired) if !wired.is_empty() => {
             println!("MCP pool: shared servers wired via {}: {}", work_dir.join(".mcp.json").display(), wired.join(", "));
         }

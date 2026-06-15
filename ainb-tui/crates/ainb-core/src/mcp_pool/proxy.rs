@@ -29,20 +29,31 @@ const KILL_GRACE: Duration = Duration::from_secs(3);
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Live status snapshot, shared with the daemon's control socket.
-#[derive(Debug, Default, Clone, serde::Serialize)]
+/// `#[serde(default)]` on the new fields keeps an older `ainb mcp status`
+/// reader forward-compatible.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerStatus {
     pub name: String,
     pub socket: String,
     pub clients: usize,
+    /// Labels of the sessions currently attached (from the shim's
+    /// `--session` attach frame); `anonymous` for shims without one.
+    #[serde(default)]
+    pub sessions: Vec<String>,
     pub child_pid: Option<u32>,
     pub state: String,
     pub spawn_count: u64,
+    /// Seconds the current child has been alive, `None` when no child.
+    #[serde(default)]
+    pub uptime_secs: Option<u64>,
 }
 
 pub type StatusMap = Arc<Mutex<HashMap<String, ServerStatus>>>;
 
 enum Event {
     ClientConnected(UnixStream),
+    /// First line was an ainb attach frame naming the session.
+    ClientAttach(ClientId, String),
     ClientLine(ClientId, String),
     ClientGone(ClientId),
     ChildLine(String),
@@ -53,6 +64,7 @@ struct ChildHandle {
     process: Child,
     stdin: tokio::process::ChildStdin,
     pgid: i32,
+    spawned_at: Instant,
 }
 
 /// Run one pooled server's proxy until the daemon shuts down.
@@ -95,6 +107,9 @@ pub async fn run_server_proxy(
 
     let mut mux = Mux::new();
     let mut clients: HashMap<ClientId, mpsc::UnboundedSender<String>> = HashMap::new();
+    // client_id → session label (from the attach frame); absent until/unless
+    // a client announces itself. Removed on disconnect alongside `clients`.
+    let mut client_sessions: HashMap<ClientId, String> = HashMap::new();
     let mut next_client: ClientId = 0;
     let mut child: Option<ChildHandle> = None;
     let mut idle_deadline: Option<Instant> = None;
@@ -106,11 +121,18 @@ pub async fn run_server_proxy(
     let socket_str = socket_path.display().to_string();
     // Status is written inline (awaited) rather than from a detached task, so
     // a later logical state (e.g. "idle" after reap) can never be overwritten
-    // by an earlier-issued "running" task that happened to run later.
+    // by an earlier-issued "running" task that happened to run later. Sessions
+    // and uptime are derived from the loop's live state at write time.
     macro_rules! set_status {
-        ($clients:expr, $pid:expr, $state:expr) => {
-            write_status(&status, &server.name, &socket_str, $clients, $pid, $state, spawn_count).await
-        };
+        ($clients:expr, $pid:expr, $state:expr) => {{
+            let sessions = session_labels(&clients, &client_sessions);
+            let uptime = child.as_ref().map(|c| c.spawned_at.elapsed().as_secs());
+            write_status(
+                &status, &server.name, &socket_str, $clients, sessions, $pid, $state,
+                spawn_count, uptime,
+            )
+            .await
+        }};
     }
     set_status!(0, None, "idle");
 
@@ -183,6 +205,14 @@ pub async fn run_server_proxy(
                         spawn_client_io(id, stream, tx.clone(), write_rx);
                         set_status!(clients.len(), child_pid(&child), "running");
                     }
+                    Event::ClientAttach(id, session) => {
+                        // The shim announced its session before any JSON-RPC.
+                        // Only record it for a still-connected client.
+                        if clients.contains_key(&id) {
+                            client_sessions.insert(id, session);
+                            set_status!(clients.len(), child_pid(&child), "running");
+                        }
+                    }
                     Event::ClientLine(id, line) => {
                         let mut child_write_failed = false;
                         for outcome in mux.on_client_line(id, &line) {
@@ -199,6 +229,7 @@ pub async fn run_server_proxy(
                     }
                     Event::ClientGone(id) => {
                         clients.remove(&id);
+                        client_sessions.remove(&id);
                         mux.on_client_disconnect(id);
                         if clients.is_empty() && child.is_some() {
                             idle_deadline = Some(Instant::now() + idle_grace);
@@ -226,6 +257,7 @@ pub async fn run_server_proxy(
                         // Drop all clients so shims reconnect (and trigger a
                         // fresh lazy spawn, rate-limited in try_spawn).
                         clients.clear();
+                        client_sessions.clear();
                         idle_deadline = None;
                         if failures >= MAX_CUMULATIVE_FAILURES {
                             disabled = true;
@@ -244,14 +276,31 @@ fn child_pid(child: &Option<ChildHandle>) -> Option<u32> {
     child.as_ref().and_then(|c| c.process.id())
 }
 
+/// Sorted, deduped session labels for the currently-connected clients.
+/// A connected client that never sent an attach frame is `anonymous`.
+fn session_labels(
+    clients: &HashMap<ClientId, mpsc::UnboundedSender<String>>,
+    client_sessions: &HashMap<ClientId, String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = clients
+        .keys()
+        .map(|id| client_sessions.get(id).cloned().unwrap_or_else(|| "anonymous".to_string()))
+        .collect();
+    out.sort();
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn write_status(
     status: &StatusMap,
     name: &str,
     socket: &str,
     clients: usize,
+    sessions: Vec<String>,
     pid: Option<u32>,
     state: &str,
     spawns: u64,
+    uptime_secs: Option<u64>,
 ) {
     status.lock().await.insert(
         name.to_string(),
@@ -259,9 +308,11 @@ async fn write_status(
             name: name.to_string(),
             socket: socket.to_string(),
             clients,
+            sessions,
             child_pid: pid,
             state: state.to_string(),
             spawn_count: spawns,
+            uptime_secs,
         },
     );
 }
@@ -334,6 +385,23 @@ where
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Build the attach frame the shim sends as its first line to announce its
+/// session. Kept next to the parser so the two formats can't drift.
+pub fn attach_frame(session: &str) -> String {
+    serde_json::json!({ "_ainb": "attach", "session": session }).to_string()
+}
+
+/// Parse the optional first-line attach frame the shim sends to announce its
+/// session: `{"_ainb":"attach","session":"<label>"}`. Returns the label, or
+/// `None` for any other line (a normal JSON-RPC message passes through).
+fn parse_attach_frame(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("_ainb")?.as_str()? != "attach" {
+        return None;
+    }
+    Some(v.get("session")?.as_str()?.to_string())
+}
+
 fn spawn_client_io(
     id: ClientId,
     stream: UnixStream,
@@ -346,7 +414,20 @@ fn spawn_client_io(
         let events = events.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
+            let mut first = true;
             while let Some(line) = read_capped_line(&mut reader, "client").await {
+                // The very first line MAY be an ainb attach frame naming the
+                // session. Intercept it so it never reaches the mux/child;
+                // any other first line is a normal JSON-RPC message.
+                if first {
+                    first = false;
+                    if let Some(session) = parse_attach_frame(&line) {
+                        if events.send(Event::ClientAttach(id, session)).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
                 if events.send(Event::ClientLine(id, line)).is_err() {
                     return;
                 }
@@ -425,7 +506,7 @@ fn try_spawn(
     }
 
     tracing::info!("mcp_pool[{}]: spawned child pid {pid}", server.name);
-    Ok(ChildHandle { process, stdin, pgid: pid })
+    Ok(ChildHandle { process, stdin, pgid: pid, spawned_at: Instant::now() })
 }
 
 fn child_stderr_log(name: &str) -> std::process::Stdio {
@@ -480,6 +561,60 @@ async fn signal_group(pgid: i32, sig: &str) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn attach_frame_round_trips_and_ignores_normal_lines() {
+        let frame = attach_frame("my-session");
+        assert_eq!(parse_attach_frame(&frame).as_deref(), Some("my-session"));
+        // A normal JSON-RPC line is not an attach frame.
+        assert_eq!(
+            parse_attach_frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#),
+            None
+        );
+        // Non-JSON and wrong marker are ignored.
+        assert_eq!(parse_attach_frame("not json"), None);
+        assert_eq!(parse_attach_frame(r#"{"_ainb":"other","session":"x"}"#), None);
+    }
+
+    #[test]
+    fn session_labels_fills_anonymous_and_sorts() {
+        let mut clients: HashMap<ClientId, mpsc::UnboundedSender<String>> = HashMap::new();
+        let (tx, _r1) = mpsc::unbounded_channel();
+        let (tx2, _r2) = mpsc::unbounded_channel();
+        let (tx3, _r3) = mpsc::unbounded_channel();
+        clients.insert(1, tx);
+        clients.insert(2, tx2);
+        clients.insert(3, tx3);
+        let mut sessions = HashMap::new();
+        sessions.insert(1, "zeta".to_string());
+        sessions.insert(2, "alpha".to_string());
+        // client 3 never attached → anonymous
+        let labels = session_labels(&clients, &sessions);
+        assert_eq!(labels, vec!["alpha", "anonymous", "zeta"]);
+    }
+
+    #[test]
+    fn server_status_new_fields_round_trip_json() {
+        let s = ServerStatus {
+            name: "context7".into(),
+            socket: "/x.sock".into(),
+            clients: 2,
+            sessions: vec!["a".into(), "b".into()],
+            child_pid: Some(123),
+            state: "running".into(),
+            spawn_count: 1,
+            uptime_secs: Some(42),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ServerStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sessions, vec!["a", "b"]);
+        assert_eq!(back.uptime_secs, Some(42));
+        // Forward-compat: old payload without the new fields still parses.
+        let old = r#"{"name":"x","socket":"/s","clients":0,"child_pid":null,"state":"idle","spawn_count":0}"#;
+        let parsed: ServerStatus = serde_json::from_str(old).unwrap();
+        assert!(parsed.sessions.is_empty());
+        assert_eq!(parsed.uptime_secs, None);
+    }
 
     #[tokio::test]
     async fn capped_reader_splits_lines_and_strips_newline() {
