@@ -1088,6 +1088,34 @@ def execute_revision_actions(actions, *, source_memory_id: str = "") -> dict:
     return summary
 
 
+def synthetic_fallback(transcript: str | Path, *, reason: str = "no_llm") -> dict:
+    """A5: capture a learning with ZERO LLM tokens when the drain can't run.
+
+    Called on the drain's no-model branches — daily budget exhausted, the
+    writer errored 3x into poison, or an explicit ``--no-llm`` — instead of
+    skipping (which would lose the correction entirely). Detects signals off
+    the transcript and hands the slice + signals to the heuristic-only
+    ``synthetic_compress`` module, which writes a structured learning carrying
+    ``compression=synthetic`` through the SAME note writer the LLM drain uses.
+    Best-effort: any failure returns ``action='skip'`` so the hook degrades
+    gracefully rather than crashing.
+    """
+    p = Path(transcript)
+    try:
+        import synthetic_compress
+    except Exception as exc:  # pragma: no cover - import environment broken
+        return {"action": "skip", "reason": f"synthetic-unavailable: {exc}"}
+    dialogue = reflect_gate.extract_dialogue(p) if p.exists() else ""
+    signals = detect_signals(dialogue) if (detect_signals and dialogue) else []
+    sliced = slice_dialogue(dialogue, signals) if signals else dialogue
+    if not (sliced or "").strip():
+        sliced = dialogue[:_MAX_SLICE_CHARS]
+    record = synthetic_compress.synthetic_compress(
+        sliced, signals, source_path=str(p), reason=reason, write=True,
+    )
+    return record.to_summary()
+
+
 def split_slice_chunks(sliced: str) -> list[str]:
     """Split a sliced dialogue into its individual signal-window chunks.
 
@@ -1255,6 +1283,12 @@ def main() -> None:
         "--source", default="",
         help="source memory id (transcript path) recorded as UPDATE evidence",
     )
+    sy = sub.add_parser("synthetic")
+    sy.add_argument("transcript")
+    sy.add_argument(
+        "--reason", default="no_llm",
+        help="why the LLM drain was skipped (no_llm|budget|errored)",
+    )
     ob = sub.add_parser("observe")
     ob.add_argument(
         "--actions", default="-",
@@ -1271,6 +1305,12 @@ def main() -> None:
         print(json.dumps(asdict(prep)))
         # exit 0 = reflect (slice ready), 1 = skip
         sys.exit(0 if prep.action == "reflect" else 1)
+
+    if args.cmd == "synthetic":
+        summary = synthetic_fallback(args.transcript, reason=args.reason)
+        print(json.dumps(summary))
+        # exit 0 = a learning was captured, 1 = degraded (skip)
+        sys.exit(0 if summary.get("action") == "synthetic" else 1)
 
     if args.cmd in ("revise", "observe"):
         raw = args.actions
