@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-06-15
+### Added
+- Merge pull request #282 from stevengonsalvez/feat/statusline-ttl-10min
+- Merge pull request #283 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: import servers from the pool overlay
+- **tui**: extend Claude statusline freshness TTL to 10 minutes
+
+### Documentation
+- **mcp-pool**: document + record the overlay import action
+
+
 ## [1.7.2] - 2026-06-15
 ### Added
 - Merge pull request #267 from stevengonsalvez/feat/mcp-socket
