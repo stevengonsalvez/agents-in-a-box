@@ -309,7 +309,11 @@ def match_skills(
     if not query_tokens:
         return []
     scored: list[tuple[float, dict[str, Any]]] = []
-    for row in reflect_db.get_skills(conn=conn):
+    # compute_stale=True so the R14 on-read recompute gates the inject tier, not
+    # just the stored R13 flag — a learning revised via add_learning_proof /
+    # update_learning_status / contradiction-demote doesn't fire the R13 trigger
+    # and would otherwise let a stale skill win the tier (and short-circuit).
+    for row in reflect_db.get_skills(compute_stale=True, conn=conn):
         if row.get("is_stale"):
             continue
         strong = _tokenize(row["name"]) | _tokenize(" ".join(row["tags"]))
