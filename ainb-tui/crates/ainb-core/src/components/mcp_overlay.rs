@@ -1,6 +1,6 @@
 // ABOUTME: Read-only live overlay for the shared MCP pool. Rendered on top of
 // the current screen (like the recovery/help overlays) when the user opens it
-// from the main menu or with `m`. Shows what's served and which sessions
+// from the main menu or with `p`. Shows what's served and which sessions
 // share each backend process. Data is fetched lazily off-thread by
 // `AppState::check_mcp_overlay`; this component only paints the snapshot.
 
@@ -65,9 +65,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // Reserve a single line for the last action's result (import summary)
+    // only when there is one — otherwise the table gets the space back.
+    let action_h: u16 = if state.last_action.is_some() { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(action_h),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     // Body: empty states vs the table.
@@ -95,13 +102,34 @@ pub fn render(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
             frame,
             chunks[0],
             msg,
-            "Start a session with MCP servers in its .mcp.json and they'll appear here.",
+            "Press `i` to import servers from .mcp.json + Claude user scope — or start a session with MCP servers and they'll appear here.",
         );
     } else {
         render_table(frame, chunks[0], state);
     }
 
-    render_help_bar(frame, chunks[1], state);
+    if let Some(msg) = state.last_action.as_deref() {
+        render_action_line(frame, chunks[1], msg);
+    }
+    render_help_bar(frame, chunks[2], state);
+}
+
+/// One-line result of the last in-overlay action (e.g. import). Green for a
+/// normal outcome, clay for a failure.
+fn render_action_line(frame: &mut Frame, area: Rect, msg: &str) {
+    let color = if msg.contains("failed") {
+        CLAY
+    } else {
+        SELECTION_GREEN
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("▸ {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn render_notice(frame: &mut Frame, area: Rect, headline: &str, hint: &str) {
@@ -216,6 +244,10 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
         Span::styled(" stop server  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("X", Style::default().fg(GOLD)),
         Span::styled(" stop pool  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("i", Style::default().fg(GOLD)),
+        Span::styled(" import  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("I", Style::default().fg(GOLD)),
+        Span::styled(" import·user  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("esc", Style::default().fg(GOLD)),

@@ -832,6 +832,10 @@ pub struct McpFetchResult {
     pub daemon_running: bool,
     pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
     pub error: Option<String>,
+    /// One-shot status line for an action that produced this result (e.g.
+    /// `import`). `None` for plain refreshes — the overlay keeps its prior
+    /// `last_action` so a refresh doesn't wipe the import summary.
+    pub action_msg: Option<String>,
 }
 
 /// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
@@ -849,6 +853,9 @@ pub struct McpOverlayState {
     /// Receiver for the in-flight fetch (None when no fetch is pending — the
     /// one-outstanding-request guard).
     pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
+    /// Status line from the last in-overlay action (e.g. `import`). Sticky
+    /// across plain refreshes; cleared only when the overlay closes.
+    pub last_action: Option<String>,
 }
 
 impl std::fmt::Debug for McpOverlayState {
@@ -860,6 +867,7 @@ impl std::fmt::Debug for McpOverlayState {
             .field("selected", &self.selected)
             .field("loading", &self.loading)
             .field("fetch_pending", &self.fetch_rx.is_some())
+            .field("last_action", &self.last_action)
             .finish()
     }
 }
@@ -878,6 +886,7 @@ pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
             daemon_running: false,
             servers: Vec::new(),
             error: None,
+            action_msg: None,
         };
     }
     match crate::mcp_pool::client::daemon_status() {
@@ -891,20 +900,71 @@ pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
                     daemon_running: true,
                     servers,
                     error: None,
+                    action_msg: None,
                 }
             }
             Err(e) => McpFetchResult {
                 daemon_running: true,
                 servers: Vec::new(),
                 error: Some(format!("parse status: {e}")),
+                action_msg: None,
             },
         },
         Err(e) => McpFetchResult {
             daemon_running: false,
             servers: Vec::new(),
             error: Some(e.to_string()),
+            action_msg: None,
         },
     }
+}
+
+/// Blocking `import` action for the overlay — runs `ainb mcp import` (project
+/// scope, or user config when `to_user`), then registers any newly-imported
+/// servers with the live daemon so they appear in the table immediately
+/// (the daemon spawns each lazily on first attach). Always run via
+/// `spawn_blocking`. Returns a fresh status snapshot tagged with a summary.
+pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
+    let summary = match crate::mcp_pool::import::execute(to_user) {
+        Ok(report) => {
+            // Push the just-imported definitions to a running daemon so the
+            // overlay reflects them without waiting for a new session.
+            if !report.imported.is_empty() && crate::mcp_pool::client::daemon_alive() {
+                if let Ok(config) = crate::config::AppConfig::load() {
+                    let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
+                        .into_iter()
+                        .filter(|s| report.imported.contains(&s.name))
+                        .collect();
+                    if !fresh.is_empty() {
+                        let _ = crate::mcp_pool::client::register_servers(&fresh);
+                    }
+                }
+            }
+            let mut parts = Vec::new();
+            if report.imported.is_empty() {
+                parts.push("nothing new to import".to_string());
+            } else {
+                parts.push(format!("imported {}", report.imported.join(", ")));
+            }
+            if !report.skipped_existing.is_empty() {
+                parts.push(format!(
+                    "already configured: {}",
+                    report.skipped_existing.join(", ")
+                ));
+            }
+            if !report.skipped_unresolvable.is_empty() {
+                parts.push(format!(
+                    "skipped (not on host): {}",
+                    report.skipped_unresolvable.join(", ")
+                ));
+            }
+            format!("{} → {}", parts.join(" · "), report.target.display())
+        }
+        Err(e) => format!("import failed: {e}"),
+    };
+    let mut result = mcp_fetch_blocking();
+    result.action_msg = Some(summary);
+    result
 }
 
 // ============================================================================
@@ -4495,6 +4555,7 @@ impl AppState {
             last_refreshed: None,
             refresh_secs: config.mcp_pool.monitor_refresh_secs,
             fetch_rx: None,
+            last_action: None,
         });
         self.spawn_mcp_fetch();
     }
@@ -4533,6 +4594,7 @@ impl AppState {
                         daemon_running: false,
                         servers: Vec::new(),
                         error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
                     }
                 });
             let _ = tx.send(result);
@@ -4554,6 +4616,11 @@ impl AppState {
                 o.loading = false;
                 o.daemon_running = result.daemon_running;
                 o.servers = result.servers;
+                // Sticky: only an action (import) sets a message; plain
+                // refreshes carry None and leave the prior summary in place.
+                if result.action_msg.is_some() {
+                    o.last_action = result.action_msg;
+                }
                 o.last_refreshed = Some(std::time::Instant::now());
                 if o.selected >= o.servers.len() {
                     o.selected = o.servers.len().saturating_sub(1);
@@ -4578,6 +4645,32 @@ impl AppState {
         let name = name.to_string();
         self.mcp_stop_then_refresh(move || {
             let _ = crate::mcp_pool::client::stop_server(&name);
+        });
+    }
+
+    /// Import MCP servers into ainb config (off-thread), register the new
+    /// ones with the live daemon, then refresh the table. `to_user` targets
+    /// the user config (`~/.agents-in-a-box/config/config.toml`) instead of
+    /// the project's `./.ainb/config.toml`. Never blocks the TUI — the
+    /// import + control-socket calls run on the blocking pool and the result
+    /// (summary + fresh snapshot) is delivered through the overlay channel.
+    pub fn mcp_import(&mut self, to_user: bool) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch
+        o.loading = true;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || mcp_import_blocking(to_user))
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("import task failed: {e}")),
+                    action_msg: Some(format!("import failed: {e}")),
+                });
+            let _ = tx.send(result);
         });
     }
 
@@ -4607,6 +4700,7 @@ impl AppState {
                         daemon_running: false,
                         servers: Vec::new(),
                         error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
                     }
                 });
             let _ = tx.send(result);
