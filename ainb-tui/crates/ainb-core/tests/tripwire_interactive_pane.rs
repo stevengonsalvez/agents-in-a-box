@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ainb::app::events::{AppEvent, EventHandler};
-use ainb::app::state::{AppState, FocusedPane};
+use ainb::app::state::{AppState, FocusedPane, PREVIEW_EMBED_DEBOUNCE};
 use ainb::components::{LayoutComponent, TmuxPreviewPane};
 use ainb::models::OtherTmuxSession;
 use ainb::tmux::{encode_key_event, encode_mouse_event};
@@ -398,4 +398,244 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
         host_mouse_back,
         "after release, a preview click must move focus to LiveLogs again"
     );
+}
+
+/// Helper: drive `sync_preview_embed` past its debounce so a READ-ONLY embed
+/// attaches for the current selection. The first sync arms the debounce window;
+/// the second (after it elapses) does the attach.
+fn settle_readonly_embed(state: &mut AppState, rows: u16, cols: u16) {
+    let _ = state.sync_preview_embed(rows, cols);
+    std::thread::sleep(PREVIEW_EMBED_DEBOUNCE + Duration::from_millis(60));
+    assert!(
+        state.sync_preview_embed(rows, cols),
+        "read-only preview embed should attach after the debounce window"
+    );
+}
+
+/// Capstone for the EAGER read-only live preview (goal: exact-tmux-attach-preview).
+/// Selecting a tmux row spins a READ-ONLY live mirror (byte-exact `tmux attach`,
+/// not the lossy capture): it streams the session's live output, renders the LIVE
+/// (not INTERACTIVE) badge, `A` ARMS the SAME client in place, and Ctrl+Q's
+/// `disarm_interactive_pane` returns to the read-only mirror WITHOUT tearing the
+/// client down — the session survives throughout.
+#[test]
+fn readonly_live_mirror_streams_then_arms_and_disarms_keeping_session() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("ro-mirror");
+
+    let mut state = AppState::new();
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+
+    // ── eager attach: selecting the row spins a read-only (NOT armed) embed ──
+    settle_readonly_embed(&mut state, 26, 100);
+    let has_embed = state.has_preview_embed();
+    let read_only = !state.is_interactive_pane();
+    let mirrors_session = state.embed_session.as_deref() == Some(session.as_str());
+
+    let pane = TmuxPreviewPane::new();
+    let mut term = Terminal::new(TestBackend::new(100, 26)).expect("test terminal");
+
+    // ── live proof: output injected into the SESSION must stream into the
+    //    read-only mirror (a capture render could not show a post-attach line) ──
+    let marker = format!("RO_LIVE_{}", std::process::id());
+    let pre_frame = {
+        term.draw(|f| pane.render_live_readonly(f, f.area(), &state)).expect("draw");
+        buffer_text(&term)
+    };
+    assert!(
+        !pre_frame.contains(&marker),
+        "negative placeholder: marker must not pre-exist:\n{pre_frame}"
+    );
+    let _ = Command::new("tmux")
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &format!("printf '{marker}\\n'"),
+            "Enter",
+        ])
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streamed = false;
+    let mut live_frame = String::new();
+    while Instant::now() < deadline {
+        term.draw(|f| pane.render_live_readonly(f, f.area(), &state)).expect("draw");
+        live_frame = buffer_text(&term);
+        if live_frame.contains(&marker) {
+            streamed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let shows_live_badge = live_frame.contains("LIVE") && !live_frame.contains("INTERACTIVE");
+
+    // ── A arms the SAME client in place (read-only -> interactive) ──
+    let session_before_arm = state.embed_session.clone();
+    let armed = state.enter_interactive_pane(26, 100);
+    let armed_same_client = state.embed_session == session_before_arm;
+    term.draw(|f| pane.render_interactive(f, f.area(), &state)).expect("draw");
+    let interactive_badge = buffer_text(&term).contains("INTERACTIVE");
+
+    // ── Ctrl+Q -> disarm: back to read-only mirror, client KEPT ──
+    state.disarm_interactive_pane();
+    let back_to_readonly = !state.is_interactive_pane() && state.has_preview_embed();
+    term.draw(|f| pane.render_live_readonly(f, f.area(), &state)).expect("draw");
+    let live_badge_again = buffer_text(&term).contains("LIVE");
+
+    let alive_before_release = session_alive(&session);
+    state.release_interactive_pane();
+    let alive_after_release = session_alive(&session);
+    kill_session(&session);
+
+    assert!(
+        has_embed,
+        "selecting a tmux row must spin a read-only embed"
+    );
+    assert!(
+        read_only,
+        "eager preview embed must NOT be armed (read-only)"
+    );
+    assert!(mirrors_session, "embed must mirror the selected session");
+    assert!(
+        streamed,
+        "read-only mirror never streamed live session output:\n{live_frame}"
+    );
+    assert!(
+        shows_live_badge,
+        "read-only mirror must show LIVE (not INTERACTIVE):\n{live_frame}"
+    );
+    assert!(armed, "A must arm the existing read-only embed");
+    assert!(
+        armed_same_client,
+        "A must arm in place, not re-attach a new client"
+    );
+    assert!(
+        interactive_badge,
+        "armed pane must show the INTERACTIVE badge"
+    );
+    assert!(
+        back_to_readonly,
+        "Ctrl+Q must disarm to a kept read-only embed, not release it"
+    );
+    assert!(
+        live_badge_again,
+        "after disarm the pane must render the read-only LIVE mirror again"
+    );
+    assert!(
+        alive_before_release,
+        "session must be alive while previewed"
+    );
+    assert!(
+        alive_after_release,
+        "releasing the embed must NOT kill the session"
+    );
+}
+
+/// Moving the selection to a DIFFERENT tmux row tears down the old read-only
+/// client immediately (so the wrong session is never shown live), then attaches
+/// a fresh one for the new selection after the debounce — and BOTH sessions
+/// survive (teardown kills the ephemeral client, never the session).
+#[test]
+fn selection_change_tears_down_readonly_embed_and_both_sessions_survive() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let first = new_session("ro-sel-a");
+    let second = new_session("ro-sel-b");
+
+    let mut state = AppState::new();
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![
+        OtherTmuxSession::new(first.clone(), false, 1),
+        OtherTmuxSession::new(second.clone(), false, 1),
+    ];
+    state.selected_other_tmux_index = Some(0);
+
+    settle_readonly_embed(&mut state, 26, 100);
+    let first_target = state.embed_session.clone();
+
+    // Move selection to the second row. The first sync detects the change and
+    // drops the stale client immediately (returns true = layout changed).
+    state.selected_other_tmux_index = Some(1);
+    let changed = state.sync_preview_embed(26, 100);
+    let torn_down_immediately = !state.has_preview_embed();
+
+    // After the debounce, a fresh read-only embed attaches for the second row.
+    std::thread::sleep(PREVIEW_EMBED_DEBOUNCE + Duration::from_millis(60));
+    let reattached = state.sync_preview_embed(26, 100);
+    let second_target = state.embed_session.clone();
+
+    state.release_interactive_pane();
+    let both_alive = session_alive(&first) && session_alive(&second);
+    kill_session(&first);
+    kill_session(&second);
+
+    assert_eq!(
+        first_target.as_deref(),
+        Some(first.as_str()),
+        "first mirror"
+    );
+    assert!(changed, "selection change must report a layout change");
+    assert!(
+        torn_down_immediately,
+        "stale read-only client must drop on selection change"
+    );
+    assert!(
+        reattached,
+        "a fresh read-only embed must attach for the new selection"
+    );
+    assert_eq!(
+        second_target.as_deref(),
+        Some(second.as_str()),
+        "re-targeted mirror"
+    );
+    assert!(
+        both_alive,
+        "selection-change teardown must NOT kill either session"
+    );
+}
+
+/// Additive invariant: while the preview embed is READ-ONLY (not armed), host
+/// input is unchanged — a preview-pane click is handled by the host (moves
+/// focus) exactly as it would WITHOUT an embed, NOT swallowed the way the armed
+/// interactive pane swallows it. Proves the eager mirror doesn't regress mouse.
+#[test]
+fn readonly_preview_does_not_swallow_host_mouse() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("ro-mouse");
+    let mut state = AppState::new();
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    state.sessions_pane_state.restore(Some(40), false);
+
+    settle_readonly_embed(&mut state, 28, 80);
+    let read_only = !state.is_interactive_pane() && state.has_preview_embed();
+
+    // Lay out the normal split (read-only branch), then click the preview pane.
+    let mut layout = LayoutComponent::new();
+    let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let _ = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 80, y: 10 }, &mut state);
+    let host_handled_mouse = state.focused_pane == FocusedPane::LiveLogs;
+
+    state.release_interactive_pane();
+    let alive = session_alive(&session);
+    kill_session(&session);
+
+    assert!(read_only, "embed must be read-only for this invariant");
+    assert!(
+        host_handled_mouse,
+        "a read-only preview must NOT swallow the mouse — host focus handling must still run"
+    );
+    assert!(alive, "session survives");
 }
