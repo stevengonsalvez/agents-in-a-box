@@ -63,6 +63,18 @@ except ImportError:
     def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
         pass
 
+# Cross-harness stdin readers (snake_case claude/codex, camelCase copilot).
+# Same import-or-inline-fallback convention as silent_fail above. In the
+# *deployed* copilot layout this hook lands at
+# ``~/.copilot/skills/recall/hooks/`` and ``scripts/`` resolves to a
+# non-existent path (a pre-existing quirk shared with silent_fail), so the
+# import no-ops there and the inline copy below takes over.
+try:
+    from hook_input import get_cwd  # noqa: E402
+except ImportError:
+    def get_cwd(data, default=""):  # type: ignore[no-redef]
+        return data["cwd"] if isinstance(data, dict) and "cwd" in data else default
+
 
 # D2: conservative caps for auto-inject
 SESSION_START_LIMIT = 3
@@ -176,17 +188,42 @@ def emit(additional_context: str) -> NoReturn:
 
     Typed NoReturn so callers (and linters) know execution stops here —
     no need for a `return` after `emit(...)` at the call site.
+
+    Output envelope is harness-gated on the ``REFLECT_HARNESS`` env var
+    (set by the per-harness adapter on the hook command), NOT on the stdin
+    shape — the env is available regardless of whether the cross-harness
+    input helper imported successfully, so the decision is robust even in
+    the deployed copilot layout where the helper import no-ops.
+
+      * Claude / Codex (default): the canonical
+        ``{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}``
+        envelope. Byte-identical to before — unchanged for those harnesses.
+
+      * Copilot (``REFLECT_HARNESS=copilot``): the documented-fallback
+        plain ``{"additionalContext": ...}`` shape.
+
+    TODO(copilot-envelope): the exact sessionStart additionalContext
+    envelope Copilot expects is docs-silent and could NOT be confirmed
+    against the live binary (org-policy-blocked during this work). The
+    plain ``{"additionalContext": ...}`` form here is the best-documented
+    guess; confirm against ``copilot`` once policy is lifted and adjust if
+    it injects nothing. The Claude envelope is also emitted-compatible (an
+    unknown extra key is harmless if Copilot ignores it), so this can be
+    revisited without breaking claude/codex.
     """
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": additional_context,
+    if os.environ.get("REFLECT_HARNESS") == "copilot":
+        print(json.dumps({"additionalContext": additional_context}))
+    else:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": additional_context,
+                    }
                 }
-            }
+            )
         )
-    )
     sys.exit(0)
 
 
@@ -199,13 +236,27 @@ UV_BIN = shutil.which("uv")
 def _main_body() -> NoReturn:
     """The real work. Wrapped by ``main()`` in a top-level catch so any
     uncaught exception silent-fails to an empty inject + last-event log."""
-    # Hooks receive JSON on stdin but we don't need it for cwd derivation
+    # Hooks receive JSON on stdin. Claude sets ``CLAUDE_PROJECT_DIR`` so we
+    # historically ignored stdin for cwd derivation, but Copilot does NOT
+    # set that env — it sends ``cwd`` on stdin (camelCase harness, but the
+    # ``cwd`` key itself is shared across all three). Parse it tolerantly
+    # and use it only as a fallback so claude/codex behaviour is unchanged.
+    raw = ""
     try:
-        _ = sys.stdin.read()
+        raw = sys.stdin.read()
     except Exception:
         pass
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
 
-    cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir:
+        cwd = Path(env_dir).resolve()
+    else:
+        stdin_cwd = get_cwd(data) if isinstance(data, dict) else ""
+        cwd = Path(stdin_cwd or os.getcwd()).resolve()
 
     # Skip for $HOME — no project context there
     if cwd == Path.home():

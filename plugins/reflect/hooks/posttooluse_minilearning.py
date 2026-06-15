@@ -60,6 +60,31 @@ except ImportError:
     def scrub_secrets(text):  # type: ignore[no-redef]
         return text
 
+# Cross-harness stdin readers (snake_case claude/codex, camelCase copilot).
+# Same import-or-inline-fallback convention as silent_fail above so the
+# camelCase tolerance survives even where the deployed scripts/ path quirk
+# stops the import from resolving.
+try:
+    from hook_input import get_session_id, get_tool_name, get_tool_response  # noqa: E402
+except ImportError:
+    def get_session_id(data, default=""):  # type: ignore[no-redef]
+        for k in ("session_id", "sessionId"):
+            if k in data:
+                return data[k]
+        return default
+    def get_tool_name(data, default=""):  # type: ignore[no-redef]
+        for k in ("tool", "tool_name", "toolName"):
+            if k in data:
+                return data[k]
+        return default
+    def get_tool_response(data, default=None):  # type: ignore[no-redef]
+        if default is None:
+            default = {}
+        for k in ("tool_response", "response", "toolResult"):
+            if k in data:
+                return data[k]
+        return default
+
 
 def state_dir() -> Path:
     return Path(os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect")))
@@ -122,13 +147,13 @@ def _main_body() -> None:
     except json.JSONDecodeError:
         data = {}
 
-    session_id = str(data.get("session_id", "") or "").strip()
+    session_id = str(get_session_id(data) or "").strip()
     if not session_id:
         return  # Nothing to arm — no session_id to key against.
 
-    tool_name = str(data.get("tool", "") or data.get("tool_name", "") or "")
-    tool_input = data.get("tool_input", "")
-    tool_response = data.get("tool_response", data.get("response", {}))
+    tool_name = str(get_tool_name(data) or "")
+    tool_input = data.get("tool_input", data.get("toolInput", ""))
+    tool_response = get_tool_response(data)
 
     if not tool_failed(tool_response, tool_name):
         return  # Successful tool calls don't arm.

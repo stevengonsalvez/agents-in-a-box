@@ -60,6 +60,23 @@ except ImportError:
     def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
         pass
 
+# Cross-harness stdin readers (snake_case claude/codex, camelCase copilot).
+try:
+    from hook_input import get_session_id, get_transcript_path, get_cwd  # noqa: E402
+except ImportError:
+    def get_session_id(data, default=""):  # type: ignore[no-redef]
+        for k in ("session_id", "sessionId"):
+            if k in data:
+                return data[k]
+        return default
+    def get_transcript_path(data, default=""):  # type: ignore[no-redef]
+        for k in ("transcript_path", "transcriptPath"):
+            if k in data:
+                return data[k]
+        return default
+    def get_cwd(data, default=""):  # type: ignore[no-redef]
+        return data["cwd"] if "cwd" in data else default
+
 
 def get_state_dir() -> Path:
     """Get the reflect state directory."""
@@ -94,7 +111,7 @@ def log_precompact_event(input_data: dict, mode: str):
     this hardcoded ``~/.claude/logs/`` which dropped codex logs into a
     Claude-flavoured directory the user wouldn't think to look in.
     """
-    session_id = str(input_data.get('session_id', 'unknown'))[:8]
+    session_id = str(get_session_id(input_data, 'unknown'))[:8]
     trigger = input_data.get('trigger', 'unknown')
     forensics_log(_HOOK_NAME, f"session={session_id} trigger={trigger} mode={mode}")
 
@@ -134,7 +151,7 @@ def run_reflection_analysis(input_data: dict) -> dict:
     surfaces queued entries to the next agent via additionalContext, and that agent
     (which IS an LLM) runs the actual /reflect analysis on each transcript.
     """
-    transcript_path = input_data.get('transcript_path', '')
+    transcript_path = get_transcript_path(input_data)
 
     if not transcript_path:
         return {
@@ -169,10 +186,10 @@ def run_reflection_analysis(input_data: dict) -> dict:
 
     entry = {
         "ts": datetime.now().isoformat(),
-        "session_id": input_data.get('session_id', 'unknown'),
+        "session_id": get_session_id(input_data, 'unknown'),
         "transcript_path": transcript_path,
         "trigger": input_data.get('trigger', 'unknown'),
-        "cwd": input_data.get('cwd', os.getcwd()),
+        "cwd": get_cwd(input_data, os.getcwd()),
     }
 
     with open(queue_file, 'a') as f:

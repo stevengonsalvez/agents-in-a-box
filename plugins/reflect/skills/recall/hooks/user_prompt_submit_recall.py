@@ -70,6 +70,20 @@ except ImportError:
     def scrub_secrets(text):  # type: ignore[no-redef]
         return text
 
+# Cross-harness stdin readers (snake_case claude/codex, camelCase copilot).
+# Same import-or-inline-fallback convention as silent_fail; the import
+# no-ops in the deployed copilot layout (recall hooks land under
+# ~/.copilot/skills/recall/hooks/ where scripts/ doesn't resolve), so the
+# inline copy below carries the camelCase tolerance there.
+try:
+    from hook_input import get_session_id  # noqa: E402
+except ImportError:
+    def get_session_id(data, default=""):  # type: ignore[no-redef]
+        for k in ("session_id", "sessionId"):
+            if k in data:
+                return data[k]
+        return default
+
 
 # --- Tunables ------------------------------------------------------------
 
@@ -329,17 +343,36 @@ def maybe_capture_minilearning(session_id: str, prompt: str) -> bool:
 # --- Output --------------------------------------------------------------
 
 def emit(additional_context: str) -> NoReturn:
-    """Always exit 0 with valid JSON for the UserPromptSubmit event."""
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": additional_context,
+    """Always exit 0 with valid JSON for the UserPromptSubmit event.
+
+    Output envelope is harness-gated on ``REFLECT_HARNESS`` (set by the
+    adapter on the hook command), mirroring ``session_start_recall.emit``.
+
+    NOTE: on Copilot the ``userPromptSubmitted`` hook's *output is ignored*
+    by the CLI, so neither envelope can actually surface recall to the
+    model on that harness — this hook still fires there purely for its
+    capture/dedupe side-effects (the mini-learning watcher, the
+    session-injected dedupe set). We emit the plain copilot shape anyway
+    so the contract is consistent and a future Copilot version that starts
+    honouring the output would Just Work.
+
+    TODO(copilot-envelope): same docs-silent caveat as
+    ``session_start_recall.emit`` — confirm against the live binary once
+    policy is lifted.
+    """
+    if os.environ.get("REFLECT_HARNESS") == "copilot":
+        print(json.dumps({"additionalContext": additional_context}))
+    else:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": additional_context,
+                    }
                 }
-            }
+            )
         )
-    )
     sys.exit(0)
 
 
@@ -355,8 +388,15 @@ def _main_body() -> NoReturn:
     except json.JSONDecodeError:
         data = {}
 
-    session_id = str(data.get("session_id", "") or "").strip()
-    prompt = str(data.get("prompt", "") or "").strip()
+    session_id = str(get_session_id(data) or "").strip()
+    # ``prompt`` is the claude/codex key. Copilot's userPromptSubmitted
+    # payload is camelCase elsewhere, so tolerate ``userPrompt`` too —
+    # presence-first, snake_case wins when both are absent is moot here.
+    prompt = ""
+    for _k in ("prompt", "userPrompt"):
+        if _k in data:
+            prompt = str(data[_k] or "").strip()
+            break
 
     # If we can capture a mini-learning, do it BEFORE recall — the
     # captured learning won't be in the index yet but the act of
