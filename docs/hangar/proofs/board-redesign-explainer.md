@@ -1,15 +1,23 @@
-# Hangar — control plane explainer (showcase + status)
+# Hangar — control plane explainer (4 tabs)
 
-**Live explainer:** https://lapis-finch-dy2m.here.now/ (permanent) · `#status` for the status tab
+**Live explainer:** https://lapis-finch-dy2m.here.now/ (permanent) · deep-link `#status` `#e2e` `#vs`
 
-Two tabs in one self-contained page:
+Four tabs in one self-contained page:
 
 - **Showcase** — the mouse-driven card-board redesign (epic 63l), recorded against the
-  real `ainb` TUI in tmux over a seeded local demo (mocked `fake-claude.sh` provider;
+  real `ainb` TUI in tmux over a seeded local demo (`fake-claude.sh` provider stub;
   real lifecycle FSM + DB transitions).
 - **Status & roadmap** — the full feature matrix (what's shipped), verification
   coverage, what's next (merge #250 → v1.0 release ceremony → follow-ups `v70`/`2qo`/
   `2a8`/`0mf`), and the epic timeline (174 build → e38 parity → 63l redesign → v1.0).
+- **End-to-end** — the full user loop, validated: create an issue on the board
+  (`createissue.gif`, HGR-5 lands), then a cron autopilot fires a real hello-world task
+  that the daemon executes (`execute.gif`) — proven against **SQLite** (task `done`,
+  `autopilot_run` `completed`, result = the agent output + PR url), not a green count.
+- **vs Multica** — a comprehensive feature + user-journey comparison against the
+  original `github.com/multica-ai/multica` (verified from a clone + the Hangar source):
+  feature matrix by area, gaps with reasons (scope-cut / unbuilt / partial), and journey
+  coverage. Full analysis in [`multica-comparison.md`](multica-comparison.md).
 
 ## Recorded journeys
 
