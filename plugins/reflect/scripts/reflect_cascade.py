@@ -824,6 +824,79 @@ def execute_observation_actions(actions, *,
     return summary
 
 
+_PERSONA_PROJECT_DEFAULT = _OBSERVATION_SCOPE_DEFAULT
+
+
+def execute_persona_actions(actions, *,
+                            project_id: str = _PERSONA_PROJECT_DEFAULT) -> dict:
+    """O3: apply structured CREATE/UPDATE persona-field actions per project.
+
+    The structured-fields executor that sits ON TOP of
+    :func:`execute_observation_actions` (Hindsight banks.disposition shape
+    applied to the typed layer). Where the observation executor maintains
+    free-text aggregate statements, this one distils them into typed persona
+    fields (testing_style='TDD') keyed by (project_id, field_name):
+
+    - CREATE / UPDATE -> :func:`reflect_db.upsert_persona_field` folds the
+      cited ``source_observation_ids`` into the SAME (project, field) row.
+      A first action CREATES the field; a later action for the same field
+      UPDATES it — new observation ids append uniquely and confidence is
+      RECOMPUTED from the grown distinct evidence count (deterministic, no
+      LLM): ~10 'prefer TDD' observations fold to one row with confidence
+      > 0.8, never 10 sibling rows. Re-citing only known ids cannot inflate
+      confidence past the real distinct evidence.
+
+    Both CREATE and UPDATE route through the same idempotent upsert, so the
+    drain need not know whether a field already exists — the same contract as
+    the observation layer's UPDATE-as-merge. Per-action failures are collected
+    in ``errors`` so one malformed action never blocks the rest of the batch.
+    """
+    summary = {"executed": 0, "created": 0, "updated": 0, "skipped": 0,
+               "errors": []}
+    try:
+        import reflect_db
+    except Exception as exc:  # pragma: no cover - import environment broken
+        summary["errors"].append(f"persona DB unavailable: {exc}")
+        return summary
+
+    for raw in actions or []:
+        if not isinstance(raw, dict):
+            summary["skipped"] += 1
+            summary["errors"].append(f"not an action object: {raw!r}")
+            continue
+        action = str(raw.get("action", "")).strip().upper()
+        field_name = str(raw.get("field_name", "") or "").strip()
+        value = str(raw.get("value", "") or "").strip()
+        effective_project = str(raw.get("project_id", "") or project_id)
+        observation_ids = raw.get("source_observation_ids")
+        try:
+            if action not in ("CREATE", "UPDATE"):
+                summary["skipped"] += 1
+                summary["errors"].append(f"unknown action: {action or '<empty>'}")
+                continue
+            if not field_name or not value:
+                summary["skipped"] += 1
+                summary["errors"].append(
+                    f"{action} missing field_name/value: {raw!r}")
+                continue
+            existed = reflect_db.get_persona_field(
+                effective_project, field_name) is not None
+            reflect_db.upsert_persona_field(
+                effective_project,
+                field_name,
+                value,
+                source_observation_ids=observation_ids,
+            )
+            if existed:
+                summary["updated"] += 1
+            else:
+                summary["created"] += 1
+        except Exception as exc:
+            summary["errors"].append(f"{action} {field_name or '<no field>'}: {exc}")
+    summary["executed"] = summary["created"] + summary["updated"]
+    return summary
+
+
 class _QuerySignal:
     """Free-text query shaped like a detector signal so the S5 overlap
     scorer (:func:`recall_related_learnings`) can rank learnings against it."""

@@ -850,6 +850,12 @@ class RecallResult:
     # Populated on EVERY return path (including errors) — the R5 temporal
     # arm and downstream callers read it regardless of retrieval outcome.
     temporal: TemporalRange | None = None
+    # O3: the direct persona-field answer ({field_name, value, confidence,
+    # ...}) when an open-domain query matched a high-confidence project_persona
+    # field — the project's distilled disposition answered the question without
+    # any GraphRAG recall or LLM call. None for closed-domain queries or a
+    # persona miss (the normal recall path then ran).
+    persona: dict | None = None
 
 
 # --- Helpers -------------------------------------------------------------
@@ -2535,6 +2541,37 @@ def record_followup_diagnostic(
         pass  # diagnostics must never break the recall path
 
 
+def lookup_persona_field(query: str, *, project: str | None = None) -> dict | None:
+    """O3: the direct persona-field answer for an open-domain query, or None.
+
+    Open-domain queries ('what testing style do we use?') first try a
+    deterministic persona-field lookup in reflect_db's ``project_persona``
+    table BEFORE any GraphRAG recall or LLM call — the project's distilled
+    disposition (testing_style='TDD') answers the question directly when a
+    high-confidence field matches. Closed-domain queries, an unmatched query,
+    or a thinly-evidenced field all return None so the caller falls through to
+    normal recall.
+
+    Best-effort: reflect_db lives beside this script's plugin (``plugins/reflect
+    /scripts``); a stripped deploy without it, or any DB problem, silently
+    yields None so persona lookup never breaks recall.
+    """
+    if not (query or "").strip():
+        return None
+    try:
+        scripts = _plugin_scripts_dir()
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import reflect_db
+
+        if not reflect_db.is_open_domain_query(query):
+            return None
+        proj = project if project is not None else detect_current_project()
+        return reflect_db.recall_persona_field(query, proj)
+    except Exception:
+        return None  # persona lookup must never break recall
+
+
 # --- Core entry ----------------------------------------------------------
 
 def recall(
@@ -2589,6 +2626,19 @@ def recall(
     # every return path (errors included) carries the range. Extraction is a
     # stdlib regex pass that never raises — None when no phrase resolves.
     temporal = extract_temporal_constraint(query) if TEMPORAL_ENABLED else None
+
+    # O3: open-domain persona-field lookup FIRST. When the query is aggregate-
+    # shaped ('what testing style do we use?') and the current project carries a
+    # high-confidence persona field that matches, the project's distilled
+    # disposition answers directly — short-circuiting the GraphRAG corpus
+    # retrieval (and any downstream LLM). A closed-domain query or a persona
+    # miss leaves ``persona`` None and falls through to normal recall unchanged.
+    persona = lookup_persona_field(query)
+    if persona is not None:
+        return RecallResult(
+            [], query, mode, persona=persona, temporal=temporal,
+        )
+
     cli = find_learnings_cli()
     if not cli:
         return RecallResult(
@@ -2927,6 +2977,21 @@ def main() -> int:
         return 0
 
     field = (args.field or "").strip() or None  # S1
+
+    # O3: a direct persona-field answer short-circuits the corpus path — render
+    # the distilled disposition field and return without touching the learnings
+    # renderers (the result set is empty by construction on this path).
+    if result.persona is not None:
+        if args.format == "json":
+            print(json.dumps({"persona": result.persona, "query": query}))
+        else:
+            p = result.persona
+            print(
+                f"{p['field_name']}: {p['value']} "
+                f"(persona, confidence {p['confidence']:.2f})"
+            )
+        return 0
+
     if args.format == "json":
         print(render_json(
             result.learnings, query, args.mode, result.ood_gated,

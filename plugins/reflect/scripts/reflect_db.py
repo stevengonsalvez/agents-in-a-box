@@ -515,6 +515,32 @@ CREATE TABLE IF NOT EXISTS commit_links (
 );
 """
 
+# O3: first-class persona/preference fields per scope (Hindsight
+# banks.disposition JSONB persona object — hindsight-api-slim
+# models.py L287-L300). The structured-fields layer that sits ON TOP of the O1
+# observations layer: where observations are free-text aggregate statements
+# ("this team generally prefers TDD"), a persona field is the DISTILLED typed
+# answer (testing_style = 'TDD') keyed by (project_id, field_name). Fields are
+# AGGREGATED from O1 observations, never hand-authored — ``confidence`` rises
+# deterministically with the count of distinct ``source_observation_ids`` cited
+# as evidence (see :func:`persona_confidence`). Open-domain queries do a field
+# lookup here FIRST (recall_persona_field) before falling back to the O1
+# observation tier — the agent gets the project's disposition without an LLM
+# call. One row per (project_id, field_name); UPDATE folds new evidence into
+# the SAME row (no sibling rows).
+_PROJECT_PERSONA_DDL = """
+CREATE TABLE IF NOT EXISTS project_persona (
+    project_id              TEXT NOT NULL DEFAULT '',
+    field_name              TEXT NOT NULL,
+    value                   TEXT NOT NULL DEFAULT '',
+    confidence              REAL NOT NULL DEFAULT 0.0,
+    source_observation_ids  TEXT NOT NULL DEFAULT '[]',
+    created_at              TEXT NOT NULL,
+    last_updated            TEXT NOT NULL,
+    PRIMARY KEY (project_id, field_name)
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -552,6 +578,8 @@ CREATE INDEX IF NOT EXISTS idx_chunk_learnings_chunk_hash
     ON chunk_learnings(chunk_hash);
 CREATE INDEX IF NOT EXISTS idx_chunk_learnings_learning_id
     ON chunk_learnings(learning_id);
+CREATE INDEX IF NOT EXISTS idx_project_persona_project_id
+    ON project_persona(project_id);
 """
 
 _SCHEMA_DDL = (
@@ -576,6 +604,7 @@ _SCHEMA_DDL = (
     + _TRANSCRIPTS_DDL
     + _TRANSCRIPT_CHUNKS_DDL
     + _CHUNK_LEARNINGS_DDL
+    + _PROJECT_PERSONA_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -928,6 +957,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_TRANSCRIPTS_DDL)
         conn.execute(_TRANSCRIPT_CHUNKS_DDL)
         conn.execute(_CHUNK_LEARNINGS_DDL)
+        conn.execute(_PROJECT_PERSONA_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -2546,6 +2576,245 @@ def recall_observation_tier(
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Project persona / preference fields (O3: structured disposition layer)
+# ---------------------------------------------------------------------------
+# Hindsight carries a per-bank ``disposition`` JSONB persona object
+# (banks.disposition — models.py L287-L300). The reflect flavour: the typed
+# structured-fields layer ON TOP of the O1 observations layer. Where an
+# observation is a free-text aggregate statement ("this team generally prefers
+# TDD"), a persona field is the DISTILLED typed answer (testing_style='TDD')
+# keyed by (project_id, field_name). Fields are AGGREGATED from O1 observations
+# — never hand-authored — and confidence is a DETERMINISTIC function of the
+# count of distinct source observations cited (no LLM on the path). Open-domain
+# queries lookup persona fields FIRST (recall_persona_field) before falling back
+# to the observation tier.
+
+PERSONA_CREATED_EVENT = "persona_field_created"
+PERSONA_UPDATED_EVENT = "persona_field_updated"
+
+# O3 confidence model (deterministic): confidence saturates at 1.0 once
+# PERSONA_CONFIDENCE_SATURATION distinct source observations corroborate a
+# field. Tuned so ~10 distinct corroborating observations cross the 0.8
+# high-confidence threshold (10/12 ≈ 0.833), while a field with 1-2 thin or
+# contradictory sources stays well below it.
+PERSONA_CONFIDENCE_SATURATION = 12
+# A field is only surfaced as an "answered" open-domain lookup at/above this
+# confidence — below it the field is considered too thinly-evidenced to short
+# circuit recall.
+PERSONA_CONFIDENCE_THRESHOLD = 0.8
+
+
+def persona_confidence(source_observation_count: int) -> float:
+    """O3: deterministic confidence from the count of distinct source obs.
+
+    ``confidence = min(1.0, n / PERSONA_CONFIDENCE_SATURATION)`` — a pure
+    function of the evidence count, never an LLM judgement. ~10 distinct
+    corroborating observations clear the 0.8 high-confidence threshold; 1-2
+    thin sources stay well below it.
+    """
+    n = max(0, int(source_observation_count))
+    return min(1.0, n / PERSONA_CONFIDENCE_SATURATION)
+
+
+def get_persona_field(
+    project_id: str,
+    field_name: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single persona field by (project_id, field_name).
+
+    ``source_observation_ids`` stays the raw JSON string, mirroring how
+    observation rows carry ``source_correction_ids``. Returns None when no row
+    exists for the pair.
+    """
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM project_persona WHERE project_id = ? AND field_name = ?",
+        (project_id, field_name),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_persona_fields(
+    project_id: str,
+    *,
+    min_confidence: float = 0.0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O3 read path: a project's persona fields, strongest-evidence-first.
+
+    Ordered by ``confidence`` DESC (then field_name as a stable tiebreak). With
+    ``min_confidence`` > 0 only fields at/above the floor qualify — pass
+    ``PERSONA_CONFIDENCE_THRESHOLD`` to read only the answered (high-confidence)
+    disposition.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM project_persona
+           WHERE project_id = ? AND confidence >= ?
+           ORDER BY confidence DESC, field_name""",
+        (project_id, min_confidence),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_persona_field(
+    project_id: str,
+    field_name: str,
+    value: str,
+    *,
+    source_observation_ids: Optional[list[str]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """O3 CREATE/UPDATE path: fold persona evidence into ONE (project, field).
+
+    Deterministic aggregation — no LLM on the path:
+
+    - CREATE (no existing row) → a new persona field is born. Its evidence set
+      is the cited ``source_observation_ids`` (deduped, order-preserving);
+      ``confidence`` = :func:`persona_confidence` over that count.
+    - UPDATE (row exists) → new observation ids fold into the SAME row:
+      ``source_observation_ids`` append uniquely and ``confidence`` is
+      recomputed from the GROWN distinct count — ~10 'prefer TDD' observations
+      folded one at a time end at one row with confidence > 0.8, never 10
+      sibling rows. ``value`` is overwritten with the latest distilled value
+      (the value evolves as evidence accumulates).
+    - Re-citing only already-recorded ids with the same value is an idempotent
+      no-op for the evidence set (confidence cannot inflate past the real
+      distinct evidence), though ``value`` / ``last_updated`` still refresh.
+
+    Returns the resulting row as a dict (``created`` True on insert).
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    existing = get_persona_field(project_id, field_name, conn=conn)
+    incoming = _dedupe_source_ids(source_observation_ids)
+
+    if existing is None:
+        merged = incoming
+        confidence = persona_confidence(len(merged))
+        with conn:
+            conn.execute(
+                """INSERT INTO project_persona
+                   (project_id, field_name, value, confidence,
+                    source_observation_ids, created_at, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    project_id,
+                    field_name,
+                    value,
+                    confidence,
+                    json.dumps(merged),
+                    now,
+                    now,
+                ),
+            )
+            add_event(
+                PERSONA_CREATED_EVENT,
+                None,
+                {
+                    "project_id": project_id,
+                    "field_name": field_name,
+                    "value": value,
+                    "confidence": confidence,
+                    "source_count": len(merged),
+                },
+                conn=conn,
+                autocommit=False,
+            )
+        return {
+            "project_id": project_id,
+            "field_name": field_name,
+            "value": value,
+            "confidence": confidence,
+            "source_observation_ids": json.dumps(merged),
+            "created_at": now,
+            "last_updated": now,
+            "created": True,
+        }
+
+    prior = _dedupe_source_ids(existing.get("source_observation_ids"))
+    fresh = [oid for oid in incoming if oid not in prior]
+    merged = prior + fresh
+    confidence = persona_confidence(len(merged))
+    with conn:
+        conn.execute(
+            """UPDATE project_persona
+               SET value = ?, confidence = ?, source_observation_ids = ?,
+                   last_updated = ?
+               WHERE project_id = ? AND field_name = ?""",
+            (
+                value,
+                confidence,
+                json.dumps(merged),
+                now,
+                project_id,
+                field_name,
+            ),
+        )
+        add_event(
+            PERSONA_UPDATED_EVENT,
+            None,
+            {
+                "project_id": project_id,
+                "field_name": field_name,
+                "value": value,
+                "confidence": confidence,
+                "source_count": len(merged),
+                "new_sources": len(fresh),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    row = get_persona_field(project_id, field_name, conn=conn) or {}
+    row["created"] = False
+    return row
+
+
+def recall_persona_field(
+    query: str,
+    project_id: str,
+    *,
+    min_confidence: float = PERSONA_CONFIDENCE_THRESHOLD,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """O3 retrieval: the direct persona-field answer for an open-domain query.
+
+    Only fires for open-domain (aggregate-shaped) queries — closed-domain
+    lookups ('how do I fix X?') return None and fall through to normal recall.
+    Among the project's high-confidence fields (confidence >= *min_confidence*),
+    returns the one whose field_name the query mentions (e.g. 'what testing
+    style do we use' -> the ``testing_style`` field) — the strongest-evidence
+    match when several qualify. Returns None when no confident field matches:
+    the caller then falls back to the O1 observation tier / raw learnings.
+
+    Deterministic and stdlib-only: the match is a substring test of the
+    field_name tokens against the lowered query; the confidence gate is a
+    numeric comparison. No LLM, no embedding sits on the path.
+    """
+    if not is_open_domain_query(query):
+        return None
+    conn = conn or get_conn()
+    lowered = str(query).lower()
+    fields = get_persona_fields(
+        project_id, min_confidence=min_confidence, conn=conn
+    )
+    for row in fields:  # already confidence DESC — strongest evidence wins
+        tokens = [t for t in str(row["field_name"]).split("_") if t]
+        if tokens and all(tok in lowered for tok in tokens):
+            return {
+                "project_id": row["project_id"],
+                "field_name": row["field_name"],
+                "value": row["value"],
+                "confidence": row["confidence"],
+                "type": "persona",
+                "tier": "persona",
+            }
+    return None
 
 
 # ---------------------------------------------------------------------------
