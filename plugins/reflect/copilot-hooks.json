@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "REFLECT_HARNESS=copilot uv run ${PLUGIN_ROOT}/skills/recall/hooks/session_start_recall.py"
+      },
+      {
+        "type": "command",
+        "command": "(nohup ${PLUGIN_ROOT}/hooks/reflect-drain-bg.sh >/dev/null 2>&1 &) >/dev/null 2>&1",
+        "timeoutSec": 5
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "command": "REFLECT_HARNESS=copilot uv run ${PLUGIN_ROOT}/skills/recall/hooks/user_prompt_submit_recall.py"
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "REFLECT_HARNESS=copilot uv run ${PLUGIN_ROOT}/hooks/posttooluse_minilearning.py"
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "REFLECT_HARNESS=copilot uv run ${PLUGIN_ROOT}/hooks/stop_reflect.py"
+      }
+    ],
+    "preCompact": [
+      {
+        "type": "command",
+        "command": "REFLECT_HARNESS=copilot uv run ${PLUGIN_ROOT}/hooks/precompact_reflect.py --auto --verbose"
+      }
+    ]
+  }
+}
