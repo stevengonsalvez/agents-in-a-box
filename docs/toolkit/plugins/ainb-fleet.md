@@ -17,6 +17,8 @@ The bundle has a top-level router skill (`ainb-fleet`) that maps the five verbs 
 
 The daemon skill describes a long-running watcher that scans each session's recent pane buffer every 5 seconds and auto-sends `continue` to any session whose buffer matches a known API-error regex (`rate_limited`, `overloaded_error`, `internal_server_error`, `request_timeout`, `socket_hang_up`, `fetch_failed`, `connection_reset`), deduping on `(session_id, pattern, match-context)` so it fires once per error.
 
+**ATC (Air Traffic Control)** is the persistent orchestrating brain that ties the verbs together on a schedule with a policy. `ainb fleet atc setup <name>` provisions `~/.agents-in-a-box/atc/<name>/` — a generated `CLAUDE.md` policy, a `meta.json` config, seeded `state.json` / `task-log.md` durable memory, and an installed OS-timer heartbeat (launchd `StartInterval` on macOS, a systemd `--user` timer on Linux) — then spawns a real `ainb run` Claude session reading that policy. Every N minutes (default 15) the timer runs `ainb fleet atc heartbeat <name>`, which builds a compact `[HEARTBEAT]` nudge from the **LLM-free** `ainb fleet needs --format json` read and tmux-sends it into the session, so ATC spends tokens only deciding. The policy is conservative and **escalate-on-uncertainty**: it auto-clears the safe cases (confident ASK → `broadcast`; ERR → `continue`, capped at 3 per session) and escalates the rest to the phone bridge, never auto-running destructive actions. ATC is **poll-mode** — it needs no hook/inbox plumbing and works against the existing fleet verbs today; the plumbing track is a drop-in event-driven enhancement. For managed fleets ATC **supersedes** the `daemon` skill, absorbing its auto-`continue` job with the retry cap the daemon lacks. `status` / `list` / `teardown` round out the lifecycle; teardown idempotently removes the timer and session.
+
 ## What it provides
 
 ### Skills
@@ -30,7 +32,8 @@ The daemon skill describes a long-running watcher that scans each session's rece
 | `ainb-fleet:needs` | Center control panel — enumerate sessions blocked on ASK / ERR / IDLE / WAIT signals, render the Jarvis HUD |
 | `ainb-fleet:fleet-needs` | Workflow-backed `needs` — runs the `hangar` workflow, renders the HUD, fires `AskUserQuestion`, routes answers back |
 | `ainb-fleet:cost` | Per-session / model / day / group USD spend rollups sourced from burndown, plus `config.toml` budget caps that fire notifyd alerts |
-| `ainb-fleet:daemon` | Background watcher that auto-`continue`s sessions matching an API-error regex |
+| `ainb-fleet:atc` | **Air Traffic Control** — provision / inspect / tear down the persistent fleet brain that watches on a heartbeat, auto-clears safe sessions, and escalates the rest to your phone |
+| `ainb-fleet:daemon` | Background watcher that auto-`continue`s sessions matching an API-error regex (**superseded by ATC** for managed fleets) |
 
 ### Workflow
 
@@ -56,8 +59,9 @@ The plugin is published via this repo's root `.claude-plugin/marketplace.json` (
 - **Apply one instruction everywhere:** `/ainb-fleet:broadcast` — e.g. `ainb fleet broadcast "/clear" --filter "shotclubhouse"`. A targeting flag is mandatory to prevent accidental fan-out.
 - **Run an ordered cycle:** `/ainb-fleet:sequence` — e.g. disconnect → reconnect → verify, waiting for each step's assistant turn-end before the next.
 - **See what wants your attention:** `/ainb-fleet:needs` (or `/ainb-fleet:fleet-needs` when `CLAUDE_CODE_WORKFLOWS=1`) renders a HUD of every blocked session and lets you answer them in one `AskUserQuestion` batch.
-- **Unattended error recovery:** `/ainb-fleet:daemon` runs a watcher that auto-`continue`s sessions hitting transient API errors (run via `nohup ... &` for real background use).
+- **Unattended fleet supervision:** `/ainb-fleet:atc` (`ainb fleet atc setup <name>`) stands up the persistent brain — it watches the whole fleet on a heartbeat, clears the safe/blocked sessions itself, and pings your phone only for the calls that genuinely need you. Supersedes the daemon for managed fleets.
+- **Unattended error recovery (one-off):** `/ainb-fleet:daemon` runs a watcher that auto-`continue`s sessions hitting transient API errors (run via `nohup ... &` for real background use). For ongoing supervision prefer ATC, which adds a retry cap.
 
 ## Source
 
-`plugins/ainb-fleet/` — a Claude Code skill bundle (7 skills + the `hangar` workflow) teaching agents to drive the `ainb fleet` Rust subcommands. Diagram generated via /fireworks-tech-graph.
+`plugins/ainb-fleet/` — a Claude Code skill bundle (8 skills + the `hangar` workflow) teaching agents to drive the `ainb fleet` Rust subcommands; the ATC skill pairs with the `ainb fleet atc` provisioning verbs in the Rust binary. Diagram generated via /fireworks-tech-graph.

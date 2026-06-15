@@ -1,7 +1,7 @@
 {
   "name": "ainb-fleet",
-  "version": "0.1.0",
-  "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, and the auto-continue daemon. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
+  "version": "0.2.0",
+  "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, the auto-continue daemon, and ATC (Air Traffic Control) — the persistent heartbeat-driven brain that auto-clears safe sessions and escalates the rest to your phone. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
   "author": {
     "name": "stevengonsalvez"
   },
@@ -14,6 +14,9 @@
     "orchestration",
     "control-plane",
     "broadcast",
-    "multi-session"
+    "multi-session",
+    "atc",
+    "air-traffic-control",
+    "heartbeat"
   ]
 }
