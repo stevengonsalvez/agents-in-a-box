@@ -267,3 +267,102 @@ body {
   cursor: pointer;
 }
 .auth-card button:hover { filter: brightness(1.08); }
+
+/* ── Live terminal attach button (session rows) ──────────────────────── */
+.attach-btn {
+  margin-left: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.attach-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* ── Push toggle (topbar) ────────────────────────────────────────────── */
+.push-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.push-toggle:hover { color: var(--text); border-color: var(--accent); }
+.push-toggle.on {
+  color: var(--green);
+  border-color: rgba(63, 185, 80, 0.5);
+  background: rgba(63, 185, 80, 0.1);
+}
+.push-icon { font-size: 13px; }
+
+/* ── Terminal overlay (xterm.js) ─────────────────────────────────────── */
+.term-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 7, 12, 0.72);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 24px;
+}
+.term-overlay[hidden] { display: none; }
+.term-window {
+  width: min(1100px, 96vw);
+  height: min(72vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: #0b0f17;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.term-title { font-weight: 650; font-size: 13px; }
+.term-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.term-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.term-close:hover { color: var(--text); background: var(--bg-elev-2); }
+.term-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+  background: #0b0f17;
+}
+.term-body .xterm { height: 100%; }

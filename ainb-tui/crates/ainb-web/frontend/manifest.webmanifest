@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "ainb · fleet dashboard",
+  "short_name": "ainb fleet",
+  "description": "Live view and remote control for your ainb agent fleet — sessions, attention needs, cost, and an in-browser terminal.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0f17",
+  "theme_color": "#0b0f17",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

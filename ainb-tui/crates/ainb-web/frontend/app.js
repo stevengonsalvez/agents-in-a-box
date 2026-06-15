@@ -20,6 +20,10 @@
 
   const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
 
+  // Server posture, learned from /healthz on boot. When read-only the terminal
+  // attach affordance is never shown (the WS route 403s anyway).
+  let readOnly = true;
+
   // ── Rendering helpers ─────────────────────────────────────────────
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -74,6 +78,17 @@
 
       const badges = el("div", "badges");
       badges.appendChild(el("span", "badge badge-status", st.label));
+      // The terminal write surface only exists when the server is NOT
+      // read-only and the session is running. Offer an "attach" button there.
+      if (!readOnly && s.is_running && s.session_id) {
+        const open = el("button", "attach-btn", "▸ terminal");
+        open.title = "Attach a live terminal to this session";
+        open.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          openTerminal(s.session_id, s.workspace_name || s.tmux_session_name || "session");
+        });
+        badges.appendChild(open);
+      }
       row.appendChild(badges);
 
       host.appendChild(row);
@@ -254,11 +269,27 @@
     };
   }
 
+  async function learnPosture() {
+    // /healthz is auth-gated when a token is set; a 401 here just means we keep
+    // the conservative read-only default until the user supplies a token.
+    try {
+      const res = await fetch("/healthz", { headers: authHeaders() });
+      if (res.ok) {
+        const h = await res.json();
+        readOnly = h.readOnly !== false;
+      }
+    } catch (_) {
+      /* keep default */
+    }
+  }
+
   async function boot() {
     setConn("connecting");
     try {
+      await learnPosture();
       render(await loadOnce());
       startSSE();
+      initPush();
     } catch (e) {
       if (String(e).includes("unauthorized")) {
         setConn("down");
@@ -282,6 +313,203 @@
   $("auth-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") $("auth-go").click();
   });
+
+  // ── Live terminal (xterm.js over WebSocket) ───────────────────────────
+  //
+  // Wire protocol (see crates/ainb-web/src/terminal.rs):
+  //   S→C binary  : raw PTY bytes → term.write()
+  //   S→C text    : {type:"status"|"error", ...} control frames
+  //   C→S text    : {type:"input",data} | {type:"resize",cols,rows} | {type:"ping"}
+  let termSession = null; // { ws, term, fit, resizeObs }
+
+  function closeTerminal() {
+    if (!termSession) return;
+    try { termSession.ws.close(); } catch (_) {}
+    try { termSession.resizeObs.disconnect(); } catch (_) {}
+    try { termSession.term.dispose(); } catch (_) {}
+    termSession = null;
+    $("term-overlay").hidden = true;
+    $("term-body").replaceChildren();
+  }
+
+  function openTerminal(sessionId, title) {
+    if (typeof window.Terminal !== "function") {
+      console.error("xterm.js not loaded");
+      return;
+    }
+    closeTerminal();
+    $("term-title").textContent = `terminal · ${title}`;
+    $("term-status").textContent = "connecting…";
+    $("term-overlay").hidden = false;
+
+    const term = new window.Terminal({
+      cursorBlink: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: 13,
+      theme: { background: "#0b0f17", foreground: "#dbe4f0" },
+    });
+    const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
+    const fit = FitAddon ? new FitAddon() : null;
+    if (fit) term.loadAddon(fit);
+    term.open($("term-body"));
+    if (fit) fit.fit();
+
+    // EventSource-style query token: the WS upgrade cannot send a header, so the
+    // server honors ?token= on this route only (scoped, same as SSE).
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const base = `${proto}://${window.location.host}/ws/session/${encodeURIComponent(sessionId)}`;
+    const wsUrl = token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+
+    const sendResize = () => {
+      if (fit) fit.fit();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    };
+
+    ws.onopen = () => {
+      $("term-status").textContent = "live";
+      sendResize();
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "error") {
+            $("term-status").textContent = `error: ${msg.code}`;
+            term.writeln(`\r\n\x1b[31m[${msg.code}] ${msg.message}\x1b[0m`);
+          } else if (msg.type === "status" && msg.event === "attached") {
+            $("term-status").textContent = `attached · ${msg.session}`;
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        return;
+      }
+      // Binary PTY bytes → straight into the emulator.
+      term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = () => {
+      $("term-status").textContent = "closed";
+    };
+    ws.onerror = () => {
+      $("term-status").textContent = "connection error";
+    };
+
+    term.onData((data) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "input", data }));
+      }
+    });
+
+    const resizeObs = new ResizeObserver(() => sendResize());
+    resizeObs.observe($("term-body"));
+
+    termSession = { ws, term, fit, resizeObs };
+    term.focus();
+  }
+
+  $("term-close").addEventListener("click", closeTerminal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && termSession) closeTerminal();
+  });
+
+  // ── Web-push (VAPID) + service worker + PWA ───────────────────────────
+  let swReg = null;
+  let pushEndpoint = null;
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64);
+    return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+  }
+
+  async function initPush() {
+    if (!("serviceWorker" in navigator)) return;
+    try {
+      swReg = await navigator.serviceWorker.register("/sw.js");
+    } catch (e) {
+      console.warn("service worker registration failed", e);
+      return;
+    }
+    if (!("PushManager" in window)) return;
+
+    // Is push even configured server-side?
+    let cfg;
+    try {
+      const res = await fetch("/api/push/config", { headers: authHeaders() });
+      if (!res.ok) return;
+      cfg = await res.json();
+    } catch (_) {
+      return;
+    }
+    if (!cfg.enabled || !cfg.vapidPublicKey) return;
+
+    const btn = $("push-toggle");
+    btn.hidden = false;
+
+    const existing = await swReg.pushManager.getSubscription();
+    if (existing) {
+      pushEndpoint = existing.endpoint;
+      markPushOn(true);
+      reportPresence(); // tell the server our focus state
+    }
+
+    btn.addEventListener("click", () => togglePush(cfg.vapidPublicKey));
+  }
+
+  function markPushOn(on) {
+    const btn = $("push-toggle");
+    btn.classList.toggle("on", on);
+    btn.querySelector(".push-label").textContent = on ? "notifying" : "notify";
+  }
+
+  async function togglePush(vapidPublicKey) {
+    if (!swReg) return;
+    const existing = await swReg.pushManager.getSubscription();
+    if (existing) {
+      await fetch("/api/push/unsubscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ endpoint: existing.endpoint }),
+      }).catch(() => {});
+      await existing.unsubscribe().catch(() => {});
+      pushEndpoint = null;
+      markPushOn(false);
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") return;
+    const sub = await swReg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+    });
+    const json = sub.toJSON();
+    const res = await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
+    });
+    if (res.ok) {
+      pushEndpoint = json.endpoint;
+      markPushOn(true);
+      reportPresence();
+    }
+  }
+
+  function reportPresence() {
+    if (!pushEndpoint) return;
+    fetch("/api/push/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ endpoint: pushEndpoint, focused: !document.hidden }),
+    }).catch(() => {});
+  }
+
+  document.addEventListener("visibilitychange", reportPresence);
 
   boot();
 })();
