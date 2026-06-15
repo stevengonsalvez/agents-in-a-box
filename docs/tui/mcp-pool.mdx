@@ -226,6 +226,31 @@ ainb mcp status
 
 </Tabs>
 
+## Monitor the pool
+
+Open the **MCP** entry in the home sidebar (or press `m`) for a live overlay of what's served right now — and **which sessions share each backend process**.
+
+![ainb MCP pool overlay — a popup titled "MCP Pool — 1 server · 1 shared" over the home screen; a table row shows context7, state running, Shared ✓×2 in green, Sessions "api-session, web-session", a PID, spawn count, and uptime; the sidebar shows the 🧬 MCP entry; the help bar reads "↑↓ select · s stop server · X stop pool · r refresh · esc close · refreshed 2s ago"](../assets/screenshots/mcp-overlay.gif)
+
+*Two sessions sharing one context7 process — the overlay names them (`api-session`, `web-session`) against a single `pid`. The session label is the ainb session name, passed through the shim's `--session` flag.*
+
+What the table shows per server: **state** (running / grace / idle / failed), **shared** (`✓ ×N` when more than one session is attached), the **session names**, the backend **pid**, **spawn count**, and **uptime**.
+
+Actions (each behind a confirmation):
+
+- **`s` — stop server**: reaps the selected server's process; attached sessions reconnect and the next attach respawns it.
+- **`X` — stop pool**: shuts the whole daemon down; every session falls back to its own MCP processes.
+- **`r`** refreshes on demand; **`esc`** / **`q`** closes.
+
+<Aside type="tip" title="It costs nothing when closed">
+The overlay is lazy by design. It fetches the daemon's status **once on open**, then (while open) auto-refreshes every `monitor_refresh_secs` (default `2`; set `0` for on-open + manual only). The control-socket read runs off-thread, so the TUI never blocks; and when the overlay is closed, **nothing polls** — there is no background monitor. Configure under `[mcp_pool]`:
+
+```toml
+[mcp_pool]
+monitor_refresh_secs = 2   # 0 = refresh on open + `r` only
+```
+</Aside>
+
 ## How it works
 
 ```
