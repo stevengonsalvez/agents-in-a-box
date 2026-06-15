@@ -30,6 +30,16 @@ struct ControlMsg {
     cmd: String,
     #[serde(default)]
     servers: Vec<PooledServer>,
+    /// Target server for `stop_server`.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Commands the control handler routes to the daemon's main loop (which owns
+/// the per-server stop signals and the running set).
+enum DaemonCmd {
+    StopServer(String),
+    Shutdown,
 }
 
 /// Run the daemon in the foreground until SIGTERM/SIGINT or a control-socket
@@ -51,30 +61,37 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
 
     let idle_grace = Duration::from_secs(idle_grace_override.unwrap_or(config.mcp_pool.idle_grace_secs));
     let status: StatusMap = Arc::new(Mutex::new(HashMap::new()));
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (register_tx, mut register_rx) = mpsc::unbounded_channel::<Vec<PooledServer>>();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
 
+    // Per-server stop signal. Firing one returns just that proxy (reaps its
+    // child + removes its socket); global shutdown fires all of them.
+    let mut proxy_stops: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
     let mut running: HashSet<String> = HashSet::new();
     let spawn_proxy = |server: PooledServer,
                        status: StatusMap,
-                       shutdown_rx: tokio::sync::watch::Receiver<bool>,
-                       idle_grace: Duration| {
+                       idle_grace: Duration|
+     -> tokio::sync::watch::Sender<bool> {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let name = server.name.clone();
         match paths::server_socket(&server.name) {
             Ok(socket_path) => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_server_proxy(server, socket_path, idle_grace, status, shutdown_rx).await {
+                    if let Err(e) = run_server_proxy(server, socket_path, idle_grace, status, stop_rx).await {
                         tracing::error!("mcp_pool[{name}]: proxy exited: {e}");
                     }
                 });
             }
             Err(e) => tracing::error!("mcp_pool[{name}]: socket path: {e}"),
         }
+        stop_tx
     };
 
     for server in pooled_servers(&config) {
-        running.insert(server.name.clone());
-        spawn_proxy(server, status.clone(), shutdown_rx.clone(), idle_grace);
+        let name = server.name.clone();
+        let stop_tx = spawn_proxy(server, status.clone(), idle_grace);
+        running.insert(name.clone());
+        proxy_stops.insert(name, stop_tx);
     }
 
     eprintln!("mcp daemon: listening (control: {})", control_path.display());
@@ -89,54 +106,59 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
                 for server in servers {
                     if !running.contains(&server.name) && server.resolvable_on_host() {
                         eprintln!("mcp daemon: registered '{}'", server.name);
-                        running.insert(server.name.clone());
-                        spawn_proxy(server, status.clone(), shutdown_rx.clone(), idle_grace);
+                        let name = server.name.clone();
+                        let stop_tx = spawn_proxy(server, status.clone(), idle_grace);
+                        running.insert(name.clone());
+                        proxy_stops.insert(name, stop_tx);
                     }
+                }
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(DaemonCmd::StopServer(name)) => {
+                        if let Some(stop_tx) = proxy_stops.remove(&name) {
+                            let _ = stop_tx.send(true); // reaps child + removes socket
+                            running.remove(&name);
+                            status.lock().await.remove(&name);
+                            eprintln!("mcp daemon: stopped server '{name}'");
+                        }
+                    }
+                    Some(DaemonCmd::Shutdown) | None => break,
                 }
             }
             accepted = control.accept() => {
                 let Ok((stream, _)) = accepted else { continue };
                 let status = status.clone();
-                let shutdown_tx = shutdown_tx.clone();
+                let cmd_tx = cmd_tx.clone();
                 let register_tx = register_tx.clone();
                 tokio::spawn(async move {
-                    let _ = handle_control(stream, status, shutdown_tx, register_tx).await;
+                    let _ = handle_control(stream, status, cmd_tx, register_tx).await;
                 });
             }
-            _ = wait_for_shutdown(shutdown_rx.clone()) => break,
         }
     }
 
-    // Graceful: signal proxies to kill children + remove their sockets.
-    let _ = shutdown_tx.send(true);
+    // Graceful: fire every per-server stop → kill children + remove sockets.
+    for stop_tx in proxy_stops.values() {
+        let _ = stop_tx.send(true);
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&control_path);
     eprintln!("mcp daemon: stopped");
     Ok(())
 }
 
-async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
-    loop {
-        if *rx.borrow() {
-            return;
-        }
-        if rx.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
 async fn handle_control(
     stream: tokio::net::UnixStream,
     status: StatusMap,
-    shutdown: tokio::sync::watch::Sender<bool>,
+    cmd_chan: mpsc::UnboundedSender<DaemonCmd>,
     register: mpsc::UnboundedSender<Vec<PooledServer>>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
-        // JSON commands (register); plain words kept for easy shell probing.
+        // JSON commands (register / stop_server); plain words for shell probing.
         let cmd = if line.starts_with('{') {
             match serde_json::from_str::<ControlMsg>(line) {
                 Ok(msg) => {
@@ -146,6 +168,18 @@ async fn handle_control(
                         write_half
                             .write_all(format!("{{\"ok\":true,\"registered\":{count}}}\n").as_bytes())
                             .await?;
+                        continue;
+                    }
+                    if msg.cmd == "stop_server" {
+                        match msg.name {
+                            Some(name) => {
+                                let _ = cmd_chan.send(DaemonCmd::StopServer(name));
+                                write_half.write_all(b"{\"ok\":true}\n").await?;
+                            }
+                            None => {
+                                write_half.write_all(b"{\"error\":\"stop_server needs name\"}\n").await?;
+                            }
+                        }
                         continue;
                     }
                     msg.cmd
@@ -178,7 +212,7 @@ async fn handle_control(
             }
             "shutdown" => {
                 write_half.write_all(b"{\"ok\":true}\n").await?;
-                let _ = shutdown.send(true);
+                let _ = cmd_chan.send(DaemonCmd::Shutdown);
                 return Ok(());
             }
             _ => {

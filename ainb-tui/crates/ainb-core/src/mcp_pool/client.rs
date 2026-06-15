@@ -37,6 +37,14 @@ pub fn register_servers(servers: &[super::PooledServer]) -> Result<String> {
     query(&path, &msg.to_string())
 }
 
+/// Stop one pooled server: the daemon reaps that server's child + removes its
+/// socket. The next attach respawns it (same semantics as idle reap).
+pub fn stop_server(name: &str) -> Result<String> {
+    let path = paths::control_socket()?;
+    let msg = serde_json::json!({"cmd": "stop_server", "name": name});
+    query(&path, &msg.to_string())
+}
+
 fn query(path: &std::path::Path, cmd: &str) -> Result<String> {
     let mut stream = std::os::unix::net::UnixStream::connect(path)
         .with_context(|| format!("connect {}", path.display()))?;

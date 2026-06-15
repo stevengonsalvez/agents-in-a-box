@@ -22,7 +22,8 @@ pub async fn execute(matches: &ArgMatches) -> Result<()> {
                 .get_one::<String>("socket")
                 .map(PathBuf::from)
                 .expect("clap enforces <socket>");
-            mcp_pool::shim::execute(socket).await
+            let session = sub.get_one::<String>("session").cloned();
+            mcp_pool::shim::execute(socket, session).await
         }
         Some(("status", _)) => {
             if !mcp_pool::client::daemon_alive() {
@@ -32,13 +33,21 @@ pub async fn execute(matches: &ArgMatches) -> Result<()> {
             println!("{}", mcp_pool::client::daemon_status()?);
             Ok(())
         }
-        Some(("stop", _)) => {
+        Some(("stop", sub)) => {
             if !mcp_pool::client::daemon_alive() {
                 println!("mcp daemon not running");
                 return Ok(());
             }
-            mcp_pool::client::daemon_stop()?;
-            println!("mcp daemon stopped");
+            match sub.get_one::<String>("server") {
+                Some(name) => {
+                    mcp_pool::client::stop_server(name)?;
+                    println!("stopped server '{name}' (next attach respawns it)");
+                }
+                None => {
+                    mcp_pool::client::daemon_stop()?;
+                    println!("mcp daemon stopped");
+                }
+            }
             Ok(())
         }
         Some(("import", sub)) => {

@@ -1270,9 +1270,19 @@ impl CliCommand for McpCommand {
             );
         let proxy = Command::new("proxy")
             .about("Stdio shim: bridge this process's stdio onto a pool socket")
-            .arg(clap::Arg::new("socket").required(true).help("Unix socket path"));
+            .arg(clap::Arg::new("socket").required(true).help("Unix socket path"))
+            .arg(
+                clap::Arg::new("session")
+                    .long("session")
+                    .help("Session label to announce to the pool (shown in `ainb mcp status`)"),
+            );
         let status = Command::new("status").about("Query the pool daemon (JSON)");
-        let stop = Command::new("stop").about("Stop the pool daemon and its MCP children");
+        let stop = Command::new("stop")
+            .about("Stop the pool daemon (or one server with `stop <server>`)")
+            .arg(
+                clap::Arg::new("server")
+                    .help("Stop just this server (next attach respawns it); omit to stop the whole daemon"),
+            );
         let import = Command::new("import")
             .about("Import stdio servers from .mcp.json / Claude user scope into ainb config")
             .arg(
