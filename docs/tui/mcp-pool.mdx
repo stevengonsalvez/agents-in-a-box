@@ -236,11 +236,16 @@ Open the **MCP** entry in the home sidebar (or press `p` for *pool*) for a live 
 
 What the table shows per server: **state** (running / grace / idle / failed), **shared** (`✓ ×N` when more than one session is attached), the **session names**, the backend **pid**, **spawn count**, and **uptime**.
 
-Actions (each behind a confirmation):
+Actions:
 
-- **`s` — stop server**: reaps the selected server's process; attached sessions reconnect and the next attach respawns it.
-- **`X` — stop pool**: shuts the whole daemon down; every session falls back to its own MCP processes.
+- **`i` — import**: pulls stdio servers from the current directory's `.mcp.json` **and** your Claude user scope (`~/.claude.json`) into the project config (`./.ainb/config.toml`), then registers any new ones with the live daemon so they appear in the table immediately — no session restart needed. **`I`** (shift) imports into the **user** config (`~/.agents-in-a-box/config/config.toml`) instead, so every project picks them up. Import is additive: existing entries are never overwritten, and servers whose command doesn't resolve on the host are skipped. The result (`▸ imported …`) shows in a line above the help bar.
+- **`s` — stop server** (confirmed): reaps the selected server's process; attached sessions reconnect and the next attach respawns it.
+- **`X` — stop pool** (confirmed): shuts the whole daemon down; every session falls back to its own MCP processes.
 - **`r`** refreshes on demand; **`esc`** / **`q`** closes.
+
+![ainb MCP pool overlay import — the overlay open over the home screen; pressing `i` imports the project's .mcp.json server into ./.ainb/config.toml, a "▸ imported context7 → …/.ainb/config.toml" result line appears above the help bar, and the context7 row shows in the table; the help bar reads "↑↓ select · s stop server · X stop pool · i import · I import·user · r refresh · esc close"](../assets/screenshots/mcp-import.gif)
+
+*Press `i` in the overlay to bring servers in from `.mcp.json` without dropping to a shell — it writes the config and registers them live.*
 
 <Aside type="tip" title="It costs nothing when closed">
 The overlay is lazy by design. It fetches the daemon's status **once on open**, then (while open) auto-refreshes every `monitor_refresh_secs` (default `2`; set `0` for on-open + manual only). The control-socket read runs off-thread, so the TUI never blocks; and when the overlay is closed, **nothing polls** — there is no background monitor. Configure under `[mcp_pool]`:
