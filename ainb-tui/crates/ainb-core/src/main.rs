@@ -1730,6 +1730,7 @@ fn setup_logging() {
                 | "presets"
                 | "usage"
                 | "claudecode"
+                | "codex"
                 | "statusline"
                 | "completion"
                 | "--help"
