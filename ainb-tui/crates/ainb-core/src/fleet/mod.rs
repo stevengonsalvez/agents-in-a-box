@@ -12,6 +12,7 @@
 
 #![allow(missing_docs)]
 
+pub mod bridge;
 pub mod discover;
 pub mod enrich_cache;
 pub mod read;
