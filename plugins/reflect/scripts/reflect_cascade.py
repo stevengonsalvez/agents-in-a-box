@@ -176,6 +176,23 @@ _DEDUP_EMBED_TIMEOUT = 60  # seconds — first call may pay the model load
 # and get the skill-edit prompt instead of the transcript prompt.
 SKILL_REFRESH_TRIGGER = "skill_refresh"
 
+# S10: write-validate-retry on the note body (ByteRover curate-session shape).
+# After the drain LLM writes a learning, its structure is validated (required
+# frontmatter fields present + the .entities.yaml sidecar valid + the sidecar's
+# entities actually referenced in the body). On a structural failure the writer
+# is re-prompted with the errors inlined and tries again, BOUNDED at
+# S10_MAX_ATTEMPTS attempts (ByteRover's correct-html loop, MAX_ATTEMPTS=4;
+# we bail one earlier — 3 — matching the spec's "MAX 3 attempts"). A learning
+# that never validates is still written, flagged ``validated: false``, so a
+# malformed note self-heals at write time instead of polluting the corpus.
+S10_MAX_ATTEMPTS = 3
+
+# Required frontmatter keys every learning note must carry — the structural
+# floor recall keys on (title to render, category to shard, confidence to rank).
+# Mirrors the always-written block of
+# output_generator.create_knowledge_note's frontmatter dict.
+_REQUIRED_FRONTMATTER_FIELDS = ("title", "category", "tags", "confidence")
+
 
 @dataclass
 class Prep:
@@ -191,6 +208,37 @@ class Prep:
     observation_count: int = 0     # O1: existing observations embedded for the second pass
     chunks_total: int = 0          # S7: signal-window chunks in the raw slice
     chunks_skipped: int = 0        # S7: chunks dropped as already-reflected (delta retain)
+
+
+@dataclass
+class DrainOutput:
+    """A single learning a drain writer emits: the note body (markdown with a
+    YAML frontmatter block) plus the path to its ``.entities.yaml`` sidecar.
+
+    The sidecar lives on disk because :func:`validate_drain_output` reuses the
+    existing :mod:`validate_sidecar` validator, which reads a file. ``body`` is
+    the in-memory note text the writer just produced (not yet committed)."""
+
+    body: str
+    sidecar_path: Optional[str] = None
+
+
+@dataclass
+class DrainResult:
+    """Verdict of the S10 write-validate-retry loop.
+
+    ``validated`` is True iff the accepted output passed structural validation
+    within the attempt budget; on a give-up it is False and ``errors`` carries
+    the last attempt's failures (the note is still written — flagged
+    ``validated: false`` — so the loop self-heals without dropping signal).
+    ``attempts`` is the telemetry the acceptance criteria require: how many
+    writer invocations the loop spent (1 = clean first write)."""
+
+    body: str
+    sidecar_path: Optional[str]
+    attempts: int
+    validated: bool
+    errors: list[str]
 
 
 def _est_tokens(text: str) -> int:
@@ -1114,6 +1162,177 @@ def synthetic_fallback(transcript: str | Path, *, reason: str = "no_llm") -> dic
         sliced, signals, source_path=str(p), reason=reason, write=True,
     )
     return record.to_summary()
+
+
+def _parse_frontmatter(body: str) -> Optional[dict]:
+    """Parse the leading ``---``-fenced YAML frontmatter block of a note body.
+
+    Returns the parsed mapping, or ``None`` when there is no well-formed
+    frontmatter block at all (no opening fence, no closing fence, non-mapping
+    payload, or unparseable YAML) — every one of which is a structural failure
+    the S10 loop must surface as an error rather than silently accept.
+    """
+    text = (body or "").lstrip("﻿")
+    if not text.startswith("---"):
+        return None
+    # Strip the opening fence (first line) then find the closing fence.
+    rest = text[3:]
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    end = rest.find("\n---")
+    if end == -1:
+        return None
+    block = rest[:end]
+    try:
+        import yaml
+        data = yaml.safe_load(block)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sidecar_claims_in_body(sidecar_path: str, body: str) -> list[str]:
+    """S10 claim-match: every entity NAMED in the sidecar must appear in the
+    note body. A sidecar that asserts entities the body never mentions is a
+    hallucinated claim — the exact "sidecar matches body claims" failure the
+    loop re-prompts on. Returns the list of unreferenced entity names (empty =
+    consistent). Best-effort: an unreadable/empty sidecar yields no claim
+    errors (its structural validity is the sidecar validator's job, not this
+    cross-check's)."""
+    try:
+        import yaml
+        data = yaml.safe_load(Path(sidecar_path).read_text())
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return []
+    body_lc = (body or "").lower()
+    missing: list[str] = []
+    for e in entities:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("name", "") or "").strip()
+        if name and name.lower() not in body_lc:
+            missing.append(name)
+    return missing
+
+
+def validate_drain_output(output: DrainOutput) -> list[str]:
+    """S10 structural validation of one drain-written learning. No LLM.
+
+    Three checks, all deterministic:
+
+      1. The note body carries a YAML frontmatter block with every
+         :data:`_REQUIRED_FRONTMATTER_FIELDS` key present and non-empty.
+      2. The ``.entities.yaml`` sidecar is structurally valid — REUSES the
+         existing :func:`validate_sidecar.validate` entrypoint (the spec's
+         "do not duplicate the validator" rule); a sidecar path that is absent
+         is itself an error.
+      3. The sidecar's claims match the body: every entity named in the
+         sidecar is actually mentioned in the note (:func:`_sidecar_claims_in_body`).
+
+    Returns a flat list of human-readable error strings (empty list = valid),
+    suitable for inlining back into the writer re-prompt.
+    """
+    errors: list[str] = []
+
+    fm = _parse_frontmatter(output.body)
+    if fm is None:
+        errors.append(
+            "frontmatter: missing or malformed YAML frontmatter block "
+            "(note must open with a `---`-fenced block)"
+        )
+    else:
+        for field_name in _REQUIRED_FRONTMATTER_FIELDS:
+            val = fm.get(field_name)
+            if field_name not in fm:
+                errors.append(f"frontmatter: missing required field `{field_name}`")
+            elif val is None or (isinstance(val, (str, list, dict)) and len(val) == 0):
+                errors.append(f"frontmatter: required field `{field_name}` is empty")
+
+    sidecar = output.sidecar_path
+    if not sidecar:
+        errors.append("sidecar: no .entities.yaml sidecar was written")
+    else:
+        # Reuse the shipped validator — never reimplement it (spec rule).
+        try:
+            import validate_sidecar
+            for err in validate_sidecar.validate(Path(sidecar)):
+                errors.append(f"sidecar: {err}")
+        except Exception as exc:  # pragma: no cover - import/env failure
+            errors.append(f"sidecar: validator unavailable ({exc})")
+        # Cross-check the sidecar's claims against the body.
+        for name in _sidecar_claims_in_body(sidecar, output.body):
+            errors.append(
+                f"sidecar: entity {name!r} is asserted in the sidecar but never "
+                f"mentioned in the note body (unsupported claim)"
+            )
+
+    return errors
+
+
+def write_validate_retry(writer, *, max_attempts: int = S10_MAX_ATTEMPTS) -> DrainResult:
+    """S10 write-validate-retry loop (ByteRover curate-session correct-html shape).
+
+    ``writer`` is the drain write step abstracted behind a callable so the LOOP
+    — the unit under test — is decoupled from the LLM. It is invoked as
+    ``writer(errors)`` and must return a :class:`DrainOutput` (or a
+    ``(body, sidecar_path)`` tuple). ``errors`` is the empty list on the first
+    attempt and the previous attempt's validation failures thereafter, so the
+    writer can re-prompt with the errors inlined.
+
+    Contract (the invariant the proof pins):
+
+      * Attempt 1 writes; if it validates clean, accept immediately
+        (``attempts=1``, ``validated=True``).
+      * On a structural failure, re-invoke the writer with the errors and try
+        again, BOUNDED at ``max_attempts`` total invocations.
+      * Accept as soon as an attempt validates — ``attempts`` records how many
+        writer calls it took (the drain telemetry the acceptance criteria want).
+      * If no attempt validates within the budget, give up and return the LAST
+        attempt's output flagged ``validated=False`` with its errors — the note
+        is still written so signal is never dropped; the flag lets the corpus
+        quarantine it.
+    """
+    if max_attempts < 1:
+        max_attempts = 1
+
+    last_output: Optional[DrainOutput] = None
+    last_errors: list[str] = []
+    errors: list[str] = []
+
+    for attempt in range(1, max_attempts + 1):
+        produced = writer(errors)
+        if isinstance(produced, DrainOutput):
+            output = produced
+        else:
+            body, sidecar = produced  # accept a (body, sidecar_path) tuple
+            output = DrainOutput(body=body, sidecar_path=sidecar)
+        last_output = output
+
+        errors = validate_drain_output(output)
+        last_errors = errors
+        if not errors:
+            return DrainResult(
+                body=output.body,
+                sidecar_path=output.sidecar_path,
+                attempts=attempt,
+                validated=True,
+                errors=[],
+            )
+
+    # Bailed at the bound — write anyway, flagged invalid, with the last errors.
+    assert last_output is not None  # max_attempts >= 1 guarantees one write
+    return DrainResult(
+        body=last_output.body,
+        sidecar_path=last_output.sidecar_path,
+        attempts=max_attempts,
+        validated=False,
+        errors=last_errors,
+    )
 
 
 def split_slice_chunks(sliced: str) -> list[str]:
