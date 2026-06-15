@@ -1003,6 +1003,12 @@ impl CliCommand for NotifydCommand {
                     .help("Target Codex CLI"),
             )
             .arg(
+                clap::Arg::new("copilot")
+                    .long("copilot")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target GitHub Copilot CLI"),
+            )
+            .arg(
                 clap::Arg::new("all")
                     .long("all")
                     .action(clap::ArgAction::SetTrue)
@@ -1044,7 +1050,12 @@ impl CliCommand for NotifydCommand {
             Status,
         }
         let agents = |m: &ArgMatches| {
-            cli::agents_from_flags(m.get_flag("claude"), m.get_flag("codex"), m.get_flag("all"))
+            cli::agents_from_flags(
+                m.get_flag("claude"),
+                m.get_flag("codex"),
+                m.get_flag("copilot"),
+                m.get_flag("all"),
+            )
         };
         // No sub-verb → `run` (matches the standalone binary's default
         // and the lazy-spawn call `ainb notifyd`).
