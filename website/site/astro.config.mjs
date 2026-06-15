@@ -54,6 +54,7 @@ export default defineConfig({
             { label: 'Overview', slug: 'tui/overview' },
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
+            { label: 'Starting a new session', slug: 'tui/start-session' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
             { label: 'CLI reference', slug: 'tui/cli' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
