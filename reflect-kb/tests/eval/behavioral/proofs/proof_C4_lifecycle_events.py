@@ -89,8 +89,16 @@ import reflect_events as E  # noqa: E402
 # --- helpers -------------------------------------------------------------
 
 def _point_state_dir(monkeypatch, tmp_path: Path) -> Path:
-    """Repoint REFLECT_STATE_DIR at an isolated tmp dir; return events.jsonl."""
+    """Repoint REFLECT_STATE_DIR at an isolated tmp dir; return events.jsonl.
+
+    Also isolate REFLECT_DB_PATH at a fresh per-test db. The cascade's S7/S8
+    chunk-hash dedup store lives in reflect.db — without this, a chunk hash
+    recorded by any earlier proof in the same run would make ``prepare`` skip
+    the test transcript as ``dup-chunk-hash`` instead of reaching the reflect
+    path. (Surfaces only in the full matrix, after S7/S8 have run.)
+    """
     monkeypatch.setenv("REFLECT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("REFLECT_DB_PATH", str(tmp_path / "reflect.db"))
     # Sanity: the module resolves the env at call time, so the path must follow.
     assert E.events_path() == tmp_path / "events.jsonl"
     return tmp_path / "events.jsonl"
