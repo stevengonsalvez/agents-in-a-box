@@ -1293,6 +1293,87 @@ def fetch_temporal(
     return [lrn for _, _, lrn in scored[:limit]]
 
 
+# A2: bitemporal graph edges. The graph arm (R1, `--mode local`) expands the
+# entity neighbourhood; A2 lets a date-range query restrict that expansion to
+# the edges that were VALID IN THE WORLD inside the window. Each sidecar edge
+# carries two clocks (agentmemory GraphEdge shape):
+#   * tvalid       — when the relationship became true in the world. Defaults
+#                    to tcommit (transaction time) when omitted, which itself
+#                    defaults to the sidecar's ingest time.
+#   * tvalid_end   — when it stopped being true. Absent => still valid (open
+#                    interval), so a current edge always survives any window
+#                    whose start it precedes.
+# An edge is kept when its validity interval [tvalid, tvalid_end] OVERLAPS the
+# query window [temporal.start, temporal.end]. Supersession (tvalid_end set +
+# superseded_by) is therefore naturally excluded from a window that postdates
+# the edge's death — "what was the architecture in April?" drops a relationship
+# superseded in March. The graph arm runs this filter ONLY when the query
+# parsed a date range; a date-free query leaves every edge untouched.
+RECALL_BITEMPORAL_ENABLED = os.environ.get("RECALL_BITEMPORAL_EDGES", "1") != "0"
+
+
+def edge_tvalid_window(
+    edge: dict, ingest_time: datetime | None = None
+) -> tuple[datetime | None, datetime | None]:
+    """A2: resolve an edge's world-validity interval ``[tvalid, tvalid_end]``.
+
+    Coalescing (agentmemory's transaction/valid-time default chain):
+        tvalid     := edge.tvalid -> edge.tcommit -> ingest_time
+        tvalid_end := edge.tvalid_end -> None  (None == open / still valid)
+
+    Returns ``(tvalid, tvalid_end)`` as naive datetimes. ``tvalid`` is None
+    only when the edge carries no parsable tvalid/tcommit AND no ingest time
+    was supplied — such an edge is undatable and (like an undatable learning in
+    R5) is never guessed into a window.
+    """
+    tvalid = _coerce_datetime(edge.get("tvalid"))
+    if tvalid is None:
+        tvalid = _coerce_datetime(edge.get("tcommit"))
+    if tvalid is None:
+        tvalid = ingest_time
+    tvalid_end = _coerce_datetime(edge.get("tvalid_end"))
+    return tvalid, tvalid_end
+
+
+def filter_edges_by_tvalid(
+    edges: list[dict],
+    temporal: TemporalRange | None,
+    ingest_time: datetime | None = None,
+) -> list[dict]:
+    """A2: keep only edges whose world-validity interval overlaps the query
+    window. The graph-arm temporal filter.
+
+    Contract (booster, never blocker — mirrors fetch_temporal):
+      * ``temporal is None`` (date-free query) or the knob is off => return
+        ``edges`` UNCHANGED. A query with no date phrase never loses edges.
+      * Otherwise keep edge e iff [tvalid_e, tvalid_end_e] overlaps
+        [temporal.start, temporal.end], i.e.
+            tvalid_e <= temporal.end  AND  (tvalid_end_e is None or
+            tvalid_end_e >= temporal.start).
+        An open-ended (still-valid) edge survives any window it starts before;
+        a superseded edge (tvalid_end set) drops out of a window that postdates
+        its death — the "what was true in April?" semantics.
+      * An undatable edge (no resolvable tvalid) is dropped from a windowed
+        query — it cannot be proven in-window, exactly as R5 drops undatable
+        notes from the temporal arm.
+    """
+    if temporal is None or not RECALL_BITEMPORAL_ENABLED:
+        return edges
+    kept: list[dict] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        tvalid, tvalid_end = edge_tvalid_window(edge, ingest_time)
+        if tvalid is None:
+            continue  # undatable edge — never guessed into the window
+        if tvalid > temporal.end:
+            continue  # edge began after the window closed
+        if tvalid_end is not None and tvalid_end < temporal.start:
+            continue  # edge died before the window opened
+        kept.append(edge)
+    return kept
+
+
 def _learning_key(learning: Learning) -> str:
     """Dedup key stable across backends. Prefers frontmatter id, falls back to
     a hash of the chunk so distinct chunks don't collapse."""

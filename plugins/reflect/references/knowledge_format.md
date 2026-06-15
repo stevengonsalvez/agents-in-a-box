@@ -70,7 +70,38 @@ relationships:
     type: caused_by | causes | enables | prevents | contradicts | supersedes | part_of | uses | solves | requires | relates_to | implements | configures | triggers
     description: "{how they relate}"
     strength: 1-10
+    # A2: bitemporal clocks (all optional, ISO-8601 date or datetime)
+    tcommit: "{when reflect LEARNED this edge}"   # defaults to extracted_at
+    tvalid: "{when it became true in the world}"  # defaults to tcommit
+    tvalid_end: "{when it stopped being true}"    # absent => still valid
+    superseded_by: "{id of the edge that replaced this one}"  # optional
 ```
+
+### Bitemporal relationship clocks (A2)
+
+Causal edges carry **two independent clocks** so a graph query can separate
+*what was true in the world* from *what we knew at the time*:
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `tcommit` | Transaction time — when reflect **learned** the relationship | the sidecar's `extracted_at` (ingest time) |
+| `tvalid` | Valid time — when the relationship became **true in the world** | `tcommit` |
+| `tvalid_end` | When the relationship **stopped** being true | absent = still valid (open interval) |
+| `superseded_by` | The edge that replaced this one | absent |
+
+- All four are **optional and additive** — sidecars without them validate
+  exactly as before. Each timestamp, when present, MUST be a valid ISO-8601
+  date or datetime; a malformed clock is rejected by `validate_sidecar.py`.
+- **Supersession, not deletion.** When a relationship is replaced (the
+  architecture changed — "JWT in April, sessions in June"), set the old edge's
+  `tvalid_end` and `superseded_by` instead of removing it. History is
+  preserved, and a query scoped to the old window still surfaces the old truth.
+- A date-range recall query filters graph-arm edges by **`tvalid` overlap**:
+  *"what was the architecture in April?"* keeps only edges valid in April
+  (`tvalid <= window.end and (tvalid_end is None or tvalid_end >= window.start)`).
+  Use the `tcommit` clock instead to ask *"what did we KNOW in April?"*.
+- Stamp missing `tcommit` values in bulk with
+  `validate_sidecar.py --backfill-tcommit` (defaults each to `extracted_at`).
 
 ## Example
 

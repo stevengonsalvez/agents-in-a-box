@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -58,8 +59,61 @@ RELATIONSHIP_TYPES = TYPED_CAUSAL_LINK_TYPES | LEGACY_RELATIONSHIP_TYPES
 
 BACKFILL_DEFAULT_TYPE = "relates_to"
 
+# A2: bitemporal graph edges (agentmemory GraphEdge shape — tcommit/tvalid/
+# tvalidEnd/supersededBy). Every causal edge carries TWO clocks:
+#   * tcommit     — when reflect LEARNED the relationship (ingest/transaction
+#                   time). Defaults to the sidecar's ingest time when omitted,
+#                   so existing sidecars never fail and the field is optional.
+#   * tvalid      — when the relationship became true in the WORLD (valid
+#                   time). Defaults to tcommit when omitted.
+#   * tvalid_end  — when the relationship STOPPED being true. Set on
+#                   supersession instead of deleting the edge, so history is
+#                   preserved ("JWT in April, sessions in June").
+# This lets a graph query answer "what was true in April?" (tvalid filter) vs
+# "what did we KNOW in April?" (tcommit filter). All three are OPTIONAL and
+# additive on top of the S2 closed-enum relationship schema.
+BITEMPORAL_EDGE_FIELDS = ("tcommit", "tvalid", "tvalid_end")
+# Companion supersession pointer (agentmemory supersededBy). Names the edge
+# that replaced this one; carried verbatim, validated only as a string.
+SUPERSEDED_BY_FIELD = "superseded_by"
+
 REQUIRED_ENTITY_FIELDS = {"name", "type", "description"}
 REQUIRED_RELATIONSHIP_FIELDS = {"source", "target", "type", "description"}
+
+
+def _coerce_iso(raw: object) -> datetime | None:
+    """A2: parse a bitemporal timestamp into a naive datetime, or None if it
+    is not a valid ISO-8601 date/datetime.
+
+    yaml.safe_load already turns ISO timestamps into datetime (tz-aware for a
+    trailing Z) and bare dates into date objects; raw strings survive when the
+    value was quoted. Mirrors recall.py::_coerce_datetime so the validator and
+    the graph arm agree on what a legal edge timestamp is. tzinfo is dropped —
+    the bitemporal filter is day-granular like the R6 window.
+    """
+    if isinstance(raw, datetime):
+        return raw.replace(tzinfo=None)
+    if isinstance(raw, date):
+        return datetime(raw.year, raw.month, raw.day)
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.strip().rstrip("Z")).replace(
+                tzinfo=None
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def default_tcommit(data: dict) -> str | None:
+    """A2: the ingest-time default for an edge's ``tcommit`` when it is omitted.
+
+    The sidecar's top-level ``extracted_at`` IS the ingest/transaction time —
+    the moment reflect learned everything in this document — so an edge with no
+    explicit ``tcommit`` inherits it. Returns None when the sidecar carries no
+    parsable ``extracted_at`` (then ``tcommit`` simply stays absent — never
+    guessed)."""
+    return data.get("extracted_at") if _coerce_iso(data.get("extracted_at")) else None
 
 
 def validate(path: Path, *, strict: bool = False) -> list[str]:
@@ -137,6 +191,26 @@ def validate(path: Path, *, strict: bool = False) -> list[str]:
                     errors.append(
                         f"relationships[{i}].strength = {s!r}, must be int 1-10"
                     )
+            # A2: bitemporal timestamps. Each is OPTIONAL, but when present it
+            # MUST be a parsable ISO-8601 date/datetime — a malformed clock is
+            # rejected (it would silently break the tvalid/tcommit graph
+            # filter). tcommit defaults to ingest time downstream, so its
+            # absence is never an error here.
+            for ts_field in BITEMPORAL_EDGE_FIELDS:
+                if ts_field in r and _coerce_iso(r[ts_field]) is None:
+                    errors.append(
+                        f"relationships[{i}].{ts_field} = {r[ts_field]!r} "
+                        f"is not a valid ISO-8601 date/datetime"
+                    )
+            # Ordering invariant: a closed validity window must not end before
+            # it began. tvalid_end < tvalid is a malformed supersession.
+            tv = _coerce_iso(r.get("tvalid"))
+            tve = _coerce_iso(r.get("tvalid_end"))
+            if tv is not None and tve is not None and tve < tv:
+                errors.append(
+                    f"relationships[{i}].tvalid_end = {r['tvalid_end']!r} "
+                    f"precedes tvalid = {r['tvalid']!r}"
+                )
             # Referential integrity: source/target should be known entity names
             if strict:
                 for end in ("source", "target"):
@@ -185,6 +259,48 @@ def backfill(path: Path) -> int:
     return changed
 
 
+def backfill_tcommit(path: Path) -> int:
+    """A2 backfill: stamp ``tcommit`` = the sidecar's ingest time on every edge
+    that omits it, in place. Kept SEPARATE from ``backfill()`` (the S2 type
+    backfill) so the two knobs compose without either changing the other's
+    rewrite count.
+
+    The ingest time is the top-level ``extracted_at`` (the moment reflect
+    learned this document) — exactly agentmemory's transaction-time default for
+    a GraphEdge. ``tvalid`` is intentionally NOT defaulted on disk: it defaults
+    to ``tcommit`` at read time in the graph arm, keeping the sidecar minimal.
+    Returns the number of edges stamped (0 = no-op; file untouched). A no-op
+    when ``extracted_at`` is missing/unparsable (tcommit is never guessed)."""
+    if not path.exists():
+        return 0
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+
+    tcommit_default = default_tcommit(data)
+    if tcommit_default is None:
+        return 0
+
+    rels = data.get("relationships")
+    if not isinstance(rels, list):
+        return 0
+
+    changed = 0
+    for r in rels:
+        if isinstance(r, dict) and "tcommit" not in r:
+            r["tcommit"] = tcommit_default
+            changed += 1
+
+    if changed:
+        path.write_text(
+            yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        )
+    return changed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("paths", nargs="+", type=Path,
@@ -195,6 +311,9 @@ def main() -> int:
     ap.add_argument("--backfill", action="store_true",
                     help="rewrite relationships with missing/unknown `type` "
                          f"to '{BACKFILL_DEFAULT_TYPE}' in place, then validate")
+    ap.add_argument("--backfill-tcommit", action="store_true",
+                    help="A2: stamp `tcommit` = ingest time (extracted_at) on "
+                         "every edge missing it, in place, then validate")
     args = ap.parse_args()
 
     total_errors = 0
@@ -204,6 +323,10 @@ def main() -> int:
             if n:
                 print(f"{p}: backfilled {n} relationship type(s) to "
                       f"'{BACKFILL_DEFAULT_TYPE}'")
+        if args.backfill_tcommit:
+            n = backfill_tcommit(p)
+            if n:
+                print(f"{p}: stamped tcommit on {n} edge(s)")
         errs = validate(p, strict=args.strict)
         if errs:
             total_errors += len(errs)
