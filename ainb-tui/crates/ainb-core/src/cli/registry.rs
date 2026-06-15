@@ -1548,10 +1548,24 @@ impl CliCommand for FleetCommand {
                     .short('v')
                     .action(clap::ArgAction::SetTrue),
             );
+        let bridge = Command::new("bridge")
+            .about(
+                "Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions",
+            )
+            .subcommand_required(false)
+            .subcommand(
+                Command::new("run")
+                    .about("Run the bridge daemon in the foreground (default; reads config.toml)"),
+            )
+            .subcommand(Command::new("install").about(
+                "Install as a launchd/systemd service (tokens read from config, never argv)",
+            ))
+            .subcommand(Command::new("uninstall").about("Remove the bridge service"))
+            .subcommand(Command::new("status").about("Report bridge service install status"));
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon",
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / bridge",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -1561,6 +1575,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(needs)
                 .subcommand(cost)
                 .subcommand(daemon)
+                .subcommand(bridge)
                 .subcommand(enrich_cache),
         )
     }
