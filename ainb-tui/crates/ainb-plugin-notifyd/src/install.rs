@@ -52,10 +52,21 @@ pub enum Agent {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
+    /// GitHub Copilot CLI. Recognised so an `install.json` written by a
+    /// Copilot-capable build round-trips cleanly; this binary does not
+    /// install Copilot hooks itself (it is intentionally absent from `ALL`).
+    Copilot,
+    /// Catch-all for any agent written by a newer build that this binary
+    /// doesn't know. Keeps `install.json` forward-compatible: an unknown
+    /// variant no longer hard-fails `serde` deserialization — which used to
+    /// reset the record to empty, nag the install prompt on every launch,
+    /// and break the "Install" action with `parsing …/install.json`.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Agent {
-    /// All known agents — used to derive `--all`.
+    /// All known agents this binary can install — used to derive `--all`.
     pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Codex];
 
     /// Lowercase name for logs / status output.
@@ -63,6 +74,8 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Copilot => "copilot",
+            Agent::Unknown => "unknown",
         }
     }
 }
@@ -79,6 +92,11 @@ pub struct InstallRecord {
     pub claude_plugin_dir: Option<PathBuf>,
     /// Resolved per-agent config path (Codex only).
     pub codex_hooks_json: Option<PathBuf>,
+    /// Resolved per-agent config path (Copilot only). Modelled so a record
+    /// written by a Copilot-capable build round-trips without dropping the
+    /// field; this binary never sets it.
+    #[serde(default)]
+    pub copilot_hooks_json: Option<PathBuf>,
     /// The plugin manifest version that was written to disk at install
     /// time. Compared against [`embedded_plugin_version`] on startup to
     /// detect drift after an `ainb` upgrade. `None` for records written
@@ -275,6 +293,10 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 record.codex_hooks_json = Some(hooks_json);
                 push_unique(&mut record.agents, Agent::Codex);
             }
+            // Copilot (and any future/unknown agent) is owned by a
+            // Copilot-capable build; this binary never receives them via
+            // `ALL`. Skip without disturbing an existing record entry.
+            Agent::Copilot | Agent::Unknown => {}
         }
     }
     record.save(paths)?;
@@ -503,6 +525,8 @@ pub fn uninstall(paths: &Paths, agents: &[Agent]) -> Result<()> {
                 }
                 record.agents.retain(|a| *a != Agent::Codex);
             }
+            // Not managed by this binary — leave any record entry intact.
+            Agent::Copilot | Agent::Unknown => {}
         }
     }
     record.save(paths)?;
@@ -598,6 +622,40 @@ mod tests {
 
     fn paths_under_home(home: &Path) -> Paths {
         Paths::under(home.join(".agents-in-a-box"))
+    }
+
+    #[test]
+    fn install_json_with_copilot_and_unknown_agents_parses() {
+        // Regression: an install.json written by a newer, Copilot-capable
+        // build (or any future agent) must not hard-fail deserialization.
+        // A failed parse used to reset the record to empty -> re-offer the
+        // install prompt on every launch, and break "Install" with
+        // `parsing .../install.json`.
+        let json = r#"{
+            "agents": ["claude", "codex", "copilot", "gemini"],
+            "hook_script": "/home/u/.agents-in-a-box/hooks/ainb-notify.sh",
+            "codex_hooks_json": "/home/u/.codex/hooks.json",
+            "copilot_hooks_json": "/home/u/.copilot/hooks/ainb.json",
+            "plugin_version": "0.2.0",
+            "prompt_dismissed": false
+        }"#;
+        let rec: InstallRecord = serde_json::from_str(json).expect("record must parse");
+        assert!(rec.agents.contains(&Agent::Claude));
+        assert!(rec.agents.contains(&Agent::Codex));
+        assert!(rec.agents.contains(&Agent::Copilot));
+        // The unknown "gemini" maps to the catch-all instead of erroring.
+        assert!(rec.agents.contains(&Agent::Unknown));
+        // Non-empty agents => prompt_state does NOT offer install every launch.
+        assert!(!rec.agents.is_empty());
+        // Copilot path is preserved on the record.
+        assert_eq!(
+            rec.copilot_hooks_json.as_deref(),
+            Some(Path::new("/home/u/.copilot/hooks/ainb.json"))
+        );
+        // Copilot survives a save/load round-trip (no data loss).
+        let reser = serde_json::to_string(&rec).unwrap();
+        let again: InstallRecord = serde_json::from_str(&reser).unwrap();
+        assert!(again.agents.contains(&Agent::Copilot));
     }
 
     #[test]
