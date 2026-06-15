@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-06-15
+### Added
+- Merge pull request #277 from stevengonsalvez/worktree-codex-statusline
+- **bootstrap**: wire caveman hooks and marketplace in settings.json
+- **cli**: add ainb codex statusline to pull Codex OAuth quota
+- **hooks**: add caveman PostToolUse and PreCompact hooks
+- **marketplace**: register caveman-stats plugin in agents-in-a-box marketplace
+- **onboarding**: clearer Welcome screen with CTAs and Esc hint
+- **plugins**: extract caveman-stats as standalone plugin
+- **session-list**: brand-color agent pill, ballot checkbox, drop tmux dot
+- **session-list**: use Nerd Font brand logos for agent icons
+- **statusline**: add caveman mode badge and savings segment
+- **tui**: overlay Codex usage onto the live window reader
+- **tui**: pull Codex usage from the live-window watcher + e2e tripwire
+- **tui**: render Codex quota (cx5h/cxwk) on the top bar next to Claude
+
+### Fixed
+- Merge pull request #276 from stevengonsalvez/onboarding-esc-menu
+- **onboarding**: Esc opens the Setup menu instead of cancelling to Home
+- **tui**: per-process tmp name for codex cache atomic write
+
+### Documentation
+- **readme**: document Homebrew's untrusted-tap gate
+- **release**: use cargo install --git one-liner in release notes
+- **tmux-ui-tripwire**: add gotcha 15 — AppState::new restores persisted UI prefs
+- **tui**: add Codex-on-top-bar proof captures (vhs frames + gif)
+- **tui**: document ainb codex statusline + live status bar
+
+### Other
+- **tui**: compact provider-grouped statusline, keep reset date/time
+
+
 ## [1.7.0] - 2026-06-12
 ### Added
 - Merge pull request #256 from stevengonsalvez/feat/antv-infographic-skill
