@@ -215,5 +215,33 @@ def test_M6_knob_off_leaks_private_content(tmp_path, monkeypatch):
     )
 
 
+def test_M6_nested_private_spans_do_not_leak():
+    """Regression: a NESTED <private> span must not leak the outer tail.
+
+    A non-greedy ``.*?</private>`` closes at the FIRST close tag, so on
+    ``<private>A <private>B</private> C</private>`` it strips only through the
+    inner close and leaks ``C`` (and a dangling close tag) to the LLM. The
+    depth-aware stripper must remove the whole balanced span. Disjoint spans of
+    the same tag must each be removed while the public text BETWEEN them
+    survives. Drives the real ``privacy_filter.strip_private`` — no LLM.
+    """
+    import privacy_filter as pf
+
+    nested = pf.strip_private(
+        "<private>API_KEY=sk-LEAK1 and <private>pw=hunter2</private> "
+        "never-log-this</private>"
+    )
+    for secret in ("sk-LEAK1", "hunter2", "never-log-this"):
+        assert secret not in nested, f"nested span leaked {secret!r}: {nested!r}"
+    assert "</private>" not in nested, f"dangling close tag left: {nested!r}"
+
+    deep = pf.strip_private("<private>a<private>b<private>SEKRIT</private>c</private>d</private>TAIL")
+    assert "SEKRIT" not in deep and "TAIL" in deep, deep
+
+    disjoint = pf.strip_private("<private>X</private> PUBLIC <private>Y</private>")
+    assert "X" not in disjoint and "Y" not in disjoint
+    assert "PUBLIC" in disjoint, f"disjoint over-stripped public text: {disjoint!r}"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -20,7 +20,9 @@ Two layers:
 
 Both layers tolerate malformed input: unclosed tags strip to end-of-text
 (fail closed — better to over-strip than leak), nested same-name tags are
-consumed greedily, and tag names are case-insensitive.
+removed as one balanced span (depth-aware so the OUTER close is honoured,
+never an inner one), disjoint spans of the same tag are each removed, and
+tag names are case-insensitive.
 
 Usage::
 
@@ -51,16 +53,51 @@ STRIP_TAGS = (
 )
 
 
-def _tag_pattern(tag: str) -> re.Pattern[str]:
-    # Closed pair (non-greedy) OR unclosed-to-EOF (fail closed).
-    return re.compile(
-        rf"<{re.escape(tag)}(?:\s[^>]*)?>.*?</{re.escape(tag)}\s*>"
-        rf"|<{re.escape(tag)}(?:\s[^>]*)?>.*\Z",
-        re.IGNORECASE | re.DOTALL,
-    )
+def _tag_res(tag: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """Compiled (open, close) matchers for one strip tag."""
+    open_re = re.compile(rf"<{re.escape(tag)}(?:\s[^>]*)?>", re.IGNORECASE | re.DOTALL)
+    close_re = re.compile(rf"</{re.escape(tag)}\s*>", re.IGNORECASE)
+    return open_re, close_re
 
 
-_PATTERNS = [(_tag_pattern(t), t) for t in STRIP_TAGS]
+_TAG_RES = [(t, *_tag_res(t)) for t in STRIP_TAGS]
+
+
+def _strip_tag(text: str, open_re: re.Pattern[str], close_re: re.Pattern[str],
+               replacement: str) -> str:
+    """Remove every balanced ``<tag>…</tag>`` span, depth-aware.
+
+    A naive non-greedy ``.*?</tag>`` closes at the FIRST close tag, so on a
+    nested span it strips only up to the inner close and LEAKS the outer tail
+    (the exact failure this replaces). Instead, for each opening tag we walk
+    forward counting nested opens vs closes until depth returns to zero — that
+    is the matching OUTER close — and remove the whole span. An opening tag
+    with no matching close strips to end-of-text (fail closed). Disjoint spans
+    are each handled by the outer loop.
+    """
+    while True:
+        m_open = open_re.search(text)
+        if not m_open:
+            return text
+        depth = 1
+        pos = m_open.end()
+        end = None
+        while depth > 0:
+            nxt_open = open_re.search(text, pos)
+            nxt_close = close_re.search(text, pos)
+            if nxt_close is None:
+                # Unclosed → strip from the open to EOF (fail closed).
+                end = len(text)
+                break
+            if nxt_open is not None and nxt_open.start() < nxt_close.start():
+                depth += 1
+                pos = nxt_open.end()
+            else:
+                depth -= 1
+                pos = nxt_close.end()
+                if depth == 0:
+                    end = pos
+        text = text[:m_open.start()] + replacement + text[end:]
 
 
 def strip_private(text: str) -> str:
@@ -72,9 +109,7 @@ def strip_private(text: str) -> str:
     if not text or "<" not in text:
         return text
     out = text
-    for pattern, tag in _PATTERNS:
+    for tag, open_re, close_re in _TAG_RES:
         replacement = PRIVATE_MARKER if tag == "private" else ""
-        # Loop: removing one span can join text that forms no new tags, but a
-        # document may contain many disjoint spans of the same tag.
-        out = pattern.sub(replacement, out)
+        out = _strip_tag(out, open_re, close_re, replacement)
     return out
