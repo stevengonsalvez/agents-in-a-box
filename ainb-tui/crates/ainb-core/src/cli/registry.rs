@@ -1548,10 +1548,11 @@ impl CliCommand for FleetCommand {
                     .short('v')
                     .action(clap::ArgAction::SetTrue),
             );
+        let atc = build_atc_command();
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon",
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / atc",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -1561,6 +1562,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(needs)
                 .subcommand(cost)
                 .subcommand(daemon)
+                .subcommand(atc)
                 .subcommand(enrich_cache),
         )
     }
@@ -1568,6 +1570,69 @@ impl CliCommand for FleetCommand {
         let matches = matches.clone();
         Box::pin(async move { crate::cli::fleet::execute(&matches, ctx.format).await })
     }
+}
+
+/// Build the `ainb fleet atc` subcommand tree: the persistent ATC brain's
+/// provisioning + management verbs. `heartbeat` is the internal timer-driven
+/// verb (hidden from `--help`).
+fn build_atc_command() -> Command {
+    let interval = clap::Arg::new("interval")
+        .long("interval")
+        .value_parser(clap::value_parser!(u32))
+        .help("Heartbeat cadence in minutes (default 15)");
+    let idle_pause = clap::Arg::new("idle-pause")
+        .long("idle-pause")
+        .value_parser(clap::value_parser!(u32))
+        .help(
+            "Minutes of fleet quiet before the heartbeat downgrades to an idle ping (default 60)",
+        );
+
+    Command::new("atc")
+        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("setup")
+                .about("Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session")
+                .arg(clap::Arg::new("name").required(true).help("Instance name (also the session name)"))
+                .arg(interval.clone())
+                .arg(idle_pause.clone())
+                .arg(
+                    clap::Arg::new("no-heartbeat")
+                        .long("no-heartbeat")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Provision without installing the OS heartbeat timer"),
+                )
+                .arg(
+                    clap::Arg::new("no-spawn")
+                        .long("no-spawn")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Provision files + timer but do not spawn the ainb session"),
+                ),
+        )
+        .subcommand(
+            Command::new("teardown")
+                .about("Remove an ATC instance's heartbeat timer + session")
+                .arg(clap::Arg::new("name").required(true))
+                .arg(
+                    clap::Arg::new("purge")
+                        .long("purge")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Also delete the instance dir (state.json + task-log.md)"),
+                ),
+        )
+        .subcommand(
+            Command::new("status")
+                .about("Report one ATC instance (meta + timer + session liveness)")
+                .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List all provisioned ATC instances"))
+        .subcommand(
+            Command::new("heartbeat")
+                .hide(true)
+                .about("Internal: build + send one [HEARTBEAT] nudge (called by the OS timer)")
+                .arg(clap::Arg::new("name").required(true)),
+        )
 }
 
 /// The `hangar` namespace — Hangar managed-agents control plane.
