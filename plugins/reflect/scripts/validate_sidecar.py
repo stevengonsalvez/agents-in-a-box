@@ -28,10 +28,13 @@ from pathlib import Path
 
 try:
     import yaml
-except ImportError:
-    print("ERROR: pyyaml required. Run via `uv run validate_sidecar.py ...`",
-          file=sys.stderr)
-    sys.exit(2)
+except ImportError:  # pragma: no cover
+    # Degrade as a LIBRARY (don't sys.exit at import time): callers like
+    # reflect_cascade wrap import + use in try/except and must be able to fall
+    # back. sys.exit raises SystemExit (a BaseException, not Exception), which
+    # would slip past those `except Exception` guards and crash the drain. The
+    # CLI entrypoint (main) prints a clean error and exits 2 instead.
+    yaml = None  # type: ignore[assignment]
 
 
 ENTITY_TYPES = {"technology", "error", "pattern", "function", "concept", "tool"}
@@ -302,6 +305,10 @@ def backfill_tcommit(path: Path) -> int:
 
 
 def main() -> int:
+    if yaml is None:
+        print("ERROR: pyyaml required. Run via `uv run validate_sidecar.py ...`",
+              file=sys.stderr)
+        return 2
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("paths", nargs="+", type=Path,
                     help="one or more .entities.yaml paths")
