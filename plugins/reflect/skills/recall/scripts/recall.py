@@ -2956,9 +2956,83 @@ def recall(
     )
 
 
+def run_corpus(
+    name: str | None,
+    filter_spec: str,
+    rebuild: bool,
+    fmt: str,
+) -> int:
+    """M7 entrypoint: build or rebuild a saved-filter corpus and emit it.
+
+    Thin dispatcher onto reflect_kb.recall.corpus — the deterministic
+    build/filter/snapshot/reprime engine. Kept additive to recall.py's query
+    path: it short-circuits before the hybrid pipeline so no embedding model
+    loads. The conversational Q&A is the calling agent's job; we only print
+    the primed context document (or its JSON form) for the agent to read.
+    """
+    try:
+        from reflect_kb.recall import corpus as corpus_mod
+    except ImportError:
+        print(
+            "error: --corpus requires the reflect_kb package on the path "
+            "(install reflect-kb, or run via the reflect venv)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not name:
+        print("error: --corpus NAME is required", file=sys.stderr)
+        return 2
+
+    try:
+        if rebuild:
+            corpus = corpus_mod.rebuild_corpus(name)
+        else:
+            filt = corpus_mod.parse_filter_spec(filter_spec)
+            corpus = corpus_mod.build_corpus(name, filt)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if fmt == "json":
+        print(json.dumps({
+            "name": corpus.name,
+            "path": str(corpus_mod.corpus_path(corpus.name)),
+            "filter": corpus.filt.to_dict(),
+            "built_at": corpus.built_at,
+            "count": len(corpus.entries),
+            "ids": corpus.ids,
+            "stale": corpus_mod.is_stale(corpus),
+            "prime_document": corpus.prime_document(),
+        }))
+    else:
+        print(corpus.prime_document())
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query", nargs="*", help="Search query")
+    ap.add_argument(
+        "--corpus", metavar="NAME", default=None,
+        help="M7: instead of a fresh hybrid query, BUILD a saved-filter corpus "
+             "named NAME — snapshot every learning matching --corpus-filter into "
+             "$REFLECT_STATE_DIR/corpora/NAME.json and print its primed Q&A "
+             "context document. The corpus is long-lived: re-running with "
+             "--corpus-rebuild re-applies the saved filter (dropping stale "
+             "entries, adding new matches) and a KB write marks it stale. The "
+             "conversational Q&A is the calling agent's job (see "
+             "/reflect:corpus); this only owns the deterministic snapshot.")
+    ap.add_argument(
+        "--corpus-filter", default="", metavar="SPEC",
+        help="M7: key:value filter for --corpus, e.g. "
+             "'tag:auth category:security project:api since:2026-01-01 "
+             "until:2026-06-30'. Bare tokens are treated as tags; tag:a,b ORs "
+             "tags. Required when building a new corpus.")
+    ap.add_argument(
+        "--corpus-rebuild", action="store_true",
+        help="M7: re-run an EXISTING corpus's saved filter against the current "
+             "KB instead of building from --corpus-filter (re-prime on drift).")
     ap.add_argument(
         "--calibrate-thresholds", action="store_true",
         help="R12: instead of querying, SAMPLE the corpus to derive per-arm "
@@ -3016,6 +3090,14 @@ def main() -> int:
                          "the current project. Default scope is the current "
                          "branch only (worktree isolation).")
     args = ap.parse_args()
+
+    if args.corpus or args.corpus_rebuild:  # M7
+        return run_corpus(
+            name=args.corpus,
+            filter_spec=args.corpus_filter,
+            rebuild=args.corpus_rebuild,
+            fmt=args.format,
+        )
 
     if args.calibrate_thresholds:  # R12
         print(calibrate_thresholds(
