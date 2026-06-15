@@ -101,6 +101,7 @@ export default defineConfig({
           label: 'Knowledge',
           items: [
             { label: 'How reflection works', slug: 'knowledge/overview' },
+            { label: 'How recall works — by example', slug: 'knowledge/recall-by-example' },
             { label: 'Hooks & platform (Claude + Codex)', slug: 'knowledge/hooks-and-platform' },
             { label: 'reflect CLI', slug: 'knowledge/reflect-cli' },
           ],
