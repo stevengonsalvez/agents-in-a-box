@@ -465,6 +465,17 @@ def parse_filter_spec(spec: str) -> CorpusFilter:
                 tags.append(tok)
         elif tok:
             tags.append(tok)
+    # Validate the date bounds eagerly so a malformed since:/until: surfaces as
+    # one clean ValueError here, not a raw traceback deep inside per-doc
+    # matching (matches() calls _parse_date on every candidate).
+    for label, bound in (("since", since), ("until", until)):
+        if bound:
+            try:
+                _parse_date(bound)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"invalid {label} date {bound!r} — use YYYY-MM-DD"
+                ) from None
     return CorpusFilter(
         tags=tuple(tags), category=category, project=project,
         since=since, until=until,

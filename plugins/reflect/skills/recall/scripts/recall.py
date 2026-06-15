@@ -2990,7 +2990,7 @@ def run_corpus(
         else:
             filt = corpus_mod.parse_filter_spec(filter_spec)
             corpus = corpus_mod.build_corpus(name, filt)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
