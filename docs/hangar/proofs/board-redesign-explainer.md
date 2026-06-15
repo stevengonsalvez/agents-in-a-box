@@ -1,10 +1,15 @@
-# Hangar board redesign — visual proof (epic agents-in-a-box-63l)
+# Hangar — control plane explainer (showcase + status)
 
-**Live explainer:** https://lapis-finch-dy2m.here.now/ (permanent)
+**Live explainer:** https://lapis-finch-dy2m.here.now/ (permanent) · `#status` for the status tab
 
-The mouse-driven card-board redesign, recorded against the real `ainb` TUI driven
-in tmux over a seeded local demo (mocked `fake-claude.sh` provider; real lifecycle
-FSM + DB transitions).
+Two tabs in one self-contained page:
+
+- **Showcase** — the mouse-driven card-board redesign (epic 63l), recorded against the
+  real `ainb` TUI in tmux over a seeded local demo (mocked `fake-claude.sh` provider;
+  real lifecycle FSM + DB transitions).
+- **Status & roadmap** — the full feature matrix (what's shipped), verification
+  coverage, what's next (merge #250 → v1.0 release ceremony → follow-ups `v70`/`2qo`/
+  `2a8`/`0mf`), and the epic timeline (174 build → e38 parity → 63l redesign → v1.0).
 
 ## Recorded journeys
 
