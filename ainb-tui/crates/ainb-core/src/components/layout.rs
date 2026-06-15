@@ -943,7 +943,14 @@ pub fn build_live_status_spans(state: &mut AppState, max_width: usize) -> Vec<Sp
         Some(StatuslineStatus::NotConfigured | StatuslineStatus::Other(_))
             if decision != StatuslineDecision::Declined =>
         {
-            build_cta_spans()
+            // Vanish (don't clip) the CTA when it can't fit — parity with
+            // the quota widget's shed behaviour and with the old width gate.
+            let cta = build_cta_spans();
+            if spans_width(&cta) <= max_width {
+                cta
+            } else {
+                Vec::new()
+            }
         }
         _ => Vec::new(),
     }
