@@ -111,7 +111,16 @@ pub fn md_to_tg_html(text: &str) -> String {
 
     // Bold / italic.
     text = BOLD_RE.replace_all(&text, "<b>$1</b>").into_owned();
-    text = ITALIC_RE.replace_all(&text, "$1<i>$2</i>$3").into_owned();
+    // `replace_all` consumes the trailing boundary capture, so two italic spans
+    // sharing a single separating space leave the second unconverted on a single
+    // pass. Re-run until the output stabilises so every span is caught.
+    loop {
+        let next = ITALIC_RE.replace_all(&text, "$1<i>$2</i>$3").into_owned();
+        if next == text {
+            break;
+        }
+        text = next;
+    }
 
     // Restore code placeholders.
     for (i, rendered) in placeholders.iter().enumerate() {
@@ -198,6 +207,13 @@ mod tests {
             md_to_tg_html("**bold** and *italic*"),
             "<b>bold</b> and <i>italic</i>"
         );
+    }
+
+    #[test]
+    fn adjacent_italics_separated_by_one_space() {
+        // The two spans share the single separating space as a boundary; both
+        // must convert even though `replace_all` consumes that space once.
+        assert_eq!(md_to_tg_html("*one* *two*"), "<i>one</i> <i>two</i>");
     }
 
     #[test]
