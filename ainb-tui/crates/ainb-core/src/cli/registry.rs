@@ -1501,14 +1501,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_five_commands() {
+    fn built_ins_registers_twenty_six_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + abtop + plugin stub + fleet + hidden notifyd
-        // + hangar = 25. The TUI is NOT in the registry — main.rs handles
-        // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 25, "expected 25 entries, got {names:?}");
+        // + codex namespace + tmux namespace + abtop + plugin stub + fleet
+        // + hidden notifyd + hangar = 26. The TUI is NOT in the registry —
+        // main.rs handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 26, "expected 26 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1528,6 +1528,7 @@ mod tests {
             "usage",
             "statusline",
             "claudecode",
+            "codex",
             "tmux",
             "completion",
             "abtop",
