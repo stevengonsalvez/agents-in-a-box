@@ -87,6 +87,8 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 ```bash
 # Install the TUI (macOS / Linux)
 brew tap stevengonsalvez/agents-in-a-box && brew install ainb
+# newer Homebrew gates third-party taps — if it says "untrusted tap", run:
+#   brew trust stevengonsalvez/agents-in-a-box
 
 # Install the toolkit for your AI tool
 cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
@@ -186,6 +188,11 @@ brew tap stevengonsalvez/agents-in-a-box
 brew install ainb
 ```
 
+> Newer Homebrew versions refuse formulas from untrusted third-party taps. If
+> `brew install`/`brew upgrade` errors with *"Refusing to load formula … from
+> untrusted tap"*, trust the tap once and retry:
+> `brew trust stevengonsalvez/agents-in-a-box`
+
 The tap lives at [`stevengonsalvez/homebrew-agents-in-a-box`](https://github.com/stevengonsalvez/homebrew-agents-in-a-box) and is auto-updated by the release workflow on every tagged release — `brew upgrade ainb` always pulls the latest.
 
 <details>
@@ -224,6 +231,12 @@ sudo xcode-select --install
 ```bash
 brew untap stevengonsalvez/ainb   # only if you tapped this earlier
 brew install stevengonsalvez/agents-in-a-box/ainb
+```
+
+**`Refusing to load formula … from untrusted tap`** — newer Homebrew gates third-party taps behind an explicit trust step. Trust the tap once and retry:
+```bash
+brew trust stevengonsalvez/agents-in-a-box
+brew install ainb   # or brew upgrade ainb
 ```
 </details>
 

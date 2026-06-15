@@ -7,7 +7,7 @@ use crate::audit::{self, AuditResult, AuditTrigger};
 use anyhow::{Context, Result};
 use dirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -411,6 +411,17 @@ pub struct PluginsConfig {
     /// discovery. Ignored entirely when `enabled` is non-empty.
     #[serde(default)]
     pub disabled: Vec<String>,
+
+    /// Per-plugin configuration tables, keyed by plugin name. Each entry is the
+    /// serialized `[plugins.<name>]` value table (flat scalars per the plugin's
+    /// `[[config]]` schema). The host resolves the entry for a plugin into JSON
+    /// and injects it at `plugin/init`. Separate from `enabled`/`disabled`,
+    /// which gate *which* plugins load; this carries *how* they're configured.
+    ///
+    /// `BTreeMap` keeps the serialized order stable so config.toml diffs stay
+    /// deterministic across saves.
+    #[serde(default, flatten)]
+    pub values: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -702,6 +713,22 @@ fn default_max_repositories() -> usize {
     500
 }
 
+/// Merge a higher-layer per-plugin value table into the lower-layer one in
+/// place: higher-layer keys win, lower-layer keys the higher layer omits
+/// survive. When either side isn't a TOML table (a plugin shipped a scalar
+/// under its name), the higher layer replaces wholesale — there's no
+/// key-level structure to merge.
+fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
+    match (lower.as_table_mut(), higher) {
+        (Some(lower_table), toml::Value::Table(higher_table)) => {
+            for (k, v) in higher_table {
+                lower_table.insert(k, v);
+            }
+        }
+        (_, higher) => *lower = higher,
+    }
+}
+
 impl AppConfig {
     /// Load configuration from default locations
     pub fn load() -> Result<Self> {
@@ -901,6 +928,29 @@ impl AppConfig {
         // changes nothing.
         if other.mcp_pool != McpPoolConfig::default() {
             self.mcp_pool = other.mcp_pool;
+        }
+
+        // Plugin enable/disable lists: a higher layer that sets either list
+        // replaces the lower layer's (matches the allowlist/denylist intent —
+        // the most specific config layer decides which plugins load).
+        if !other.plugins.enabled.is_empty() {
+            self.plugins.enabled = other.plugins.enabled;
+        }
+        if !other.plugins.disabled.is_empty() {
+            self.plugins.disabled = other.plugins.disabled;
+        }
+        // Per-plugin config tables layer per key: the higher layer overrides
+        // shared keys, but keys it omits keep the lower layer's value (so a
+        // project layer can tweak one path without re-declaring the whole
+        // table). Mirrors the usage-layering contract.
+        for (name, higher_table) in other.plugins.values {
+            merge_plugin_value_table(
+                self.plugins
+                    .values
+                    .entry(name)
+                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new())),
+                higher_table,
+            );
         }
     }
 
@@ -1324,6 +1374,90 @@ mod tests {
         "#;
         let parsed: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(!parsed.mcp_servers["browser"].shared, "explicit opt-out parses");
+    }
+
+    #[test]
+    fn test_plugins_values_roundtrip() {
+        // config.toml with a `[plugins.learnings]` value table parses into
+        // `PluginsConfig.values["learnings"]`, survives a save()→reload round
+        // trip, leaves the existing enabled/disabled lists untouched, and an
+        // absent `[plugins.<x>]` yields an empty map (serde default).
+        let toml_src = r#"
+[plugins]
+disabled = ["burndown"]
+
+[plugins.learnings]
+learnings_dir = "x"
+qmd_collection = "learnings"
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).expect("parse plugins.values");
+
+        // The nested table lands under values, keyed by plugin name.
+        let learnings = cfg.plugins.values.get("learnings").expect("learnings value table present");
+        assert_eq!(
+            learnings.get("learnings_dir").and_then(toml::Value::as_str),
+            Some("x")
+        );
+        assert_eq!(
+            learnings.get("qmd_collection").and_then(toml::Value::as_str),
+            Some("learnings")
+        );
+        // Existing enable/disable lists are unaffected by the new field.
+        assert_eq!(cfg.plugins.disabled, vec!["burndown".to_string()]);
+        assert!(cfg.plugins.enabled.is_empty());
+
+        // save()→reload identity: serialize, parse back, compare the values map.
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let reloaded: AppConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reloaded.plugins.values, cfg.plugins.values);
+
+        // Absent `[plugins.<x>]` → empty map via serde default.
+        let bare: AppConfig = toml::from_str("[plugins]\n").expect("bare plugins");
+        assert!(bare.plugins.values.is_empty(), "absent table → empty map");
+    }
+
+    #[test]
+    fn test_plugins_values_layering() {
+        // A higher (project) layer overrides the lower (user) layer for the
+        // same `[plugins.<n>].<key>`, mirroring the usage-layering contract.
+        let mut base = AppConfig::default();
+        let mut user_table = toml::value::Table::new();
+        user_table.insert("learnings_dir".into(), toml::Value::String("user".into()));
+        user_table.insert(
+            "qmd_collection".into(),
+            toml::Value::String("base-only".into()),
+        );
+        base.plugins.values.insert("learnings".into(), toml::Value::Table(user_table));
+
+        let mut higher = AppConfig::default();
+        let mut project_table = toml::value::Table::new();
+        project_table.insert(
+            "learnings_dir".into(),
+            toml::Value::String("project".into()),
+        );
+        higher
+            .plugins
+            .values
+            .insert("learnings".into(), toml::Value::Table(project_table));
+
+        base.merge_loaded(higher, false);
+
+        let merged = base
+            .plugins
+            .values
+            .get("learnings")
+            .and_then(toml::Value::as_table)
+            .expect("merged learnings table");
+        // Higher layer wins for the shared key.
+        assert_eq!(
+            merged.get("learnings_dir").and_then(toml::Value::as_str),
+            Some("project")
+        );
+        // Keys only present in the lower layer survive the merge.
+        assert_eq!(
+            merged.get("qmd_collection").and_then(toml::Value::as_str),
+            Some("base-only")
+        );
     }
 }
 

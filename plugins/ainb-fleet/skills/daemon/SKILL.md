@@ -21,8 +21,10 @@ allowed-tools:
 
 # ainb fleet:daemon
 
-Background watcher. Registers as peer `ainb-fleet-cp`. Auto-continues
-sessions hitting API errors.
+Background watcher. Reads each session's tmux pane (`capture-pane`) and
+auto-continues sessions hitting API errors via `tmux send-keys`. It does
+**not** register as a peer — it is purely tmux-driven (broker health is
+checked only to print an informational line).
 
 ## Run
 
@@ -44,7 +46,7 @@ nohup ainb fleet daemon --verbose > ~/.ainb-fleet.log 2>&1 &
 3. Run the API-error regex set over the buffer.
 4. If a match fires AND the (session_id, pattern, snippet-tail) dedupe
    key hasn't been seen yet → send `continue` to that session via the
-   standard route (peers-first, tmux fallback).
+   standard route (tmux-first by default — see `AINB_FLEET_TRANSPORT`).
 
 ## Detected error patterns
 
@@ -90,15 +92,23 @@ pkill -INT -f "ainb fleet daemon"
 kill <pid>
 ```
 
-The daemon's SIGINT handler unregisters from the broker before exit, so
-peers won't see a stale `ainb-fleet-cp` entry.
+The daemon holds no broker registration, so there is no stale peer entry to
+clean up on exit — `Ctrl-C` / `kill` is enough.
 
 ## Observe what the daemon is doing
 
-With `--verbose`, every detection prints:
+On start the daemon prints whether the broker is reachable (informational
+only — writes go via tmux regardless):
 
 ```
 [fleet/daemon] broker healthy at 127.0.0.1:7899
+   # or, when the broker is down:
+[fleet/daemon] broker not reachable — operating in tmux-only mode
+```
+
+With `--verbose`, every detection also prints:
+
+```
 [fleet/daemon] auto-continue -> <tmux_session> (<pattern>)
 ```
 
@@ -114,5 +124,6 @@ tail -F ~/.ainb-fleet.log
   reading the error, racing your investigation.
 - On a fleet doing batch work that explicitly throws errors as control
   flow — the daemon will misinterpret intentional errors.
-- When the broker is down AND every session is tmux-only — the daemon
-  still works via tmux fallback but loses peer-aware routing.
+- On a session with no live tmux pane (bg job, dead tmux) — there is
+  nothing to send-keys to; under the default `tmux-first` it can only
+  reach such a session if it still has a healthy broker peer.

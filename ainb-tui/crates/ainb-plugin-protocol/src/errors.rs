@@ -18,6 +18,12 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 /// Spec: JSON-RPC 2.0 reserved code.
 pub const INVALID_PARAMS: i32 = -32602;
 
+/// Internal host error — an operation failed for a reason that is not the
+/// caller's fault (e.g. a state file the host could not write).
+///
+/// Spec: JSON-RPC 2.0 reserved code.
+pub const INTERNAL_ERROR: i32 = -32603;
+
 /// Plugin or host attempted a call outside the granted capability set.
 pub const CAPABILITY_DENIED: i32 = -32001;
 
@@ -26,6 +32,22 @@ pub const ACTION_TIMEOUT: i32 = -32002;
 
 /// Manifest failed schema validation at install time or `plugin/init`.
 pub const MANIFEST_VALIDATION: i32 = -32003;
+
+/// `host/secret_store_get` found no secret for the requested
+/// `(scope, key)` pair in the platform secret store.
+pub const SECRET_NOT_FOUND: i32 = -32004;
+
+/// The requested host capability is not implemented on this platform
+/// (e.g. the linux Secret Service backend, deferred to a later phase).
+pub const NOT_IMPLEMENTED: i32 = -32005;
+
+/// The platform secret store is locked (e.g. a macOS Keychain the user
+/// has not unlocked). The plugin may retry after the user unlocks it.
+pub const SECRET_BACKEND_LOCKED: i32 = -32006;
+
+/// Access to the platform secret store was denied (e.g. the user
+/// dismissed the Keychain authorization prompt).
+pub const SECRET_ACCESS_DENIED: i32 = -32007;
 
 /// Wire shape of a JSON-RPC 2.0 error object.
 ///
@@ -91,6 +113,51 @@ impl RpcError {
     #[must_use]
     pub fn invalid_params(reason: impl Into<String>) -> Self {
         Self::new(INVALID_PARAMS, reason)
+    }
+
+    /// Constructor for [`INTERNAL_ERROR`] with a free-form reason string.
+    #[must_use]
+    pub fn internal(reason: impl Into<String>) -> Self {
+        Self::new(INTERNAL_ERROR, reason)
+    }
+
+    /// Constructor for [`SECRET_NOT_FOUND`] naming the `(scope, key)`
+    /// pair the platform secret store had no entry for.
+    #[must_use]
+    pub fn secret_not_found(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
+        Self::new(
+            SECRET_NOT_FOUND,
+            format!("secret not found: scope={s} key={k}"),
+        )
+    }
+
+    /// Constructor for [`SECRET_BACKEND_LOCKED`] naming the `(scope, key)`
+    /// the locked backend refused to read.
+    #[must_use]
+    pub fn secret_backend_locked(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
+        Self::new(
+            SECRET_BACKEND_LOCKED,
+            format!("secret backend locked: scope={s} key={k}"),
+        )
+    }
+
+    /// Constructor for [`SECRET_ACCESS_DENIED`] naming the `(scope, key)`
+    /// the user/OS denied access to.
+    #[must_use]
+    pub fn secret_access_denied(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
+        Self::new(
+            SECRET_ACCESS_DENIED,
+            format!("secret access denied: scope={s} key={k}"),
+        )
+    }
+
+    /// Constructor for [`NOT_IMPLEMENTED`] with a free-form reason string.
+    #[must_use]
+    pub fn not_implemented(reason: impl Into<String>) -> Self {
+        Self::new(NOT_IMPLEMENTED, reason)
     }
 }
 
@@ -162,10 +229,53 @@ mod tests {
             CAPABILITY_DENIED,
             ACTION_TIMEOUT,
             MANIFEST_VALIDATION,
+            SECRET_NOT_FOUND,
+            NOT_IMPLEMENTED,
+            SECRET_BACKEND_LOCKED,
+            SECRET_ACCESS_DENIED,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), codes.len());
+    }
+
+    #[test]
+    fn secret_store_error_codes_have_expected_values() {
+        // Locked by the P5.2 contract.
+        assert_eq!(SECRET_NOT_FOUND, -32004);
+        assert_eq!(NOT_IMPLEMENTED, -32005);
+        assert_eq!(SECRET_BACKEND_LOCKED, -32006);
+        assert_eq!(SECRET_ACCESS_DENIED, -32007);
+    }
+
+    #[test]
+    fn secret_not_found_constructor_carries_code() {
+        let e = RpcError::secret_not_found("workspace:abc", "anthropic_api_key");
+        assert_eq!(e.code, SECRET_NOT_FOUND);
+        assert!(e.message.contains("workspace:abc"));
+        assert!(e.message.contains("anthropic_api_key"));
+    }
+
+    #[test]
+    fn secret_backend_locked_constructor_carries_code() {
+        let e = RpcError::secret_backend_locked("global", "openai_api_key");
+        assert_eq!(e.code, SECRET_BACKEND_LOCKED);
+        assert!(e.message.contains("global"));
+        assert!(e.message.contains("openai_api_key"));
+    }
+
+    #[test]
+    fn secret_access_denied_constructor_carries_code() {
+        let e = RpcError::secret_access_denied("global", "k");
+        assert_eq!(e.code, SECRET_ACCESS_DENIED);
+        assert!(e.message.contains("global"));
+    }
+
+    #[test]
+    fn not_implemented_constructor_carries_code() {
+        let e = RpcError::not_implemented("linux Secret Service deferred to P5");
+        assert_eq!(e.code, NOT_IMPLEMENTED);
+        assert!(e.message.contains("linux"));
     }
 }

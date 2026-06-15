@@ -44,6 +44,7 @@ mod git;
 mod interactive;
 mod mcp_pool;
 mod models;
+mod perf;
 mod plugins;
 mod providers;
 mod tmux;
@@ -72,7 +73,10 @@ fn cleanup_terminal() {
 /// Unified terminal cleanup that works with a terminal instance
 fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -86,6 +90,7 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    crate::perf::init();
     setup_logging();
     setup_panic_handler();
 
@@ -297,6 +302,10 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
         cleanup_terminal();
     }
 
+    // Perf trace summary (no-op unless AINB_PERF_TRACE is set). Emitted after
+    // the alternate screen is torn down so the report lands on the real stderr.
+    crate::perf::report();
+
     result
 }
 
@@ -325,6 +334,24 @@ async fn run_tui_loop(
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 
+    // Perf trace: timestamp of the most recent keystroke awaiting its paint.
+    // Set when a key event is read; consumed at the top of the next loop
+    // iteration once the paint that reflects it has completed. Gated behind
+    // `AINB_PERF_TRACE` (see `crate::perf`); zero cost when disabled.
+    let mut pending_key_at: Option<Instant> = None;
+
+    // Dirty-gate for the host layout repaint (perf: bead `wai`). The TUI used
+    // to call `terminal.draw()` unconditionally every 33 ms (~30 fps) even when
+    // nothing changed, burning ~5-6% CPU at idle. Animations and periodic state
+    // already advance only on the 250 ms `app_tick`, so a frame between ticks
+    // was an identical repaint. We now paint only when something actually
+    // changed: an input/resize/paste event, a fresh plugin frame, an
+    // `app_tick` (covers mascot/spinner/state at their existing 250 ms
+    // cadence), or an explicit `ui_needs_refresh`. Starts `true` for the first
+    // paint. Worst-case staleness is one `app_tick` (250 ms) — identical to the
+    // pre-existing animation cadence — so there is no visible regression.
+    let mut needs_redraw = true;
+
     // Startup guard: Ignore key events for the first 100ms to prevent stray keypresses
     // from triggering actions (e.g., buffered 'n' key opening New Session dialog)
     let startup_time = Instant::now();
@@ -338,23 +365,62 @@ async fn run_tui_loop(
         // WireBuffer into `state.pending_plugin_renders`, so layout's
         // `PluginScreen` can paint without touching the plugin host
         // directly.
-        app.tick_plugin_renders();
+        // A fresh plugin frame is a reason to repaint even if nothing else
+        // changed (e.g. a self-animating plugin screen).
+        if app.tick_plugin_renders() {
+            needs_redraw = true;
+        }
 
-        terminal.draw(|frame| {
-            layout.render(frame, &mut app.state);
-        })?;
+        // If the interactive embed ended (detach / session gone / EOF), auto-
+        // release so the pane reverts to the read-only preview, not a dead
+        // screen. Releasing changes the layout, so it is a repaint trigger.
+        if app.state.poll_embed_exit() {
+            needs_redraw = true;
+        }
+
+        // Live embed output is the third repaint source alongside input and
+        // plugin frames: the PTY reader thread marks the embed dirty as bytes
+        // stream in, with no host input involved. Without this the dirty-gate
+        // would hold the live pane at the 250ms app-tick floor.
+        if app.state.embed_take_dirty() {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            let draw_start = Instant::now();
+            terminal.draw(|frame| {
+                layout.render(frame, &mut app.state);
+            })?;
+            crate::perf::record_draw(draw_start.elapsed());
+            // This paint is the first one to reflect any key read in the
+            // previous iteration, so it marks the end of the key-to-render
+            // interval.
+            if let Some(key_at) = pending_key_at.take() {
+                crate::perf::record_key_to_render(key_at.elapsed());
+            }
+            needs_redraw = false;
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if crossterm::event::poll(timeout)? {
+            // Any input (key/mouse/paste/resize) warrants a repaint on the next
+            // loop iteration (perf: bead `wai` dirty-gate).
+            needs_redraw = true;
             match event::read()? {
                 Event::Key(key_event) => {
                     // Windows fires Press + Release for every key; macOS/Linux fire only Press.
                     // Drop Release so Enter doesn't immediately re-trigger and close popups.
                     if key_event.kind == KeyEventKind::Release {
                         continue;
+                    }
+
+                    // Perf trace: this real keystroke now awaits the next paint.
+                    if crate::perf::enabled() {
+                        crate::perf::record_key();
+                        pending_key_at = Some(Instant::now());
                     }
 
                     // Startup guard: Ignore key events during startup period
@@ -367,6 +433,47 @@ async fn run_tui_loop(
                     }
 
                     use crossterm::event::KeyCode;
+
+                    // Interactive embed escape hatch: Ctrl+Q releases focus and
+                    // kills the ephemeral tmux client. Keyed off the RESOURCE
+                    // (embed exists), never the mode flag, so the hatch works
+                    // even from a leaked state where the embed is alive but
+                    // focus drifted off the preview pane.
+                    {
+                        use crossterm::event::KeyModifiers;
+                        if app.state.embed.is_some()
+                            && key_event.code == KeyCode::Char('q')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            app.state.release_interactive_pane();
+                            continue;
+                        }
+                    }
+
+                    // Interactive embed has highest input precedence: while a
+                    // session is focused in-place, every key is forwarded to the
+                    // embedded tmux client (Ctrl+Q was already intercepted
+                    // above). This runs BEFORE the slash palette so typing ':'
+                    // inside the embed reaches the PTY instead of opening the
+                    // palette.
+                    if app.state.is_interactive_pane() {
+                        // write_input only errors when the PTY writer thread is
+                        // gone — release immediately instead of leaving a
+                        // focused pane that silently eats input.
+                        let write_failed = app
+                            .state
+                            .embed
+                            .as_ref()
+                            .zip(crate::tmux::encode_key_event(&key_event))
+                            .is_some_and(|(client, bytes)| client.write_input(&bytes).is_err());
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                        continue;
+                    }
 
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
@@ -397,10 +504,20 @@ async fn run_tui_loop(
                     if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
-                                tracing::info!(
-                                    "slash command requested (stub, no dispatch yet): /{}",
-                                    cmd
-                                );
+                                // Route host-mapped slash commands (e.g. the
+                                // learnings plugin's `/recall` + `/memory`,
+                                // wired in P9) to the same AppEvent path the
+                                // global keyboard shortcuts use. Commands with
+                                // no host mapping fall through to the log-only
+                                // stub (plugin-owned dispatch lands later).
+                                if let Some(app_event) = EventHandler::slash_command_event(&cmd) {
+                                    EventHandler::process_event(app_event, &mut app.state);
+                                } else {
+                                    tracing::info!(
+                                        "slash command requested (no host mapping): /{}",
+                                        cmd
+                                    );
+                                }
                             }
                             SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
                         }
@@ -481,6 +598,33 @@ async fn run_tui_loop(
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
                             }
+                            AppEvent::EnterInteractivePane => {
+                                // Size the embed to the EXACT interactive
+                                // layout (the user's current sidebar + chrome)
+                                // so tmux reflows once at attach instead of
+                                // attach-size → layout-size back-to-back. The
+                                // render path still resizes each frame for
+                                // terminal resizes.
+                                let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                                    width: 80,
+                                    height: 24,
+                                });
+                                let sidebar =
+                                    app.state.sessions_pane_state.effective_width(sz.width);
+                                let (rows, cols) =
+                                    crate::components::layout::interactive_embed_size(
+                                        sz.width, sz.height, sidebar,
+                                    );
+                                // Failure (no tmux session on the row / attach
+                                // error) surfaces as a notification from
+                                // enter_interactive_pane itself, which knows
+                                // which case it hit.
+                                if !app.state.enter_interactive_pane(rows, cols) {
+                                    tracing::debug!(
+                                        "EnterInteractivePane: no tmux session on selection / attach failed"
+                                    );
+                                }
+                            }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
                             | AppEvent::ConfirmationConfirm => {
@@ -515,6 +659,47 @@ async fn run_tui_loop(
                 Event::Mouse(mouse_event) => {
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
+
+                    // Mode boundary: while the interactive embed owns input,
+                    // host mouse handlers must NEVER run — a click/scroll
+                    // changing focus or selection under a live embed splits
+                    // the mode invariants. Events inside the embed's interior
+                    // are translated + forwarded to the PTY as SGR sequences
+                    // (ainb-created sessions run with tmux `mouse on`, so the
+                    // wheel scrolls and drag selects inside tmux; sessions
+                    // without it ignore the sequences). Everything else is
+                    // swallowed.
+                    if app.state.is_interactive_pane() {
+                        let write_failed = app
+                            .state
+                            .embed_pane_area
+                            .zip(app.state.embed.as_ref())
+                            .and_then(|(inner, client)| {
+                                crate::tmux::encode_mouse_event(&mouse_event, inner)
+                                    .map(|bytes| client.write_input(&bytes).is_err())
+                            })
+                            .unwrap_or(false);
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                        continue;
+                    }
+
+                    // A focused plugin screen owns the pointer (mirrors the
+                    // key-forwarding contract). Forward + consume before the
+                    // host's own mouse handling so the two never double-act.
+                    if matches!(
+                        crate::app::screens::builtin::forward_mouse_to_focused_plugin(
+                            &mut app.state,
+                            &mouse_event,
+                        ),
+                        crate::app::screens::EventOutcome::Handled
+                    ) {
+                        continue;
+                    }
 
                     match mouse_event.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
@@ -687,7 +872,25 @@ async fn run_tui_loop(
                 Event::FocusGained => {}
                 Event::FocusLost => {}
                 Event::Paste(text) => {
-                    if let Some(app_event) = EventHandler::handle_paste_event(text, &app.state) {
+                    if app.state.is_interactive_pane() {
+                        // Forward as a bracketed paste so the inner program
+                        // doesn't submit multi-line content line-by-line.
+                        let write_failed = app.state.embed.as_ref().is_some_and(|client| {
+                            let mut bytes = Vec::with_capacity(text.len() + 12);
+                            bytes.extend_from_slice(b"\x1b[200~");
+                            bytes.extend_from_slice(text.as_bytes());
+                            bytes.extend_from_slice(b"\x1b[201~");
+                            client.write_input(&bytes).is_err()
+                        });
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                    } else if let Some(app_event) =
+                        EventHandler::handle_paste_event(text, &app.state)
+                    {
                         EventHandler::process_event(app_event, &mut app.state);
                     }
                 }
@@ -804,6 +1007,110 @@ async fn run_tui_loop(
                                 ));
                             }
                         }
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::AttachAbtop => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        const ABTOP_SESSION: &str = "ainb-abtop";
+                        info!(
+                            "[ACTION] Launching abtop in tmux session '{}'",
+                            ABTOP_SESSION
+                        );
+
+                        // Atomic create-or-reuse: `-A` attaches if the session exists,
+                        // creates it otherwise; `-d` keeps it detached so we drive the
+                        // attach (with TUI suspend/resume) ourselves below. tmux runs
+                        // the command in its OWN pty, so abtop gets a real TTY even
+                        // though ainb owns the alternate screen. `--exit-on-jump` makes
+                        // abtop quit (returning the terminal to ainb) after the user
+                        // jumps to an agent's pane with Enter. The command is passed as a
+                        // single string so tmux doesn't parse `--exit-on-jump` as a flag.
+                        let created = Command::new("tmux")
+                            .args([
+                                "new-session",
+                                "-A",
+                                "-d",
+                                "-s",
+                                ABTOP_SESSION,
+                                "abtop --exit-on-jump",
+                            ])
+                            .status()
+                            .await;
+                        match created {
+                            Ok(s) if s.success() => {
+                                let mut attach_handler =
+                                    AttachHandler::new_from_terminal(terminal)?;
+                                if let Err(e) =
+                                    attach_handler.attach_to_session(ABTOP_SESSION).await
+                                {
+                                    error!("[ACTION] abtop attach failed: {}", e);
+                                    app.state.add_error_notification(format!(
+                                        "Failed to open abtop: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(s) => {
+                                error!(
+                                    "[ACTION] failed to create abtop tmux session (exit {:?})",
+                                    s.code()
+                                );
+                                app.state.add_error_notification(
+                                    "Could not start abtop — is `abtop` installed and on PATH? Install: brew install graykode/tap/abtop · cargo install abtop"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                error!("[ACTION] tmux new-session for abtop errored: {}", e);
+                                app.state
+                                    .add_error_notification(format!("Failed to open abtop: {}", e));
+                            }
+                        }
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::SetupAbtopRateLimits => {
+                        use tokio::process::Command;
+
+                        info!("[ACTION] Running abtop --setup (rate-limit StatusLine hook)");
+                        // `abtop --setup` writes a StatusLine hook into
+                        // ~/.claude/settings.json. Run it in its OWN detached
+                        // tmux pane so it gets a real TTY (abtop's CLI paths
+                        // expect one) without disturbing ainb's alternate
+                        // screen. We don't attach — it completes on its own.
+                        let setup = Command::new("tmux")
+                            .args([
+                                // `-A`: attach-or-create so a stale/slow
+                                // setup pane doesn't fail a retry with a
+                                // misleading "is abtop installed?" error.
+                                "new-session",
+                                "-A",
+                                "-d",
+                                "-s",
+                                "ainb-abtop-setup",
+                                "abtop --setup",
+                            ])
+                            .status()
+                            .await;
+                        match setup {
+                            Ok(s) if s.success() => {
+                                app.state.add_info_notification(
+                                    "Enabling abtop rate-limit tracking (abtop --setup)…"
+                                        .to_string(),
+                                );
+                            }
+                            _ => {
+                                app.state.add_error_notification(
+                                    "Could not run `abtop --setup` — is `abtop` on PATH? You can run it manually."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        // Open abtop regardless of the setup outcome.
+                        app.state.pending_async_action = Some(AsyncAction::AttachAbtop);
                         app.state.ui_needs_refresh = true;
                     }
 
@@ -1369,14 +1676,9 @@ async fn run_tui_loop(
             match app.tick().await {
                 Ok(()) => {
                     last_app_tick = Instant::now();
-
-                    // Check if UI needs immediate refresh after async operations
-                    if app.needs_ui_refresh() {
-                        // Force immediate redraw by skipping the timeout
-                        terminal.draw(|frame| {
-                            layout.render(frame, &mut app.state);
-                        })?;
-                    }
+                    // Consume the refresh flag; the repaint is handled by the
+                    // app-tick redraw below (perf: bead `wai`).
+                    let _ = app.needs_ui_refresh();
                 }
                 Err(e) => {
                     use tracing::error;
@@ -1385,6 +1687,12 @@ async fn run_tui_loop(
                     last_app_tick = Instant::now();
                 }
             }
+
+            // The app tick is the only place mascot/spinner/streaming state
+            // advances, so repaint once per tick (its existing ~250 ms cadence).
+            // This is the animation floor of the dirty-gate: between ticks, with
+            // no input or plugin frame, we draw nothing. (perf: bead `wai`)
+            needs_redraw = true;
         }
 
         if app.state.should_quit {
@@ -1423,6 +1731,7 @@ fn setup_logging() {
                 | "presets"
                 | "usage"
                 | "claudecode"
+                | "codex"
                 | "statusline"
                 | "completion"
                 | "--help"
@@ -1532,6 +1841,12 @@ fn setup_panic_handler() {
     use tracing::error;
 
     std::panic::set_hook(Box::new(|panic_info| {
+        // Kill any live embedded tmux-attach client before restoring the
+        // terminal, so a panic while an interactive pane is focused doesn't
+        // leak the ephemeral client. Killing the client never kills the
+        // tmux session — tmux owns that.
+        crate::tmux::pty_wrapper::kill_all_embed_children();
+
         // Ensure terminal is restored before logging the panic
         cleanup_terminal();
 

@@ -17,7 +17,7 @@ What the rest of this directory documents.
 - **Runtime:** the `ainb` TUI spawns each plugin as a native child process and talks JSON-RPC 2.0 over framed stdio
 - **What they can do:** own a TUI screen, claim a CLI subcommand tree, publish/subscribe to snapshot topics, paint statusline segments
 - **Capability model:** deny-by-default; manifest declares grants for filesystem, network, subprocess, event bus
-- **Reference plugins:** `burndown` (analytics), `session-reader` (data backend), and `witr` (process causality, wraps an external binary) — all ship in-tree as real subprocess plugins. (Notifications are **not** a plugin — the Inbox + `ainb-notifyd` daemon are host code compiled into `ainb-core`; see [TUI → Inbox & notifications](../tui/inbox-notifications.md).)
+- **Reference plugins:** `burndown` (analytics), `session-reader` (data backend), `witr` (process causality, wraps an external binary), and `abtop` (top-for-agents, real-time agent monitor) — all ship in-tree as real subprocess plugins. (Notifications are **not** a plugin — the Inbox + `ainb-notifyd` daemon are host code compiled into `ainb-core`; see [TUI → Inbox & notifications](../tui/inbox-notifications.md).)
 
 If you want to **add a screen / CLI / dashboard to the TUI**, you want this kind of plugin. Continue to:
 - [overview.md](overview.md) — what a v2 plugin is, conceptually

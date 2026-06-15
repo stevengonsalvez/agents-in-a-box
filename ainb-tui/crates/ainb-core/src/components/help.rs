@@ -55,7 +55,15 @@ impl HelpComponent {
             ListItem::new("Tools:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  c          Toggle Claude chat"),
-            ListItem::new("  b          Inbox"),
+            ListItem::new(""),
+            ListItem::new("Panels (closing returns here):")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ListItem::new("  b          Inbox (Esc closes)"),
+            ListItem::new("  i          Stats / usage analytics (Esc closes)"),
+            ListItem::new("  w          Witr process browser (quit witr to return)"),
+            ListItem::new("  k          Skills browser (Esc closes)"),
+            ListItem::new("  m          Memory / learnings browser (Esc closes)"),
+            ListItem::new("  t          Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),
             ListItem::new("Views:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),

@@ -237,6 +237,30 @@ agent-skills:
       - "rsvg-convert (librsvg) for PNG export — `brew install librsvg`"
     docs: "https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
 
+  - name: antv-infographic
+    repo: https://github.com/antvis/Infographic
+    version: "0.2.19"
+    multi-subpath: skills
+    applies-to: [claude, codex, copilot, gemini]
+    purpose: "AntV's declarative infographic generation + rendering engine — turn words/data into high-quality SVG infographics from ~200 templates, AI-friendly config, hand-drawn + gradient themes"
+    multi-skill: true
+    skills:
+      - infographic-creator: "Primary entry point — generate a complete infographic from a topic/dataset, picking template + structure + items"
+      - infographic-syntax-creator: "Author the declarative infographic syntax (the @antv/infographic config spec)"
+      - infographic-structure-creator: "Design the layout/structure skeleton an infographic hangs off"
+      - infographic-item-creator: "Create individual infographic items/blocks within a structure"
+      - infographic-template-updater: "Update or extend the bundled template library"
+    features:
+      - Declarative @antv/infographic engine with streaming SVG rendering
+      - ~200 built-in templates + built-in editor
+      - AI-friendly configuration syntax (words/data → infographic)
+      - Theme system (hand-drawn + gradient styles)
+      - 5 cross-agent skills under skills/ (SKILL.md standard)
+      - MIT licensed
+    requires:
+      - "node.js (>=18) + npm if rendering locally (`npm install @antv/infographic`)"
+    docs: "https://github.com/antvis/Infographic"
+
   # ---------------------------------------------------------------------------
   # Catalog-only entries below — listed for discoverability / alternatives
   # consideration but NOT installed by bootstrap. Flip `catalog-only: true` to

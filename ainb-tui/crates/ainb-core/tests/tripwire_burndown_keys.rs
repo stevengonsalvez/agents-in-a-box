@@ -111,6 +111,15 @@ git_directories = []
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the `i` keystroke this tripwire sends.
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
+
     let fixture = fixture_root();
     let claude_src = fixture.join("claude").join("projects");
     if claude_src.is_dir() {
@@ -153,24 +162,39 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
-/// Send a key and wait for the capture to settle (no further byte
-/// changes for two consecutive polls, or hard timeout). Returns the
-/// final capture. Settling beats fixed sleeps because plugin frames
-/// arrive asynchronously over JSON-RPC and the prior frame's bytes can
-/// linger in the capture for a brief window.
+/// Send a key and return the capture once it has (a) changed from the
+/// pre-key frame and (b) then settled (no further byte changes for
+/// ~350ms), or the hard timeout elapses.
+///
+/// The change-from-`before` gate is load-bearing: plugin frames arrive
+/// asynchronously over JSON-RPC, so a slow repaint can leave the
+/// PRE-key frame byte-stable for the settle window — a plain settle
+/// then returns the pre-switch screen. That race is exactly the flaky
+/// `signal_7d == signal_30d` failure (the 30d capture caught the still-
+/// 7d frame). Requiring an observed change first makes period/provider/
+/// zoom captures deterministic. Genuinely no-op keys (e.g. Backspace
+/// with no filter chip) never change the frame, so they fall through to
+/// the timeout and return the stable unchanged capture — correct, just
+/// slower for those callers.
 fn send_key_and_settle(session: &str, key: &str) -> String {
+    let before = capture_pane(session);
     send_key(session, key);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last = capture_pane(session);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut last = before.clone();
+    let mut changed = false;
     let mut stable_since: Option<Instant> = None;
     while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(150));
         let cur = capture_pane(session);
+        if cur != before {
+            changed = true;
+        }
         if cur == last {
-            match stable_since {
-                None => stable_since = Some(Instant::now()),
-                Some(t) if t.elapsed() >= Duration::from_millis(400) => return cur,
-                _ => {}
+            if changed
+                && stable_since.get_or_insert_with(Instant::now).elapsed()
+                    >= Duration::from_millis(350)
+            {
+                return cur;
             }
         } else {
             last = cur;
@@ -182,6 +206,32 @@ fn send_key_and_settle(session: &str, key: &str) -> String {
 
 fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
+}
+
+/// Return a byte-stable capture WITHOUT sending a key — waits until two
+/// consecutive captures match for ~300ms. Use for "pre-action" snapshots
+/// so they don't catch a mid-repaint frame (a raw `capture_pane` right
+/// after a prior settle can still land on a transient, which is how the
+/// `p filter:` chip went momentarily missing and tripped the
+/// both-non-empty assert).
+fn settle(session: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last = capture_pane(session);
+    let mut stable_since: Option<Instant> = None;
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(150));
+        let cur = capture_pane(session);
+        if cur == last {
+            if stable_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(300)
+            {
+                return cur;
+            }
+        } else {
+            last = cur;
+            stable_since = None;
+        }
+    }
+    last
 }
 
 /// Extract the burndown chip strip's `p filter: X` token (`All`,
@@ -270,7 +320,7 @@ fn burndown_interactive_keys_change_render() {
         .expect("tmux send launch cmd");
 
     // Wait for HomeScreen.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_home = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -284,7 +334,7 @@ fn burndown_interactive_keys_change_render() {
     // so a `$<digit>` token must appear inside 30s once session-reader
     // publishes the first usage_data chunk.
     send_key(&session, "i");
-    let data_deadline = Instant::now() + Duration::from_secs(45);
+    let data_deadline = Instant::now() + Duration::from_secs(90);
     let initial = poll_capture(&session, data_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
@@ -324,7 +374,7 @@ fn burndown_interactive_keys_change_render() {
     // so the only stable, render-visible delta is the chip strip's
     // `p filter:` token. Default is `All`, Right cycles to the next
     // provider's filter state. We assert that token shifts.
-    let cap_pre_right = capture_pane(&session);
+    let cap_pre_right = settle(&session);
     let cap_post_right = send_key_and_settle(&session, "Right");
     let filter_pre_right = filter_token(&cap_pre_right);
     let filter_post_right = filter_token(&cap_post_right);
@@ -336,12 +386,12 @@ fn burndown_interactive_keys_change_render() {
     // can't see the focus highlight directly, but the chip strip or
     // panel headers shift their position/title — easier to assert by
     // recording the full capture and demanding change.
-    let cap_pre_tab = capture_pane(&session);
+    let cap_pre_tab = settle(&session);
     let cap_post_tab = send_key_and_settle(&session, "Tab");
 
     // Zoom toggle. A zoomed view occupies the full body region, so the
     // bottom-half panel titles drop out vs. the grid view.
-    let cap_pre_zoom = capture_pane(&session);
+    let cap_pre_zoom = settle(&session);
     let cap_post_zoom = send_key_and_settle(&session, "z");
     // Restore (toggle off) so we don't leave the plugin in a zoomed
     // state for downstream assertions.
@@ -350,8 +400,8 @@ fn burndown_interactive_keys_change_render() {
     // Backspace must be safe when no filter chip is set — a no-op
     // rather than crashing the plugin. We don't assert a delta; we
     // assert the burndown screen is still rendered after Backspace.
-    // (`Esc` is host-reserved — see `is_host_reserved_key` — so the
-    // navigation-back tripwire lives in its own test file
+    // (`Esc` at the root view asks the host to close the panel — that
+    // navigation tripwire lives in its own test file
     // `tripwire_burndown_esc_returns_home.rs`.)
     let cap_post_backspace = send_key_and_settle(&session, "BSpace");
 

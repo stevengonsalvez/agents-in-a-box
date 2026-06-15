@@ -1,0 +1,10 @@
+---
+source: "../plugins/hangar-tui/tests/snapshot_logs_screen.rs"
+expression: full
+---
+Logs
+[a]all  [i]info  [w]warn  [e]error
+
+12:00:00 INFO ainb_hangar_daemon daemon ready task_id=t-aaa
+12:00:01 WARN ainb_hangar_daemon::run_loop claim slot retry attempts=2
+12:00:02 ERROR ainb_hangar_daemon::runner provider exited nonzero code=7

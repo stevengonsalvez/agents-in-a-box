@@ -499,6 +499,33 @@ _bar_fg() {
   if (( pct >= 85 )); then echo "$C_WHITE"; else echo "$C_BLACK"; fi
 }
 
+# ════════════════════════════════════════════════════════════════════════════
+# SIGNAL 9 — Caveman mode badge + savings
+# Reads pre-rendered suffix from .caveman-statusline-suffix (written by
+# caveman_posttooluse.js on each tool use — never shells out to node here).
+# ════════════════════════════════════════════════════════════════════════════
+CAVEMAN_BADGE=""
+CAVEMAN_SAVINGS=""
+CAVEMAN_MODE=""
+_CAVEMAN_FLAG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-active"
+_CAVEMAN_SUFFIX="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-statusline-suffix"
+if [[ -f "$_CAVEMAN_FLAG" ]] && [[ ! -L "$_CAVEMAN_FLAG" ]]; then
+  CAVEMAN_MODE=$(head -c 64 "$_CAVEMAN_FLAG" 2>/dev/null | tr -d '\n\r' | tr -cd 'a-z0-9-')
+  case "$CAVEMAN_MODE" in
+    off|lite|full|ultra|wenyan-lite|wenyan|wenyan-full|wenyan-ultra|commit|review|compress)
+      if [[ "$CAVEMAN_MODE" == "full" ]] || [[ -z "$CAVEMAN_MODE" ]]; then
+        CAVEMAN_BADGE="🪨"
+      else
+        CAVEMAN_BADGE="🪨:$(printf '%s' "$CAVEMAN_MODE" | tr '[:lower:]' '[:upper:]')"
+      fi
+      ;;
+    *) CAVEMAN_MODE="" ;;
+  esac
+fi
+if [[ -n "$CAVEMAN_MODE" ]] && [[ -f "$_CAVEMAN_SUFFIX" ]] && [[ ! -L "$_CAVEMAN_SUFFIX" ]]; then
+  CAVEMAN_SAVINGS=$(head -c 64 "$_CAVEMAN_SUFFIX" 2>/dev/null | tr -d '\000-\037')
+fi
+
 # ── Build Line 1 (powerline: cwd · git · beads) ──────────────────────────────
 L1=""
 prev=""

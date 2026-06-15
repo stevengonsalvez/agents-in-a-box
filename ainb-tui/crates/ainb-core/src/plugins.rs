@@ -15,11 +15,71 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use ainb_plugin_runtime::workspace_store::{
+    StateTomlWorkspaceStore, WorkspaceInfo, default_state_path,
+};
 use ainb_plugin_runtime::{Runtime, RuntimeError, RuntimeHandle};
 use tracing::{debug, info, warn};
 
 use crate::config::PluginsConfig;
+
+/// Build the host workspace store for the `host/workspace_*` caps (P5.5),
+/// seeding its catalogue from the Hangar `workspace` table.
+///
+/// The switch *state* lives in `state.toml` (resolved via
+/// [`default_state_path`]); the *catalogue* (which workspaces exist, with their
+/// ULID id + slug + name) is read once from the daemon's SQLite store. A
+/// failure to resolve the path or read the DB degrades to an empty catalogue —
+/// the caps then return an empty list / reject unknown ids rather than crashing
+/// startup.
+fn build_workspace_store() -> Arc<StateTomlWorkspaceStore> {
+    let path = default_state_path().unwrap_or_else(|_| PathBuf::from("state.toml"));
+    let catalogue = load_workspace_catalogue();
+    Arc::new(StateTomlWorkspaceStore::new(path, catalogue))
+}
+
+/// Read the workspace catalogue from the Hangar store DB.
+///
+/// `init_plugin_runtime` may be called from *within* a tokio runtime (the app's
+/// main runtime), so a naive `block_on` on a nested runtime panics with "Cannot
+/// start a runtime from within a runtime". The one-shot async query is therefore
+/// run on a dedicated OS thread (which carries no ambient runtime), where a
+/// fresh current-thread runtime's `block_on` is legal. Any error yields an empty
+/// catalogue (logged at debug) — startup never fails on a missing/locked DB.
+fn load_workspace_catalogue() -> Vec<WorkspaceInfo> {
+    std::thread::spawn(|| {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return Vec::new();
+        };
+        rt.block_on(async {
+            let store = match ainb_hangar_store::Store::open_default().await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(error = %e, "hangar workspace catalogue unavailable");
+                    return Vec::new();
+                }
+            };
+            let rows: Result<Vec<(String, String, String)>, _> =
+                sqlx::query_as("SELECT id, slug, name FROM workspace ORDER BY created_at")
+                    .fetch_all(store.pool())
+                    .await;
+            match rows {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|(id, slug, name)| WorkspaceInfo { id, slug, name })
+                    .collect(),
+                Err(e) => {
+                    debug!(error = %e, "hangar workspace query failed");
+                    Vec::new()
+                }
+            }
+        })
+    })
+    .join()
+    .unwrap_or_default()
+}
 
 /// Outcome of [`init_plugin_runtime`] — kept for parity with the previous
 /// `LoadOutcome` type so callers (CLI, smoke tests) can log discovery results
@@ -37,7 +97,11 @@ pub struct LoadOutcome {
 /// for the lifetime of the app — dropping it joins every plugin task and tears
 /// down the tokio executor.
 pub fn init_plugin_runtime() -> Result<(Runtime, RuntimeHandle, LoadOutcome), RuntimeError> {
-    let (runtime, handle) = Runtime::new()?;
+    let (runtime, handle) = Runtime::with_config_and_stores(
+        ainb_plugin_runtime::RuntimeConfig::default(),
+        ainb_plugin_runtime::secret_store::default_backend(),
+        build_workspace_store(),
+    )?;
     let mut outcome = LoadOutcome::default();
 
     // Operator escape hatch — `AINB_DISABLE_PLUGINS=1` skips discovery
@@ -54,15 +118,23 @@ pub fn init_plugin_runtime() -> Result<(Runtime, RuntimeHandle, LoadOutcome), Ru
         return Ok((runtime, handle, outcome));
     };
 
+    // Load the plugins config once: it drives both the enable/disable filter
+    // and the per-plugin `[plugins.<name>]` config injected at init.
+    let plugins_cfg = load_plugins_config();
+
     // Per-plugin enable/disable filter, resolved from env + config.toml
     // with documented precedence. See `resolve_plugin_filter` doc.
-    let filter = resolve_plugin_filter_from_env_and_config();
+    let filter = resolve_plugin_filter_from_env(&plugins_cfg);
     if let Some(reason) = filter.describe() {
         info!(filter = %reason, "applying plugin filter");
     }
 
     info!(plugin_root = %root.display(), "discovering subprocess plugins");
-    let result = handle.discover_filtered(&root, |p| filter.allows(p.id.as_str()));
+    let result = handle.discover_filtered_with_config(
+        &root,
+        |p| filter.allows(p.id.as_str()),
+        |p| resolve_plugin_config(&plugins_cfg, p.id.as_str()),
+    );
     match result {
         Ok(plugins) => {
             for p in plugins {
@@ -144,31 +216,57 @@ impl PluginFilter {
     }
 }
 
-/// Build a [`PluginFilter`] from env vars + the loaded `config.toml`.
+/// Load the `[plugins]` section from the layered `config.toml`.
 ///
-/// Wrapper that gathers the inputs from process state. The pure
-/// resolution logic lives in [`resolve_plugin_filter`] so it's
-/// testable without poking `std::env`.
-fn resolve_plugin_filter_from_env_and_config() -> PluginFilter {
-    let env_only = std::env::var("AINB_ONLY_PLUGINS").ok();
-    let env_disable = std::env::var("AINB_DISABLE_PLUGIN").ok();
-    // Load config.toml; surface load failures so a corrupt config
-    // doesn't silently disable the user's plugin filter intent. Falling
-    // back to `Default` is still the right behaviour — booting plugin-
-    // free isn't what the user wanted — but the warn line gives them a
-    // breadcrumb in `~/.agents-in-a-box/logs/`.
-    let cfg = match crate::config::AppConfig::load() {
+/// Surfaces load failures so a corrupt config doesn't silently disable the
+/// user's plugin filter intent or drop their per-plugin config. Falling back to
+/// `Default` is still the right behaviour — booting plugin-free isn't what the
+/// user wanted — but the warn line gives them a breadcrumb in
+/// `~/.agents-in-a-box/logs/`.
+fn load_plugins_config() -> PluginsConfig {
+    match crate::config::AppConfig::load() {
         Ok(c) => c.plugins,
         Err(e) => {
             warn!(
                 error = %e,
-                "config.toml failed to load — falling back to default plugin filter (all plugins enabled). \
-                 [plugins].enabled / .disabled will not apply this session."
+                "config.toml failed to load — falling back to default plugin config (all plugins enabled, \
+                 no per-plugin config). [plugins].enabled / .disabled / per-plugin values will not apply this session."
             );
             PluginsConfig::default()
         }
+    }
+}
+
+/// Build a [`PluginFilter`] from env vars + an already-loaded [`PluginsConfig`].
+///
+/// Wrapper that gathers the env inputs from process state. The pure resolution
+/// logic lives in [`resolve_plugin_filter`] so it's testable without poking
+/// `std::env`.
+fn resolve_plugin_filter_from_env(cfg: &PluginsConfig) -> PluginFilter {
+    let env_only = std::env::var("AINB_ONLY_PLUGINS").ok();
+    let env_disable = std::env::var("AINB_DISABLE_PLUGIN").ok();
+    resolve_plugin_filter(env_only.as_deref(), env_disable.as_deref(), cfg)
+}
+
+/// Resolve the per-plugin config table for `id` into the JSON the host injects
+/// at `plugin/init`.
+///
+/// Looks up `plugins.values[id]` (the serialized `[plugins.<id>]` table) and
+/// converts it from TOML to JSON. An absent entry — or a conversion failure for
+/// a value TOML allows but JSON can't represent — yields JSON `null`, which the
+/// plugin's typed config parser treats as "all defaults". This is the same
+/// sentinel `PluginInitParams.config` defaults to for ABI-2 back-compat.
+pub(crate) fn resolve_plugin_config(cfg: &PluginsConfig, id: &str) -> serde_json::Value {
+    let Some(table) = cfg.values.get(id) else {
+        return serde_json::Value::Null;
     };
-    resolve_plugin_filter(env_only.as_deref(), env_disable.as_deref(), &cfg)
+    match serde_json::to_value(table) {
+        Ok(json) => json,
+        Err(e) => {
+            warn!(plugin = id, error = %e, "failed to convert [plugins.<name>] table to JSON — injecting null config");
+            serde_json::Value::Null
+        }
+    }
 }
 
 /// Pure filter resolution. Inputs are the two env-var values (already
@@ -328,6 +426,123 @@ mod tests {
 }
 
 #[cfg(test)]
+mod plugin_config_tests {
+    //! Host-side resolution of the per-plugin `[plugins.<name>]` value
+    //! table into the JSON injected at `plugin/init`, plus the grant flow
+    //! for the `read_paths` capability (collector arm landed in P0).
+    use super::*;
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode,
+        Subscribes,
+    };
+    use ainb_plugin_runtime::RegisteredPlugin;
+    use std::path::PathBuf;
+
+    fn values_with(name: &str, pairs: &[(&str, &str)]) -> PluginsConfig {
+        let mut table = toml::value::Table::new();
+        for (k, v) in pairs {
+            table.insert((*k).into(), toml::Value::String((*v).into()));
+        }
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(name.to_string(), toml::Value::Table(table));
+        PluginsConfig {
+            enabled: Vec::new(),
+            disabled: Vec::new(),
+            values,
+        }
+    }
+
+    fn manifest_with_read_paths(name: &str, paths: &[&str]) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities {
+                read_paths: CapabilityGrant::List(paths.iter().map(|s| (*s).into()).collect()),
+                ..Capabilities::default()
+            },
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_resolved_config_injected_at_init() {
+        // Host resolves `plugins.values[id]` → JSON and stamps it onto the
+        // `RegisteredPlugin.config` that `send_init` forwards verbatim into
+        // `PluginInitParams.config`. The JSON carried equals the resolved table.
+        let cfg = values_with(
+            "learnings",
+            &[
+                ("learnings_dir", "~/.learnings"),
+                ("qmd_collection", "learnings"),
+            ],
+        );
+
+        let resolved = resolve_plugin_config(&cfg, "learnings");
+        // The resolved JSON is exactly the `[plugins.learnings]` table.
+        assert_eq!(resolved["learnings_dir"], serde_json::json!("~/.learnings"));
+        assert_eq!(resolved["qmd_collection"], serde_json::json!("learnings"));
+
+        // Stamping onto the RegisteredPlugin (what send_init reads) preserves it.
+        let plugin = RegisteredPlugin::new(
+            manifest_with_read_paths("learnings", &["~/.learnings"]),
+            PathBuf::from("/bin/learnings"),
+            PathBuf::from("/etc/manifest.toml"),
+        )
+        .with_config(resolved.clone());
+        assert_eq!(plugin.config, resolved);
+
+        // An unconfigured plugin resolves to JSON null (ABI-2 back-compat default).
+        let absent = resolve_plugin_config(&cfg, "burndown");
+        assert_eq!(absent, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_read_paths_granted_from_manifest() {
+        // A manifest declaring `read_paths` carries a granted capability the
+        // runtime collector (P0) surfaces as "read_paths"; an absent grant does
+        // not. The host stamps config onto the same plugin without disturbing it.
+        let granted = manifest_with_read_paths("learnings", &["~/.learnings", "~/.cache/qmd"]);
+        assert!(
+            granted.capabilities.read_paths.is_granted(),
+            "list-form read_paths must be granted"
+        );
+        assert_eq!(
+            granted.capabilities.read_paths.allow_list().unwrap(),
+            ["~/.learnings", "~/.cache/qmd"]
+        );
+
+        let ungranted = manifest_with_read_paths("plain", &[]);
+        assert!(
+            !ungranted.capabilities.read_paths.is_granted(),
+            "empty list → not granted"
+        );
+
+        // Grant + injected config coexist on the registered plugin.
+        let plugin = RegisteredPlugin::new(
+            granted,
+            PathBuf::from("/bin/learnings"),
+            PathBuf::from("/etc/manifest.toml"),
+        )
+        .with_config(serde_json::json!({"learnings_dir": "~/.learnings"}));
+        assert!(plugin.manifest.capabilities.read_paths.is_granted());
+        assert_eq!(
+            plugin.config["learnings_dir"],
+            serde_json::json!("~/.learnings")
+        );
+    }
+}
+
+#[cfg(test)]
 mod plugin_filter_tests {
     //! Pure unit tests for the per-plugin allow/deny filter. Touch
     //! `resolve_plugin_filter` directly so we don't pollute process
@@ -342,6 +557,7 @@ mod plugin_filter_tests {
         PluginsConfig {
             enabled: enabled.iter().map(|s| s.to_string()).collect(),
             disabled: disabled.iter().map(|s| s.to_string()).collect(),
+            ..PluginsConfig::default()
         }
     }
 

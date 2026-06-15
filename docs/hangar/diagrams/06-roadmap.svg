@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <defs>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}</style>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#5a4a3a"/></marker>
+    <marker id="arrBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#2563eb"/></marker>
+    <marker id="arrClay" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#D97757"/></marker>
+    <marker id="arrOlive" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#788C5D"/></marker>
+  </defs>
+  <rect width="1280" height="720" fill="#f8f6f3"/>
+  <text x="640" y="32" text-anchor="middle" font-size="20" font-weight="700" fill="#141413">ainb v2 execution roadmap — 8 phases over ~16 weeks</text>
+  <text x="640" y="52" text-anchor="middle" font-size="12" fill="#5a4a3a">Sequencing chosen so a usable surface ships at the end of every phase · no big-bang</text>
+  <line x1="100" y1="100" x2="100" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="135.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W1</text>
+  <line x1="170" y1="100" x2="170" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="205.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W2</text>
+  <line x1="240" y1="100" x2="240" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="275.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W3</text>
+  <line x1="310" y1="100" x2="310" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="345.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W4</text>
+  <line x1="380" y1="100" x2="380" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="415.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W5</text>
+  <line x1="450" y1="100" x2="450" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="485.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W6</text>
+  <line x1="520" y1="100" x2="520" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="555.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W7</text>
+  <line x1="590" y1="100" x2="590" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="625.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W8</text>
+  <line x1="660" y1="100" x2="660" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="695.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W9</text>
+  <line x1="730" y1="100" x2="730" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="765.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W10</text>
+  <line x1="800" y1="100" x2="800" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="835.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W11</text>
+  <line x1="870" y1="100" x2="870" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="905.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W12</text>
+  <line x1="940" y1="100" x2="940" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="975.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W13</text>
+  <line x1="1010" y1="100" x2="1010" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="1045.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W14</text>
+  <line x1="1080" y1="100" x2="1080" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="1115.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W15</text>
+  <line x1="1150" y1="100" x2="1150" y2="650" stroke="#E3DACC" stroke-width="0.5"/>
+  <text x="1185.0" y="92" text-anchor="middle" font-size="11" fill="#5a4a3a">W16</text>
+  <text x="80" y="140" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P0</text>
+  <text x="80" y="154" text-anchor="end" font-size="10" fill="#5a4a3a">Schema + server skeleton</text>
+  <rect x="100" y="128" width="140" height="32" rx="6" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="2"/>
+  <text x="108" y="148" font-size="10" fill="#141413">Postgres migrations · Axum router · sqlx setup · health endpoint</text>
+  <text x="80" y="190" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P1</text>
+  <text x="80" y="204" text-anchor="end" font-size="10" fill="#5a4a3a">Task lifecycle + daemon v1</text>
+  <rect x="170" y="178" width="280" height="32" rx="6" fill="#fff5e0" stroke="#D97757" stroke-width="2"/>
+  <text x="178" y="198" font-size="10" fill="#141413">queued→dispatched→running state machine · per-task env dir · single-provider</text>
+  <text x="80" y="240" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P2</text>
+  <text x="80" y="254" text-anchor="end" font-size="10" fill="#5a4a3a">Beads sync adapter</text>
+  <rect x="310" y="228" width="140" height="32" rx="6" fill="#fdf4e3" stroke="#788C5D" stroke-width="2"/>
+  <text x="318" y="248" font-size="10" fill="#141413">Two-way: beads issue ↔ task row · ID mapping table</text>
+  <text x="80" y="290" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P3</text>
+  <text x="80" y="304" text-anchor="end" font-size="10" fill="#5a4a3a">Web UI minimal</text>
+  <rect x="310" y="278" width="280" height="32" rx="6" fill="#fff5e0" stroke="#D97757" stroke-width="2"/>
+  <text x="318" y="298" font-size="10" fill="#141413">Next.js: issue list · transcript view · agent picker · auth screen</text>
+  <text x="80" y="340" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P4</text>
+  <text x="80" y="354" text-anchor="end" font-size="10" fill="#5a4a3a">WebSocket realtime</text>
+  <rect x="520" y="328" width="140" height="32" rx="6" fill="#fdf4e3" stroke="#788C5D" stroke-width="2"/>
+  <text x="528" y="348" font-size="10" fill="#141413">Two-hub split · scope subscribe · idempotent finalize</text>
+  <text x="80" y="390" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P5</text>
+  <text x="80" y="404" text-anchor="end" font-size="10" fill="#5a4a3a">Multi-tenant + auth</text>
+  <rect x="590" y="378" width="210" height="32" rx="6" fill="#fff5e0" stroke="#D97757" stroke-width="2"/>
+  <text x="598" y="398" font-size="10" fill="#141413">Workspace · membership · PAT · daemon token · polymorphic actor</text>
+  <text x="80" y="440" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P6</text>
+  <text x="80" y="454" text-anchor="end" font-size="10" fill="#5a4a3a">Skills server-side</text>
+  <rect x="730" y="428" width="210" height="32" rx="6" fill="#fdf4e3" stroke="#788C5D" stroke-width="2"/>
+  <text x="738" y="448" font-size="10" fill="#141413">Skill aggregate · dispatch-time materialization · embedded templates</text>
+  <text x="80" y="490" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P7</text>
+  <text x="80" y="504" text-anchor="end" font-size="10" fill="#5a4a3a">Polish: GitHub PR mirror, autopilots, observability</text>
+  <rect x="870" y="478" width="210" height="32" rx="6" fill="#fdf4e3" stroke="#5a4a3a" stroke-width="2"/>
+  <text x="878" y="498" font-size="10" fill="#141413">GitHub App · cron + webhook triggers · OTEL traces · Prometheus</text>
+  <text x="80" y="540" text-anchor="end" font-size="11" font-weight="700" fill="#141413">P8</text>
+  <text x="80" y="554" text-anchor="end" font-size="10" fill="#5a4a3a">Cloud runtime + billing (later)</text>
+  <rect x="1010" y="528" width="210" height="32" rx="6" fill="#fff5e0" stroke="#D97757" stroke-width="2"/>
+  <text x="1018" y="548" font-size="10" fill="#141413">Optional · proxy stub mirroring Multica's open-core boundary</text>
+  <line x1="100" y1="85" x2="100" y2="650" stroke="#b91c1c" stroke-width="2" stroke-dasharray="4,3"/>
+  <text x="105" y="82" font-size="11" font-weight="700" fill="#b91c1c">TODAY (2026-05-22)</text>
+  <polygon points="240,651 249,660 240,669 231,660" fill="#D97757" stroke="#141413" stroke-width="1.5"/>
+  <rect x="150" y="672" width="180" height="16" fill="#f8f6f3" opacity="0.95"/>
+  <text x="240" y="684" text-anchor="middle" font-size="11" font-weight="600" fill="#D97757">M1: daemon claims a task</text>
+  <polygon points="520,671 529,680 520,689 511,680" fill="#D97757" stroke="#141413" stroke-width="1.5"/>
+  <rect x="430" y="692" width="180" height="16" fill="#f8f6f3" opacity="0.95"/>
+  <text x="520" y="704" text-anchor="middle" font-size="11" font-weight="600" fill="#D97757">M2: web Kanban live</text>
+  <polygon points="800,651 809,660 800,669 791,660" fill="#D97757" stroke="#141413" stroke-width="1.5"/>
+  <rect x="710" y="672" width="180" height="16" fill="#f8f6f3" opacity="0.95"/>
+  <text x="800" y="684" text-anchor="middle" font-size="11" font-weight="600" fill="#D97757">M3: multi-tenant + skills</text>
+  <polygon points="1010,671 1019,680 1010,689 1001,680" fill="#D97757" stroke="#141413" stroke-width="1.5"/>
+  <rect x="920" y="692" width="180" height="16" fill="#f8f6f3" opacity="0.95"/>
+  <text x="1010" y="704" text-anchor="middle" font-size="11" font-weight="600" fill="#D97757">M4: v1.0 ainb-as-control-plane</text>
+  <text x="100" y="700" font-size="11" font-style="italic" fill="#5a4a3a">Each phase ends with a usable artifact. Beads sync adapter (P2) is the leverage move — it lets Stevie keep using beads UX while the server backfills the task table.</text>
+</svg>

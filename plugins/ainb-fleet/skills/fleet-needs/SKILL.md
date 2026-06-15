@@ -41,6 +41,9 @@ SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs
 | Fallback writes | peers/broker via `ainb fleet broadcast` | only when no tmux_session known; broker has a known delivery gap |
 
 All write routing below uses tmux first. Broker is a last resort, not the default.
+This matches the binary's default `AINB_FLEET_TRANSPORT=tmux-first`; set
+`tmux-only` to disable the broker fallback entirely, or `peers` to restore the
+legacy broker-first order.
 
 ## Step 0 — gate check (fallback if workflows off)
 
@@ -51,7 +54,41 @@ All write routing below uses tmux first. Broker is a last resort, not the defaul
 If gate off → **stop and invoke `/ainb-fleet:needs`** (the prompt-skill).
 The workflow path only works when `CLAUDE_CODE_WORKFLOWS=1` is set.
 
-## Step 1 — run the hangar workflow with verb=needs
+## Step 0.5 — choose the enrich locus (hybrid, token-efficient)
+
+The Rust read already does the expensive part for free: each card carries
+`enrich_key`, an `enriched` string when a **fresh cached** suggestion exists,
+and `need_enrich: true` only when it has no cache entry. Decide how to draft the
+*missing* ones by COUNT — never one subagent per session.
+
+```bash
+out=$(ainb --format json fleet needs)            # 0 tokens — cards pre-attached
+stale=$(echo "$out" | jq '[.[] | select(.need_enrich==true)] | length')
+```
+
+```
+stale == 0  ─▶ render straight from $out          (0 tokens — all cached/--no-enrich)
+stale ≤ 6   ─▶ draft inline in THIS session        (0 subagents)
+stale  > 6  ─▶ run the hangar workflow (Step 1)     (exactly 1 batched agent)
+```
+
+Cutoff is `AINB_FLEET_ENRICH_INLINE_MAX` (default 6).
+
+**Inline draft (≤6):** for each `need_enrich` card, you draft the `suggestion`
+yourself (ASK → best option label; ERR → retry|skip|investigate; IDLE →
+resume|close; else empty) and persist it so the next read is free:
+
+```bash
+ainb fleet enrich-cache put --key "<card.enrich_key>" --suggestion "<text>"
+```
+
+Then render from `$out`, substituting your drafted suggestions. No workflow, no
+subagent. For `stale == 0`, skip drafting entirely.
+
+**0-token mode:** `ainb fleet needs --no-enrich` (or `AINB_FLEET_ENRICH=0`)
+returns cards with no `need_enrich` flags — render cached suggestions only.
+
+## Step 1 — run the hangar workflow with verb=needs (only when stale > 6)
 
 `hangar` is the single multi-verb workflow under `ainb-fleet`. The `needs`
 verb runs the Discover ▸ Enrich ▸ Prioritize chain and returns the render-ready

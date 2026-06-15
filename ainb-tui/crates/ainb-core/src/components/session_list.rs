@@ -24,10 +24,25 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
 const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
 
+// Per-agent brand colors for the coding-agent pill chip. The chip is a
+// filled block in these colors so the agent is identifiable at a glance —
+// orange = Claude, blue = Gemini, etc. — even before the glyph resolves.
+const BRAND_CLAUDE: Color = Color::Rgb(217, 119, 87); // Anthropic clay-orange
+const BRAND_CODEX: Color = Color::Rgb(236, 236, 241); // OpenAI near-white
+const BRAND_COPILOT: Color = Color::Rgb(46, 160, 67); // GitHub green
+const BRAND_GEMINI: Color = Color::Rgb(66, 133, 244); // Google blue
+const BRAND_KIRO: Color = Color::Rgb(171, 121, 224); // crystal purple
+const BRAND_SHELL: Color = Color::Rgb(150, 150, 165); // muted slate
+const BRAND_SSH: Color = Color::Rgb(255, 165, 0); // amber
+
+// Powerline rounded caps that wrap the pill chip's filled middle.
+const PILL_LEFT: &str = "\u{e0b6}"; //
+const PILL_RIGHT: &str = "\u{e0b4}"; //
+
 use ainb_plugin_notifyd::AlertKind;
 
 use crate::app::AppState;
-use crate::models::{SessionMode, SessionStatus, ShellSessionStatus, Workspace};
+use crate::models::{SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace};
 
 /// Width of the leading badge slot rendered before every list row.
 /// Two characters: a digit (or space) and a trailing space separator.
@@ -85,7 +100,7 @@ impl SessionListComponent {
         use crate::app::state::FocusedPane;
         let (border_color, is_focused) = match state.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
-            FocusedPane::LiveLogs => (SUBDUED_BORDER, false),
+            FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };
         let border_color = if state.sessions_pane_state.edge_highlighted() {
             GOLD
@@ -130,6 +145,12 @@ impl SessionListComponent {
             ));
         }
         title_spans.push(Span::raw(" "));
+        // 'B' is the keyboard twin of clicking the [-] glyph (hint lives next
+        // to the control it drives, not in the bottom menu bar).
+        title_spans.push(Span::styled(
+            "B",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        ));
         title_spans.push(Span::styled(
             "[-]",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
@@ -240,8 +261,11 @@ impl SessionListComponent {
     fn build_list_items_static(state: &AppState) -> Vec<ListItem<'static>> {
         let mut items = Vec::new();
 
-        // Load favorites to check which workspaces are starred
-        let favorites = crate::config::FavoritesStore::load();
+        // Favorite status is precomputed off the render path into
+        // `state.favorite_workspace_paths` (see
+        // `AppState::recompute_favorite_workspaces`), so this hot loop does an
+        // O(1) set lookup instead of re-parsing favorites.yaml and opening a
+        // git repo per workspace on every frame. (perf: beads 9ov + 8rn)
 
         // Must stay in lockstep with AppState::attachable_items_in_order;
         // divergence would attach the wrong session for a given digit.
@@ -288,44 +312,10 @@ impl SessionListComponent {
                 String::new()
             };
 
-            // Check if this workspace is a favorite (by local path OR remote URL)
-            let workspace_path_str = workspace.path.display().to_string();
-            let is_favorite = {
-                // First check local path
-                let by_path = favorites.favorites.iter().any(|f| f.source == workspace_path_str);
-                if by_path {
-                    true
-                } else {
-                    // Also check by remote URL (owner/repo format).
-                    // `from_input` is deprecated for free-form input
-                    // (finding #14); the URL here came from
-                    // `get_remote_url()` so the legacy contract is fine.
-                    if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
-                        if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                            #[allow(deprecated)]
-                            if let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url)
-                            {
-                                if let Ok(parsed) = repo_source.parse_components() {
-                                    let shorthand =
-                                        format!("{}/{}", parsed.owner, parsed.repo_name);
-                                    favorites
-                                        .favorites
-                                        .iter()
-                                        .any(|f| f.source == shorthand || f.source == remote_url)
-                                } else {
-                                    favorites.favorites.iter().any(|f| f.source == remote_url)
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                }
-            };
+            // Favorite status: O(1) lookup against the precomputed cache
+            // (resolved off the render path in
+            // `AppState::recompute_favorite_workspaces`). No git2 / YAML here.
+            let is_favorite = state.favorite_workspace_paths.contains(&workspace.path);
             let star_indicator = if is_favorite { "⭐ " } else { "" };
 
             let workspace_line = Line::from(vec![
@@ -385,15 +375,6 @@ impl SessionListComponent {
                         ""
                     };
 
-                    // Tmux status indicator
-                    let tmux_indicator = if session.is_attached {
-                        "🔗"
-                    } else if session.tmux_session_name.is_some() {
-                        "●"
-                    } else {
-                        "○"
-                    };
-
                     // Git changes (controlled by show_git_status config)
                     let changes_text = if state.app_config.ui_preferences.show_git_status
                         && session.git_changes.total() > 0
@@ -404,28 +385,22 @@ impl SessionListComponent {
                     };
 
                     // Premium session styling
-                    let (branch_color, tmux_color) = if is_selected_session {
-                        (SELECTION_GREEN, SELECTION_GREEN)
+                    let branch_color = if is_selected_session {
+                        SELECTION_GREEN
                     } else {
                         match session.status {
-                            SessionStatus::Running => (SELECTION_GREEN, SOFT_WHITE),
-                            SessionStatus::Stopped => (MUTED_GRAY, MUTED_GRAY),
-                            SessionStatus::Idle => (WARNING_ORANGE, SOFT_WHITE),
-                            SessionStatus::Error(_) => (Color::Rgb(230, 100, 100), SOFT_WHITE),
+                            SessionStatus::Running => SELECTION_GREEN,
+                            SessionStatus::Stopped => MUTED_GRAY,
+                            SessionStatus::Idle => WARNING_ORANGE,
+                            SessionStatus::Error(_) => Color::Rgb(230, 100, 100),
                         }
                     };
 
                     let agent_icon = session.agent_type.icon();
+                    let agent_color = agent_brand_color(&session.agent_type);
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
 
-                    let checkbox = if is_multi_selected {
-                        Span::styled(
-                            "[x]",
-                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
-                    };
+                    let checkbox = ballot_checkbox(is_multi_selected);
 
                     // ainb-hooks attention marker for this session row.
                     // Live "needs you" marker, recomputed from the
@@ -442,11 +417,19 @@ impl SessionListComponent {
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_indicator), Style::default()),
                         Span::styled(mode_indicator.to_string(), Style::default()),
-                        Span::styled(format!("{} ", agent_icon), Style::default()),
+                        // Coding-agent pill: filled brand-color chip with
+                        // powerline caps. Color carries the identity (orange
+                        // Claude, blue Gemini, …), the glyph confirms it.
+                        Span::styled(PILL_LEFT, Style::default().fg(agent_color)),
                         Span::styled(
-                            format!("{} ", tmux_indicator),
-                            Style::default().fg(tmux_color),
+                            format!(" {} ", agent_icon),
+                            Style::default()
+                                .fg(DARK_BG)
+                                .bg(agent_color)
+                                .add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(PILL_RIGHT, Style::default().fg(agent_color)),
+                        Span::raw(" "),
                         Span::styled(
                             session.branch_name.clone(),
                             Style::default().fg(branch_color).add_modifier(
@@ -704,14 +687,7 @@ impl SessionListComponent {
                     let is_being_renamed = is_selected && state.other_tmux_rename_mode;
 
                     let badge = next_badge(&mut attach_no);
-                    let checkbox = if is_multi_selected {
-                        Span::styled(
-                            "[x]",
-                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
-                    };
+                    let checkbox = ballot_checkbox(is_multi_selected);
                     let session_line = if is_being_renamed {
                         // Show inline rename input
                         Line::from(vec![
@@ -951,4 +927,31 @@ impl SessionListComponent {
 #[allow(dead_code)]
 fn workspace_running_count(workspace: &Workspace) -> usize {
     workspace.running_sessions().len()
+}
+
+/// Multi-select ballot toggle shared by the workspace-session and
+/// other-tmux rows: ☑ (green, marked) / ☐ (muted, unmarked).
+fn ballot_checkbox(checked: bool) -> Span<'static> {
+    if checked {
+        Span::styled(
+            "☑ ",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("☐ ", Style::default().fg(MUTED_GRAY))
+    }
+}
+
+/// Brand color for a coding agent's pill chip. Drives the filled-block
+/// identity in the session list (orange Claude, blue Gemini, …).
+fn agent_brand_color(agent: &SessionAgentType) -> Color {
+    match agent {
+        SessionAgentType::Claude => BRAND_CLAUDE,
+        SessionAgentType::Codex => BRAND_CODEX,
+        SessionAgentType::Copilot => BRAND_COPILOT,
+        SessionAgentType::Gemini => BRAND_GEMINI,
+        SessionAgentType::Kiro => BRAND_KIRO,
+        SessionAgentType::Shell => BRAND_SHELL,
+        SessionAgentType::Ssh => BRAND_SSH,
+    }
 }

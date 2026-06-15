@@ -41,7 +41,9 @@ pub enum SidebarItem {
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
     Witr,      // Process causality (witr plugin)
+    Abtop,     // top-for-agents — live agent monitor (abtop plugin)
     Skills,    // Browse per-agent skills
+    Memory,    // Knowledge-base browser (learnings plugin)
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
     Help,      // Docs & guides
@@ -61,7 +63,9 @@ impl SidebarItem {
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Witr => "🌳",
+            Self::Abtop => "📡",
             Self::Skills => "🧠",
+            Self::Memory => "📚",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
             Self::Help => "❓",
@@ -81,7 +85,9 @@ impl SidebarItem {
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Witr => "Witr",
+            Self::Abtop => "abtop",
             Self::Skills => "Skills",
+            Self::Memory => "Memory",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
             Self::Help => "Help",
@@ -101,7 +107,9 @@ impl SidebarItem {
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
+            Self::Abtop => "top-for-agents",
             Self::Skills => "Per-Agent Skills",
+            Self::Memory => "Knowledge & Recall",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
             Self::Help => "Docs & Guides",
@@ -121,7 +129,9 @@ impl SidebarItem {
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Witr => "w",
+            Self::Abtop => "t",
             Self::Skills => "k",
+            Self::Memory => "m",
             Self::Changelog => "v",
             Self::Setup => "S",
             Self::Help => "?",
@@ -141,7 +151,9 @@ impl SidebarItem {
             Self::Logs,
             Self::Stats,
             Self::Witr,
+            Self::Abtop,
             Self::Skills,
+            Self::Memory,
             Self::Changelog,
             Self::Setup,
             Self::Help,
@@ -522,6 +534,29 @@ mod tests {
         let collisions =
             all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
+    }
+
+    #[test]
+    fn memory_tile_registered_with_discoverable_shortcut() {
+        // The learnings/Memory panel was reachable by the `m` key but had no
+        // sidebar tile, so it couldn't be discovered from the home menu like
+        // every other overlay panel (Inbox/Stats/Witr/Skills/Abtop). Lock the
+        // tile shape + position + a non-colliding shortcut so it can't be
+        // dropped again.
+        let all = SidebarItem::all();
+        let memory_pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Memory)
+            .expect("SidebarItem::Memory missing from all()");
+        assert!(memory_pos > 0, "Memory shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Memory.icon(), "📚");
+        assert_eq!(SidebarItem::Memory.label(), "Memory");
+        assert_eq!(SidebarItem::Memory.shortcut(), "m");
+        assert_eq!(SidebarItem::Memory.description(), "Knowledge & Recall");
+        // 'm' must not collide with any other tile shortcut.
+        let collisions =
+            all.iter().filter(|i| **i != SidebarItem::Memory && i.shortcut() == "m").count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'm' collides");
     }
 
     #[test]

@@ -1,0 +1,23 @@
+document_id: lrn-audit-after-rebase
+extracted_at: "2026-05-07T14:52:33.890366+00:00"
+entities:
+  - name: "audit-after-rebase"
+    type: pattern
+    description: "Discipline of stopping the in-flight plan to check for overlap after a large pull"
+  - name: "stale plan execution"
+    type: error
+    description: "Anti-pattern: continuing a plan after main has moved significantly"
+  - name: "git pull --rebase"
+    type: tool
+    description: "Standard git command for syncing local branch onto remote HEAD"
+relationships:
+  - source: "audit-after-rebase"
+    target: "stale plan execution"
+    type: solves
+    description: "Audit step prevents blindly continuing a superseded plan"
+    strength: 9
+  - source: "stale plan execution"
+    target: "git pull --rebase"
+    type: caused_by
+    description: "Continuing after a rebase reveals new commits leads to staleness"
+    strength: 8

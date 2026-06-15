@@ -4,9 +4,10 @@ description: |
   Fan out a single prompt to selected claude sessions across the fleet.
   Use when you need to apply the same instruction (e.g. `/clear`,
   `git pull`, `remote-control disconnect`) to many sessions at once.
-  Routing: peers-first (broker HTTP) when peer registered, tmux send-keys
-  fallback otherwise. Refuses to run without an explicit targeting flag
-  (--all, --filter <regex>, or --cwd <substring>) — no implicit fan-out.
+  Routing: tmux send-keys by default (the broker is an opt-in fallback,
+  toggled via AINB_FLEET_TRANSPORT). Refuses to run without an explicit
+  targeting flag (--all, --filter <regex>, or --cwd <substring>) — no
+  implicit fan-out.
 version: "0.1.0"
 user-invocable: true
 triggers:
@@ -47,22 +48,30 @@ accidental fan-out.
 
 ```
 ainb fleet broadcast — sent to N target(s)
-  ✓ <name> via broker peer <peer_id>
   ✓ <name> via tmux <tmux_session>
+  ✓ <name> via broker peer <peer_id>
   ✗ <name>: <reason>
 ```
 
-`✓ via broker` = sent through claude-peers HTTP (clean, structured).
 `✓ via tmux` = sent via `tmux send-keys -l` (literal mode, works for any
-tmux pane regardless of peer state).
+tmux pane regardless of peer state) — this is the default path.
+`✓ via broker` = sent through claude-peers HTTP — only seen when a target
+has no live tmux pane (or `AINB_FLEET_TRANSPORT=peers` is set).
 
 ## Routing rule
 
-For each target:
+Controlled by `AINB_FLEET_TRANSPORT` (default `tmux-first`). For each target:
 
-1. If session has `peer_id` and broker is healthy → POST `/send-message` to broker.
-2. Else if session has `tmux_session` and tmux says it exists → `tmux send-keys -l`.
-3. Else → `Failed { reason: "no peer registered and no tmux session found" }`.
+**Default (`tmux-first`):**
+
+1. If session has `tmux_session` and tmux says it exists → `tmux send-keys -l`.
+2. Else if session has `peer_id` and broker is healthy → POST `/send-message` to broker.
+3. Else → `Failed { reason: "no live tmux session and no reachable broker peer" }`.
+
+**`tmux-only`:** step 1 only; never touches the broker. Failure reason notes
+`(transport=tmux-only)`.
+
+**`peers` / `broker` (legacy):** the old order — broker first, tmux fallback.
 
 ## Common flows
 

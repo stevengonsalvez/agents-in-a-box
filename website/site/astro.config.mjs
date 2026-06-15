@@ -114,6 +114,8 @@ export default defineConfig({
                 { label: 'burndown', slug: 'plugins/burndown' },
                 { label: 'session-reader', slug: 'plugins/session-reader' },
                 { label: 'witr', slug: 'plugins/witr' },
+                { label: 'learnings', slug: 'plugins/learnings' },
+                { label: 'abtop', slug: 'plugins/abtop' },
               ],
             },
             { label: 'Changelog', slug: 'plugins/changelog' },
@@ -133,6 +135,12 @@ export default defineConfig({
             { label: 'Building', slug: 'contributing/building' },
             { label: 'CI / CD', slug: 'contributing/ci-cd' },
             { label: 'Release process', slug: 'contributing/release-process' },
+          ],
+        },
+        {
+          label: 'Hangar',
+          items: [
+            { label: 'Architecture & features', slug: 'hangar/architecture' },
           ],
         },
         {

@@ -1,0 +1,23 @@
+[
+  {
+    "docid": "#114073",
+    "score": 0.93,
+    "file": "qmd://learnings/feedback-audit-after-rebase.md",
+    "title": "feedback_audit_after_rebase",
+    "snippet": "@@ -1,4 @@ (0 before, 20 after)\n---\ntitle: \"Audit after large rebase before continuing prior plan\""
+  },
+  {
+    "docid": "#8980c5",
+    "score": 0.56,
+    "file": "qmd://learnings/audit-after-large-rebase-baa6c1.md",
+    "title": "Problem",
+    "snippet": "@@ -1,4 @@ (0 before, 41 after)\n---\ntitle: \"Audit after large rebase before continuing prior plan\"\ncategory: \"process\""
+  },
+  {
+    "docid": "#5862eb",
+    "score": 0.46,
+    "file": "qmd://learnings/memory-cfddd3.md",
+    "title": "Memory Index",
+    "snippet": "@@ -20,4 @@ (19 before, 1 after)\n- [Audit after large rebase](feedback_audit_after_rebase.md)"
+  }
+]

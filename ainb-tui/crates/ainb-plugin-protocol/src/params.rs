@@ -37,6 +37,11 @@ pub struct PluginInitParams {
     /// Wire ABI version the host speaks. Plugin MUST refuse to init
     /// if it can't speak this revision.
     pub abi_version: u32,
+    /// Resolved per-plugin config (the `[plugins.<name>]` table) the host
+    /// injects at init. Defaults to JSON `null` so ABI-2 peers that omit it
+    /// keep decoding. The plugin parses this into its typed config struct.
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 /// `plugin/init` result: plugin echoes its name + version so the host
@@ -100,6 +105,17 @@ pub struct RenderParams {
 pub struct RenderResult {
     /// Cell grid to paint.
     pub buffer: WireBuffer,
+    /// Self-animation hint: when `true`, the plugin is mid-transition and
+    /// wants to be rendered again on the next host tick without any further
+    /// input. The runtime re-marks the plugin's render-dirty flag so the
+    /// host's render loop calls `plugin/render` again, frame-by-frame, until
+    /// the plugin returns `false`. A requestAnimationFrame analogue.
+    ///
+    /// `#[serde(default)]` (defaults to `false`) so ABI-2 peers that omit it
+    /// keep decoding — a plugin that never animates is byte-compatible with
+    /// the pre-`redraw` wire shape.
+    #[serde(default)]
+    pub redraw: bool,
 }
 
 // =====================================================================
@@ -223,6 +239,92 @@ pub struct HandleKeyParams {
     /// is expected to echo the value back via [`RenderParams::generation`]
     /// on the next render, giving the host a freshness witness that the
     /// key has been observed.
+    pub generation: u64,
+}
+
+// =====================================================================
+// plugin/handle_mouse
+// =====================================================================
+
+/// Mouse button identity for the press/release/drag variants of
+/// [`MouseKind`]. Wire tag is `type`, variants `snake_case` —
+/// `Left` is `{"type":"left"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseButton {
+    /// Left / primary button.
+    Left,
+    /// Right / secondary button.
+    Right,
+    /// Middle / wheel button.
+    Middle,
+}
+
+/// Logical mouse action. Wire tag is `type`, variants `snake_case` —
+/// `Down { button }` is `{"type":"down","button":{"type":"left"}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseKind {
+    /// Button pressed.
+    Down {
+        /// Which button went down.
+        button: MouseButton,
+    },
+    /// Button released.
+    Up {
+        /// Which button came up.
+        button: MouseButton,
+    },
+    /// Pointer moved with a button held.
+    Drag {
+        /// Which button is held during the drag.
+        button: MouseButton,
+    },
+    /// Pointer moved with no button held.
+    Moved,
+    /// Wheel scrolled up.
+    ScrollUp,
+    /// Wheel scrolled down.
+    ScrollDown,
+    /// Wheel scrolled left.
+    ScrollLeft,
+    /// Wheel scrolled right.
+    ScrollRight,
+}
+
+/// Normalized mouse event delivered from host → plugin.
+///
+/// Coordinates are **plugin-viewport-relative**: the host subtracts the
+/// plugin screen's origin before forwarding, so `(0, 0)` is the top-left
+/// cell of the plugin's own buffer. This lets a plugin hit-test against
+/// the same coordinate space it painted into, without knowing where on
+/// the terminal its screen was placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseEvent {
+    /// What the pointer did.
+    pub kind: MouseKind,
+    /// Column within the plugin viewport (0-based).
+    pub col: u16,
+    /// Row within the plugin viewport (0-based).
+    pub row: u16,
+    /// Bitmask of active modifiers — same bits as [`KeyEvent::mods`]
+    /// ([`KEY_MOD_SHIFT`], [`KEY_MOD_CTRL`], [`KEY_MOD_ALT`], [`KEY_MOD_SUPER`]).
+    #[serde(default)]
+    pub mods: u8,
+}
+
+/// `plugin/handle_mouse` params (notification). Host forwards mouse
+/// events to the plugin owning the currently focused screen, mirroring
+/// [`HandleKeyParams`]. The [`MouseEvent`] carries coordinates already
+/// translated into the plugin's viewport space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleMouseParams {
+    /// Plugin-defined screen identifier (mirrors [`HandleKeyParams::screen_id`]).
+    pub screen_id: String,
+    /// The mouse event, in plugin-viewport coordinates.
+    pub mouse: MouseEvent,
+    /// Monotonic counter the host increments per forwarded mouse event,
+    /// mirroring [`HandleKeyParams::generation`].
     pub generation: u64,
 }
 
@@ -444,16 +546,333 @@ pub struct NetworkFetchResult {
 }
 
 // =====================================================================
-// (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
+// host/event_stream_subscribe
+// =====================================================================
+
+/// `host/event_stream_subscribe` params: open a cancellable streaming
+/// subscription on `topic`.
+///
+/// The host validates `topic` against the plugin's
+/// `event_stream_subscribe` capability allow-list (list form = topic-prefix
+/// whitelist; bool-true = wildcard) before allocating a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamSubscribeParams {
+    /// Topic to subscribe to (e.g. `workspace:default`).
+    pub topic: String,
+    /// Optional resume point. When present, the host replays from this
+    /// version; when omitted, the stream starts from the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_version: Option<u64>,
+}
+
+/// `host/event_stream_subscribe` result: the host-allocated stream handle.
+///
+/// `stream_id` is a host-minted opaque token (ULID) the plugin cannot forge;
+/// subsequent events arrive via `plugin/handle_event` under topic
+/// `stream:<stream_id>` and the plugin cancels using this same id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamSubscribeResult {
+    /// Host-allocated stream identifier.
+    pub stream_id: String,
+    /// Topic version the stream is positioned at (first event the plugin
+    /// will observe is `> version` unless `since_version` requested a replay).
+    #[serde(default)]
+    pub version: u64,
+}
+
+// =====================================================================
+// host/event_stream_cancel
+// =====================================================================
+
+/// `host/event_stream_cancel` params (notification): tear down a stream.
+///
+/// Cancels a stream the plugin previously opened; the host stops emitting
+/// further `stream:<stream_id>` events. Cancellation is also implicit on
+/// plugin restart / shutdown / quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamCancelParams {
+    /// Stream to cancel — the `stream_id` returned by `event_stream_subscribe`.
+    pub stream_id: String,
+}
+
+// =====================================================================
+// host/spawn_managed_subprocess
+// =====================================================================
+
+/// `host/spawn_managed_subprocess` params: ask the host to spawn a
+/// host-supervised child process.
+///
+/// `bin` must appear on the plugin's `spawn_managed_subprocess`
+/// capability allow-list (list form is mandatory; a bool-true grant is
+/// rejected at manifest validation). `env_allowlist` names the parent
+/// environment variables the child is permitted to inherit — every other
+/// variable is stripped before exec, so a plugin can't exfiltrate the
+/// host's secrets into an arbitrary child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnManagedSubprocessParams {
+    /// Binary name or absolute path to spawn. Must be on the cap allow-list.
+    pub bin: String,
+    /// Arguments passed to the child, `argv[1..]` style.
+    #[serde(default)]
+    pub argv: Vec<String>,
+    /// Names of parent env vars the child may inherit. Everything not
+    /// listed is removed from the child's environment.
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    /// Optional working directory for the child. Inherits the host's
+    /// cwd when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// `host/spawn_managed_subprocess` result: the host-allocated handle +
+/// the child's OS process id.
+///
+/// `handle` is an opaque, host-minted token the plugin uses to compose
+/// with `host/event_stream_subscribe` on topic `managed:<handle>:stdout`.
+/// `pid` is informational (e.g. for the plugin to surface in its UI).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnManagedSubprocessResult {
+    /// Host-allocated, opaque managed-subprocess handle.
+    pub handle: String,
+    /// OS process id of the spawned child.
+    pub pid: u32,
+}
+
+// =====================================================================
+// host/unix_socket_dial
+// =====================================================================
+
+/// `host/unix_socket_dial` params: ask the host to dial an `AF_UNIX` socket.
+///
+/// `path` must resolve (after symlink canonicalization) to an entry on
+/// the plugin's `unix_socket_dial` capability allow-list (list form is
+/// mandatory; a bool-true grant is rejected at manifest validation). The
+/// host expands env vars (`${XDG_RUNTIME_DIR}`) and `~` itself — the
+/// plugin always sends the literal path string from its manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketDialParams {
+    /// Filesystem path of the socket to dial. Must be on the cap allow-list.
+    pub path: String,
+}
+
+/// `host/unix_socket_dial` result: the host-allocated stream handle.
+///
+/// `stream_id` is a host-minted opaque token (ULID) the plugin cannot
+/// forge; subsequent socket frames arrive via `plugin/handle_event` under
+/// topic `socket:<stream_id>` and the plugin writes / closes using this
+/// same id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketDialResult {
+    /// Host-allocated socket stream identifier.
+    pub stream_id: String,
+}
+
+// =====================================================================
+// host/unix_socket_send
+// =====================================================================
+
+/// `host/unix_socket_send` params (notification): write bytes to a dialled
+/// socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketSendParams {
+    /// Stream to write to — the `stream_id` returned by `unix_socket_dial`.
+    pub stream_id: String,
+    /// Bytes to write to the socket.
+    #[serde(with = "bytes_serde")]
+    pub bytes: bytes::Bytes,
+}
+
+// =====================================================================
+// host/unix_socket_close
+// =====================================================================
+
+/// `host/unix_socket_close` params (notification): tear down a dialled
+/// socket.
+///
+/// The host shuts the connection and stops emitting `socket:<stream_id>`
+/// events. Closure is also implicit on plugin shutdown / crash /
+/// quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketCloseParams {
+    /// Stream to close — the `stream_id` returned by `unix_socket_dial`.
+    pub stream_id: String,
+}
+
+/// Kind tag for a `socket:<stream_id>` delivery frame's payload.
+///
+/// The host wraps each inbound socket event in a small JSON envelope so
+/// the plugin can distinguish ordinary data from end-of-stream and from a
+/// transport error without an out-of-band channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnixSocketEventKind {
+    /// Bytes read from the socket; `bytes` is populated.
+    Data,
+    /// The peer closed the socket; no further events follow.
+    Eof,
+    /// A transport error occurred; `error` describes it, no further events.
+    Error,
+}
+
+/// Payload of a `socket:<stream_id>` `plugin/handle_event` notification.
+///
+/// Carried as the event `payload` bytes (JSON-encoded). `bytes` is present
+/// only for [`UnixSocketEventKind::Data`]; `error` only for
+/// [`UnixSocketEventKind::Error`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketEvent {
+    /// What this frame represents.
+    pub kind: UnixSocketEventKind,
+    /// Bytes read from the socket (present iff `kind == Data`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_bytes_serde"
+    )]
+    pub bytes: Option<bytes::Bytes>,
+    /// Human-readable transport error (present iff `kind == Error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// =====================================================================
+// host/secret_store_get
+// =====================================================================
+
+/// `host/secret_store_get` params: read a secret from the platform secret
+/// store, addressed by `(scope, key)`.
+///
+/// `scope` selects the addressing namespace and is one of `"workspace"` or
+/// `"global"`:
+///
+/// - `"workspace"` requires `workspace_id` and isolates the secret to a
+///   single workspace. The host folds `workspace_id` into the backend's
+///   service string so per-workspace secrets never collide with each other
+///   or with `"global"` secrets that share a `key`.
+/// - `"global"` is a host-wide secret shared across all workspaces;
+///   `workspace_id` is ignored.
+///
+/// The capability `secrets:read` must be granted (list form = an allow-list
+/// of permitted `key`s; bool-true = any key). On macOS the host reads the
+/// login Keychain; on linux the backend is deferred and the host returns
+/// `-32005`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretStoreGetParams {
+    /// Addressing scope: `"workspace"` or `"global"`.
+    pub scope: String,
+    /// Workspace id — required when `scope == "workspace"`, ignored for
+    /// `"global"`. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The secret key within the scope (e.g. `anthropic_api_key`). Cap-gated.
+    pub key: String,
+}
+
+/// `host/secret_store_get` result: the secret, base64-encoded.
+///
+/// The secret bytes are carried base64-encoded (not as a raw JSON byte
+/// array) so an arbitrary binary secret survives the JSON envelope and the
+/// payload stays compact. The plugin decodes `value` itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretStoreGetResult {
+    /// Base64 (standard alphabet) encoding of the secret's raw bytes.
+    pub value: String,
+}
+
+// =====================================================================
+// host/workspace_list
+// =====================================================================
+
+/// One workspace row in a `host/workspace_list` result.
+///
+/// The `id` is the workspace's stable ULID (what `state.toml` is keyed by and
+/// what `set_active`/`set_default` switch on); `slug` is the short display
+/// handle (e.g. `default`); `name` is the human-readable label. `active` and
+/// `default` are resolved against `~/.ainb/hangar/state.toml` at list time —
+/// `active` reflects the effective active workspace (explicit active, else
+/// default, else first), so exactly one row is `active` in a non-empty list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEntry {
+    /// Stable ULID workspace id. State + switching key on this, never the slug.
+    pub id: String,
+    /// Short display handle (e.g. `default`).
+    pub slug: String,
+    /// Human-readable display name.
+    pub name: String,
+    /// Whether this workspace is the effective active one.
+    pub active: bool,
+    /// Whether this workspace is the configured default.
+    pub default: bool,
+}
+
+/// `host/workspace_list` params: empty — the list is host-wide.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListParams {}
+
+/// `host/workspace_list` result: every known workspace with its
+/// active/default flags resolved from `state.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListResult {
+    /// The workspace rows, in the host's list order.
+    pub workspaces: Vec<WorkspaceEntry>,
+}
+
+// =====================================================================
+// host/workspace_get_active
+// =====================================================================
+
+/// `host/workspace_get_active` params: empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGetActiveParams {}
+
+/// `host/workspace_get_active` result: the effective active workspace id, or
+/// `None` when no workspaces exist.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGetActiveResult {
+    /// The effective active workspace ULID, or `None` for an empty host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+// =====================================================================
+// host/workspace_set_active / host/workspace_set_default
+// =====================================================================
+
+/// `host/workspace_set_active` params: the workspace ULID to make active.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetActiveParams {
+    /// The workspace ULID to switch to. Must name a known workspace.
+    pub workspace_id: String,
+}
+
+/// `host/workspace_set_active` result: empty acknowledgement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetActiveResult {}
+
+/// `host/workspace_set_default` params: the workspace ULID to make default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetDefaultParams {
+    /// The workspace ULID to set as default. Must name a known workspace.
+    pub workspace_id: String,
+}
+
+/// `host/workspace_set_default` result: empty acknowledgement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetDefaultResult {}
+
+// =====================================================================
+// (de)serialise bytes::Bytes as a base64 string (with a legacy
+// byte-array fallback on decode).
 // =====================================================================
 
 /// Binary payloads ride the JSON-RPC envelope as **base64 strings**.
 ///
-/// serde_json's default for `&[u8]` (and `Vec<u8>`) is a JSON array of
+/// `serde_json`'s default for `&[u8]` (and `Vec<u8>`) is a JSON array of
 /// numbers — `[12, 34, 56, ...]` — which costs 3-4 ASCII chars per
 /// byte. For the session-reader → burndown handoff that ballooned a
 /// ~25 MB msgpack snapshot to ~80 MB of JSON, exceeding the host
-/// framer's `MAX_BODY_BYTES = 16 MiB` and OOMing the plugin process
+/// framer's `MAX_BODY_BYTES = 16 MiB` and `OOM`-ing the plugin process
 /// mid-write. Base64 costs ~1.33 chars per byte — fits the budget and
 /// matches how JSON-RPC servers in the wild ship binary blobs.
 ///
@@ -532,11 +951,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // exhaustive per-method round-trip list
     fn round_trip_each() {
         rt(&PluginInitParams {
             manifest_path: "/x/manifest.toml".into(),
             granted_capabilities: vec!["read_sessions".into()],
             abi_version: 2,
+            config: serde_json::Value::Null,
         });
         rt(&PluginInitResult {
             name: "burndown".into(),
@@ -551,11 +972,31 @@ mod tests {
             viewport: Viewport::new(80, 24),
             generation: 7,
         });
-        rt(&RenderResult { buffer: buf });
+        rt(&RenderResult {
+            buffer: buf.clone(),
+            redraw: false,
+        });
+        rt(&RenderResult {
+            buffer: buf,
+            redraw: true,
+        });
 
         rt(&HandleEventParams {
             topic: "sessions.usage_data".into(),
             payload: bytes::Bytes::from_static(b"hello"),
+        });
+
+        rt(&HandleMouseParams {
+            screen_id: "learnings".into(),
+            mouse: MouseEvent {
+                kind: MouseKind::Down {
+                    button: MouseButton::Left,
+                },
+                col: 12,
+                row: 3,
+                mods: KEY_MOD_CTRL,
+            },
+            generation: 9,
         });
 
         rt(&CliDispatchParams {
@@ -627,12 +1068,293 @@ mod tests {
             headers: vec![("content-type".into(), "application/json".into())],
             body: bytes::Bytes::from_static(b"{}"),
         });
+
+        rt(&EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: Some(7),
+        });
+        rt(&EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: None,
+        });
+        rt(&EventStreamSubscribeResult {
+            stream_id: "01J9ZX8QK7".into(),
+            version: 42,
+        });
+        rt(&EventStreamCancelParams {
+            stream_id: "01J9ZX8QK7".into(),
+        });
+
+        rt(&SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec!["--socket".into(), "/tmp/x.sock".into()],
+            env_allowlist: vec!["HOME".into(), "PATH".into()],
+            cwd: Some("/tmp".into()),
+        });
+        rt(&SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec![],
+            env_allowlist: vec![],
+            cwd: None,
+        });
+        rt(&SpawnManagedSubprocessResult {
+            handle: "01J9ZX8QK7-0000002a".into(),
+            pid: 4242,
+        });
+
+        rt(&UnixSocketDialParams {
+            path: "/run/user/1000/ainb-hangar.sock".into(),
+        });
+        rt(&UnixSocketDialResult {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+        });
+        rt(&UnixSocketSendParams {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+            bytes: bytes::Bytes::from_static(b"ping\n"),
+        });
+        rt(&UnixSocketCloseParams {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Data,
+            bytes: Some(bytes::Bytes::from_static(b"pong\n")),
+            error: None,
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Error,
+            bytes: None,
+            error: Some("connection reset".into()),
+        });
+
+        rt(&SecretStoreGetParams {
+            scope: "workspace".into(),
+            workspace_id: Some("ws-123".into()),
+            key: "anthropic_api_key".into(),
+        });
+        rt(&SecretStoreGetParams {
+            scope: "global".into(),
+            workspace_id: None,
+            key: "openai_api_key".into(),
+        });
+        rt(&SecretStoreGetResult {
+            value: "c2VjcmV0".into(),
+        });
+
+        rt(&WorkspaceListParams::default());
+        rt(&WorkspaceListResult {
+            workspaces: vec![
+                WorkspaceEntry {
+                    id: "01J9ZX8QK7".into(),
+                    slug: "default".into(),
+                    name: "Default".into(),
+                    active: true,
+                    default: true,
+                },
+                WorkspaceEntry {
+                    id: "01J9ZX8QK8".into(),
+                    slug: "acme".into(),
+                    name: "Acme".into(),
+                    active: false,
+                    default: false,
+                },
+            ],
+        });
+        rt(&WorkspaceGetActiveParams::default());
+        rt(&WorkspaceGetActiveResult {
+            workspace_id: Some("01J9ZX8QK7".into()),
+        });
+        rt(&WorkspaceGetActiveResult { workspace_id: None });
+        rt(&WorkspaceSetActiveParams {
+            workspace_id: "01J9ZX8QK8".into(),
+        });
+        rt(&WorkspaceSetActiveResult::default());
+        rt(&WorkspaceSetDefaultParams {
+            workspace_id: "01J9ZX8QK8".into(),
+        });
+        rt(&WorkspaceSetDefaultResult::default());
+    }
+
+    #[test]
+    fn workspace_get_active_omits_none_id() {
+        // A host with no workspaces returns `{}` (no `workspace_id` key).
+        let r = WorkspaceGetActiveResult { workspace_id: None };
+        assert_eq!(serde_json::to_string(&r).unwrap(), "{}");
+    }
+
+    #[test]
+    fn workspace_entry_wire_shape() {
+        let e = WorkspaceEntry {
+            id: "01J9ZX8QK7".into(),
+            slug: "default".into(),
+            name: "Default".into(),
+            active: true,
+            default: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"id":"01J9ZX8QK7","slug":"default","name":"Default","active":true,"default":false}"#
+        );
+    }
+
+    #[test]
+    fn secret_store_get_params_workspace_wire_shape() {
+        let p = SecretStoreGetParams {
+            scope: "workspace".into(),
+            workspace_id: Some("ws-123".into()),
+            key: "anthropic_api_key".into(),
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            j,
+            r#"{"scope":"workspace","workspace_id":"ws-123","key":"anthropic_api_key"}"#
+        );
+    }
+
+    #[test]
+    fn secret_store_get_params_global_omits_workspace_id() {
+        // `workspace_id: None` must not ride the wire for a global read.
+        let p = SecretStoreGetParams {
+            scope: "global".into(),
+            workspace_id: None,
+            key: "openai_api_key".into(),
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(j, r#"{"scope":"global","key":"openai_api_key"}"#);
+    }
+
+    #[test]
+    fn secret_store_get_result_wire_shape() {
+        // `value` carries the base64-encoded secret bytes (the secret is
+        // never sent as a raw byte array).
+        let r = SecretStoreGetResult {
+            value: "c2VjcmV0".into(),
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert_eq!(j, r#"{"value":"c2VjcmV0"}"#);
+    }
+
+    #[test]
+    fn unix_socket_event_data_kind_lowercased_on_wire() {
+        let s = serde_json::to_string(&UnixSocketEventKind::Eof).unwrap();
+        assert_eq!(s, "\"eof\"");
+    }
+
+    #[test]
+    fn unix_socket_event_omits_absent_optional_fields() {
+        // An EOF frame carries neither `bytes` nor `error`.
+        let ev = UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert_eq!(j, r#"{"kind":"eof"}"#);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_skips_serializing_none_cwd() {
+        // None must not emit a `cwd: null` key — keeps the wire payload
+        // minimal and matches the optional contract.
+        let p = SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec![],
+            env_allowlist: vec![],
+            cwd: None,
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("cwd"), "None cwd should be omitted: {j}");
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_defaults_empty_argv_and_env() {
+        // Older/minimal peers may omit argv + env_allowlist entirely.
+        let j = r#"{"bin":"ainb-hangar-daemon"}"#;
+        let p: SpawnManagedSubprocessParams = serde_json::from_str(j).unwrap();
+        assert_eq!(p.bin, "ainb-hangar-daemon");
+        assert!(p.argv.is_empty());
+        assert!(p.env_allowlist.is_empty());
+        assert_eq!(p.cwd, None);
+    }
+
+    #[test]
+    fn event_stream_subscribe_since_version_omitted_decodes_none() {
+        // `since_version` is optional on the wire; older/absent peers omit it
+        // entirely and the host starts the stream from the current version.
+        let j = r#"{"topic":"workspace:default"}"#;
+        let p: EventStreamSubscribeParams = serde_json::from_str(j).unwrap();
+        assert_eq!(p.topic, "workspace:default");
+        assert_eq!(p.since_version, None);
+    }
+
+    #[test]
+    fn event_stream_subscribe_skips_serializing_none_since_version() {
+        // None must not emit a `since_version: null` key — keeps the wire
+        // payload minimal and matches the optional contract.
+        let p = EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: None,
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(j, r#"{"topic":"workspace:default"}"#);
     }
 
     #[test]
     fn log_level_lowercased_on_wire() {
         let s = serde_json::to_string(&LogLevel::Warn).unwrap();
         assert_eq!(s, "\"warn\"");
+    }
+
+    #[test]
+    fn mouse_event_wire_shape_and_viewport_coords() {
+        // Coordinates are plugin-viewport-relative; kind carries the button.
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 7,
+            row: 2,
+            mods: 0,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"col\":7"), "col missing: {json}");
+        assert!(json.contains("\"row\":2"), "row missing: {json}");
+        assert!(json.contains("\"kind\""), "kind missing: {json}");
+        // Snake-case tagged union for the action + button.
+        assert!(
+            json.contains("\"type\":\"down\""),
+            "down tag missing: {json}"
+        );
+        assert!(
+            json.contains("\"type\":\"left\""),
+            "left tag missing: {json}"
+        );
+        let back: MouseEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn mouse_event_mods_default_to_zero_when_absent() {
+        let json = r#"{"kind":{"type":"moved"},"col":1,"row":1}"#;
+        let ev: MouseEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.mods, 0);
+        assert_eq!(ev.kind, MouseKind::Moved);
+    }
+
+    #[test]
+    fn render_result_redraw_defaults_to_false_when_absent() {
+        // Pre-`redraw` wire shape (buffer only) must still decode, with
+        // redraw defaulting to false — ABI back-compat for non-animating
+        // plugins.
+        let mut buf = WireBuffer::new(1, 1);
+        buf.push(Coord::new(0, 0), Cell::new("x"));
+        let legacy = serde_json::json!({ "buffer": buf });
+        let back: RenderResult = serde_json::from_value(legacy).unwrap();
+        assert!(!back.redraw, "absent redraw must default to false");
     }
 
     #[test]
@@ -686,6 +1408,31 @@ mod tests {
         assert_eq!(all, 0b1111);
         assert_eq!(KEY_MOD_SHIFT & KEY_MOD_CTRL, 0);
         assert_eq!(KEY_MOD_ALT & KEY_MOD_SUPER, 0);
+    }
+
+    #[test]
+    fn test_init_params_config_defaults_empty() {
+        // ABI-2 back-compat: an init payload WITHOUT `config` still decodes,
+        // and `config` defaults to JSON null.
+        let legacy = r#"{
+            "manifest_path": "/x/manifest.toml",
+            "granted_capabilities": ["read_sessions"],
+            "abi_version": 2
+        }"#;
+        let p: PluginInitParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.config, serde_json::Value::Null);
+
+        // With `config` present it round-trips byte-stably.
+        let with_config = PluginInitParams {
+            manifest_path: "/x/manifest.toml".into(),
+            granted_capabilities: vec!["read_paths".into()],
+            abi_version: 2,
+            config: serde_json::json!({ "learnings_dir": "~/.learnings" }),
+        };
+        let json = serde_json::to_string(&with_config).unwrap();
+        let back: PluginInitParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_config, back);
+        assert_eq!(back.config["learnings_dir"], "~/.learnings");
     }
 
     #[test]

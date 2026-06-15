@@ -56,6 +56,15 @@ git_directories = []
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
+    // Suppress the ainb-hooks first-run install dialog — it overlays the
+    // home screen and swallows the `b` keystroke this tripwire sends.
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
+
     // Seed two synthetic notifications via the real Store API the
     // daemon uses. This proves the same code path produces rows
     // the Inbox screen will read.
@@ -133,6 +142,13 @@ fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
+fn send_key(session: &str, key: &str) {
+    Command::new("tmux")
+        .args(["send-keys", "-t", session, key])
+        .status()
+        .expect("tmux send-keys");
+}
+
 #[test]
 fn inbox_opens_and_renders_seeded_notifications() {
     if !tmux_available() {
@@ -163,7 +179,7 @@ fn inbox_opens_and_renders_seeded_notifications() {
         .expect("send launch cmd");
 
     // Wait for HomeScreen — same marker the other tripwire tests use.
-    let home_deadline = Instant::now() + Duration::from_secs(45);
+    let home_deadline = Instant::now() + Duration::from_secs(90);
     let pre_cap = poll_capture(&session, home_deadline, |c| {
         c.contains("Stats") && c.contains("[i]")
     });
@@ -202,7 +218,7 @@ fn inbox_opens_and_renders_seeded_notifications() {
         .status()
         .expect("send-keys b");
 
-    let inbox_deadline = Instant::now() + Duration::from_secs(15);
+    let inbox_deadline = Instant::now() + Duration::from_secs(30);
     let post_cap = poll_capture(&session, inbox_deadline, |c| {
         c.contains("📥 Inbox")
             && c.contains("Notification:idle_prompt")
@@ -229,4 +245,124 @@ fn inbox_opens_and_renders_seeded_notifications() {
     );
 
     kill_session(&session);
+}
+
+/// Launch ainb in a detached tmux session and return once the
+/// HomeScreen has rendered. Shared by the origin-return tests below.
+fn launch_to_home(session: &str, home: &Path) {
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", session, "-x", "180", "-y", "50"])
+        .status()
+        .expect("tmux new-session");
+    assert!(status.success(), "tmux new-session failed");
+    let cmd = format!("HOME={} exec {} tui", home.display(), ainb_bin().display());
+    Command::new("tmux")
+        .args(["send-keys", "-t", session, &cmd, "Enter"])
+        .status()
+        .expect("send launch cmd");
+    if poll_capture(session, Instant::now() + Duration::from_secs(90), |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
+    {
+        let last = capture_pane(session);
+        kill_session(session);
+        panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
+    }
+}
+
+/// The inbox SCREEN title is `📥 Inbox` (single space). The home sidebar
+/// tile is `📥  Inbox` (double space) and the session-list legend says
+/// `b inbox` (lowercase, no emoji), so this single-space form uniquely
+/// identifies "we are on the inbox screen".
+fn on_inbox_screen(c: &str) -> bool {
+    c.contains("📥 Inbox")
+}
+
+#[test]
+fn inbox_from_home_returns_home() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_isolated_home(home_tmp.path());
+    let session = format!("tripwire-inbox-home-{}", std::process::id());
+    launch_to_home(&session, home_tmp.path());
+
+    send_key(&session, "b");
+    if poll_capture(
+        &session,
+        Instant::now() + Duration::from_secs(30),
+        on_inbox_screen,
+    )
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("inbox never opened after `b`; last:\n---\n{last}\n---");
+    }
+
+    send_key(&session, "Escape");
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
+        c.contains("Stats") && c.contains("[i]") && !on_inbox_screen(c)
+    });
+    let final_cap = capture_pane(&session);
+    kill_session(&session);
+    assert!(
+        back.is_some(),
+        "Esc on inbox (opened from home) did not return to home within 25s. \
+         Final capture:\n---\n{final_cap}\n---"
+    );
+}
+
+#[test]
+fn inbox_from_session_list_returns_to_session_list() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_isolated_home(home_tmp.path());
+    let session = format!("tripwire-inbox-sessions-{}", std::process::id());
+    launch_to_home(&session, home_tmp.path());
+
+    // Hop to the session list (`del-sel` is unique to its legend).
+    send_key(&session, "s");
+    if poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
+        c.contains("del-sel")
+    })
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+    }
+
+    // Open the inbox from the session list (`b` is mirrored here).
+    send_key(&session, "b");
+    if poll_capture(
+        &session,
+        Instant::now() + Duration::from_secs(30),
+        on_inbox_screen,
+    )
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("inbox never opened after `b` from session list; last:\n---\n{last}\n---");
+    }
+
+    // Esc must return to the SESSION LIST (not home).
+    send_key(&session, "Escape");
+    let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
+        c.contains("del-sel") && !on_inbox_screen(c)
+    });
+    let final_cap = capture_pane(&session);
+    kill_session(&session);
+    assert!(
+        back.is_some(),
+        "Esc on inbox (opened from session list) did not return to the session list \
+         within 25s. Final capture:\n---\n{final_cap}\n---"
+    );
 }

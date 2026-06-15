@@ -103,12 +103,15 @@ impl CommandRegistry {
         r.register(UsageCommand);
         r.register(StatuslineCommand);
         r.register(ClaudecodeCommand);
+        r.register(CodexCommand);
         r.register(TmuxCommand);
         r.register(CompletionCommand);
+        r.register(AbtopCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(McpCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
+        r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r
     }
 
@@ -668,6 +671,63 @@ async fn dispatch_inner(
         );
     }
 
+    // `--hard`: tell session-reader to wipe its caches and rebuild
+    // from source before we poll for data. This is the ONE place the
+    // CLI publishes a refresh itself — the normal path relies on
+    // burndown's on_init publish (re-publishing incrementals here
+    // would queue redundant rescans and starve cli_dispatch).
+    //
+    // The payload is the msgpack encoding of the wire type
+    // `ainb_plugin_types_sessions::RefreshRequest { hard: true }`
+    // (`to_vec_named`: fixmap{ "hard": true }). Hand-pinned bytes so
+    // the host CLI stays decoupled from the plugin codec crates; the
+    // canonical encoding is asserted byte-for-byte by
+    // `refresh_request_hard_wire_bytes_are_pinned` in
+    // ainb-plugin-types-sessions — change one, that test fails.
+    // (The exact-token argv scan cannot fire on malformed invocations:
+    // clap validates the full `usage` surface in the registry hook
+    // before dispatch_inner runs, so a typo'd command errors out
+    // before any publish.)
+    if argv.iter().any(|a| a == "--hard") {
+        const HARD_REFRESH_MSGPACK: [u8; 7] = [0x81, 0xA4, b'h', b'a', b'r', b'd', 0xC3];
+        // Publishing to a topic with no subscriber yet is a silent
+        // no-op — racing session-reader's on_init subscribe would
+        // silently downgrade --hard to a normal refresh. Wait (bounded)
+        // for both subscribers to finish init: session-reader
+        // subscribes to refresh_request during on_init, and burndown
+        // must observe the hard request to drop its stale snapshot so
+        // the retry loop below can only be satisfied by post-rebuild
+        // data.
+        let session_reader = PluginId::from("session-reader");
+        let subscribe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            use ainb_plugin_runtime::LifecycleState;
+            let sr = handle.lifecycle_state(&session_reader);
+            let bd = handle.lifecycle_state(&burndown);
+            if matches!(sr, Some(LifecycleState::Running))
+                && matches!(bd, Some(LifecycleState::Running))
+            {
+                break;
+            }
+            if std::time::Instant::now() >= subscribe_deadline {
+                eprintln!(
+                    "warning: --hard requested but plugins not running yet \
+                     (session-reader: {sr:?}, burndown: {bd:?}); the hard \
+                     refresh may be downgraded to a normal one"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        handle.publish_snapshot(
+            "sessions.refresh_request",
+            bytes::Bytes::from_static(&HARD_REFRESH_MSGPACK),
+        );
+        if trace {
+            eprintln!("[usage-cli] --hard: published hard refresh_request");
+        }
+    }
+
     // Retry contract: burndown reports `exit_code = 1` + empty stdout +
     // a stderr containing this exact byte sequence when `self.data` is
     // None. Any *other* exit/stdout/stderr shape (including a real
@@ -844,6 +904,61 @@ impl CliCommand for ClaudecodeCommand {
                 Some("statusline") => crate::cli::statusline::execute(cache_only),
                 _ => Err(anyhow::anyhow!(
                     "claudecode requires a subcommand (e.g. `statusline`)"
+                )),
+            }
+        })
+    }
+}
+
+/// Canonical `ainb codex <subcmd>` provider-namespaced surface — the Codex
+/// analog of [`ClaudecodeCommand`].
+///
+/// Today: only `statusline`, which pulls Codex OAuth quota
+/// (`chatgpt.com/backend-api/wham/usage`) and caches it for the ainb TUI
+/// top bar. Unlike `claudecode statusline` (Claude PUSHES its windows to a
+/// render-time subprocess), this command makes a throttled network call —
+/// it is driven by the Codex `stop` hook and the TUI background poller,
+/// never by a prompt render. Hide-on-fail; never errors out to the caller.
+pub struct CodexCommand;
+impl CliCommand for CodexCommand {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Codex-specific commands (statusline, etc.). \
+                     Provider-namespaced — the Codex analog of `claudecode`.",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("statusline")
+                        .about(
+                            "Pull Codex OAuth quota (5h + weekly) from \
+                             chatgpt.com and cache it for the ainb TUI top bar. \
+                             Throttled; hide-on-fail when Codex is not logged in.",
+                        )
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Bypass the throttle and pull now."),
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let (sub_name, force) = match matches.subcommand() {
+            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("force")),
+            _ => (None, false),
+        };
+        Box::pin(async move {
+            match sub_name.as_deref() {
+                Some("statusline") => crate::cli::codex_statusline::execute(force).await,
+                _ => Err(anyhow::anyhow!(
+                    "codex requires a subcommand (e.g. `statusline`)"
                 )),
             }
         })
@@ -1048,6 +1163,70 @@ impl CliCommand for CompletionCommand {
     }
 }
 
+/// `ainb abtop [args]` — print a one-shot snapshot of running AI agents by
+/// shelling out to the external `abtop --once` (the "top-for-agents" TUI).
+///
+/// abtop is a ratatui alternate-screen TUI: `--once` prints a human-readable
+/// snapshot and exits ONLY when stdout is a real terminal (piped, it blocks in
+/// its event loop). So this command inherits the parent's stdio — `ainb abtop`
+/// from a terminal works exactly like `abtop --once`. Extra args are forwarded
+/// verbatim (e.g. `ainb abtop --theme <name>`). The interactive full-screen
+/// abtop is reached from the TUI menu ("abtop (top-for-agents)" / press `t`),
+/// which attaches the real binary in tmux. The in-tree `ainb-plugin-abtop`
+/// crate owns detection + the install-hint empty-state; this is the live CLI.
+pub struct AbtopCommand;
+impl CliCommand for AbtopCommand {
+    fn name(&self) -> &'static str {
+        "abtop"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Snapshot running AI agents (top-for-agents) via `abtop --once`")
+                .arg(
+                    clap::Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true)
+                        .help(
+                            "Extra flags forwarded verbatim to `abtop --once` (e.g. --theme <name>)",
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let forwarded: Vec<String> = matches
+            .get_many::<String>("args")
+            .map(|vals| vals.cloned().collect())
+            .unwrap_or_default();
+        Box::pin(async move {
+            use tokio::process::Command as ChildCommand;
+            // Inherit stdio (the default) so abtop gets the user's real TTY —
+            // `abtop --once` only prints + exits cleanly against a terminal.
+            let status = ChildCommand::new("abtop").arg("--once").args(&forwarded).status().await;
+            match status {
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(anyhow::anyhow!(
+                    "abtop exited with status {}",
+                    s.code().map_or_else(|| "signal".to_string(), |c| c.to_string())
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!(
+                        "abtop is not installed or not on PATH.\n\n\
+                         Install it:\n  \
+                         macOS:  brew install graykode/tap/abtop\n  \
+                         Linux:  curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh\n  \
+                         any:    cargo install abtop\n  \
+                         docs:   https://github.com/graykode/abtop"
+                    );
+                    Err(anyhow::anyhow!("abtop not found on PATH"))
+                }
+                Err(e) => Err(anyhow::anyhow!("failed to launch abtop: {e}")),
+            }
+        })
+    }
+}
+
 /// `ainb plugin {marketplace,install,update,remove,list,search}` — Phase 4
 /// marketplace + installer. Argument shapes nailed down in Phase 2b so plugin
 /// authors could target them today; Phase 4 wires the real handlers in
@@ -1188,6 +1367,12 @@ impl CliCommand for FleetCommand {
                     .long("text")
                     .action(clap::ArgAction::SetTrue)
                     .help("Force text output even with --format json"),
+            )
+            .arg(
+                clap::Arg::new("no-enrich")
+                    .long("no-enrich")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Skip AI enrichment — 0-token output (env AINB_FLEET_ENRICH=0)"),
             );
         let broadcast = Command::new("broadcast")
             .about("Send one prompt to selected sessions (peers-first, tmux fallback)")
@@ -1227,6 +1412,27 @@ impl CliCommand for FleetCommand {
                     .long("idle-min")
                     .value_parser(clap::value_parser!(i64))
                     .help("Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)"),
+            )
+            .arg(
+                clap::Arg::new("no-enrich")
+                    .long("no-enrich")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Skip AI enrichment — 0-token HUD (env AINB_FLEET_ENRICH=0)"),
+            );
+        let enrich_cache = Command::new("enrich-cache")
+            .about("Content-addressed enrich cache (the producer's write path)")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("put")
+                    .about("Store a drafted suggestion under a card's enrich_key")
+                    .arg(clap::Arg::new("key").long("key").required(true))
+                    .arg(clap::Arg::new("suggestion").long("suggestion").required(true)),
+            )
+            .subcommand(
+                Command::new("get")
+                    .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
+                    .arg(clap::Arg::new("key").long("key").required(true)),
             );
         let daemon = Command::new("daemon")
             .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
@@ -1245,7 +1451,8 @@ impl CliCommand for FleetCommand {
                 .subcommand(broadcast)
                 .subcommand(sequence)
                 .subcommand(needs)
-                .subcommand(daemon),
+                .subcommand(daemon)
+                .subcommand(enrich_cache),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1314,6 +1521,38 @@ impl CliCommand for McpCommand {
     }
 }
 
+/// The `hangar` namespace — Hangar managed-agents control plane.
+///
+/// Augments the derive-side [`HangarCommand`](crate::cli::hangar::HangarCommand)
+/// subtree (noun groups: `issue` / `task` / `beads` / `daemon`) onto a `hangar`
+/// builder command, mirroring the hybrid derive+builder pattern used elsewhere
+/// in this registry. The dispatch lives in the `cli::hangar` lib module
+/// (`reference_rust_bin_lib_split`); `run` only extracts the parsed enum and
+/// hands it off. Verbs whose backing impl does not yet exist (`skill`,
+/// `autopilot`, `config`, `init`, `tui`, `daemon start|stop`) are intentionally
+/// absent — a later phase adds a variant rather than un-stubbing one here.
+pub struct HangarCommand;
+impl CliCommand for HangarCommand {
+    fn name(&self) -> &'static str {
+        "hangar"
+    }
+    fn build(&self, app: Command) -> Command {
+        let hangar = <crate::cli::hangar::HangarCommand as Subcommand>::augment_subcommands(
+            Command::new(self.name())
+                .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
+                .subcommand_required(true)
+                .arg_required_else_help(true),
+        );
+        app.subcommand(hangar)
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::hangar::HangarCommand::from_arg_matches(matches) {
+            Ok(cmd) => Box::pin(async move { crate::cli::hangar::dispatch(cmd, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,14 +1562,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_four_commands() {
+    fn built_ins_registers_twenty_seven_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + plugin stub + fleet + mcp namespace + hidden
-        // notifyd = 24. The TUI is NOT in the registry — main.rs handles
+        // main's 26 (built-ins + doctor + reflect + claudecode + codex + tmux
+        // + abtop + plugin stub + fleet + hidden notifyd + hangar) + the mcp
+        // namespace = 27. The TUI is NOT in the registry — main.rs handles
         // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 24, "expected 24 entries, got {names:?}");
+        assert_eq!(names.len(), 27, "expected 27 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1350,12 +1589,15 @@ mod tests {
             "usage",
             "statusline",
             "claudecode",
+            "codex",
             "tmux",
             "completion",
+            "abtop",
             "plugin",
             "fleet",
             "mcp",
             "notifyd",
+            "hangar",
         ] {
             assert!(
                 names.contains(&required),

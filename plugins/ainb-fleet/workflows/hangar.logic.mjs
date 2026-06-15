@@ -108,6 +108,16 @@ function buildPanel(enriched) {
 
   return { banner, cards, asks }
 }
+
+function enrichMapFromItems(items) {
+  const map = {}
+  for (const it of items || []) {
+    if (it && typeof it.enrich_key === 'string' && it.enrich_key.length > 0) {
+      map[it.enrich_key] = typeof it.suggestion === 'string' ? it.suggestion : ''
+    }
+  }
+  return map
+}
 // PARITY-END
 
-export { buildPanel }
+export { buildPanel, enrichMapFromItems }

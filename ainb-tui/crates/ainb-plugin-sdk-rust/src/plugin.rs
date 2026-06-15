@@ -11,12 +11,36 @@
 //! default.
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
-    params::{HandleEventParams, HandleKeyParams, RenderParams},
+    params::{HandleEventParams, HandleKeyParams, HandleMouseParams, RenderParams},
     wire_buffer::WireBuffer,
 };
+
+/// Resolved one-shot init data the host hands the plugin on
+/// [`PLUGIN_INIT`](ainb_plugin_protocol::methods::PLUGIN_INIT).
+///
+/// Bundles the granted-capability set and the resolved per-plugin config
+/// table so [`Plugin::on_init`] receives both without a growing list of
+/// positional parameters. Future init-time data (locale, theme, ...) adds
+/// a field here rather than another `on_init` arg.
+///
+/// Borrows from the decoded [`PluginInitParams`](ainb_plugin_protocol::params::PluginInitParams)
+/// — it lives only for the duration of the `on_init` call.
+#[derive(Debug, Clone, Copy)]
+pub struct InitContext<'a> {
+    /// Capabilities the host granted, by canonical capability key. A
+    /// subset of the manifest `[capabilities]`. A plugin may refuse to
+    /// start (return [`crate::SdkError::plugin`]) if a required capability
+    /// was withheld.
+    pub granted_capabilities: &'a [String],
+    /// Resolved `[plugins.<name>]` config table the host injected, as a
+    /// JSON value. `null` when the host omitted config (ABI-2 back-compat).
+    /// Plugins parse this into their typed config struct.
+    pub config: &'a Value,
+}
 
 /// Captured stdout / stderr / exit code from a CLI dispatch.
 ///
@@ -104,6 +128,37 @@ pub trait Plugin: Send + 'static {
         Ok(())
     }
 
+    /// Receive a single normalized mouse event the host has forwarded.
+    ///
+    /// Notification — the host does not wait on a response and ignores
+    /// errors. Default is a no-op, mirroring [`Self::handle_key`], so
+    /// plugins that don't react to the pointer get nothing on the wire
+    /// by virtue of the host only forwarding mouse events to the focused
+    /// plugin. `params.mouse.col`/`.row` are already in the plugin's own
+    /// viewport coordinate space.
+    ///
+    /// Ordering: dispatched inline on the reader-loop task, same as
+    /// `handle_key`. Plugins MUST NOT spawn the handler body.
+    async fn handle_mouse(&mut self, host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        let _ = (host, params);
+        Ok(())
+    }
+
+    /// Whether the plugin wants the host to render it again on the next
+    /// tick without any further input. Queried by the [`Server`] right
+    /// after each [`render`](Self::render) call and reported to the host
+    /// via `RenderResult.redraw`; the runtime re-marks the plugin dirty
+    /// when it's `true`, so the host's render loop keeps calling `render`
+    /// frame-by-frame.
+    ///
+    /// This is the self-animation hook (a requestAnimationFrame analogue):
+    /// a plugin running a transition returns `true` while frames remain and
+    /// `false` once it settles. Default is `false` — static plugins repaint
+    /// only on input/snapshot, exactly as before.
+    fn wants_redraw(&self) -> bool {
+        false
+    }
+
     /// Dispatch a CLI subcommand the plugin advertised in its manifest's
     /// `[provides] cli_namespaces` list. Default implementation returns
     /// exit-2 (`unknown command`).
@@ -125,12 +180,13 @@ pub trait Plugin: Send + 'static {
     /// [`PLUGIN_INIT`](ainb_plugin_protocol::methods::PLUGIN_INIT).
     ///
     /// Default is a no-op. Plugins are free to override for one-shot
-    /// setup (open caches, subscribe to topics via `host`, ...). The
-    /// granted-capabilities list is supplied so the plugin can refuse
-    /// to start if a required capability was withheld — return
-    /// [`crate::SdkError::plugin`] in that case.
-    async fn on_init(&mut self, host: &HostClient, granted_capabilities: &[String]) -> Result<()> {
-        let _ = (host, granted_capabilities);
+    /// setup (open caches, subscribe to topics via `host`, parse the
+    /// injected config, ...). The [`InitContext`] carries the granted
+    /// capabilities (so the plugin can refuse to start if a required one
+    /// was withheld — return [`crate::SdkError::plugin`] in that case)
+    /// and the resolved per-plugin `config` table the host injected.
+    async fn on_init(&mut self, host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
+        let _ = (host, ctx);
         Ok(())
     }
 

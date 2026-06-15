@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ainb_plugin_protocol::params::RenderParams;
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord};
-use ainb_plugin_sdk::{CliOutput, HostClient, Plugin, Result as SdkResult};
+use ainb_plugin_sdk::{CliOutput, HostClient, InitContext, Plugin, Result as SdkResult};
 use ainb_plugin_testkit::{
     CliDispatchParams, CliDispatchResult, HarnessError, RenderResult, Viewport, WireBuffer,
     methods, run_plugin,
@@ -36,7 +36,7 @@ impl Plugin for FixturePlugin {
         "[plugin]\nname = \"fixture\"\nversion = \"0.1.0\"\nabi_version = 2\n"
     }
 
-    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> SdkResult<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> SdkResult<()> {
         host.snapshot_publish("fixture.greeting", bytes::Bytes::from_static(b"hello"))
             .await
     }

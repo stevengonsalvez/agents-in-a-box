@@ -9,11 +9,11 @@
 
 use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
-    Result, SdkError, WireBuffer,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
+    RenderParams, Result, SdkError, WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
-    ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
+    RefreshRequest, ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
 };
 use async_trait::async_trait;
 use ratatui::buffer::Buffer as RBuffer;
@@ -137,7 +137,7 @@ impl Plugin for BurndownPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // Subscribe up front so chunked publishes from session-reader
         // arrive via `handle_event`. The snapshot store only retains
         // the most recent publish, so for >1-chunk snapshots a passive
@@ -148,6 +148,13 @@ impl Plugin for BurndownPlugin {
         // walking the per-provider dirs on a cold cache. Failure is
         // non-fatal — the legacy ⏳ Waiting spinner remains.
         let _ = host.snapshot_subscribe("sessions.scan_progress").await;
+        // Subscribe to refresh requests so a HARD refresh (from our own
+        // R-confirm or the CLI --hard) drops the in-memory snapshot:
+        // the dashboard falls back to the scanning skeleton, and the
+        // CLI dispatch retry loop can only be satisfied by data
+        // published AFTER the rebuild — never by the pre-wipe snapshot
+        // the user just declared distrusted.
+        let _ = host.snapshot_subscribe("sessions.refresh_request").await;
 
         // Trigger a fresh publish. Eager-spawned session-reader runs
         // its first publish during its own `on_init`, which races
@@ -172,6 +179,28 @@ impl Plugin for BurndownPlugin {
             "sessions.scan_progress" => {
                 self.ingest_scan_progress(host, &params.payload).await;
             }
+            "sessions.refresh_request" => {
+                // Empty payload = incremental ping (our own r key, the
+                // FS watcher) — nothing to do. Only a hard refresh
+                // invalidates what is on screen.
+                let hard = !params.payload.is_empty()
+                    && rmp_serde::from_slice::<RefreshRequest>(&params.payload)
+                        .map(|req| req.hard)
+                        .unwrap_or(false);
+                if hard {
+                    self.data = None;
+                    self.pending = None;
+                    self.ui.data = None;
+                    self.ui.cached_filtered = None;
+                    self.filter_cache = None;
+                    self.generation = self.generation.wrapping_add(1);
+                    let _ = host
+                        .log_info(
+                            "burndown: hard refresh observed — dropped snapshot, awaiting rebuild",
+                        )
+                        .await;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -186,9 +215,9 @@ impl Plugin for BurndownPlugin {
     /// exists in `ui.rs`:
     ///
     /// - `Backspace` → `pop_filter_chip` / `zoom_handle_esc` (plan:
-    ///   `pop_filter`; originally bound to `Esc` but the host now
-    ///   reserves `Esc` for navigation back to home — see
-    ///   `is_host_reserved_key` in ainb-core).
+    ///   `pop_filter`). `Esc` performs the same one-level pop and, at
+    ///   the root view, publishes `ui.close_request` so the host closes
+    ///   the screen — see `is_host_reserved_key` in ainb-core.
     /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
     /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
     ///
@@ -203,16 +232,42 @@ impl Plugin for BurndownPlugin {
     /// Generation is bumped only when the dispatch matched a binding,
     /// so unmapped keys won't trigger an avoidable re-render.
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        // Hard-refresh confirm overlay is modal: while it's up, every
+        // key resolves it. Dispatched before everything else so the
+        // confirm `y` can never collide with the zoom-yank `y` below.
+        if self.ui.confirm_hard {
+            self.ui.confirm_hard = false;
+            if matches!(params.key.code, KeyCode::Char { ch: 'y' | 'Y' }) {
+                let payload = rmp_serde::to_vec_named(&RefreshRequest { hard: true })
+                    .map(bytes::Bytes::from)
+                    .unwrap_or_default();
+                let _ = host.snapshot_publish("sessions.refresh_request", payload).await;
+            }
+            // Any other key cancels: prior data stays on screen,
+            // nothing is published. (`Esc` is host-reserved and pops
+            // the screen before reaching us, hence `n`/anything.)
+            self.generation = self.generation.wrapping_add(1);
+            return Ok(());
+        }
+
         // Refresh + flush-cache are the two bindings that need the
         // host. Everything else mutates `self.ui` only, so it lives in
         // the pure helper below for testability.
         let handled = match params.key.code {
-            KeyCode::Char { ch: 'r' | 'R' } => {
-                // Ask session-reader to re-publish from scratch. Best
-                // effort — failure is silently dropped, the existing
-                // snapshot stays on screen.
+            KeyCode::Char { ch: 'r' } => {
+                // Ask session-reader to re-publish. Empty payload =
+                // incremental refresh (the cheap path). Best effort —
+                // failure is silently dropped, the existing snapshot
+                // stays on screen.
                 let _ =
                     host.snapshot_publish("sessions.refresh_request", bytes::Bytes::new()).await;
+                true
+            }
+            KeyCode::Char { ch: 'R' } => {
+                // Hard refresh re-parses ALL history from source —
+                // CPU-heavy, so it's gated behind the ⚠ confirm
+                // overlay. Nothing publishes until `y`.
+                self.ui.confirm_hard = true;
                 true
             }
             KeyCode::Char { ch: 'F' } => {
@@ -269,6 +324,25 @@ impl Plugin for BurndownPlugin {
                 // Always treat `y` as handled so generation bumps and the
                 // flash (or the no-op) renders.
                 true
+            }
+            KeyCode::Esc => {
+                // Esc pops one internal level via the pure dispatch
+                // (detail drawer → search overlay → zoom → filter chip).
+                // At the root view nothing is left to pop — publish
+                // `ui.close_request` so the host closes this screen back
+                // to wherever the user opened it from. Best effort: if
+                // the publish is lost the user just presses Esc again.
+                let popped = self.dispatch_key_pure(&params.key.code);
+                if !popped {
+                    let req = topics::UiCloseRequest {
+                        screen_id: params.screen_id.clone(),
+                    };
+                    let payload = serde_json::to_vec(&req).unwrap_or_default();
+                    let _ = host
+                        .snapshot_publish(topics::UI_CLOSE_REQUEST, bytes::Bytes::from(payload))
+                        .await;
+                }
+                popped
             }
             _ => self.dispatch_key_pure(&params.key.code),
         };
@@ -600,11 +674,14 @@ impl BurndownPlugin {
     /// latest known progress. Malformed payloads are logged and
     /// dropped — the skeleton just keeps showing the previous tick (or
     /// the ⏳ waiting line if no tick has arrived yet).
+    ///
+    /// A `done: true` event is terminal: the scan finished but decided
+    /// not to republish (session-reader's unchanged-snapshot
+    /// short-circuit), so no `usage_data` chunk is coming to clear the
+    /// banner — clear it here instead.
     async fn ingest_scan_progress(&mut self, host: &HostClient, payload: &[u8]) {
         match rmp_serde::from_slice::<ScanProgressEvent>(payload) {
-            Ok(evt) => {
-                self.scan_progress = Some(evt);
-            }
+            Ok(evt) => self.apply_scan_progress(evt),
             Err(e) => {
                 let _ = host
                     .log_info(format!(
@@ -612,6 +689,16 @@ impl BurndownPlugin {
                     ))
                     .await;
             }
+        }
+    }
+
+    /// Pure half of [`Self::ingest_scan_progress`] — unit-testable
+    /// without a `HostClient`.
+    fn apply_scan_progress(&mut self, evt: ScanProgressEvent) {
+        if evt.done {
+            self.scan_progress = None;
+        } else {
+            self.scan_progress = Some(evt);
         }
     }
 
@@ -954,16 +1041,29 @@ impl BurndownPlugin {
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
-            // `Backspace` (not `Esc`) handles pop-state: close zoom if
-            // open, otherwise pop the most recent filter chip. Esc is
-            // host-reserved — it always bubbles up to navigate back to
-            // home. See the doc on `is_host_reserved_key` in
-            // ainb-core/src/app/screens/builtin.rs for the rationale.
+            // `Backspace` handles pop-state: close zoom if open,
+            // otherwise pop the most recent filter chip. `Esc` (below)
+            // performs the same one-level pop but additionally signals
+            // the host once the root view is reached.
             KeyCode::Backspace => {
                 if self.ui.is_zoomed() {
                     let _ = self.ui.zoom_handle_esc();
                 } else {
                     let _ = self.ui.pop_filter_chip();
+                }
+            }
+            // One-level pop, mirroring Backspace: the zoom ladder first
+            // (detail drawer → search overlay → zoom), then the newest
+            // filter chip. Returning `false` at the root view (nothing
+            // left to pop) makes the async `handle_key` publish
+            // `ui.close_request` so the host closes the screen back to
+            // wherever it was opened from. See `is_host_reserved_key`
+            // in ainb-core/src/app/screens/builtin.rs for the host side.
+            KeyCode::Esc => {
+                if self.ui.zoom_handle_esc() {
+                    // Consumed by the zoom ladder.
+                } else if self.ui.pop_filter_chip().is_none() {
+                    return false;
                 }
             }
             KeyCode::Char { ch: 'p' } => self.ui.cycle_provider_filter(),
@@ -1112,15 +1212,94 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn esc_is_not_claimed_by_plugin() {
-        // Esc is host-reserved (see `is_host_reserved_key` in
-        // ainb-core/src/app/screens/builtin.rs) so the runtime should
-        // never forward it. Defensively assert dispatch returns false
-        // even if it does — the plugin must NOT claim Esc, otherwise
-        // pressing it on the analytics screen would swallow the
-        // navigation-back keystroke.
+    fn esc_at_root_is_not_claimed() {
+        // At the root view (no zoom, no overlay, no filter chips) there
+        // is nothing left to pop, so the dispatch must return false —
+        // that's the signal `handle_key` uses to publish
+        // `ui.close_request` and have the host close the screen. If
+        // this started returning true, Esc on the analytics root would
+        // silently do nothing forever.
         let mut p = BurndownPlugin::default();
         assert!(!p.dispatch_key_pure(&KeyCode::Esc));
+    }
+
+    #[test]
+    fn esc_pops_one_level_before_signalling_close() {
+        // Esc mirrors Backspace's one-level pop: zoomed → unzoom (claimed),
+        // then a second Esc at the root is unclaimed (close signal).
+        let mut p = BurndownPlugin::default();
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the unzoom"
+        );
+        assert!(!p.ui.is_zoomed(), "Esc must exit zoom");
+
+        assert!(
+            !p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc at the root must be unclaimed so handle_key publishes ui.close_request"
+        );
+    }
+
+    #[test]
+    fn esc_pops_filter_chip_before_signalling_close() {
+        use crate::data::usage::{BranchUsage, TokenBucket, UsageData, UsagePeriod};
+        use crate::ui::UsagePanel;
+
+        // Commit a branch chip (same setup as the Enter regression test),
+        // then assert Esc pops it before going unclaimed at the root.
+        let mut p = BurndownPlugin::default();
+        let mut data = UsageData::default();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: TokenBucket {
+                input_tokens: 100,
+                output_tokens: 100,
+                ..Default::default()
+            },
+        }];
+        p.data = Some(std::sync::Arc::new(data));
+        p.ui.data = None;
+        p.ui.focused_panel = Some(UsagePanel::ByBranch);
+        p.ui.focus_row = 0;
+        p.ui.period = UsagePeriod::All;
+        assert!(p.dispatch_key_pure(&KeyCode::Enter));
+        assert_eq!(p.ui.filters.branch, vec!["main".to_string()]);
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the chip pop"
+        );
+        assert!(p.ui.filters.branch.is_empty(), "Esc must pop the chip");
+        assert!(
+            !p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc with no chips left must be unclaimed (close signal)"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_zoom_search_before_unzooming() {
+        // With the `/` search overlay open inside zoom, Esc closes the
+        // overlay first (one level), keeping the zoom; only subsequent
+        // presses unzoom and then signal close.
+        let mut p = BurndownPlugin::default();
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.dispatch_key_pure(&ch('/')));
+        assert!(p.ui.zoom_search_active);
+
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Esc),
+            "Esc must claim the search cancel"
+        );
+        assert!(
+            !p.ui.zoom_search_active,
+            "Esc must close the search overlay"
+        );
+        assert!(p.ui.is_zoomed(), "search cancel must not also unzoom");
     }
 
     #[test]
@@ -1564,6 +1743,7 @@ mod chunk_accumulator_tests {
             scanned: 7,
             total: 100,
             current_project: "alpha".into(),
+            done: false,
         });
         let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
         assert!(
@@ -1644,6 +1824,7 @@ mod scan_progress_tests {
             scanned,
             total,
             current_project: project.into(),
+            done: false,
         })
         .expect("encode scan_progress")
     }
@@ -1682,6 +1863,54 @@ mod scan_progress_tests {
     }
 
     #[test]
+    fn done_event_clears_in_flight_banner_without_data() {
+        // The unchanged-snapshot short-circuit (issue #255) ends a
+        // scan with NO usage_data publish — the terminal `done` event
+        // is the only thing that clears the banner.
+        let mut p = BurndownPlugin::default();
+        p.apply_scan_progress(ScanProgressEvent {
+            scanned: 7,
+            total: 10,
+            current_project: "mid-scan".into(),
+            done: false,
+        });
+        assert!(p.scan_progress.is_some(), "banner armed mid-scan");
+
+        let bytes = rmp_serde::to_vec_named(&ScanProgressEvent {
+            done: true,
+            ..ScanProgressEvent::default()
+        })
+        .expect("encode");
+        let decoded: ScanProgressEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        p.apply_scan_progress(decoded);
+        assert!(
+            p.scan_progress.is_none(),
+            "done event clears the banner with no data publish"
+        );
+    }
+
+    #[test]
+    fn pre_done_publisher_payload_decodes_with_done_false() {
+        // Wire back-compat: a pre-#255 session-reader publishes maps
+        // without the `done` key — serde's default must fill `false`.
+        #[derive(serde::Serialize)]
+        struct LegacyScanProgress {
+            scanned: u32,
+            total: u32,
+            current_project: String,
+        }
+        let bytes = rmp_serde::to_vec_named(&LegacyScanProgress {
+            scanned: 3,
+            total: 9,
+            current_project: "legacy".into(),
+        })
+        .expect("encode legacy");
+        let decoded: ScanProgressEvent = rmp_serde::from_slice(&bytes).expect("decode legacy");
+        assert!(!decoded.done, "missing field defaults to false");
+        assert_eq!(decoded.scanned, 3);
+    }
+
+    #[test]
     fn malformed_payload_leaves_state_unchanged() {
         // `rmp_serde::from_slice` rejects non-msgpack bytes; the
         // existing stashed progress (if any) must survive.
@@ -1690,6 +1919,7 @@ mod scan_progress_tests {
             scanned: 5,
             total: 10,
             current_project: "good".into(),
+            done: false,
         });
         let bad = b"\xff\xff\xff not msgpack";
         let result = rmp_serde::from_slice::<ScanProgressEvent>(bad);

@@ -124,6 +124,7 @@ skill rather than hand-drawing SVG:
 |---|---|---|
 | Architecture · data flow · sequence · agent/memory · concept map | `/fireworks-tech-graph` | SVG + PNG (drop SVG inline) |
 | Knowledge graph from code/docs/papers — clustered, communities | `/graphify` | HTML / JSON / SVG |
+| Data-driven infographic — stats, comparisons, processes, timelines as a designed poster-style figure | `/infographic-creator` (AntV) | SVG (drop inline) |
 
 For small bespoke SVG (decorative icons, hero glyphs, simple
 illustrations) — author the inline SVG directly. You're capable of it

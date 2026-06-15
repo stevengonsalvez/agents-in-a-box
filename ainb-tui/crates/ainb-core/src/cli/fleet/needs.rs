@@ -10,11 +10,13 @@ use crate::cli::OutputFormat;
 use crate::fleet::discover::{
     discover_from_ainb, discover_from_jobs, discover_from_peers, merge_sessions,
 };
+use crate::fleet::enrich_cache;
 use crate::fleet::read::{ClassifyInput, NeedsRow, capture_pane, classify};
 use crate::fleet::types::Session;
 
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let idle_override: Option<i64> = matches.get_one::<i64>("idle-min").copied();
+    let enrich = enrich_enabled(matches);
 
     let (ainb_res, jobs_res) = tokio::join!(discover_from_ainb(), async { discover_from_jobs() });
     let ainb = ainb_res.unwrap_or_default();
@@ -22,7 +24,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     let jobs = jobs_res.unwrap_or_default();
 
     let merged = merge_sessions(vec![ainb, peers, jobs]);
-    let rows = classify_all(merged, idle_override).await;
+    let rows = classify_all(merged, idle_override, enrich).await;
 
     if matches!(format, OutputFormat::Text) {
         print_text(&rows);
@@ -33,7 +35,27 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     Ok(())
 }
 
-async fn classify_all(sessions: Vec<Session>, idle_override: Option<i64>) -> Vec<NeedsRow> {
+/// Enrichment is on by default. `--no-enrich` or `AINB_FLEET_ENRICH=0` turns it
+/// off — the reader still attaches free cached suggestions, but no card is
+/// flagged `need_enrich`, so no producer (inline or agent) runs → 0 tokens.
+pub fn enrich_enabled(matches: &clap::ArgMatches) -> bool {
+    if matches
+        .try_get_one::<bool>("no-enrich")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    std::env::var("AINB_FLEET_ENRICH").map(|v| v != "0").unwrap_or(true)
+}
+
+async fn classify_all(
+    sessions: Vec<Session>,
+    idle_override: Option<i64>,
+    enrich: bool,
+) -> Vec<NeedsRow> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut handles = Vec::with_capacity(sessions.len());
     for session in sessions {
@@ -52,7 +74,14 @@ async fn classify_all(sessions: Vec<Session>, idle_override: Option<i64>) -> Vec
     }
     let mut out = Vec::new();
     for h in handles {
-        if let Ok(Some(row)) = h.await {
+        if let Ok(Some(mut row)) = h.await {
+            // Attach a fresh cached suggestion for free; otherwise flag the
+            // card for the producer when enrichment is enabled.
+            if let Some(s) = enrich_cache::lookup(&row.enrich_key) {
+                row.enriched = Some(s);
+            } else if enrich {
+                row.need_enrich = true;
+            }
             out.push(row);
         }
     }
@@ -119,6 +148,9 @@ fn print_text(rows: &[NeedsRow]) {
             NeedsContext::Wait(w) => {
                 println!("▸ 🟢 {name} ─ {} {}", w.marker, truncate_line(&w.text, 80));
             }
+        }
+        if let Some(s) = &r.enriched {
+            println!("    ↳ suggest: {}", truncate_line(s, 90));
         }
     }
 }

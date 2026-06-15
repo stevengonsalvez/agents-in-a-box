@@ -1,5 +1,5 @@
 //! Slow fixture plugin: identical to `fixture_plugin` except render
-//! sleeps 200ms before replying — used by tripwire_nonblocking to
+//! sleeps 200ms before replying — used by `tripwire_nonblocking` to
 //! prove the TUI render thread never blocks on a slow plugin.
 
 use std::io::{BufReader, Write};
@@ -44,7 +44,7 @@ fn main() {
                         version: "0.1.0".into(),
                     })
                     .unwrap();
-                    write_response(&mut writer, id, result);
+                    write_response(&mut writer, id, &result);
                 }
             }
             methods::PLUGIN_RENDER => {
@@ -53,8 +53,12 @@ fn main() {
                 if let Some(id) = id {
                     let mut buf = WireBuffer::new(1, 1);
                     buf.push(Coord::new(0, 0), Cell::new("S"));
-                    let result = serde_json::to_value(RenderResult { buffer: buf }).unwrap();
-                    write_response(&mut writer, id, result);
+                    let result = serde_json::to_value(RenderResult {
+                        buffer: buf,
+                        redraw: false,
+                    })
+                    .unwrap();
+                    write_response(&mut writer, id, &result);
                 }
             }
             methods::PLUGIN_SHUTDOWN => {
@@ -74,7 +78,7 @@ fn main() {
     }
 }
 
-fn write_response<W: Write>(w: &mut W, id: u64, result: Value) {
+fn write_response<W: Write>(w: &mut W, id: u64, result: &Value) {
     let body = json!({ "jsonrpc": "2.0", "id": id, "result": result });
     write_value(w, &body);
 }

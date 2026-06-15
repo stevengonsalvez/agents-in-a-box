@@ -176,3 +176,14 @@ show_git_status = true
 #
 # Load everything EXCEPT these (denylist). Ignored when `enabled` is set.
 # disabled = ["burndown"]
+
+# ── Session-reader plugin ─────────────────────────────────────────────
+# The session-reader plugin (usage analytics data backend) refreshes
+# incrementally: files modified within the trailing window below are
+# re-aggregated on each refresh; older history is served from a
+# persisted rollup. A hard refresh (Shift+R in the Analytics screen,
+# or `ainb usage --hard`) rebuilds everything from source.
+#
+# [session_reader]
+# Trailing recent-window size in days (default 30, minimum 1).
+# incremental_window_days = 30

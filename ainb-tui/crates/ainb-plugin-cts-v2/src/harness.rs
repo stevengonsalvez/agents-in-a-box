@@ -41,6 +41,7 @@ pub fn canary_manifest(name: &str) -> Manifest {
             spawn: SpawnMode::Lazy,
             idle_reap_secs: 600,
         },
+        config: Vec::new(),
     }
 }
 
