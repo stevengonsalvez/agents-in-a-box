@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-06-15
+### Added
+- Merge pull request #267 from stevengonsalvez/feat/mcp-socket
+- Merge pull request #279 from stevengonsalvez/feat/gemini-copilot-agent-pills
+- Merge pull request #281 from stevengonsalvez/feat/statusline-slim-quota
+- **cli**: add mcp namespace — daemon / proxy / status / stop
+- **cli**: mcp import and mcp install --codex/--copilot
+- **config**: add [mcp_pool] monitor_refresh_secs
+- **config**: add [mcp_pool] section and per-server shared flag
+- **config**: read project config from .ainb/ (legacy .agents-box/ kept)
+- **mcp-pool**: per-server stop control command
+- **mcp-pool**: runtime server registration over the control socket
+- **mcp-pool**: session identity + uptime in pool status
+- **mcp-pool**: shared MCP server pool — daemon, mux, shim
+- **new-session**: restore Gemini and Copilot as agent options
+- **run**: auto-import stdio servers from project .mcp.json into the pool
+- **run**: wire shared MCP pool into session creation
+- **tui**: MCP Pool config category
+- **tui**: shared MCP pool observability overlay
+- **tui**: slim top bar to a dedicated quota line + abbreviate-then-shed
+
+### Fixed
+- **mcp-pool**: address PR review — name validation, atomic writes, backup guard
+- **mcp-pool**: move overlay shortcut to p — m collides with Memory tile
+- **mcp-pool**: per-server stop is reap-only; chain overlay refresh
+- **mcp-pool**: proxy robustness — status ordering, crash recovery, line cap
+- **new-session**: harden greyed-agent handling and narrow-terminal Agent row
+- **tui**: vanish the unwired-statusline CTA when it can't fit
+- **validate**: trust canonical /private/tmp paths, target active tmux window
+
+### Documentation
+- Merge pull request #280 from stevengonsalvez/docs/new-session-guide
+- **screenshots**: from-scratch MCP pool walkthrough (journey GIF + tape)
+- **screenshots**: mcp-pool vhs tape + animated GIF
+- **screenshots**: slow the MCP pool walkthrough GIF ~1.4x
+- **tui**: add "Starting a new session" guide with wizard walkthrough
+- **tui**: add scannable Enable & Use quickstart to MCP pool page
+- **tui**: document the MCP pool observability overlay
+- **tui**: embed from-scratch walkthrough GIF on the MCP pool page
+- **tui**: port the full rich explainer into the MCP pool page
+- **tui**: shared MCP pool page with embedded proof GIF
+- **tui**: tabbed, per-agent MCP pool guide (mdx)
+- cover mcp import/install and .mcp.json auto-import
+- document shared MCP pool settings and architecture
+- point project config references at .ainb/
+
+### Other
+- fix(mcp-pool): move overlay shortcut to p — m collides with Memory tile
+
+
 ## [1.7.1] - 2026-06-15
 ### Added
 - Merge pull request #277 from stevengonsalvez/worktree-codex-statusline
