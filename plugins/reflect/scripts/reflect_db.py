@@ -1383,6 +1383,7 @@ def record_commit(
                 "branch": branch,
                 "conflict_resolved": bool(conflict_resolved),
             },
+            conn=conn,  # write the audit event to the caller's connection, not get_conn()
         )
 
     demoted: list[str] = []
