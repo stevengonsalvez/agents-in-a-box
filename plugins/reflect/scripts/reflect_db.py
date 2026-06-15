@@ -457,6 +457,24 @@ CREATE TABLE IF NOT EXISTS chunk_hashes (
 );
 """
 
+# SG2: git-event capture (agentmemory post-commit.ts shape). One row per
+# commit SHA the post-commit hook captures, linked to the session_id active
+# when the commit landed. ``conflict_resolved`` flags a merge-conflict
+# resolution commit — the high-confidence learning trigger from the source.
+# A revert reads this table to find the reverted commit's session and demote
+# that session's learnings (is_latest=0). The append-only ``commits.jsonl``
+# beside the DB is the grep-able mirror (same pattern as events.jsonl).
+_COMMIT_LINKS_DDL = """
+CREATE TABLE IF NOT EXISTS commit_links (
+    sha                 TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL DEFAULT '',
+    branch              TEXT NOT NULL DEFAULT '',
+    message             TEXT NOT NULL DEFAULT '',
+    conflict_resolved   INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -485,6 +503,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     WHERE idempotency_key != '';
 CREATE INDEX IF NOT EXISTS idx_chunk_hashes_created_at
     ON chunk_hashes(created_at);
+CREATE INDEX IF NOT EXISTS idx_commit_links_session_id
+    ON commit_links(session_id);
 """
 
 _SCHEMA_DDL = (
@@ -505,6 +525,7 @@ _SCHEMA_DDL = (
     + _OBSERVATION_HISTORY_DDL
     + _CONVENTIONS_DOCS_DDL
     + _CHUNK_HASHES_DDL
+    + _COMMIT_LINKS_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -853,6 +874,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_OBSERVATION_HISTORY_DDL)
         conn.execute(_CONVENTIONS_DOCS_DDL)
         conn.execute(_CHUNK_HASHES_DDL)
+        conn.execute(_COMMIT_LINKS_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -1036,6 +1058,270 @@ def get_events_by_type(
 ) -> list[dict[str, Any]]:
     """Thin wrapper around ``get_events`` scoped to a single event type."""
     return get_events(event_type=event_type, limit=limit, conn=conn)
+
+
+# ---------------------------------------------------------------------------
+# SG2: git-event capture (agentmemory post-commit.ts shape)
+#
+# The post-commit hook (plugins/reflect/hooks/post_commit.sh) shells out to
+# ``record_commit`` for every commit: it links the SHA to the active session,
+# appends a grep-able line to ``commits.jsonl`` beside the DB, and flags
+# merge-conflict resolutions as a high-confidence learning trigger. A revert
+# reads ``commit_links`` to find the reverted commit's session and demotes
+# that session's learnings (is_latest=0) — "contradicted by revert".
+# ---------------------------------------------------------------------------
+
+COMMIT_CAPTURED_EVENT_TYPE = "commit_captured"
+REVERT_CONTRADICTION_EVENT_TYPE = "contradicted_by_revert"
+
+# A subject is a revert when it matches git's own auto-generated revert prefix
+# (``Revert "<subject>"``) and carries the ``This reverts commit <sha>.`` body
+# line. We extract the reverted SHA from the body — the subject only echoes the
+# prior subject, not a machine-resolvable id.
+_REVERTS_COMMIT_RE = re.compile(
+    r"This reverts commit ([0-9a-f]{7,40})", re.IGNORECASE
+)
+
+
+def _commits_jsonl_path(conn: sqlite3.Connection) -> Optional[Path]:
+    """Resolve the ``commits.jsonl`` mirror path for *conn*.
+
+    Honours ``REFLECT_STATE_DIR`` when set (the test/runtime override the SG2
+    spec pins); otherwise falls back to the directory holding the DB file —
+    the same ``~/.reflect/`` default ``events.jsonl`` uses.
+    """
+    override = os.environ.get("REFLECT_STATE_DIR")
+    if override:
+        return Path(override)
+    return _conn_state_dir(conn)
+
+
+def _append_commit_jsonl(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    """Append a captured-commit record to ``commits.jsonl`` beside the DB.
+
+    Best-effort, append-only mirror of the ``commit_links`` row (same shape as
+    :func:`_append_contradiction_jsonl`): the sqlite row is the source of
+    truth; this file is for grep-ability and never raises.
+    """
+    try:
+        state = _commits_jsonl_path(conn)
+        if state is None:
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        with open(state / "commits.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def parse_reverted_sha(message: str) -> Optional[str]:
+    """Extract the reverted SHA from a git revert commit message, else None.
+
+    Matches the ``This reverts commit <sha>.`` body line git generates for a
+    ``git revert``. A non-revert message yields None — the capture path treats
+    such a commit as an ordinary commit.
+    """
+    if not message:
+        return None
+    match = _REVERTS_COMMIT_RE.search(message)
+    return match.group(1).lower() if match else None
+
+
+def add_commit_link(
+    sha: str,
+    session_id: str = "",
+    *,
+    branch: str = "",
+    message: str = "",
+    conflict_resolved: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Insert a ``commit_links`` row linking *sha* to *session_id*.
+
+    Idempotent on the SHA primary key: re-capturing a commit already on file
+    is a no-op (returns False), so a hook that fires twice never double-counts.
+    Returns True when a new row was written.
+    """
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    if not sha:
+        return False
+    with conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO commit_links
+               (sha, session_id, branch, message, conflict_resolved, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                sha,
+                session_id,
+                branch,
+                message,
+                1 if conflict_resolved else 0,
+                _now_iso(),
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def get_commit_link(
+    sha: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single ``commit_links`` row by SHA (None if absent)."""
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    if not sha:
+        return None
+    row = conn.execute(
+        "SELECT * FROM commit_links WHERE sha = ?",
+        (sha,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def revert_session_learnings(
+    session_id: str,
+    *,
+    reverted_sha: str = "",
+    revert_sha: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[str]:
+    """Demote a session's learnings on revert (is_latest=0, "contradicted").
+
+    A revert is a negative signal: the work the reverted commit's session
+    produced was undone, so the learnings captured in that session are no
+    longer the latest belief. Each still-latest learning for *session_id* is
+    demoted non-destructively — S6 history snapshot first, then
+    ``is_latest = 0`` + ``revert_reason``, plus a ``contradicted_by_revert``
+    audit event. Returns the demoted learning ids (empty when the session has
+    no still-latest learnings — idempotent re-runs are a no-op).
+    """
+    conn = conn or get_conn()
+    if not session_id:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM learnings WHERE session_id = ? AND is_latest = 1",
+        (session_id,),
+    ).fetchall()
+    demoted: list[str] = []
+    reason = (
+        f"contradicted by revert {revert_sha or '-'} of {reverted_sha or '-'}"
+    )
+    for row in rows:
+        lid = row["id"]
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                lid,
+                change_type="revert",
+                changed_fields=["is_latest", "revert_reason"],
+                reason=reason,
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                "UPDATE learnings SET is_latest = 0, revert_reason = ? WHERE id = ?",
+                (reason, lid),
+            )
+            add_event(
+                REVERT_CONTRADICTION_EVENT_TYPE,
+                lid,
+                {
+                    "session_id": session_id,
+                    "reverted_sha": reverted_sha,
+                    "revert_sha": revert_sha,
+                },
+                conn=conn,
+                autocommit=False,
+            )
+        demoted.append(lid)
+    return demoted
+
+
+def record_commit(
+    sha: str,
+    *,
+    session_id: str = "",
+    branch: str = "",
+    message: str = "",
+    files: Optional[list[str]] = None,
+    conflict_resolved: bool = False,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """SG2 capture entrypoint — the body the post-commit hook drives.
+
+    For every commit it: (1) writes a ``commit_links`` row linking the SHA to
+    the active session, (2) appends a ``commits.jsonl`` line
+    ``{sid, sha, branch, message, files, ts}`` beside the DB, and (3) when the
+    message is a git revert, demotes the reverted commit's session learnings
+    (is_latest=0). A merge-conflict resolution (``conflict_resolved=True``) is
+    recorded as the high-confidence learning trigger via a ``commit_captured``
+    audit event carrying the flag.
+
+    Returns a summary dict: ``{sha, session_id, captured, is_revert,
+    reverted_sha, demoted_learning_ids}``. ``captured`` is False when the SHA
+    was already on file (idempotent re-capture) or the SHA is empty.
+    """
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    ts = _coerce_now(now).isoformat()
+    reverted_sha = parse_reverted_sha(message)
+
+    captured = add_commit_link(
+        sha,
+        session_id,
+        branch=branch,
+        message=message,
+        conflict_resolved=conflict_resolved,
+        conn=conn,
+    )
+
+    if captured:
+        _append_commit_jsonl(
+            conn,
+            {
+                "sid": session_id,
+                "sha": sha,
+                "branch": branch,
+                "message": message,
+                "files": list(files or []),
+                "conflict_resolved": bool(conflict_resolved),
+                "ts": ts,
+            },
+        )
+        add_event(
+            COMMIT_CAPTURED_EVENT_TYPE,
+            None,
+            {
+                "sha": sha,
+                "session_id": session_id,
+                "branch": branch,
+                "conflict_resolved": bool(conflict_resolved),
+            },
+        )
+
+    demoted: list[str] = []
+    if reverted_sha:
+        link = get_commit_link(reverted_sha, conn=conn)
+        reverted_session = link["session_id"] if link else ""
+        if reverted_session:
+            demoted = revert_session_learnings(
+                reverted_session,
+                reverted_sha=reverted_sha,
+                revert_sha=sha,
+                conn=conn,
+            )
+
+    return {
+        "sha": sha,
+        "session_id": session_id,
+        "captured": captured,
+        "is_revert": reverted_sha is not None,
+        "reverted_sha": reverted_sha or "",
+        "demoted_learning_ids": demoted,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4006,6 +4292,7 @@ def main() -> None:
         choices=[
             "init", "stats", "events", "history", "contradictions", "doctor",
             "slot-list", "slot-get", "slot-append", "slot-replace", "slot-delete",
+            "record-commit",
         ],
         help="Action to perform",
     )
@@ -4013,6 +4300,19 @@ def main() -> None:
     parser.add_argument("--name", default="", help="Slot name (slot-* commands)")
     parser.add_argument("--text", default="", help="Text to append (slot-append)")
     parser.add_argument("--content", default="", help="New body (slot-replace)")
+    # SG2 record-commit args (driven by hooks/post_commit.sh)
+    parser.add_argument("--sha", default="", help="Commit SHA (record-commit)")
+    parser.add_argument("--session", default="", help="Session id (record-commit)")
+    parser.add_argument("--branch", default="", help="Branch name (record-commit)")
+    parser.add_argument("--message", default="", help="Commit subject (record-commit)")
+    parser.add_argument(
+        "--files", default="", help="Newline-separated changed files (record-commit)"
+    )
+    parser.add_argument(
+        "--conflict-resolved",
+        action="store_true",
+        help="Flag a merge-conflict resolution commit (record-commit)",
+    )
     parser.add_argument(
         "--project",
         default=None,
@@ -4062,6 +4362,20 @@ def main() -> None:
             )
         return
 
+    if args.command == "record-commit":
+        files = [ln for ln in (args.files or "").splitlines() if ln.strip()]
+        result = record_commit(
+            args.sha,
+            session_id=args.session,
+            branch=args.branch,
+            message=args.message,
+            files=files,
+            conflict_resolved=args.conflict_resolved,
+            conn=conn,
+        )
+        print(json.dumps(result))
+        return
+
     if args.command == "init":
         ensure_default_slots(derive_slot_project_id(), conn=conn)
         print(f"Database initialized at {_db_path()}")
@@ -4083,6 +4397,7 @@ def main() -> None:
             "observations",
             "observation_history",
             "conventions_docs",
+            "commit_links",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")

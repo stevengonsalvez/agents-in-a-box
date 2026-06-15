@@ -241,10 +241,55 @@ def recent_commit_tags(cwd: Path, n: int = 5, limit: int = 3) -> list[str]:
     return [t for t, _ in ranked[:limit]]
 
 
+def sg2_commit_tags(limit: int = 3, n: int = 5) -> list[str]:
+    """SG2 enrichment: top tokens from the post-commit-captured ``commits.jsonl``.
+
+    The SG2 git-event capture (hooks/post_commit.sh -> reflect_db.record_commit)
+    records every commit's subject + branch keyed to the session. Reading the
+    newest few SHA-linked subjects here enriches the SessionStart recall query
+    with the *captured* commit context — which can be richer than raw
+    ``git log`` (it carries merge-conflict and revert signal the plain log
+    drops). Additive: returns [] on any failure so the existing git-derived
+    query is unchanged. State path follows reflect_db's convention
+    (REFLECT_STATE_DIR override, else ~/.reflect).
+    """
+    try:
+        state = Path(
+            os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect"))
+        )
+        commits_file = state / "commits.jsonl"
+        if not commits_file.is_file():
+            return []
+        lines = [
+            ln for ln in commits_file.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        tokens: dict[str, int] = {}
+        for ln in lines[-n:]:
+            try:
+                rec = json.loads(ln)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            subject = str(rec.get("message", "")).splitlines()[:1]
+            for line in subject:
+                for tok in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", line):
+                    low = tok.lower()
+                    if low in STOPWORDS:
+                        continue
+                    tokens[low] = tokens.get(low, 0) + 1
+        ranked = sorted(tokens.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [t for t, _ in ranked[:limit]]
+    except Exception:
+        return []
+
+
 def build_query(cwd: Path) -> tuple[str, list[str]]:
     """
     D3: query = project_name + branch + top-3 commit-derived tags.
     Returns (query_string, tag_list_for_rerank).
+
+    SG2: enriched with tokens from the post-commit-captured commits.jsonl
+    (SHA<->session linkage) when present — additive, never subtractive.
     """
     parts = [project_name(cwd)]
     branch = current_branch(cwd)
@@ -252,6 +297,11 @@ def build_query(cwd: Path) -> tuple[str, list[str]]:
         # Normalise: "feat/foo-bar" → "foo bar"
         parts.append(re.sub(r"[/_-]+", " ", branch))
     tags = recent_commit_tags(cwd)
+    # SG2 additive enrichment: fold in tags from captured commits (deduped
+    # below). Order-preserving so the plain git-log tags still lead.
+    for sg2_tag in sg2_commit_tags():
+        if sg2_tag not in tags:
+            tags.append(sg2_tag)
     parts.extend(tags)
     # Dedup, preserving order
     seen: set[str] = set()
