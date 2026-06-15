@@ -682,7 +682,86 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    McpStopServer(String), // Stop one pooled MCP server (reaps its child)
+    McpStopDaemon,     // Stop the whole MCP pool daemon
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+// ============================================================================
+// MCP Pool observability overlay
+// ============================================================================
+
+/// Result of one off-thread fetch of the daemon's control-socket `status`.
+#[derive(Debug, Clone)]
+pub struct McpFetchResult {
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub error: Option<String>,
+}
+
+/// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
+/// the overlay is open; dropping it (on close) stops all refresh activity —
+/// nothing polls the daemon when the overlay isn't showing.
+pub struct McpOverlayState {
+    pub pool_enabled: bool,
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub selected: usize,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Auto-refresh cadence while open; 0 = on-open + manual (`r`) only.
+    pub refresh_secs: u64,
+    /// Receiver for the in-flight fetch (None when no fetch is pending — the
+    /// one-outstanding-request guard).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
+}
+
+impl std::fmt::Debug for McpOverlayState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOverlayState")
+            .field("pool_enabled", &self.pool_enabled)
+            .field("daemon_running", &self.daemon_running)
+            .field("servers", &self.servers.len())
+            .field("selected", &self.selected)
+            .field("loading", &self.loading)
+            .field("fetch_pending", &self.fetch_rx.is_some())
+            .finish()
+    }
+}
+
+impl McpOverlayState {
+    pub fn selected_server_name(&self) -> Option<String> {
+        self.servers.get(self.selected).map(|s| s.name.clone())
+    }
+}
+
+/// Blocking control-socket fetch — always run via `spawn_blocking`. Probes the
+/// daemon and parses its `status` JSON into the snapshot.
+pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
+    if !crate::mcp_pool::client::daemon_alive() {
+        return McpFetchResult { daemon_running: false, servers: Vec::new(), error: None };
+    }
+    match crate::mcp_pool::client::daemon_status() {
+        Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => {
+                let servers = v
+                    .get("servers")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or_default();
+                McpFetchResult { daemon_running: true, servers, error: None }
+            }
+            Err(e) => McpFetchResult {
+                daemon_running: true,
+                servers: Vec::new(),
+                error: Some(format!("parse status: {e}")),
+            },
+        },
+        Err(e) => McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: Some(e.to_string()),
+        },
+    }
 }
 
 // ============================================================================
@@ -696,6 +775,7 @@ pub enum HomeTile {
     Config,   // Settings & presets
     Sessions, // Session manager
     Recovery, // Recover orphaned sessions
+    Mcp,      // Shared MCP pool overlay
     Stats,    // Analytics & usage
     Help,     // Docs & guides
 }
@@ -708,6 +788,7 @@ impl HomeTile {
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
+            HomeTile::Mcp,
             HomeTile::Stats,
             HomeTile::Help,
         ]
@@ -720,6 +801,7 @@ impl HomeTile {
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
+            HomeTile::Mcp => "MCP",
             HomeTile::Stats => "Stats",
             HomeTile::Help => "Help",
         }
@@ -732,6 +814,7 @@ impl HomeTile {
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
+            HomeTile::Mcp => "Shared Pool",
             HomeTile::Stats => "Usage & Analytics",
             HomeTile::Help => "Docs & Guides",
         }
@@ -744,6 +827,7 @@ impl HomeTile {
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
+            HomeTile::Mcp => "🧬",
             HomeTile::Stats => "📊",
             HomeTile::Help => "❓",
         }
@@ -2346,6 +2430,8 @@ pub struct AppState {
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
+    // Shared MCP pool observability overlay (None = closed; no refresh runs).
+    pub mcp_overlay: Option<McpOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -2867,6 +2953,7 @@ impl Default for AppState {
             pending_async_action: None,
             async_operation_cancelled: false,
             confirmation_dialog: None,
+            mcp_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -3921,6 +4008,116 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    // ── Shared MCP pool overlay ────────────────────────────────────────────
+    // The overlay is opened on demand and refreshed lazily. All daemon I/O
+    // runs off-thread (spawn_blocking); the render loop only reads the cached
+    // snapshot. Nothing polls while the overlay is closed.
+
+    /// Toggle the MCP pool overlay. Opening seeds config + fires the first
+    /// fetch; closing drops the snapshot (and thus all refresh activity).
+    pub fn toggle_mcp_overlay(&mut self) {
+        if self.mcp_overlay.is_some() {
+            self.mcp_overlay = None;
+            return;
+        }
+        let config = crate::config::AppConfig::load().unwrap_or_default();
+        self.mcp_overlay = Some(McpOverlayState {
+            pool_enabled: config.mcp_pool.enabled,
+            daemon_running: false,
+            servers: Vec::new(),
+            selected: 0,
+            loading: true,
+            last_refreshed: None,
+            refresh_secs: config.mcp_pool.monitor_refresh_secs,
+            fetch_rx: None,
+        });
+        self.spawn_mcp_fetch();
+    }
+
+    pub fn close_mcp_overlay(&mut self) {
+        self.mcp_overlay = None;
+    }
+
+    pub fn mcp_overlay_move(&mut self, delta: i32) {
+        if let Some(o) = self.mcp_overlay.as_mut() {
+            if o.servers.is_empty() {
+                return;
+            }
+            let n = o.servers.len() as i32;
+            o.selected = ((o.selected as i32 + delta).rem_euclid(n)) as usize;
+        }
+    }
+
+    /// Spawn one off-thread fetch of the daemon status, unless one is already
+    /// in flight (the one-outstanding-request guard). The blocking control
+    /// socket call runs on the blocking pool so the executor never stalls.
+    pub fn spawn_mcp_fetch(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else { return };
+        if o.fetch_rx.is_some() {
+            return; // a fetch is already pending
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(mcp_fetch_blocking)
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("fetch task failed: {e}")),
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed fetch and, while the overlay is open, fire the next
+    /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
+    /// `try_recv` never waits, and no fetch is spawned when one is pending or
+    /// the cadence is disabled. Called from the 250ms app tick.
+    pub fn check_mcp_overlay(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else { return };
+
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.daemon_running = result.daemon_running;
+                o.servers = result.servers;
+                o.last_refreshed = Some(std::time::Instant::now());
+                if o.selected >= o.servers.len() {
+                    o.selected = o.servers.len().saturating_sub(1);
+                }
+            }
+        }
+
+        // Lazy auto-refresh: only while open, only when nothing is pending,
+        // only if a cadence is configured and it has elapsed.
+        let due = o.refresh_secs > 0
+            && o.fetch_rx.is_none()
+            && o.last_refreshed.map(|t| t.elapsed().as_secs() >= o.refresh_secs).unwrap_or(false);
+        if due {
+            self.spawn_mcp_fetch();
+        }
+    }
+
+    /// Stop the selected pooled server (off-thread), then refresh.
+    pub fn mcp_stop_server(&mut self, name: &str) {
+        let name = name.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || crate::mcp_pool::client::stop_server(&name)).await;
+        });
+        self.spawn_mcp_fetch();
+    }
+
+    /// Stop the whole pool daemon (off-thread), then refresh.
+    pub fn mcp_stop_daemon(&mut self) {
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(crate::mcp_pool::client::daemon_stop).await;
+        });
+        self.spawn_mcp_fetch();
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from
@@ -9541,6 +9738,9 @@ impl App {
         if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;
         }
+
+        // Drain + lazily refresh the MCP pool overlay (no-op when closed).
+        self.state.check_mcp_overlay();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

@@ -39,6 +39,14 @@ pub enum AppEvent {
     NextWorkspace,
     PreviousWorkspace,
     ToggleHelp,
+    // Shared MCP pool overlay
+    McpOverlayOpen,
+    McpOverlayClose,
+    McpOverlayPrev,
+    McpOverlayNext,
+    McpOverlayRefresh,
+    McpOverlayStopServer,
+    McpOverlayStopDaemon,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -860,6 +868,20 @@ impl EventHandler {
                 }
                 _ => return None,
             }
+        }
+
+        // MCP pool overlay captures all keys while open (after the
+        // confirmation dialog, so a stop-confirmation sits on top of it).
+        if state.mcp_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => Some(AppEvent::McpOverlayClose),
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
+                KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
+                KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
+                KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
+                _ => None,
+            };
         }
 
         // Handle "Other tmux" rename mode (high priority)
@@ -2028,6 +2050,7 @@ impl EventHandler {
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
+            KeyCode::Char('m') => return Some(AppEvent::McpOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2239,6 +2262,49 @@ impl EventHandler {
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ToggleHelp => state.toggle_help(),
+            AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
+            AppEvent::McpOverlayClose => state.close_mcp_overlay(),
+            AppEvent::McpOverlayPrev => state.mcp_overlay_move(-1),
+            AppEvent::McpOverlayNext => state.mcp_overlay_move(1),
+            AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
+            AppEvent::McpOverlayStopServer => {
+                if let Some(name) =
+                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                {
+                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                        title: "Stop MCP server".to_string(),
+                        message: format!(
+                            "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
+                        ),
+                        confirm_action: crate::app::state::ConfirmAction::McpStopServer(name),
+                        selected_option: false,
+                        warning: None,
+                        options: None,
+                        selected_index: 0,
+                    });
+                }
+            }
+            AppEvent::McpOverlayStopDaemon => {
+                let (servers, sessions) = state
+                    .mcp_overlay
+                    .as_ref()
+                    .map(|o| {
+                        let s: usize = o.servers.iter().map(|x| x.clients).sum();
+                        (o.servers.len(), s)
+                    })
+                    .unwrap_or((0, 0));
+                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    title: "Stop the MCP pool".to_string(),
+                    message: format!(
+                        "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
+                    ),
+                    confirm_action: crate::app::state::ConfirmAction::McpStopDaemon,
+                    selected_option: false,
+                    warning: None,
+                    options: None,
+                    selected_index: 0,
+                });
+            }
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             // Other tmux rename events
@@ -2952,6 +3018,12 @@ impl EventHandler {
                                     let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
                                 }
                             }
+                            crate::app::state::ConfirmAction::McpStopServer(name) => {
+                                state.mcp_stop_server(&name);
+                            }
+                            crate::app::state::ConfirmAction::McpStopDaemon => {
+                                state.mcp_stop_daemon();
+                            }
                             crate::app::state::ConfirmAction::Cancel => {
                                 // Explicit Cancel ("Not now"): dialog already
                                 // taken; nothing persisted, so we re-ask next
@@ -3356,6 +3428,10 @@ impl EventHandler {
                             tracing::info!("Navigating to SessionRecovery view");
                             state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
+                        HomeTile::Mcp => {
+                            tracing::info!("Opening MCP pool overlay");
+                            state.toggle_mcp_overlay();
+                        }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
@@ -3420,6 +3496,11 @@ impl EventHandler {
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                    }
+                    SidebarItem::Mcp => {
+                        // Opens the overlay on top of the current screen (not a
+                        // screen switch) and fires the first lazy fetch.
+                        state.toggle_mcp_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
