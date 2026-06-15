@@ -258,7 +258,10 @@ pub fn spawn_delivery(state: AppState, push: PushState) {
 /// True for the actionable attention kinds (the ones worth a push). `IDLE` and
 /// `FINISHED` are informational and don't buzz.
 fn is_attention(kind: &str) -> bool {
-    matches!(kind, "ASK" | "ERR" | "WAIT" | "NEEDS_PERMISSION")
+    // `ainb fleet needs` only ever emits ASK / ERR / IDLE / WAIT (the
+    // `NeedsContext` variants). A permission prompt surfaces as ASK, so there
+    // is no separate NEEDS_PERMISSION kind to handle here.
+    matches!(kind, "ASK" | "ERR" | "WAIT")
 }
 
 /// Reduce the `needs` JSON array to a map of session key → highest-priority
@@ -270,7 +273,7 @@ fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, String> 
         return out;
     };
     let rank = |k: &str| match k {
-        "ASK" | "NEEDS_PERMISSION" => 0,
+        "ASK" => 0,
         "ERR" => 1,
         "WAIT" => 2,
         _ => 3,
@@ -302,8 +305,13 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
     let mut session_id = String::new();
     if let Some(sessions) = snap.sessions.as_array() {
         for s in sessions {
-            let cwd = s.get("worktree_path").and_then(Value::as_str).unwrap_or("");
-            if cwd == key {
+            // `attention_by_key` builds the key from the needs row's `session.cwd`.
+            // For ainb-managed sessions cwd == workspace_path != worktree_path, so
+            // match on the same field that built the key (cwd) and fall back to
+            // worktree_path for sessions keyed that way.
+            let cwd = s.get("cwd").and_then(Value::as_str).unwrap_or("");
+            let worktree = s.get("worktree_path").and_then(Value::as_str).unwrap_or("");
+            if cwd == key || worktree == key {
                 if let Some(name) = s.get("workspace_name").and_then(Value::as_str) {
                     title_name = name.to_string();
                 }
@@ -318,7 +326,6 @@ fn build_payload(key: &str, kind: &str, snap: &crate::data::FleetSnapshot) -> Va
         "ASK" => "needs an answer",
         "ERR" => "hit an error",
         "WAIT" => "is waiting on you",
-        "NEEDS_PERMISSION" => "needs permission",
         _ => "needs attention",
     };
     json!({
@@ -622,9 +629,10 @@ mod tests {
         assert!(is_attention("ASK"));
         assert!(is_attention("ERR"));
         assert!(is_attention("WAIT"));
-        assert!(is_attention("NEEDS_PERMISSION"));
         assert!(!is_attention("IDLE"));
         assert!(!is_attention("FINISHED"));
+        // `ainb fleet needs` never emits NEEDS_PERMISSION (permission → ASK).
+        assert!(!is_attention("NEEDS_PERMISSION"));
     }
 
     #[test]
@@ -658,5 +666,32 @@ mod tests {
         assert_eq!(p["sessionId"], "id-1");
         assert!(p["title"].as_str().unwrap().contains("demo"));
         assert_eq!(p["requireInteraction"], false);
+    }
+
+    #[test]
+    fn payload_resolves_ainb_managed_session_by_cwd() {
+        // For ainb-managed sessions the needs key is the session `cwd`
+        // (== workspace_path), which differs from `worktree_path`. Resolution
+        // must match on cwd so the title/deep-link don't mis-resolve.
+        let snap = crate::data::FleetSnapshot::from_parts(
+            crate::data::CoreSnapshot {
+                sessions: json!([
+                    {
+                        "session_id": "id-9",
+                        "workspace_name": "managed",
+                        "cwd": "/ws/managed",
+                        "worktree_path": "/repo/.worktrees/managed"
+                    }
+                ]),
+                needs: json!([]),
+            },
+            Value::Null,
+        );
+        let p = build_payload("/ws/managed", "ASK", &snap);
+        assert_eq!(
+            p["sessionId"], "id-9",
+            "must resolve via cwd, not worktree_path"
+        );
+        assert!(p["title"].as_str().unwrap().contains("managed"));
     }
 }
