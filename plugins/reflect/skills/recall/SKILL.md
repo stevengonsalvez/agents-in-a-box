@@ -122,3 +122,4 @@ and hydrate only what survives.
 - `/reflect:ingest` — populate the KB
 - `/reflect-status` — KB health, coverage, pending reviews
 - SessionStart hook — auto-recall on project entry (see `hooks/settings-snippet.json`)
+- **[Retrieval, by example](../../docs/retrieval-features.md)** — every retrieval feature (graph arm, cross-encoder, MMR, temporal, OOD gate, bounded boosts, fuzzy cache, tiered inject, per-arm thresholds, sharding, affinity, staged recall, branch isolation) with a concrete example, why it matters, and what breaks without it.
