@@ -41,8 +41,12 @@ enum InitState {
     NotStarted,
     /// Initialize forwarded to the child; later initializes queue here as
     /// (client, original id) and are answered when the response lands.
-    Pending { waiters: Vec<(ClientId, Value)> },
-    Done { result: Value },
+    Pending {
+        waiters: Vec<(ClientId, Value)>,
+    },
+    Done {
+        result: Value,
+    },
 }
 
 pub struct Mux {
@@ -140,10 +144,8 @@ impl Mux {
         // Notification from the child?
         if msg.get("id").is_none_or(Value::is_null) {
             if msg.get("method").and_then(Value::as_str) == Some("notifications/progress") {
-                if let Some(token) = msg
-                    .get("params")
-                    .and_then(|p| p.get("progressToken"))
-                    .map(canonical_token)
+                if let Some(token) =
+                    msg.get("params").and_then(|p| p.get("progressToken")).map(canonical_token)
                 {
                     if let Some(owner) = self.progress_tokens.get(&token) {
                         return vec![Outcome::ToClient(*owner, line.to_string())];
@@ -192,7 +194,9 @@ impl Mux {
                     progress_token: None,
                     is_initialize: true,
                 });
-                self.init = InitState::Pending { waiters: Vec::new() };
+                self.init = InitState::Pending {
+                    waiters: Vec::new(),
+                };
                 msg["id"] = Value::from(proxy_id);
                 vec![Outcome::ToChild(msg.to_string())]
             }
@@ -210,7 +214,9 @@ impl Mux {
 
         let is_error = msg.get("error").is_some();
         if !is_error {
-            self.init = InitState::Done { result: msg.clone() };
+            self.init = InitState::Done {
+                result: msg.clone(),
+            };
         }
         // On error InitState stays NotStarted so the next initialize retries.
 
@@ -284,24 +290,42 @@ mod tests {
         let mut mux = Mux::new();
 
         // Both clients use id:1 (Claude Code always starts at 1).
-        let out_a = mux.on_client_line(1, &line(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})));
-        let out_b = mux.on_client_line(2, &line(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})));
+        let out_a = mux.on_client_line(
+            1,
+            &line(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})),
+        );
+        let out_b = mux.on_client_line(
+            2,
+            &line(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})),
+        );
 
-        let Outcome::ToChild(fwd_a) = &out_a[0] else { panic!("{out_a:?}") };
-        let Outcome::ToChild(fwd_b) = &out_b[0] else { panic!("{out_b:?}") };
+        let Outcome::ToChild(fwd_a) = &out_a[0] else {
+            panic!("{out_a:?}")
+        };
+        let Outcome::ToChild(fwd_b) = &out_b[0] else {
+            panic!("{out_b:?}")
+        };
         let id_a = parse(fwd_a)["id"].as_i64().unwrap();
         let id_b = parse(fwd_b)["id"].as_i64().unwrap();
         assert_ne!(id_a, id_b, "proxy ids must be unique");
 
         // Child answers B first.
-        let out = mux.on_child_line(&line(json!({"jsonrpc":"2.0","id":id_b,"result":{"tools":[]}})));
+        let out = mux.on_child_line(&line(
+            json!({"jsonrpc":"2.0","id":id_b,"result":{"tools":[]}}),
+        ));
         assert_eq!(out.len(), 1);
-        let Outcome::ToClient(client, resp) = &out[0] else { panic!("{out:?}") };
+        let Outcome::ToClient(client, resp) = &out[0] else {
+            panic!("{out:?}")
+        };
         assert_eq!(*client, 2);
         assert_eq!(parse(resp)["id"], json!(1), "original id restored");
 
-        let out = mux.on_child_line(&line(json!({"jsonrpc":"2.0","id":id_a,"result":{"tools":[]}})));
-        let Outcome::ToClient(client, _) = &out[0] else { panic!("{out:?}") };
+        let out = mux.on_child_line(&line(
+            json!({"jsonrpc":"2.0","id":id_a,"result":{"tools":[]}}),
+        ));
+        let Outcome::ToClient(client, _) = &out[0] else {
+            panic!("{out:?}")
+        };
         assert_eq!(*client, 1);
         assert_eq!(mux.in_flight(), 0);
     }
@@ -310,16 +334,25 @@ mod tests {
     fn initialize_hits_child_once_then_served_from_cache() {
         let mut mux = Mux::new();
 
-        let init = |id: i64| line(json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}));
+        let init = |id: i64| {
+            line(
+                json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+            )
+        };
 
         // First client: forwarded.
         let out = mux.on_client_line(1, &init(1));
-        let Outcome::ToChild(fwd) = &out[0] else { panic!("{out:?}") };
+        let Outcome::ToChild(fwd) = &out[0] else {
+            panic!("{out:?}")
+        };
         let proxy_id = parse(fwd)["id"].as_i64().unwrap();
 
         // Second client initializes while the first is still pending: queued.
         let out = mux.on_client_line(2, &init(7));
-        assert!(out.is_empty(), "pending waiter must not re-forward: {out:?}");
+        assert!(
+            out.is_empty(),
+            "pending waiter must not re-forward: {out:?}"
+        );
 
         // Child responds once → both clients answered with THEIR ids.
         let out = mux.on_child_line(&line(json!({
@@ -327,15 +360,21 @@ mod tests {
             "result":{"capabilities":{},"serverInfo":{"name":"x"}}
         })));
         assert_eq!(out.len(), 2);
-        let Outcome::ToClient(c1, r1) = &out[0] else { panic!() };
-        let Outcome::ToClient(c2, r2) = &out[1] else { panic!() };
+        let Outcome::ToClient(c1, r1) = &out[0] else {
+            panic!()
+        };
+        let Outcome::ToClient(c2, r2) = &out[1] else {
+            panic!()
+        };
         assert_eq!((*c1, parse(r1)["id"].clone()), (1, json!(1)));
         assert_eq!((*c2, parse(r2)["id"].clone()), (2, json!(7)));
 
         // Third client initializes later: served from cache, child untouched.
         let out = mux.on_client_line(3, &init(42));
         assert_eq!(out.len(), 1);
-        let Outcome::ToClient(c3, r3) = &out[0] else { panic!("{out:?}") };
+        let Outcome::ToClient(c3, r3) = &out[0] else {
+            panic!("{out:?}")
+        };
         assert_eq!(*c3, 3);
         let resp = parse(r3);
         assert_eq!(resp["id"], json!(42));
@@ -354,15 +393,25 @@ mod tests {
     #[test]
     fn initialize_error_is_not_cached() {
         let mut mux = Mux::new();
-        let out = mux.on_client_line(1, &line(json!({"jsonrpc":"2.0","id":1,"method":"initialize"})));
-        let Outcome::ToChild(fwd) = &out[0] else { panic!() };
+        let out = mux.on_client_line(
+            1,
+            &line(json!({"jsonrpc":"2.0","id":1,"method":"initialize"})),
+        );
+        let Outcome::ToChild(fwd) = &out[0] else {
+            panic!()
+        };
         let proxy_id = parse(fwd)["id"].as_i64().unwrap();
 
-        let out = mux.on_child_line(&line(json!({"jsonrpc":"2.0","id":proxy_id,"error":{"code":-1,"message":"boom"}})));
+        let out = mux.on_child_line(&line(
+            json!({"jsonrpc":"2.0","id":proxy_id,"error":{"code":-1,"message":"boom"}}),
+        ));
         assert_eq!(out.len(), 1, "error routed to requester");
 
         // Next initialize must be forwarded again, not served from cache.
-        let out = mux.on_client_line(2, &line(json!({"jsonrpc":"2.0","id":1,"method":"initialize"})));
+        let out = mux.on_client_line(
+            2,
+            &line(json!({"jsonrpc":"2.0","id":1,"method":"initialize"})),
+        );
         assert!(matches!(out[0], Outcome::ToChild(_)), "{out:?}");
     }
 
@@ -375,11 +424,16 @@ mod tests {
             "params":{"name":"t","_meta":{"progressToken":"tok-1"}}
         });
         let out = mux.on_client_line(1, &line(req));
-        let Outcome::ToChild(fwd) = &out[0] else { panic!() };
+        let Outcome::ToChild(fwd) = &out[0] else {
+            panic!()
+        };
         let proxy_id = parse(fwd)["id"].as_i64().unwrap();
 
         // Another client with no token in flight.
-        mux.on_client_line(2, &line(json!({"jsonrpc":"2.0","id":5,"method":"tools/list"})));
+        mux.on_client_line(
+            2,
+            &line(json!({"jsonrpc":"2.0","id":5,"method":"tools/list"})),
+        );
 
         let progress = line(json!({
             "jsonrpc":"2.0","method":"notifications/progress",
@@ -400,23 +454,35 @@ mod tests {
         let mut mux = Mux::new();
         let out = mux.on_child_line("not json");
         assert!(matches!(out[0], Outcome::Broadcast(_)));
-        let out = mux.on_child_line(&line(json!({"jsonrpc":"2.0","id":999,"method":"roots/list"})));
+        let out = mux.on_child_line(&line(
+            json!({"jsonrpc":"2.0","id":999,"method":"roots/list"}),
+        ));
         assert!(matches!(out[0], Outcome::Broadcast(_)));
     }
 
     #[test]
     fn cancelled_notification_remaps_request_id() {
         let mut mux = Mux::new();
-        let out = mux.on_client_line(1, &line(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}})));
-        let Outcome::ToChild(fwd) = &out[0] else { panic!() };
+        let out = mux.on_client_line(
+            1,
+            &line(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}})),
+        );
+        let Outcome::ToChild(fwd) = &out[0] else {
+            panic!()
+        };
         let proxy_id = parse(fwd)["id"].as_i64().unwrap();
 
         let out = mux.on_client_line(
             1,
             &line(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3}})),
         );
-        let Outcome::ToChild(fwd) = &out[0] else { panic!("{out:?}") };
-        assert_eq!(parse(fwd)["params"]["requestId"].as_i64().unwrap(), proxy_id);
+        let Outcome::ToChild(fwd) = &out[0] else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            parse(fwd)["params"]["requestId"].as_i64().unwrap(),
+            proxy_id
+        );
     }
 
     #[test]

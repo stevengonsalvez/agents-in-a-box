@@ -198,7 +198,11 @@ fn setup_mcp_pool(work_dir: &std::path::Path, session_name: &str) {
     }
     match mcp_pool::mcp_json::write_session_mcp_json(work_dir, &pooled, Some(session_name)) {
         Ok(wired) if !wired.is_empty() => {
-            println!("MCP pool: shared servers wired via {}: {}", work_dir.join(".mcp.json").display(), wired.join(", "));
+            println!(
+                "MCP pool: shared servers wired via {}: {}",
+                work_dir.join(".mcp.json").display(),
+                wired.join(", ")
+            );
         }
         Ok(_) => {}
         Err(e) => warn!("mcp pool: could not write .mcp.json: {e}"),

@@ -35,7 +35,10 @@ pub async fn execute(socket_path: PathBuf, session: Option<String>) -> Result<()
     'reconnect: loop {
         let stream = match connect_with_backoff(&socket_path).await {
             Some(s) => s,
-            None => anyhow::bail!("could not reach pool socket {} within retry budget", socket_path.display()),
+            None => anyhow::bail!(
+                "could not reach pool socket {} within retry budget",
+                socket_path.display()
+            ),
         };
         let (read_half, mut write_half) = stream.into_split();
         let mut sock_lines = BufReader::new(read_half).lines();
@@ -81,7 +84,10 @@ pub async fn execute(socket_path: PathBuf, session: Option<String>) -> Result<()
     }
 }
 
-async fn write_line(half: &mut tokio::net::unix::OwnedWriteHalf, line: &str) -> std::io::Result<()> {
+async fn write_line(
+    half: &mut tokio::net::unix::OwnedWriteHalf,
+    line: &str,
+) -> std::io::Result<()> {
     half.write_all(line.as_bytes()).await?;
     half.write_all(b"\n").await
 }

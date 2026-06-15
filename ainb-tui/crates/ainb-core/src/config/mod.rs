@@ -1311,7 +1311,10 @@ mod tests {
         let paths = AppConfig::get_config_paths();
         let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
         let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
-        let (ainb, legacy) = (ainb.expect(".ainb path missing"), legacy.expect("legacy path missing"));
+        let (ainb, legacy) = (
+            ainb.expect(".ainb path missing"),
+            legacy.expect("legacy path missing"),
+        );
         // Later files override earlier ones in load(), so `.ainb` must come
         // after `.agents-box` for the canonical location to win.
         assert!(ainb > legacy, "expected .ainb after legacy, got {paths:?}");
@@ -1324,7 +1327,10 @@ mod tests {
         config.mcp_pool.idle_grace_secs = 42;
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
-        assert!(toml_str.contains("[mcp_pool]"), "missing section:\n{toml_str}");
+        assert!(
+            toml_str.contains("[mcp_pool]"),
+            "missing section:\n{toml_str}"
+        );
 
         let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
         assert!(!parsed.mcp_pool.enabled);
@@ -1345,7 +1351,10 @@ mod tests {
         higher.mcp_pool.enabled = false;
 
         base.merge_loaded(higher, false);
-        assert!(!base.mcp_pool.enabled, "explicit disable must survive merge");
+        assert!(
+            !base.mcp_pool.enabled,
+            "explicit disable must survive merge"
+        );
 
         // A layer that omits [mcp_pool] (== defaults) must not clobber it back.
         base.merge_loaded(AppConfig::default(), false);
@@ -1373,7 +1382,10 @@ mod tests {
             definition = { type = "Command", command = "npx", args = [] }
         "#;
         let parsed: AppConfig = toml::from_str(toml_str).unwrap();
-        assert!(!parsed.mcp_servers["browser"].shared, "explicit opt-out parses");
+        assert!(
+            !parsed.mcp_servers["browser"].shared,
+            "explicit opt-out parses"
+        );
     }
 
     #[test]

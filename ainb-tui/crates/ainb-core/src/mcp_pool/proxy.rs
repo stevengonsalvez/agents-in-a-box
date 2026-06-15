@@ -92,7 +92,10 @@ pub async fn run_server_proxy(
     mut signal: tokio::sync::watch::Receiver<ProxySignal>,
 ) -> Result<()> {
     if super::paths::socket_alive_or_cleanup(&socket_path) {
-        anyhow::bail!("socket {} already served by another daemon", socket_path.display());
+        anyhow::bail!(
+            "socket {} already served by another daemon",
+            socket_path.display()
+        );
     }
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind {}", socket_path.display()))?;
@@ -144,8 +147,15 @@ pub async fn run_server_proxy(
             let sessions = session_labels(&clients, &client_sessions);
             let uptime = child.as_ref().map(|c| c.spawned_at.elapsed().as_secs());
             write_status(
-                &status, &server.name, &socket_str, $clients, sessions, $pid, $state,
-                spawn_count, uptime,
+                &status,
+                &server.name,
+                &socket_str,
+                $clients,
+                sessions,
+                $pid,
+                $state,
+                spawn_count,
+                uptime,
             )
             .await
         }};
@@ -400,11 +410,7 @@ where
 {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let mut buf: Vec<u8> = Vec::new();
-    let n = reader
-        .take(MAX_LINE_BYTES as u64 + 1)
-        .read_until(b'\n', &mut buf)
-        .await
-        .ok()?;
+    let n = reader.take(MAX_LINE_BYTES as u64 + 1).read_until(b'\n', &mut buf).await.ok()?;
     if n == 0 {
         return None; // EOF
     }
@@ -542,7 +548,12 @@ fn try_spawn(
     }
 
     tracing::info!("mcp_pool[{}]: spawned child pid {pid}", server.name);
-    Ok(ChildHandle { process, stdin, pgid: pid, spawned_at: Instant::now() })
+    Ok(ChildHandle {
+        process,
+        stdin,
+        pgid: pid,
+        spawned_at: Instant::now(),
+    })
 }
 
 fn child_stderr_log(name: &str) -> std::process::Stdio {
@@ -609,7 +620,10 @@ mod tests {
         );
         // Non-JSON and wrong marker are ignored.
         assert_eq!(parse_attach_frame("not json"), None);
-        assert_eq!(parse_attach_frame(r#"{"_ainb":"other","session":"x"}"#), None);
+        assert_eq!(
+            parse_attach_frame(r#"{"_ainb":"other","session":"x"}"#),
+            None
+        );
     }
 
     #[test]
@@ -655,8 +669,14 @@ mod tests {
     #[tokio::test]
     async fn capped_reader_splits_lines_and_strips_newline() {
         let mut r = BufReader::new(Cursor::new(b"first\nsecond\n".to_vec()));
-        assert_eq!(read_capped_line(&mut r, "t").await.as_deref(), Some("first"));
-        assert_eq!(read_capped_line(&mut r, "t").await.as_deref(), Some("second"));
+        assert_eq!(
+            read_capped_line(&mut r, "t").await.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            read_capped_line(&mut r, "t").await.as_deref(),
+            Some("second")
+        );
         assert_eq!(read_capped_line(&mut r, "t").await, None); // EOF
     }
 

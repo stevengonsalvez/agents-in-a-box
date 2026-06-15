@@ -54,7 +54,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
         shared_total
     );
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
@@ -69,12 +72,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
 
     // Body: empty states vs the table.
     if !state.pool_enabled {
-        render_notice(frame, chunks[0], "MCP pool is disabled", "Set `[mcp_pool] enabled = true` in config to share MCP processes across sessions.");
+        render_notice(
+            frame,
+            chunks[0],
+            "MCP pool is disabled",
+            "Set `[mcp_pool] enabled = true` in config to share MCP processes across sessions.",
+        );
     } else if !state.daemon_running {
-        render_notice(frame, chunks[0], "Pool daemon not running", "It starts automatically with your next `ainb run` session — or run `ainb mcp daemon`.");
+        render_notice(
+            frame,
+            chunks[0],
+            "Pool daemon not running",
+            "It starts automatically with your next `ainb run` session — or run `ainb mcp daemon`.",
+        );
     } else if state.servers.is_empty() {
-        let msg = if state.loading { "Loading…" } else { "No servers pooled yet" };
-        render_notice(frame, chunks[0], msg, "Start a session with MCP servers in its .mcp.json and they'll appear here.");
+        let msg = if state.loading {
+            "Loading…"
+        } else {
+            "No servers pooled yet"
+        };
+        render_notice(
+            frame,
+            chunks[0],
+            msg,
+            "Start a session with MCP servers in its .mcp.json and they'll appear here.",
+        );
     } else {
         render_table(frame, chunks[0], state);
     }
@@ -85,7 +107,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
 fn render_notice(frame: &mut Frame, area: Rect, headline: &str, hint: &str) {
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(headline, Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            headline,
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(Span::styled(hint, Style::default().fg(MUTED_GRAY))),
     ];
@@ -115,21 +140,37 @@ fn render_table(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
             _ => SOFT_WHITE,
         };
         let shared_cell = if shared {
-            Span::styled(format!("✓ ×{}", s.clients), Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD))
+            Span::styled(
+                format!("✓ ×{}", s.clients),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled(format!("×{}", s.clients), Style::default().fg(MUTED_GRAY))
         };
-        let sessions = if s.sessions.is_empty() { "—".to_string() } else { s.sessions.join(", ") };
+        let sessions = if s.sessions.is_empty() {
+            "—".to_string()
+        } else {
+            s.sessions.join(", ")
+        };
         let pid = s.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "—".to_string());
         let uptime = s.uptime_secs.map(fmt_uptime).unwrap_or_else(|| "—".to_string());
 
         let row = Row::new(vec![
-            Cell::from(Span::styled(s.name.clone(), Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD))),
-            Cell::from(Span::styled(s.state.clone(), Style::default().fg(state_color))),
+            Cell::from(Span::styled(
+                s.name.clone(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                s.state.clone(),
+                Style::default().fg(state_color),
+            )),
             Cell::from(shared_cell),
             Cell::from(Span::styled(sessions, Style::default().fg(SOFT_WHITE))),
             Cell::from(Span::styled(pid, Style::default().fg(MUTED_GRAY))),
-            Cell::from(Span::styled(s.spawn_count.to_string(), Style::default().fg(MUTED_GRAY))),
+            Cell::from(Span::styled(
+                s.spawn_count.to_string(),
+                Style::default().fg(MUTED_GRAY),
+            )),
             Cell::from(Span::styled(uptime, Style::default().fg(MUTED_GRAY))),
         ]);
         if selected {
@@ -184,5 +225,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
         format!("    · refreshed {refreshed}"),
         Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
     ));
-    frame.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
 }

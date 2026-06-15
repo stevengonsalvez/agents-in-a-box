@@ -59,7 +59,8 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
     let control = UnixListener::bind(&control_path)
         .with_context(|| format!("bind {}", control_path.display()))?;
 
-    let idle_grace = Duration::from_secs(idle_grace_override.unwrap_or(config.mcp_pool.idle_grace_secs));
+    let idle_grace =
+        Duration::from_secs(idle_grace_override.unwrap_or(config.mcp_pool.idle_grace_secs));
     let status: StatusMap = Arc::new(Mutex::new(HashMap::new()));
     let (register_tx, mut register_rx) = mpsc::unbounded_channel::<Vec<PooledServer>>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
@@ -80,7 +81,9 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
         match paths::server_socket(&server.name) {
             Ok(socket_path) => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_server_proxy(server, socket_path, idle_grace, status, sig_rx).await {
+                    if let Err(e) =
+                        run_server_proxy(server, socket_path, idle_grace, status, sig_rx).await
+                    {
                         tracing::error!("mcp_pool[{name}]: proxy exited: {e}");
                     }
                 });
@@ -103,7 +106,10 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
         }
     }
 
-    eprintln!("mcp daemon: listening (control: {})", control_path.display());
+    eprintln!(
+        "mcp daemon: listening (control: {})",
+        control_path.display()
+    );
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
@@ -177,7 +183,9 @@ async fn handle_control(
                         let count = msg.servers.len();
                         let _ = register.send(msg.servers);
                         write_half
-                            .write_all(format!("{{\"ok\":true,\"registered\":{count}}}\n").as_bytes())
+                            .write_all(
+                                format!("{{\"ok\":true,\"registered\":{count}}}\n").as_bytes(),
+                            )
                             .await?;
                         continue;
                     }
@@ -188,7 +196,9 @@ async fn handle_control(
                                 write_half.write_all(b"{\"ok\":true}\n").await?;
                             }
                             None => {
-                                write_half.write_all(b"{\"error\":\"stop_server needs name\"}\n").await?;
+                                write_half
+                                    .write_all(b"{\"error\":\"stop_server needs name\"}\n")
+                                    .await?;
                             }
                         }
                         continue;

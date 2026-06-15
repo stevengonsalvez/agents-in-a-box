@@ -55,13 +55,23 @@ pub async fn execute(matches: &ArgMatches) -> Result<()> {
             if report.imported.is_empty() {
                 println!("nothing new to import");
             } else {
-                println!("imported into {}: {}", report.target.display(), report.imported.join(", "));
+                println!(
+                    "imported into {}: {}",
+                    report.target.display(),
+                    report.imported.join(", ")
+                );
             }
             if !report.skipped_existing.is_empty() {
-                println!("already configured (untouched): {}", report.skipped_existing.join(", "));
+                println!(
+                    "already configured (untouched): {}",
+                    report.skipped_existing.join(", ")
+                );
             }
             if !report.skipped_unresolvable.is_empty() {
-                println!("skipped (command not on host): {}", report.skipped_unresolvable.join(", "));
+                println!(
+                    "skipped (command not on host): {}",
+                    report.skipped_unresolvable.join(", ")
+                );
             }
             Ok(())
         }
@@ -84,17 +94,29 @@ pub async fn execute(matches: &ArgMatches) -> Result<()> {
                 }
             }
             if servers.is_empty() {
-                anyhow::bail!("no poolable servers configured — define [mcp_servers.*] or run `ainb mcp import` first");
+                anyhow::bail!(
+                    "no poolable servers configured — define [mcp_servers.*] or run `ainb mcp import` first"
+                );
             }
             if codex {
                 let r = mcp_pool::install::install_codex(&servers)?;
-                println!("codex: wired {} into {}", r.wired.join(", "), r.target.display());
+                println!(
+                    "codex: wired {} into {}",
+                    r.wired.join(", "),
+                    r.target.display()
+                );
             }
             if copilot {
                 let r = mcp_pool::install::install_copilot(&servers)?;
-                println!("copilot: wired {} into {}", r.wired.join(", "), r.target.display());
+                println!(
+                    "copilot: wired {} into {}",
+                    r.wired.join(", "),
+                    r.target.display()
+                );
             }
-            println!("note: pool daemon must be running for these sessions (`ainb mcp daemon`, or any ainb Claude session starts it)");
+            println!(
+                "note: pool daemon must be running for these sessions (`ainb mcp daemon`, or any ainb Claude session starts it)"
+            );
             Ok(())
         }
         _ => unreachable!("clap subcommand_required"),

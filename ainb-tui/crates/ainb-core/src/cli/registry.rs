@@ -1467,9 +1467,8 @@ impl CliCommand for McpCommand {
         "mcp"
     }
     fn build(&self, app: Command) -> Command {
-        let daemon = Command::new("daemon")
-            .about("Run the shared MCP pool daemon (foreground)")
-            .arg(
+        let daemon =
+            Command::new("daemon").about("Run the shared MCP pool daemon (foreground)").arg(
                 clap::Arg::new("idle-grace")
                     .long("idle-grace")
                     .value_parser(clap::value_parser!(u64))
@@ -1486,10 +1485,9 @@ impl CliCommand for McpCommand {
         let status = Command::new("status").about("Query the pool daemon (JSON)");
         let stop = Command::new("stop")
             .about("Stop the pool daemon (or one server with `stop <server>`)")
-            .arg(
-                clap::Arg::new("server")
-                    .help("Stop just this server (next attach respawns it); omit to stop the whole daemon"),
-            );
+            .arg(clap::Arg::new("server").help(
+                "Stop just this server (next attach respawns it); omit to stop the whole daemon",
+            ));
         let import = Command::new("import")
             .about("Import stdio servers from .mcp.json / Claude user scope into ainb config")
             .arg(
@@ -1500,8 +1498,18 @@ impl CliCommand for McpCommand {
             );
         let install = Command::new("install")
             .about("Point other agent CLIs' MCP configs at the pool shim")
-            .arg(clap::Arg::new("codex").long("codex").action(clap::ArgAction::SetTrue).help("Wire ~/.codex/config.toml"))
-            .arg(clap::Arg::new("copilot").long("copilot").action(clap::ArgAction::SetTrue).help("Wire ~/.copilot/mcp-config.json"));
+            .arg(
+                clap::Arg::new("codex")
+                    .long("codex")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Wire ~/.codex/config.toml"),
+            )
+            .arg(
+                clap::Arg::new("copilot")
+                    .long("copilot")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Wire ~/.copilot/mcp-config.json"),
+            );
         app.subcommand(
             Command::new(self.name())
                 .about("Shared MCP server pool: daemon / proxy / status / stop / import / install")

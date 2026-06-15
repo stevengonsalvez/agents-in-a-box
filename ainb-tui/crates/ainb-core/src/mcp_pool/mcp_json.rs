@@ -25,8 +25,8 @@ pub fn write_session_mcp_json(
     let path = worktree.join(".mcp.json");
 
     let mut root: Value = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let content =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str(&content)
             .with_context(|| format!("parse existing {}", path.display()))?
     } else {
@@ -36,11 +36,7 @@ pub fn write_session_mcp_json(
     if !root.is_object() {
         anyhow::bail!(".mcp.json root is not an object: {}", path.display());
     }
-    let servers = root
-        .as_object_mut()
-        .unwrap()
-        .entry("mcpServers")
-        .or_insert_with(|| json!({}));
+    let servers = root.as_object_mut().unwrap().entry("mcpServers").or_insert_with(|| json!({}));
     let Some(servers) = servers.as_object_mut() else {
         anyhow::bail!("mcpServers is not an object in {}", path.display());
     };
@@ -83,14 +79,20 @@ fn shim_entry(ainb_exe: &Path, socket: &Path, session: Option<&str>) -> Value {
 /// at the `ainb mcp proxy` shim (our own output — re-importing it would
 /// pool the shim itself).
 pub fn parse_stdio_servers(path: &Path) -> Vec<PooledServer> {
-    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
-    let Ok(root) = serde_json::from_str::<Value>(&content) else { return vec![] };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&content) else {
+        return vec![];
+    };
     extract_stdio_servers(root.get("mcpServers"))
 }
 
 /// Same extraction from an already-parsed `mcpServers` value.
 pub fn extract_stdio_servers(servers: Option<&Value>) -> Vec<PooledServer> {
-    let Some(map) = servers.and_then(Value::as_object) else { return vec![] };
+    let Some(map) = servers.and_then(Value::as_object) else {
+        return vec![];
+    };
     let mut out = Vec::new();
     for (name, entry) in map {
         // Untrusted boundary: `.mcp.json` keys become socket filenames and
@@ -103,7 +105,9 @@ pub fn extract_stdio_servers(servers: Option<&Value>) -> Vec<PooledServer> {
         if transport != "stdio" {
             continue;
         }
-        let Some(command) = entry.get("command").and_then(Value::as_str) else { continue };
+        let Some(command) = entry.get("command").and_then(Value::as_str) else {
+            continue;
+        };
         let args: Vec<String> = entry
             .get("args")
             .and_then(Value::as_array)
@@ -121,7 +125,12 @@ pub fn extract_stdio_servers(servers: Option<&Value>) -> Vec<PooledServer> {
                     .collect()
             })
             .unwrap_or_default();
-        out.push(PooledServer { name: name.clone(), command: command.to_string(), args, env });
+        out.push(PooledServer {
+            name: name.clone(),
+            command: command.to_string(),
+            args,
+            env,
+        });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -206,7 +215,10 @@ mod tests {
     fn creates_file_when_absent_and_noop_when_no_pooled() {
         let dir = tempfile::tempdir().unwrap();
         assert!(write_session_mcp_json(dir.path(), &[], None).unwrap().is_empty());
-        assert!(!dir.path().join(".mcp.json").exists(), "no servers → no file");
+        assert!(
+            !dir.path().join(".mcp.json").exists(),
+            "no servers → no file"
+        );
 
         write_session_mcp_json(dir.path(), &[pooled("ctx")], None).unwrap();
         let written: Value =

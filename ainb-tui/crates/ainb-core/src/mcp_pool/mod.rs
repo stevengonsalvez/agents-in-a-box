@@ -72,11 +72,8 @@ impl PooledServer {
 /// `/home/claude-user/...` which only exists inside containers — pooling
 /// those on the host would spawn children that instantly crash.
 pub fn pooled_servers(config: &AppConfig) -> Vec<PooledServer> {
-    let mut out: Vec<PooledServer> = config
-        .mcp_servers
-        .values()
-        .filter_map(|s| eligible(s))
-        .collect();
+    let mut out: Vec<PooledServer> =
+        config.mcp_servers.values().filter_map(|s| eligible(s)).collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
@@ -86,7 +83,10 @@ fn eligible(server: &McpServerConfig) -> Option<PooledServer> {
         return None;
     }
     if !valid_server_name(&server.name) {
-        tracing::warn!("mcp_pool: skipping server with unsafe name {:?}", server.name);
+        tracing::warn!(
+            "mcp_pool: skipping server with unsafe name {:?}",
+            server.name
+        );
         return None;
     }
     let McpServerDefinition::Command { command, args, env } = &server.definition else {
@@ -100,7 +100,10 @@ fn eligible(server: &McpServerConfig) -> Option<PooledServer> {
         env: env.clone(),
     };
     if !candidate.resolvable_on_host() {
-        tracing::debug!("mcp_pool: skipping '{}' — not resolvable on host", server.name);
+        tracing::debug!(
+            "mcp_pool: skipping '{}' — not resolvable on host",
+            server.name
+        );
         return None;
     }
     Some(candidate)
@@ -141,12 +144,17 @@ mod tests {
 
         config.mcp_servers.insert(
             "container".into(),
-            cmd_server("container", "node", &["/home/claude-user/.npm-global/lib/x.js"]),
+            cmd_server(
+                "container",
+                "node",
+                &["/home/claude-user/.npm-global/lib/x.js"],
+            ),
         );
 
-        config
-            .mcp_servers
-            .insert("missing".into(), cmd_server("missing", "definitely-not-a-binary-xyz", &[]));
+        config.mcp_servers.insert(
+            "missing".into(),
+            cmd_server("missing", "definitely-not-a-binary-xyz", &[]),
+        );
 
         let pooled = pooled_servers(&config);
         assert_eq!(pooled.len(), 1, "{pooled:?}");
@@ -159,16 +167,16 @@ mod tests {
             assert!(valid_server_name(ok), "should accept {ok:?}");
         }
         for bad in [
-            "",                       // empty
-            &"x".repeat(65),          // too long
-            "../etc",                 // traversal
-            "a/b",                    // slash
-            "..",                     // parent
-            "a.b",                    // dotted → nested TOML table
-            "a\"b",                   // quote → key breakout
-            "a b",                    // space
-            "a\nb",                   // control char
-            "srv]",                   // bracket
+            "",              // empty
+            &"x".repeat(65), // too long
+            "../etc",        // traversal
+            "a/b",           // slash
+            "..",            // parent
+            "a.b",           // dotted → nested TOML table
+            "a\"b",          // quote → key breakout
+            "a b",           // space
+            "a\nb",          // control char
+            "srv]",          // bracket
         ] {
             assert!(!valid_server_name(bad), "should reject {bad:?}");
         }
@@ -180,7 +188,10 @@ mod tests {
         let mut config = AppConfig::default();
         config.mcp_servers.clear();
         config.mcp_servers.insert("../evil".into(), cmd_server("../evil", "sh", &[]));
-        assert!(pooled_servers(&config).is_empty(), "unsafe config name must not pool");
+        assert!(
+            pooled_servers(&config).is_empty(),
+            "unsafe config name must not pool"
+        );
 
         // …and server_socket refuses to build a traversal path.
         assert!(crate::mcp_pool::paths::server_socket("../../etc/x").is_err());

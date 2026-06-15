@@ -9,7 +9,9 @@ use super::paths;
 
 /// True when the daemon's control socket answers within ~500ms.
 pub fn daemon_alive() -> bool {
-    let Ok(path) = paths::control_socket() else { return false };
+    let Ok(path) = paths::control_socket() else {
+        return false;
+    };
     if !path.exists() {
         return false;
     }
@@ -95,5 +97,8 @@ pub fn ensure_daemon() -> Result<()> {
             return Ok(());
         }
     }
-    anyhow::bail!("mcp daemon did not come up within 3s (see {})", paths::daemon_log()?.display())
+    anyhow::bail!(
+        "mcp daemon did not come up within 3s (see {})",
+        paths::daemon_log()?.display()
+    )
 }

@@ -1251,7 +1251,10 @@ mod mcp_pool_config_screen_tests {
 
         assert!(!config.mcp_pool.enabled);
         assert!(!config.mcp_servers["context7"].shared);
-        assert!(config.mcp_servers["serena"].shared, "untouched server keeps default");
+        assert!(
+            config.mcp_servers["serena"].shared,
+            "untouched server keeps default"
+        );
 
         // Reopen → edited values shown.
         let reopened = ConfigScreenState::from_app_config(&config);

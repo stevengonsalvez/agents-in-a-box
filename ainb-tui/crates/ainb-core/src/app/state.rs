@@ -874,7 +874,11 @@ impl McpOverlayState {
 /// daemon and parses its `status` JSON into the snapshot.
 pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
     if !crate::mcp_pool::client::daemon_alive() {
-        return McpFetchResult { daemon_running: false, servers: Vec::new(), error: None };
+        return McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: None,
+        };
     }
     match crate::mcp_pool::client::daemon_status() {
         Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
@@ -883,7 +887,11 @@ pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
                     .get("servers")
                     .and_then(|s| serde_json::from_value(s.clone()).ok())
                     .unwrap_or_default();
-                McpFetchResult { daemon_running: true, servers, error: None }
+                McpFetchResult {
+                    daemon_running: true,
+                    servers,
+                    error: None,
+                }
             }
             Err(e) => McpFetchResult {
                 daemon_running: true,
@@ -4506,7 +4514,9 @@ impl AppState {
     /// in flight (the one-outstanding-request guard). The blocking control
     /// socket call runs on the blocking pool so the executor never stalls.
     pub fn spawn_mcp_fetch(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else { return };
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
         if o.fetch_rx.is_some() {
             return; // a fetch is already pending
         }
@@ -4514,12 +4524,13 @@ impl AppState {
         o.fetch_rx = Some(rx);
         o.loading = true;
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(mcp_fetch_blocking)
-                .await
-                .unwrap_or_else(|e| McpFetchResult {
-                    daemon_running: false,
-                    servers: Vec::new(),
-                    error: Some(format!("fetch task failed: {e}")),
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                    }
                 });
             let _ = tx.send(result);
         });
@@ -4530,7 +4541,9 @@ impl AppState {
     /// `try_recv` never waits, and no fetch is spawned when one is pending or
     /// the cadence is disabled. Called from the 250ms app tick.
     pub fn check_mcp_overlay(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else { return };
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
 
         if let Some(rx) = o.fetch_rx.as_mut() {
             if let Ok(result) = rx.try_recv() {
@@ -4549,7 +4562,9 @@ impl AppState {
         // only if a cadence is configured and it has elapsed.
         let due = o.refresh_secs > 0
             && o.fetch_rx.is_none()
-            && o.last_refreshed.map(|t| t.elapsed().as_secs() >= o.refresh_secs).unwrap_or(false);
+            && o.last_refreshed
+                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
+                .unwrap_or(false);
         if due {
             self.spawn_mcp_fetch();
         }
@@ -4575,18 +4590,21 @@ impl AppState {
     /// change as soon as the stop completes (no immediate-fetch race that
     /// reads pre-stop state).
     fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
-        let Some(o) = self.mcp_overlay.as_mut() else { return };
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
         let (tx, rx) = mpsc::unbounded_channel();
         o.fetch_rx = Some(rx); // replaces any in-flight fetch (its result is discarded)
         o.loading = true;
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(stop).await;
-            let result = tokio::task::spawn_blocking(mcp_fetch_blocking)
-                .await
-                .unwrap_or_else(|e| McpFetchResult {
-                    daemon_running: false,
-                    servers: Vec::new(),
-                    error: Some(format!("fetch task failed: {e}")),
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                    }
                 });
             let _ = tx.send(result);
         });

@@ -141,7 +141,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join(".ainb").join("config.toml");
 
-        let report = import_into(&target, &[server("ctx", "sh"), server("ghost", "no-such-bin-xyz")]).unwrap();
+        let report = import_into(
+            &target,
+            &[server("ctx", "sh"), server("ghost", "no-such-bin-xyz")],
+        )
+        .unwrap();
         assert_eq!(report.imported, vec!["ctx"]);
         assert_eq!(report.skipped_unresolvable, vec!["ghost"]);
 
@@ -170,8 +174,17 @@ mod tests {
         assert_eq!(report.imported, vec!["extra"]);
 
         let content = std::fs::read_to_string(&target).unwrap();
-        assert!(content.contains("# my precious comment"), "comment lost:\n{content}");
-        assert!(content.contains("command = \"bun\""), "existing entry clobbered:\n{content}");
-        assert!(content.contains("[mcp_servers.extra]"), "new entry missing:\n{content}");
+        assert!(
+            content.contains("# my precious comment"),
+            "comment lost:\n{content}"
+        );
+        assert!(
+            content.contains("command = \"bun\""),
+            "existing entry clobbered:\n{content}"
+        );
+        assert!(
+            content.contains("[mcp_servers.extra]"),
+            "new entry missing:\n{content}"
+        );
     }
 }

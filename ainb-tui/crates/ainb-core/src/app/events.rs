@@ -907,7 +907,9 @@ impl EventHandler {
         // confirmation dialog, so a stop-confirmation sits on top of it).
         if state.mcp_overlay.is_some() {
             return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => Some(AppEvent::McpOverlayClose),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
+                    Some(AppEvent::McpOverlayClose)
+                }
                 KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
                 KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
                 KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),

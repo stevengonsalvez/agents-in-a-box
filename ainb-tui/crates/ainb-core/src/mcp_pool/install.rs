@@ -73,11 +73,8 @@ pub fn install_copilot(servers: &[PooledServer]) -> Result<InstallReport> {
     if !root.is_object() {
         anyhow::bail!("{} root is not an object", target.display());
     }
-    let servers_obj = root
-        .as_object_mut()
-        .unwrap()
-        .entry("mcpServers")
-        .or_insert_with(|| json!({}));
+    let servers_obj =
+        root.as_object_mut().unwrap().entry("mcpServers").or_insert_with(|| json!({}));
     let Some(map) = servers_obj.as_object_mut() else {
         anyhow::bail!("mcpServers is not an object in {}", target.display());
     };
@@ -97,14 +94,21 @@ pub fn install_copilot(servers: &[PooledServer]) -> Result<InstallReport> {
         wired.push(server.name.clone());
     }
 
-    paths::write_atomic(&target, &(serde_json::to_string_pretty(&root)? + "\n"), Some(0o600))?;
+    paths::write_atomic(
+        &target,
+        &(serde_json::to_string_pretty(&root)? + "\n"),
+        Some(0o600),
+    )?;
     Ok(InstallReport { target, wired })
 }
 
 fn backup(target: &Path) -> Result<()> {
     let bak = target.with_extension(format!(
         "{}bak",
-        target.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
+        target
+            .extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
     ));
     // Never clobber an existing backup: the first run captured the user's
     // pristine pre-install config; a second run would otherwise copy the
