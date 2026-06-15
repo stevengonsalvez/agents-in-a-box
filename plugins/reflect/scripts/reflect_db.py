@@ -326,6 +326,46 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
+
+# ---------------------------------------------------------------------------
+# S8: Document -> chunks -> learnings grouping (Hindsight documents+chunks model)
+#
+# Tracks (transcript_id, slice_hash) -> learning_ids[] so multiple learnings
+# attribute back to one conversation and dedup across them. Enables
+# "show me everything that came out of session X" and cross-learning
+# consolidation. ``transcript_chunks.hash`` REUSES the S7 slice-chunk hash
+# (cascade ``signal_hash``); the UNIQUE constraint on (transcript_id, hash)
+# makes re-recording the same chunk idempotent so chunks are never
+# double-processed.
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPTS_DDL = """
+CREATE TABLE IF NOT EXISTS transcripts (
+    id              TEXT PRIMARY KEY,
+    captured_at     TEXT NOT NULL
+);
+"""
+
+_TRANSCRIPT_CHUNKS_DDL = """
+CREATE TABLE IF NOT EXISTS transcript_chunks (
+    id              TEXT PRIMARY KEY,
+    transcript_id   TEXT NOT NULL REFERENCES transcripts(id),
+    hash            TEXT NOT NULL,
+    slice           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    UNIQUE (transcript_id, hash)
+);
+"""
+
+_CHUNK_LEARNINGS_DDL = """
+CREATE TABLE IF NOT EXISTS chunk_learnings (
+    chunk_hash      TEXT NOT NULL,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (chunk_hash, learning_id)
+);
+"""
+
 _LEARNING_HISTORY_DDL = """
 CREATE TABLE IF NOT EXISTS learning_history (
     id              TEXT PRIMARY KEY,
@@ -505,6 +545,13 @@ CREATE INDEX IF NOT EXISTS idx_chunk_hashes_created_at
     ON chunk_hashes(created_at);
 CREATE INDEX IF NOT EXISTS idx_commit_links_session_id
     ON commit_links(session_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_chunks_transcript_id
+    ON transcript_chunks(transcript_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_chunks_hash ON transcript_chunks(hash);
+CREATE INDEX IF NOT EXISTS idx_chunk_learnings_chunk_hash
+    ON chunk_learnings(chunk_hash);
+CREATE INDEX IF NOT EXISTS idx_chunk_learnings_learning_id
+    ON chunk_learnings(learning_id);
 """
 
 _SCHEMA_DDL = (
@@ -526,6 +573,9 @@ _SCHEMA_DDL = (
     + _CONVENTIONS_DOCS_DDL
     + _CHUNK_HASHES_DDL
     + _COMMIT_LINKS_DDL
+    + _TRANSCRIPTS_DDL
+    + _TRANSCRIPT_CHUNKS_DDL
+    + _CHUNK_LEARNINGS_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -875,6 +925,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(_CONVENTIONS_DOCS_DDL)
         conn.execute(_CHUNK_HASHES_DDL)
         conn.execute(_COMMIT_LINKS_DDL)
+        conn.execute(_TRANSCRIPTS_DDL)
+        conn.execute(_TRANSCRIPT_CHUNKS_DDL)
+        conn.execute(_CHUNK_LEARNINGS_DDL)
 
     # A4: pre-existing recall_events tables predate the followup-rate
     # diagnostic (session anchor + followup flag).
@@ -3357,6 +3410,167 @@ def add_artifact(
             ),
         )
     return aid
+
+
+# ---------------------------------------------------------------------------
+# S8: Transcript -> chunks -> learnings grouping
+# ---------------------------------------------------------------------------
+
+
+def record_transcript(
+    transcript_id: str,
+    *,
+    captured_at: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Register a transcript (conversation) so its chunks/learnings can group.
+
+    Idempotent: re-recording the same ``transcript_id`` keeps the original
+    ``captured_at`` rather than clobbering it. Returns the transcript id.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO transcripts (id, captured_at) VALUES (?, ?)
+               ON CONFLICT(id) DO NOTHING""",
+            (transcript_id, captured_at or _now_iso()),
+        )
+    return transcript_id
+
+
+def record_chunk(
+    transcript_id: str,
+    chunk_hash: str,
+    *,
+    slice_text: str = "",
+    captured_at: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Record a (transcript, slice_hash) chunk, reusing the S7 slice hash.
+
+    Ensures the parent transcript exists, then inserts the chunk under a
+    UNIQUE (transcript_id, hash) constraint so the same chunk is never
+    double-processed — a repeat call is a no-op. Returns the chunk hash.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO transcripts (id, captured_at) VALUES (?, ?)
+               ON CONFLICT(id) DO NOTHING""",
+            (transcript_id, captured_at or _now_iso()),
+        )
+        conn.execute(
+            """INSERT INTO transcript_chunks
+                   (id, transcript_id, hash, slice, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(transcript_id, hash) DO NOTHING""",
+            (_new_id(), transcript_id, chunk_hash, slice_text, _now_iso()),
+        )
+    return chunk_hash
+
+
+def chunk_already_processed(
+    transcript_id: str,
+    chunk_hash: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """True if this (transcript_id, slice_hash) chunk is already recorded."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM transcript_chunks WHERE transcript_id = ? AND hash = ?",
+        (transcript_id, chunk_hash),
+    ).fetchone()
+    return row is not None
+
+
+def link_chunk_learning(
+    chunk_hash: str,
+    learning_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Attribute a learning back to the chunk it was drained from.
+
+    Idempotent on (chunk_hash, learning_id) so re-recording the same mapping
+    adds no duplicate.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO chunk_learnings (chunk_hash, learning_id, created_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(chunk_hash, learning_id) DO NOTHING""",
+            (chunk_hash, learning_id, _now_iso()),
+        )
+
+
+def record_chunk_with_learnings(
+    transcript_id: str,
+    chunk_hash: str,
+    learning_ids: list[str],
+    *,
+    slice_text: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Convenience: record a chunk and attribute its learnings in one call.
+
+    Used at the cascade drain point. Fully idempotent — re-running with the
+    same chunk + learnings produces no duplicate rows.
+    """
+    conn = conn or get_conn()
+    record_chunk(transcript_id, chunk_hash, slice_text=slice_text, conn=conn)
+    for learning_id in learning_ids:
+        link_chunk_learning(chunk_hash, learning_id, conn=conn)
+
+
+def get_learnings_for_transcript(
+    transcript_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[str]:
+    """Return the distinct learning ids that came from a transcript/session.
+
+    Answers "show me everything that came out of session X" by joining
+    transcript -> chunks -> chunk_learnings. Ordered by attribution time.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT DISTINCT cl.learning_id AS learning_id, cl.created_at AS created_at
+               FROM transcript_chunks tc
+               JOIN chunk_learnings cl ON cl.chunk_hash = tc.hash
+              WHERE tc.transcript_id = ?
+              ORDER BY cl.created_at, cl.learning_id""",
+        (transcript_id,),
+    ).fetchall()
+    return [r["learning_id"] for r in rows]
+
+
+def get_transcript_grouping(
+    transcript_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, list[str]]:
+    """Return the per-chunk learning grouping for a transcript.
+
+    Maps each chunk hash to the list of learning ids attributed to it. Lets
+    callers see cross-chunk consolidation candidates within one session.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT tc.hash AS chunk_hash, cl.learning_id AS learning_id
+               FROM transcript_chunks tc
+               LEFT JOIN chunk_learnings cl ON cl.chunk_hash = tc.hash
+              WHERE tc.transcript_id = ?
+              ORDER BY tc.created_at, cl.created_at""",
+        (transcript_id,),
+    ).fetchall()
+    grouping: dict[str, list[str]] = {}
+    for r in rows:
+        bucket = grouping.setdefault(r["chunk_hash"], [])
+        if r["learning_id"] is not None:
+            bucket.append(r["learning_id"])
+    return grouping
 
 
 # ---------------------------------------------------------------------------

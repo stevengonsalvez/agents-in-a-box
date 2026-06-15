@@ -1484,6 +1484,30 @@ def prepare(transcript: str | Path, *, context_lines: int = _DEFAULT_CONTEXT_LIN
     return prep
 
 
+def record_drain_chunk(prep: Prep, *, transcript_id: str, learning_ids: list[str]) -> bool:
+    """S8: persist the (transcript -> slice chunk -> learnings) grouping at drain.
+
+    Reuses the S7 ``prep.signal_hash`` as the chunk hash so a slice is never
+    double-processed, then attributes the drained learnings back to it. This
+    is what makes "show me everything that came out of session X" queryable
+    and gives cross-learning consolidation a stable grouping key.
+
+    Best-effort: returns False (without raising) if the DB is unavailable, so
+    the drainer's primary path is never blocked by the grouping layer.
+    """
+    chunk_hash = prep.signal_hash
+    if not chunk_hash:
+        return False
+    try:
+        from reflect_db import record_chunk_with_learnings
+        record_chunk_with_learnings(
+            transcript_id, chunk_hash, learning_ids, slice_text=prep.slice_path or ""
+        )
+        return True
+    except Exception:
+        return False
+
+
 def main() -> None:
     import argparse
 
