@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde_json::Value;
 
 use super::atomic::write_atomic;
@@ -21,10 +22,39 @@ pub fn claude_settings_path(home: &Path) -> PathBuf {
     home.join(".claude").join("settings.json")
 }
 
+/// Path to the advisory lock guarding the settings.json read-merge-write window.
+#[must_use]
+pub fn settings_lock_path(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json.lock")
+}
+
+/// Acquire an exclusive advisory lock guarding the settings.json
+/// read-merge-write window. Other tools that touch the same file (reflect /
+/// notifyd) take the same lock, so a concurrent rewrite cannot silently drop the
+/// other's hooks (lost update). Mirrors the inbox lock pattern.
+fn lock_settings(home: &Path) -> Result<std::fs::File> {
+    let path = settings_lock_path(home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating settings dir {}", parent.display()))?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .context("opening settings.json lock file")?;
+    f.lock_exclusive().context("acquiring settings.json lock")?;
+    Ok(f)
+}
+
 /// Install the ATC lifecycle hooks into `<home>/.claude/settings.json`, pointing
 /// every managed event at `hook_script`. Preserves all existing hooks. Returns
-/// the settings path written. Idempotent.
+/// the settings path written. Idempotent. The read-merge-write is performed
+/// under an advisory lock so it never clobbers a concurrent rewrite by another
+/// tool.
 pub fn install_claude_hooks(home: &Path, hook_script: &Path) -> Result<PathBuf> {
+    let _guard = lock_settings(home)?;
     let path = claude_settings_path(home);
     let existing = read_settings(&path)?;
     let merged = hooks::merge_into(existing, &hook_script.to_string_lossy());
@@ -34,8 +64,10 @@ pub fn install_claude_hooks(home: &Path, hook_script: &Path) -> Result<PathBuf> 
 }
 
 /// Strip the ATC lifecycle hooks from `<home>/.claude/settings.json`, leaving
-/// every other hook intact. No-op when the file is absent. Idempotent.
+/// every other hook intact. No-op when the file is absent. Idempotent. The
+/// read-merge-write is performed under the same advisory lock as install.
 pub fn uninstall_claude_hooks(home: &Path) -> Result<()> {
+    let _guard = lock_settings(home)?;
     let path = claude_settings_path(home);
     if !path.exists() {
         return Ok(());
@@ -170,5 +202,59 @@ mod tests {
     fn uninstall_is_noop_when_settings_absent() {
         let home = TempDir::new().unwrap();
         uninstall_claude_hooks(home.path()).unwrap(); // must not error
+    }
+
+    /// Regression (M3): the read-merge-write window is guarded by an advisory
+    /// lock so a concurrent rewrite by another tool (reflect / notifyd) cannot
+    /// silently drop the other's hooks. We assert the lock file is created and
+    /// used by install — the marker that the locked path was actually taken.
+    #[test]
+    fn install_takes_the_settings_lock() {
+        let home = TempDir::new().unwrap();
+        let lock = settings_lock_path(home.path());
+        assert!(!lock.exists(), "lock file should not exist before install");
+        install_claude_hooks(home.path(), Path::new("/x/notify.sh")).unwrap();
+        assert!(
+            lock.exists(),
+            "install must create + use the settings.json lock"
+        );
+    }
+
+    /// The settings lock serialises concurrent installs: two threads racing
+    /// `install_claude_hooks` against the same settings.json both complete and
+    /// the result is a single coherent file with the ATC hooks present (no torn
+    /// write, no lost merge). With the advisory lock the read-merge-write is
+    /// mutually exclusive.
+    #[test]
+    fn concurrent_installs_serialise_under_the_lock() {
+        use std::sync::Arc;
+        let home = Arc::new(TempDir::new().unwrap());
+        write_reflect_and_notifyd(home.path());
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let h = home.clone();
+            handles.push(std::thread::spawn(move || {
+                install_claude_hooks(h.path(), Path::new("/x/notify.sh")).unwrap();
+            }));
+        }
+        for j in handles {
+            j.join().unwrap();
+        }
+
+        // The file is coherent: parses, preserves reflect + notifyd, and carries
+        // the ATC hooks.
+        let v = read(home.path());
+        assert_eq!(v["otherUserSetting"], 42);
+        assert!(v["hooks"]["SessionEnd"].is_array(), "ATC hooks present");
+        let stop: Vec<String> = v["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().cloned().unwrap_or_default())
+            .filter_map(|h| h["command"].as_str().map(str::to_string))
+            .collect();
+        assert!(stop.iter().any(|c| c.contains("stop_reflect.py")));
+        assert!(stop.iter().any(|c| c.contains("notify.sh")));
     }
 }
