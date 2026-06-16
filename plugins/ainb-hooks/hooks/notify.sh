@@ -186,4 +186,27 @@ if ! ainb_send; then
   fi
 fi
 
+# ----- 6. ATC plumbing (status files · durable inbox · Stop-drain) ------------
+# Only active when this hook was installed under ATC management
+# (AINB_MANAGED=atc, set by the settings.json managed block). Leaf sessions and
+# the plain notifyd-only install skip every line below, so they pay nothing.
+#
+# `ainb fleet atc hook` does the real work in Rust (atomic status file, durable
+# parent inbox commit, and — on Stop — the synchronous drain that prints
+# {"decision":"block",...}). The shell only forwards what it already parsed and
+# relays the command's stdout verbatim so Claude Code sees the block JSON.
+if [ "${AINB_MANAGED:-}" = "atc" ] && command -v ainb >/dev/null 2>&1; then
+  AINB_HOOK_EVENT="${AINB_HOOK_EVENT:-${AINB_RAW_EVENT}}"
+  # Forward the original payload on stdin so the Rust side can extract a
+  # done_summary (last assistant line) without re-reading the transcript.
+  AINB_HOOK_OUT="$(printf '%s' "${AINB_INPUT}" | ainb fleet atc hook \
+    --event "${AINB_HOOK_EVENT}" \
+    --session-id "${AINB_SESSION_ID}" \
+    --cwd "${AINB_CWD}" 2>/dev/null)"
+  # Relay any decision JSON (the Stop-drain block) to Claude Code on stdout.
+  if [ -n "${AINB_HOOK_OUT}" ]; then
+    printf '%s\n' "${AINB_HOOK_OUT}"
+  fi
+fi
+
 exit 0
