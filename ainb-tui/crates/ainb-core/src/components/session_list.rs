@@ -370,7 +370,7 @@ impl SessionListComponent {
                     // selector made width unpredictable across terminals.
                     let mode_indicator = if state.app_config.ui_preferences.show_container_status {
                         match session.mode {
-                            SessionMode::Boss => "\u{e7b0} ",       // dev-docker
+                            SessionMode::Boss => "\u{e7b0} ",        // dev-docker
                             SessionMode::Interactive => "\u{f108} ", // fa-desktop
                         }
                     } else {
@@ -417,12 +417,19 @@ impl SessionListComponent {
                     // there is no square box around the glyph on the highlight
                     // bar. Caps collapse to spaces to preserve column width.
                     let (pill_l, pill_r, agent_style) = if is_selected_session {
-                        (" ", " ", Style::default().fg(agent_color).add_modifier(Modifier::BOLD))
+                        (
+                            " ",
+                            " ",
+                            Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
+                        )
                     } else {
                         (
                             PILL_LEFT,
                             PILL_RIGHT,
-                            Style::default().fg(DARK_BG).bg(agent_color).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(DARK_BG)
+                                .bg(agent_color)
+                                .add_modifier(Modifier::BOLD),
                         )
                     };
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
@@ -442,7 +449,10 @@ impl SessionListComponent {
                         next_badge(&mut attach_no),
                         checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(format!(" {} ", status_indicator), Style::default().fg(state_color)),
+                        Span::styled(
+                            format!(" {} ", status_indicator),
+                            Style::default().fg(state_color),
+                        ),
                         Span::styled(mode_indicator.to_string(), Style::default().fg(MUTED_GRAY)),
                         // Coding-agent chip — brand colour carries identity
                         // (orange Claude, blue Gemini, …). Filled pill on normal

@@ -3,8 +3,8 @@
 # Drives scripts/mcp-import-journey.sh — isolated $HOME, an empty pool daemon,
 # and a project whose .mcp.json declares one stdio server. Launches the TUI in
 # that project, opens the overlay with `p` (empty), then presses `i` to import.
-# Proves: the import writes ./.ainb/config.toml AND the server appears live in
-# the table, with a "▸ imported …" result line.
+# Proves: the import writes the global user config AND the server appears live
+# in the table, with a "▸ imported …" result line.
 #
 # Run from the ainb-tui/ workspace root:
 #   cargo build --release
@@ -35,7 +35,8 @@ Sleep 1s
 Type "p"
 Sleep 3s
 
-# Import: reads the project .mcp.json, writes ./.ainb/config.toml, registers
+# Import: reads the launch dir's .mcp.json + Claude user scope, writes the
+# global user config, registers
 # the server with the live daemon. The table gains the row + a result line.
 Type "i"
 Sleep 4s
