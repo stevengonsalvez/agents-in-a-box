@@ -4,8 +4,10 @@
 # host-resolvable stdio server), starts an EMPTY pool daemon, then execs the
 # ainb TUI from inside that project so vhs can drive it:
 #   `p` opens the overlay (empty — nothing pooled yet)
-#   `i` imports the project's .mcp.json into ./.ainb/config.toml AND registers
-#       it with the live daemon, so the server appears in the table.
+#   `i` imports the launch dir's .mcp.json (+ Claude user scope) into the global
+#       user config AND registers it with the live daemon, so the server appears
+#       in the table. The overlay is a global view, so import targets the user
+#       config (the one read from anywhere), not a per-worktree project config.
 #
 # Self-contained & deterministic: own $HOME (never touches your real env),
 # onboarding pre-completed so no wizard, a fake stdio MCP (no network).
@@ -57,6 +59,6 @@ sleep 2
 trap '"$AINB" mcp stop >/dev/null 2>&1; pkill -f "$T/fake.js" 2>/dev/null; rm -rf "$T"' EXIT
 
 # Hand the terminal to the TUI, with cwd = the project so the overlay's import
-# reads THIS .mcp.json and writes THIS ./.ainb/config.toml.
+# reads THIS .mcp.json as a source (the target is the global user config).
 cd "$PROJECT"
 exec "$AINB"
