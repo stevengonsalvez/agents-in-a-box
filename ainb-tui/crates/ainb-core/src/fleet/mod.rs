@@ -16,6 +16,7 @@ pub mod atc;
 pub mod bridge;
 pub mod discover;
 pub mod enrich_cache;
+pub mod plumbing;
 pub mod read;
 pub mod send;
 pub mod types;

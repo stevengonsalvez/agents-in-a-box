@@ -67,6 +67,9 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tempfile = { workspace = true }
+# Durable orchestration plumbing: advisory file locks (inbox).
+# (blake3, for exactly-once turn fingerprints, is already a dependency below.)
+fs2 = { workspace = true }
 nix = { workspace = true }
 arboard = { workspace = true }
 keyring = { workspace = true }
