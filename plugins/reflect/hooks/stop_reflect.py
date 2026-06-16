@@ -73,6 +73,27 @@ except ImportError:
     def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
         pass
 
+# Cross-harness stdin readers (snake_case claude/codex, camelCase copilot).
+try:
+    from hook_input import get_session_id, get_transcript_path, get_cwd  # noqa: E402
+except ImportError:
+    def get_session_id(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
+        for k in ("session_id", "sessionId"):
+            if k in data:
+                return data[k]
+        return default
+    def get_transcript_path(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
+        for k in ("transcript_path", "transcriptPath"):
+            if k in data:
+                return data[k]
+        return default
+    def get_cwd(data, default=""):  # type: ignore[no-redef]
+        return data["cwd"] if isinstance(data, dict) and "cwd" in data else default
+
 
 def state_dir() -> Path:
     return Path(os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect")))
@@ -295,8 +316,8 @@ def _main_body() -> None:
     except json.JSONDecodeError:
         data = {}
 
-    session_id = str(data.get("session_id", "") or "").strip()
-    transcript_path = str(data.get("transcript_path", "") or "").strip()
+    session_id = str(get_session_id(data) or "").strip()
+    transcript_path = str(get_transcript_path(data) or "").strip()
 
     # SG4: sweep TTL-expired test-outcome state. Stop is the closest thing to
     # a session-end hook the plugin wires; deleting the CURRENT session's
@@ -357,7 +378,7 @@ def _main_body() -> None:
             "session_id": session_id or "unknown",
             "transcript_path": transcript_path,
             "trigger": "stop",
-            "cwd": data.get("cwd", os.getcwd()),
+            "cwd": get_cwd(data, os.getcwd()),
         }
         # Append, not atomic — JSONL queue is append-only and the
         # drainer tolerates partial lines.

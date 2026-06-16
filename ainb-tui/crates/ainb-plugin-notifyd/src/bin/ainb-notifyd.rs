@@ -16,7 +16,7 @@ use clap::{Args, Parser, Subcommand};
 use ainb_plugin_notifyd::cli;
 
 /// ainb-notifyd: notification daemon + hook installer for
-/// Claude Code and Codex CLI.
+/// Claude Code, Codex CLI, and GitHub Copilot CLI.
 #[derive(Debug, Parser)]
 #[command(name = "ainb-notifyd", version)]
 struct Cli {
@@ -47,6 +47,9 @@ struct AgentArgs {
     /// Target Codex CLI.
     #[arg(long)]
     codex: bool,
+    /// Target GitHub Copilot CLI.
+    #[arg(long)]
+    copilot: bool,
     /// Target every known agent (mutually exclusive with per-agent flags).
     #[arg(long)]
     all: bool,
@@ -65,8 +68,12 @@ async fn main() -> ExitCode {
     let result: Result<()> = match cli.cmd.unwrap_or(Cmd::Run) {
         Cmd::Run => cli::cmd_run().await,
         Cmd::Stop => cli::cmd_stop(),
-        Cmd::Install(a) => cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.all)),
-        Cmd::Uninstall(a) => cli::cmd_uninstall(&cli::agents_from_flags(a.claude, a.codex, a.all)),
+        Cmd::Install(a) => {
+            cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
+        }
+        Cmd::Uninstall(a) => {
+            cli::cmd_uninstall(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
+        }
         Cmd::Status => cli::cmd_status(),
     };
     match result {

@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${PLUGIN_ROOT}/skills/recall/hooks/session_start_recall.py"
+          },
+          {
+            "type": "command",
+            "command": "(nohup ${PLUGIN_ROOT}/hooks/reflect-drain-bg.sh >/dev/null 2>&1 &) >/dev/null 2>&1",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${PLUGIN_ROOT}/skills/recall/hooks/user_prompt_submit_recall.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${PLUGIN_ROOT}/hooks/posttooluse_minilearning.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${PLUGIN_ROOT}/hooks/stop_reflect.py"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${PLUGIN_ROOT}/hooks/precompact_reflect.py --auto --verbose"
+          }
+        ]
+      }
+    ]
+  }
+}

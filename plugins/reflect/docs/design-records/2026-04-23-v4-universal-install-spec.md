@@ -150,6 +150,15 @@ ALWAYS writes local copy to ~/.learnings/ first (no data loss if push fails).
 
 ### Invocation Per Harness
 
+> **⚠️ SUPERSEDED (2026-06-15).** The "no hook parity" decision below was reversed
+> once Codex (hooks since ~0.114) and Copilot (hooks GA Feb 2026) shipped real
+> lifecycle hook systems. Both adapters now wire reflect hooks: Codex →
+> `~/.codex/hooks.json` (6 hooks), Copilot → copilot-native `~/.copilot/hooks/reflect.json`.
+> Auto-recall on SessionStart works on all three; only Copilot's *per-prompt*
+> recall stays manual (it ignores `userPromptSubmitted` hook output). The table
+> below reflects the original v4 decision, not current behaviour — see
+> `docs/architecture.md` § "Hook parity" and `research/2026-06-15_*_copilot-hooks-statusline-reflect-adapter.md`.
+
 | Harness | Auto-recall on session start | Slash commands | Notes |
 |---------|------------------------------|----------------|-------|
 | Claude Code | ✅ SessionStart hook | ✅ `/reflect`, `/recall`, `/reflect:ingest` | Flagship — feature-complete |

@@ -3,7 +3,7 @@
 //! The bash hook script and Claude plugin manifest are embedded into
 //! the `ainb-notifyd` binary at build time via `include_str!`. The
 //! [`install`] verb extracts them to known on-disk locations and
-//! wires both Claude Code and Codex CLI to call into `notify.sh`.
+//! wires Claude Code, Codex CLI, and GitHub Copilot CLI to call into `notify.sh`.
 //!
 //! For Claude: a plugin directory at `~/.claude/plugins/ainb-hooks/`
 //! holding the manifest + script (so Claude Code's plugin marketplace
@@ -772,6 +772,7 @@ mod tests {
         let names: Vec<_> = rows.iter().map(|r| r.agent.as_str()).collect();
         assert!(names.contains(&"claude"));
         assert!(names.contains(&"codex"));
+        assert!(names.contains(&"copilot"));
         for r in &rows {
             assert!(!r.installed);
             assert!(!r.socket_ok);
