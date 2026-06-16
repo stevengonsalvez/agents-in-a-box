@@ -179,7 +179,12 @@ sidecar_schema:
             description: "Entity name on the 'to' side of the relationship"
           type:
             type: string
-            enum: [caused_by, solves, requires, relates_to]
+            # S2 typed causal links (caused_by..uses) + legacy types.
+            # Keep in sync with scripts/validate_sidecar.py::RELATIONSHIP_TYPES.
+            enum: [caused_by, causes, enables, prevents, contradicts,
+                   supersedes, part_of, uses,
+                   solves, requires, relates_to,
+                   implements, configures, triggers]
           description:
             type: string
             description: "How the two entities relate"

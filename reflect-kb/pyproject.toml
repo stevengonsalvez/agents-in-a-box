@@ -90,6 +90,14 @@ Specification = "https://github.com/stevengonsalvez/ai-coder-rules/blob/main/pla
 [tool.hatch.build.targets.wheel]
 packages = ["src/reflect_kb"]
 
+[tool.pytest.ini_options]
+# Behavioral proofs live in tests/eval/behavioral/proofs/proof_*.py — their test
+# FUNCTIONS are named test_* (default), but the FILE glob must include proof_*
+# so a plain `pytest tests/eval/behavioral/` discovers them. Additive: no other
+# proof_*.py files exist in the repo, so standard test_*/*_test discovery is
+# unchanged for the 1000+ existing tests.
+python_files = ["test_*.py", "*_test.py", "proof_*.py"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

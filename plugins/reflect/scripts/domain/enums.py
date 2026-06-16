@@ -14,6 +14,7 @@ class LearningStatus(StrEnum):
     SUPERSEDED = "superseded"
     REVERTED = "reverted"
     REJECTED = "rejected"
+    ARCHIVED = "archived"  # A3: per-row TTL expired (forget sweep)
 
 
 class ProposalStatus(StrEnum):

@@ -1,0 +1,20 @@
+document_id: tp-02-auth-session-convention
+extracted_at: '2026-05-15T00:00:00'
+entities:
+  - name: "session-auth"
+    type: pattern
+    description: "server-side session auth"
+  - name: "auth-convention"
+    type: concept
+    description: "team auth standard"
+relationships:
+  - source: "session-auth"
+    target: "auth-convention"
+    type: part_of
+    description: "the current standard"
+    strength: 9
+  - source: "session-auth"
+    target: "jwt-auth"
+    type: supersedes
+    description: "replaces stateless JWTs"
+    strength: 9

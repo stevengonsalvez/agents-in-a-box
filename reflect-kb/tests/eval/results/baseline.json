@@ -1,0 +1,360 @@
+{
+  "overall": {
+    "n_queries": 20,
+    "recall_at_5": 1.0,
+    "mrr": 0.9375,
+    "noise_rate": 0.2,
+    "latency_p50_s": 12.773,
+    "latency_p95_s": 23.445
+  },
+  "per_class": {
+    "exact": {
+      "n": 8,
+      "recall_at_5": 1.0,
+      "mrr": 0.9375,
+      "noise_rate": 0.0
+    },
+    "graph": {
+      "n": 5,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "noise_rate": 0.0
+    },
+    "ood": {
+      "n": 4,
+      "recall_at_5": null,
+      "mrr": null,
+      "noise_rate": 1.0
+    },
+    "temporal": {
+      "n": 3,
+      "recall_at_5": 1.0,
+      "mrr": 0.8333,
+      "noise_rate": 0.0
+    }
+  },
+  "per_arm_top5_attribution": {
+    "graphrag_only": 48,
+    "qmd_only": 0,
+    "both": 0,
+    "neither": 8
+  },
+  "queries": [
+    {
+      "id": "q-ex-01",
+      "class": "exact",
+      "returned": [
+        "ex-01-tmux-socket-protection",
+        "gr-07-k8s-oomkill-debugging",
+        "tp-02-auth-session-convention"
+      ],
+      "relevant": [
+        "ex-01-tmux-socket-protection"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 19.047
+    },
+    {
+      "id": "q-ex-02",
+      "class": "exact",
+      "returned": [
+        "ex-02-pyenv-shim-ordering"
+      ],
+      "relevant": [
+        "ex-02-pyenv-shim-ordering"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 14.976
+    },
+    {
+      "id": "q-ex-03",
+      "class": "exact",
+      "returned": [
+        "ex-03-zsh-glob-nomatch",
+        "ex-06-launchd-plist-env"
+      ],
+      "relevant": [
+        "ex-03-zsh-glob-nomatch"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 15.894
+    },
+    {
+      "id": "q-ex-04",
+      "class": "exact",
+      "returned": [
+        "ex-04-docker-buildkit-cache-mount"
+      ],
+      "relevant": [
+        "ex-04-docker-buildkit-cache-mount"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 11.571
+    },
+    {
+      "id": "q-ex-05",
+      "class": "exact",
+      "returned": [
+        "ex-05-gh-graphql-pagination",
+        "gr-02-api-gateway-timeout-cascade",
+        "gr-01-redis-pool-exhaustion",
+        "gr-05-celery-prefetch-starvation"
+      ],
+      "relevant": [
+        "ex-05-gh-graphql-pagination"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 13.524
+    },
+    {
+      "id": "q-ex-06",
+      "class": "exact",
+      "returned": [
+        "ex-06-launchd-plist-env",
+        "ex-02-pyenv-shim-ordering"
+      ],
+      "relevant": [
+        "ex-06-launchd-plist-env"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.109
+    },
+    {
+      "id": "q-ex-07",
+      "class": "exact",
+      "returned": [
+        "ex-08-git-worktree-prune",
+        "ex-07-sqlite-wal-checkpoint",
+        "gr-06-worker-memory-leak"
+      ],
+      "relevant": [
+        "ex-07-sqlite-wal-checkpoint"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 0.5,
+      "noise": false,
+      "latency_s": 13.679
+    },
+    {
+      "id": "q-ex-08",
+      "class": "exact",
+      "returned": [
+        "ex-08-git-worktree-prune",
+        "tp-04-deploy-fly-process"
+      ],
+      "relevant": [
+        "ex-08-git-worktree-prune"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.907
+    },
+    {
+      "id": "q-gr-01",
+      "class": "graph",
+      "returned": [
+        "gr-02-api-gateway-timeout-cascade",
+        "gr-01-redis-pool-exhaustion",
+        "gr-07-k8s-oomkill-debugging",
+        "gr-05-celery-prefetch-starvation",
+        "gr-03-circuit-breaker-rollout"
+      ],
+      "relevant": [
+        "gr-02-api-gateway-timeout-cascade",
+        "gr-01-redis-pool-exhaustion"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.509
+    },
+    {
+      "id": "q-gr-02",
+      "class": "graph",
+      "returned": [
+        "gr-02-api-gateway-timeout-cascade",
+        "gr-01-redis-pool-exhaustion",
+        "gr-05-celery-prefetch-starvation",
+        "gr-03-circuit-breaker-rollout",
+        "gr-04-nginx-keepalive-upstream"
+      ],
+      "relevant": [
+        "gr-03-circuit-breaker-rollout",
+        "gr-02-api-gateway-timeout-cascade"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.773
+    },
+    {
+      "id": "q-gr-03",
+      "class": "graph",
+      "returned": [
+        "gr-05-celery-prefetch-starvation",
+        "gr-02-api-gateway-timeout-cascade",
+        "gr-07-k8s-oomkill-debugging",
+        "gr-01-redis-pool-exhaustion",
+        "gr-06-worker-memory-leak"
+      ],
+      "relevant": [
+        "gr-05-celery-prefetch-starvation",
+        "gr-06-worker-memory-leak"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 13.52
+    },
+    {
+      "id": "q-gr-04",
+      "class": "graph",
+      "returned": [
+        "gr-07-k8s-oomkill-debugging",
+        "gr-01-redis-pool-exhaustion",
+        "gr-02-api-gateway-timeout-cascade",
+        "ex-01-tmux-socket-protection",
+        "gr-05-celery-prefetch-starvation"
+      ],
+      "relevant": [
+        "gr-07-k8s-oomkill-debugging",
+        "gr-06-worker-memory-leak",
+        "gr-08-grafana-alert-tuning"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.535
+    },
+    {
+      "id": "q-gr-05",
+      "class": "graph",
+      "returned": [
+        "gr-05-celery-prefetch-starvation",
+        "gr-07-k8s-oomkill-debugging",
+        "gr-01-redis-pool-exhaustion",
+        "ex-08-git-worktree-prune",
+        "gr-06-worker-memory-leak"
+      ],
+      "relevant": [
+        "gr-06-worker-memory-leak",
+        "gr-05-celery-prefetch-starvation",
+        "gr-08-grafana-alert-tuning"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.755
+    },
+    {
+      "id": "q-tp-01",
+      "class": "temporal",
+      "returned": [
+        "tp-02-auth-session-convention",
+        "tp-01-auth-jwt-convention"
+      ],
+      "relevant": [
+        "tp-02-auth-session-convention"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 12.268
+    },
+    {
+      "id": "q-tp-02",
+      "class": "temporal",
+      "returned": [
+        "gr-06-worker-memory-leak",
+        "tp-04-deploy-fly-process",
+        "tp-03-deploy-heroku-process"
+      ],
+      "relevant": [
+        "tp-04-deploy-fly-process"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 0.5,
+      "noise": false,
+      "latency_s": 12.092
+    },
+    {
+      "id": "q-tp-03",
+      "class": "temporal",
+      "returned": [
+        "tp-02-auth-session-convention",
+        "tp-01-auth-jwt-convention"
+      ],
+      "relevant": [
+        "tp-02-auth-session-convention",
+        "tp-01-auth-jwt-convention"
+      ],
+      "r_at_5": 1.0,
+      "mrr": 1.0,
+      "noise": false,
+      "latency_s": 13.397
+    },
+    {
+      "id": "q-ood-01",
+      "class": "ood",
+      "returned": [
+        "?"
+      ],
+      "relevant": [],
+      "r_at_5": null,
+      "mrr": null,
+      "noise": true,
+      "latency_s": 12.05
+    },
+    {
+      "id": "q-ood-02",
+      "class": "ood",
+      "returned": [
+        "tp-03-deploy-heroku-process"
+      ],
+      "relevant": [],
+      "r_at_5": null,
+      "mrr": null,
+      "noise": true,
+      "latency_s": 12.169
+    },
+    {
+      "id": "q-ood-03",
+      "class": "ood",
+      "returned": [
+        "gr-04-nginx-keepalive-upstream",
+        "tp-04-deploy-fly-process",
+        "tp-03-deploy-heroku-process"
+      ],
+      "relevant": [],
+      "r_at_5": null,
+      "mrr": null,
+      "noise": true,
+      "latency_s": 16.525
+    },
+    {
+      "id": "q-ood-04",
+      "class": "ood",
+      "returned": [
+        "?"
+      ],
+      "relevant": [],
+      "r_at_5": null,
+      "mrr": null,
+      "noise": true,
+      "latency_s": 23.445
+    }
+  ]
+}

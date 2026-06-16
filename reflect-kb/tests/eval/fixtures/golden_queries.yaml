@@ -1,0 +1,102 @@
+# ABOUTME: Golden query set for the recall eval harness.
+# ABOUTME: Each query has a class (exact|graph|temporal|ood) and the doc names considered relevant.
+#
+# Classes:
+#   exact    — unique terminology; vector/BM25 should nail these directly
+#   graph    — the best answer is one entity-hop from the lexically matching doc (proves R1)
+#   temporal — old vs new convention; current doc must outrank superseded (proves recency/temporal)
+#   ood      — nothing in the corpus is relevant; returning results is noise (proves R7)
+
+queries:
+  # ---------- EXACT (8) ----------
+  - id: q-ex-01
+    class: exact
+    query: "tmux kill-server destroyed all my sessions"
+    relevant: [ex-01-tmux-socket-protection]
+  - id: q-ex-02
+    class: exact
+    query: "pyenv version ignored, system python used instead"
+    relevant: [ex-02-pyenv-shim-ordering]
+  - id: q-ex-03
+    class: exact
+    query: "zsh no matches found error aborts script glob"
+    relevant: [ex-03-zsh-glob-nomatch]
+  - id: q-ex-04
+    class: exact
+    query: "docker buildkit cache mount permission denied non-root"
+    relevant: [ex-04-docker-buildkit-cache-mount]
+  - id: q-ex-05
+    class: exact
+    query: "gh api graphql paginate nested connection cursor"
+    relevant: [ex-05-gh-graphql-pagination]
+  - id: q-ex-06
+    class: exact
+    query: "launchd job missing PATH environment variables"
+    relevant: [ex-06-launchd-plist-env]
+  - id: q-ex-07
+    class: exact
+    query: "sqlite wal file growing huge checkpoint"
+    relevant: [ex-07-sqlite-wal-checkpoint]
+  - id: q-ex-08
+    class: exact
+    query: "git worktree branch already checked out after deleting directory"
+    relevant: [ex-08-git-worktree-prune]
+
+  # ---------- GRAPH (5) — answer requires/benefits from an entity hop ----------
+  - id: q-gr-01
+    class: graph
+    query: "gateway returning 504 errors during traffic spikes, what is the root cause"
+    # lexical match is gr-02; the ROOT CAUSE doc is gr-01 (one caused_by hop)
+    relevant: [gr-02-api-gateway-timeout-cascade, gr-01-redis-pool-exhaustion]
+  - id: q-gr-02
+    class: graph
+    query: "how do we stop timeout cascades from a flaky dependency"
+    relevant: [gr-03-circuit-breaker-rollout, gr-02-api-gateway-timeout-cascade]
+  - id: q-gr-03
+    class: graph
+    query: "celery workers idle but tasks stuck pending in queue"
+    relevant: [gr-05-celery-prefetch-starvation, gr-06-worker-memory-leak]
+  - id: q-gr-04
+    class: graph
+    query: "pods getting OOMKilled exit 137, memory looks fine on average"
+    # lexical match gr-07; linked context gr-06 (leak) + gr-08 (alerting)
+    relevant: [gr-07-k8s-oomkill-debugging, gr-06-worker-memory-leak, gr-08-grafana-alert-tuning]
+  - id: q-gr-05
+    class: graph
+    query: "worker memory keeps creeping up over days"
+    relevant: [gr-06-worker-memory-leak, gr-05-celery-prefetch-starvation, gr-08-grafana-alert-tuning]
+
+  # ---------- TEMPORAL (3) — current must outrank superseded ----------
+  - id: q-tp-01
+    class: temporal
+    query: "what is our current auth convention"
+    relevant: [tp-02-auth-session-convention]
+    superseded: [tp-01-auth-jwt-convention]
+  - id: q-tp-02
+    class: temporal
+    query: "how do we deploy services now"
+    relevant: [tp-04-deploy-fly-process]
+    superseded: [tp-03-deploy-heroku-process]
+  - id: q-tp-03
+    class: temporal
+    query: "are we still using JWTs for first-party auth"
+    relevant: [tp-02-auth-session-convention, tp-01-auth-jwt-convention]
+    superseded: []
+
+  # ---------- OOD (4) — nothing relevant exists; results are noise ----------
+  - id: q-ood-01
+    class: ood
+    query: "istio service mesh sidecar injection configuration"
+    relevant: []
+  - id: q-ood-02
+    class: ood
+    query: "react native turbo module bridging to swift"
+    relevant: []
+  - id: q-ood-03
+    class: ood
+    query: "terraform state locking with dynamodb backend"
+    relevant: []
+  - id: q-ood-04
+    class: ood
+    query: "embedded rust HAL register access on stm32"
+    relevant: []

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template (SG3): idle-session reflection sweep.
+
+  Runs idle_reflect.sh every 300s to enqueue sessions whose transcript has
+  been quiet for REFLECT_IDLE_THRESHOLD_SEC (default 600s) with
+  trigger='idle'. A 300s tick against a 600s threshold bounds detection
+  latency at threshold + one tick. The sweep is idempotent: a still-idle
+  session is evaluated once per idle period (idle-state file) and the gate's
+  queue/cost dedup stops double-processing after a resume.
+
+  INSTALL (replace {{PLUGIN_ROOT}} with the absolute reflect plugin path, e.g.
+  ~/.claude/plugins/cache/agents-in-a-box/reflect/<ver> or the toolkit source):
+    sed "s|{{PLUGIN_ROOT}}|$HOME/.claude/.../reflect|g" \
+      com.reflect.idle.plist > ~/Library/LaunchAgents/com.reflect.idle.plist
+    launchctl load ~/Library/LaunchAgents/com.reflect.idle.plist
+  UNINSTALL:
+    launchctl unload ~/Library/LaunchAgents/com.reflect.idle.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.reflect.idle</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{PLUGIN_ROOT}}/hooks/idle_reflect.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/reflect-idle-launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/reflect-idle-launchd.err</string>
+</dict>
+</plist>

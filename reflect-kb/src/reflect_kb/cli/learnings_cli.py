@@ -213,6 +213,152 @@ def search(query: str, mode: str, tags: Optional[str], category: Optional[str],
     )
 
 
+@cli.command("rerank")
+@click.argument("query")
+@click.option(
+    "--batch-size", default=20, show_default=True,
+    help="Cross-encoder prediction batch size",
+)
+@click.option(
+    "--model", "model_name", default=None,
+    help="Override the cross-encoder model (default: ms-marco-MiniLM-L-6-v2)",
+)
+def rerank(query: str, batch_size: int, model_name: Optional[str]):
+    """Score (query, candidate) pairs with a local cross-encoder (R2).
+
+    Reads JSON from stdin:  {"candidates": [{"id": "...", "text": "..."}]}
+    Writes JSON to stdout:  {"available": true, "model": "...",
+                             "scores": {"<id>": <raw_logit>, ...}}
+
+    The model auto-downloads on first use and is cached under
+    ~/.reflect/models/ thereafter. On the slim build (no
+    sentence-transformers) or any scoring failure this emits
+    {"available": false, ...} and exits 0 — callers degrade silently.
+    """
+    from reflect_kb.recall.cross_encoder import (
+        cross_encoder_available,
+        get_reranker,
+    )
+
+    start = time.monotonic()
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        payload = None
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        click.echo(json.dumps({"available": False, "error": "invalid payload"}))
+        return
+
+    if not cross_encoder_available():
+        click.echo(json.dumps({
+            "available": False,
+            "error": "sentence-transformers not installed (slim build)",
+        }))
+        return
+
+    ids: List[str] = []
+    texts: List[str] = []
+    for cand in candidates:
+        if isinstance(cand, dict) and "id" in cand and isinstance(cand.get("text"), str):
+            ids.append(str(cand["id"]))
+            texts.append(cand["text"])
+
+    try:
+        reranker = get_reranker(model_name=model_name, batch_size=batch_size)
+        scores = reranker.score(query, texts)
+    except Exception as e:  # model download/load/predict failure — degrade
+        write_metric(
+            "rerank",
+            query=query,
+            candidates=len(ids),
+            error=str(e),
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        click.echo(json.dumps({"available": False, "error": str(e)}))
+        return
+
+    click.echo(json.dumps({
+        "available": True,
+        "model": reranker.model_name,
+        "scores": dict(zip(ids, scores)),
+    }))
+    write_metric(
+        "rerank",
+        query=query,
+        candidates=len(ids),
+        latency_ms=int((time.monotonic() - start) * 1000),
+    )
+
+
+@cli.command("embed")
+@click.argument("query")
+def embed(query: str):
+    """Embed the query + candidate texts with the index embedding model (R3).
+
+    Reads JSON from stdin:  {"candidates": [{"id": "...", "text": "..."}]}
+    Writes JSON to stdout:  {"available": true, "model": "all-mpnet-base-v2",
+                             "query_embedding": [...],
+                             "embeddings": {"<id>": [<float>, ...], ...}}
+
+    Vectors are unit-normalized all-mpnet-base-v2 — the SAME model
+    nano-graphrag indexes chunks with, so recall's MMR diversity step
+    measures similarity in the index's embedding space. On the slim build
+    (no sentence-transformers) or any failure this emits
+    {"available": false, ...} and exits 0 — callers degrade silently.
+    """
+    from reflect_kb.cli.graph_engine import EMBEDDING_MODEL_NAME
+
+    start = time.monotonic()
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        payload = None
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        click.echo(json.dumps({"available": False, "error": "invalid payload"}))
+        return
+
+    ids: List[str] = []
+    texts: List[str] = []
+    for cand in candidates:
+        if isinstance(cand, dict) and "id" in cand and isinstance(cand.get("text"), str):
+            ids.append(str(cand["id"]))
+            texts.append(cand["text"])
+
+    try:
+        engine = _get_graph_engine()
+        vectors = engine.embed_texts([query] + texts)
+    except Exception as e:  # slim build / model load failure — degrade
+        write_metric(
+            "embed",
+            query=query,
+            candidates=len(ids),
+            error=str(e),
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        click.echo(json.dumps({"available": False, "error": str(e)}))
+        return
+
+    # 6 decimals keeps stdout (and the caller's per-query cache) compact
+    # without measurably moving cosine similarities.
+    rounded = [[round(x, 6) for x in vec] for vec in vectors]
+    click.echo(json.dumps({
+        "available": True,
+        "model": EMBEDDING_MODEL_NAME,
+        "query_embedding": rounded[0],
+        "embeddings": dict(zip(ids, rounded[1:])),
+    }))
+    write_metric(
+        "embed",
+        query=query,
+        candidates=len(ids),
+        latency_ms=int((time.monotonic() - start) * 1000),
+    )
+
+
 @cli.command()
 @click.argument("file_path", type=click.Path(exists=True))
 @click.option(

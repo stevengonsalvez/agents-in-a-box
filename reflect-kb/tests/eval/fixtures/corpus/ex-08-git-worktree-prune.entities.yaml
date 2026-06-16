@@ -1,0 +1,15 @@
+document_id: ex-08-git-worktree-prune
+extracted_at: '2026-04-20T00:00:00'
+entities:
+  - name: "git-worktree"
+    type: tool
+    description: "multiple working trees"
+  - name: "worktree-prune"
+    type: pattern
+    description: "stale ref cleanup"
+relationships:
+  - source: "worktree-prune"
+    target: "git-worktree"
+    type: solves
+    description: "clears stale checkout refs"
+    strength: 8

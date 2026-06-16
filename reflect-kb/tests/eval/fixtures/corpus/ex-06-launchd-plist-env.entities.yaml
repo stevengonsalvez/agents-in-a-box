@@ -1,0 +1,15 @@
+document_id: ex-06-launchd-plist-env
+extracted_at: '2026-02-28T00:00:00'
+entities:
+  - name: "launchd"
+    type: platform
+    description: "macOS service manager"
+  - name: "environment-variables"
+    type: config
+    description: "process env"
+relationships:
+  - source: "launchd"
+    target: "environment-variables"
+    type: requires
+    description: "explicit env in plist"
+    strength: 8
