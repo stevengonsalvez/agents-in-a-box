@@ -246,8 +246,6 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &McpOverlayState) {
         Span::styled(" stop pool  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("i", Style::default().fg(GOLD)),
         Span::styled(" import  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("I", Style::default().fg(GOLD)),
-        Span::styled(" import·user  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("esc", Style::default().fg(GOLD)),

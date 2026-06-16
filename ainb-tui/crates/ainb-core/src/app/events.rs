@@ -47,9 +47,8 @@ pub enum AppEvent {
     McpOverlayRefresh,
     McpOverlayStopServer,
     McpOverlayStopDaemon,
-    McpOverlayImport,     // Import .mcp.json + Claude user-scope into project config
-    McpOverlayImportUser, // Same, but target the user config
-    RefreshWorkspaces,    // Manual refresh of workspace data
+    McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
+    RefreshWorkspaces, // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
@@ -918,7 +917,6 @@ impl EventHandler {
                 KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
                 KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
                 KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
-                KeyCode::Char('I') => Some(AppEvent::McpOverlayImportUser),
                 _ => None,
             };
         }
@@ -2403,10 +2401,11 @@ impl EventHandler {
                     selected_index: 0,
                 });
             }
-            // Import is additive (never overwrites existing config entries),
-            // so it fires immediately without a confirmation dialog.
-            AppEvent::McpOverlayImport => state.mcp_import(false),
-            AppEvent::McpOverlayImportUser => state.mcp_import(true),
+            // The overlay is a global pool view (not bound to any worktree),
+            // so import always targets the user config — the only config read
+            // from anywhere. cwd's .mcp.json is still pulled in as a source.
+            // Additive (never overwrites), so it fires without a confirmation.
+            AppEvent::McpOverlayImport => state.mcp_import(true),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -5628,11 +5627,11 @@ mod panel_back_tests {
         );
     }
 
-    /// While the MCP overlay is open it captures all keys. `i` imports into
-    /// the project config, `I` (shift) into the user config. Lock both so the
-    /// action bar can't drift from the keybinds.
+    /// While the MCP overlay is open it captures all keys. `i` imports (into
+    /// the global user config — the overlay isn't bound to a worktree). Lock
+    /// the keybind so the action bar can't drift from it.
     #[test]
-    fn mcp_overlay_import_keys_dispatch() {
+    fn mcp_overlay_import_key_dispatches() {
         let mut state = AppState::default();
         state.mcp_overlay = Some(crate::app::state::McpOverlayState {
             pool_enabled: true,
@@ -5651,15 +5650,7 @@ mod panel_back_tests {
             .expect("`i` in the overlay must dispatch an event");
         assert!(
             matches!(evt, AppEvent::McpOverlayImport),
-            "`i` must import into project config, got {evt:?}"
-        );
-
-        let shift_i = KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT);
-        let evt = EventHandler::handle_key_event(shift_i, &mut state)
-            .expect("`I` in the overlay must dispatch an event");
-        assert!(
-            matches!(evt, AppEvent::McpOverlayImportUser),
-            "`I` must import into user config, got {evt:?}"
+            "`i` must dispatch McpOverlayImport, got {evt:?}"
         );
     }
 
