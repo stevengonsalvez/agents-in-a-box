@@ -614,7 +614,9 @@ fn atc_hook_writes_status_and_routes_completion() {
     );
     assert_eq!(peeked[0]["child_id"], "child-a");
 
-    // A Stop with NO parent dead-letters rather than dropping.
+    // A Stop with NO resolvable parent does ZERO durable routing writes (H3):
+    // the hooks are installed host-wide, so an unrelated session's Stop must not
+    // grow the dead-letter sink. No commit, no dead-letter.
     let out = Command::new(ainb_bin())
         .env("AINB_HOME", &home)
         .args([
@@ -630,8 +632,139 @@ fn atc_hook_writes_status_and_routes_completion() {
         .expect("hook orphan");
     assert!(out.status.success());
     let dl = home.join("inbox").join("dead-letter.jsonl");
-    assert!(dl.exists(), "orphan Stop should dead-letter");
-    assert!(std::fs::read_to_string(dl).unwrap().contains("orphan-b"));
+    assert!(
+        !dl.exists(),
+        "orphan Stop with no resolvable parent must not dead-letter (host-wide growth)"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Regression (H3): the lifecycle hooks live in the GLOBAL settings.json, so
+/// every Claude session on the host runs `ainb fleet atc hook`. A Stop for a
+/// session with no resolvable parent and no inbox must do ZERO durable routing
+/// writes — no commit, no dead-letter — otherwise the dead-letter sink grows
+/// unbounded on every unrelated host session. A Stop WITH a resolvable parent
+/// still routes the completion to that parent's inbox.
+#[test]
+fn atc_hook_unlinked_stop_writes_no_dead_letter_but_linked_routes() {
+    let home = std::env::temp_dir().join(format!("atc-h3-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let dl = home.join("inbox").join("dead-letter.jsonl");
+
+    // (1) Unlinked Stop (no AINB_PARENT_SESSION, no durable map entry) →
+    //     no dead-letter, no commit.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "Stop",
+            "--session-id",
+            "unrelated-host-session",
+        ])
+        .output()
+        .expect("hook unlinked stop");
+    assert!(out.status.success(), "unlinked Stop should still exit 0");
+    assert!(
+        !dl.exists(),
+        "unlinked Stop must not create a dead-letter file"
+    );
+
+    // (2) Linked Stop (resolvable parent via env) → routes to the parent inbox.
+    let payload = r#"{"hook_event_name":"Stop","last_assistant_message":"linked work done"}"#;
+    let mut child = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "Stop",
+            "--session-id",
+            "linked-child",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn linked hook");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().expect("linked hook stop");
+    assert!(out.status.success(), "linked Stop failed");
+
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args(["--format", "json", "fleet", "atc", "inbox", "peek", "tower"])
+        .output()
+        .expect("peek");
+    let peeked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        peeked.as_array().unwrap().len(),
+        1,
+        "linked Stop must route the completion to the parent inbox"
+    );
+    assert_eq!(peeked[0]["child_id"], "linked-child");
+    // The linked Stop still must not dead-letter.
+    assert!(
+        !dl.exists(),
+        "a routed completion must not also dead-letter"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Regression (H2): the durable child→parent map must be keyed by the id the
+/// HOOK reports (the Claude-minted session id), not ainb's spawn-time Uuid which
+/// the hook never sees. The hook self-registers from AINB_PARENT_SESSION, so
+/// after one hook invocation the map resolves the hook-observed child id to its
+/// parent — and a later lookup with the env CLEARED (restart / resume) still
+/// resolves via that durable map.
+#[test]
+fn atc_hook_self_registers_durable_parent_map_under_hook_observed_id() {
+    use ainb::fleet::plumbing::parent::load_map_in;
+    use ainb::fleet::plumbing::resolve_parent_in;
+
+    let home = std::env::temp_dir().join(format!("atc-h2-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Run the hook once with the live env parent + a hook-observed child id.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "SessionStart",
+            "--session-id",
+            "claude-minted-id",
+        ])
+        .output()
+        .expect("hook session start");
+    assert!(out.status.success(), "hook (SessionStart) failed");
+
+    // The durable map is now keyed by the id the hook actually reported.
+    let map = load_map_in(&home);
+    assert_eq!(
+        map.get("claude-minted-id").map(String::as_str),
+        Some("tower"),
+        "hook must self-register the durable map under the hook-observed id: {map:?}"
+    );
+
+    // And with the env CLEARED (None), resolution still succeeds via the map —
+    // proving the restart-safe fallback now actually works.
+    assert_eq!(
+        resolve_parent_in(&home, "claude-minted-id", None),
+        Some("tower".to_string()),
+        "durable fallback must resolve after env loss"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

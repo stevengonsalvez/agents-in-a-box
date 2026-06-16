@@ -547,40 +547,58 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
 
     let base_event = event.split(':').next().unwrap_or(&event);
 
-    // 2. A genuine user turn resets this session's consecutive-block budget.
+    // Self-heal the durable child→parent map. `ainb run` seeds only the live
+    // AINB_PARENT_SESSION env (claude mints its own session id, so a map keyed by
+    // ainb's spawn-time Uuid would never match the id the hook reports). Here we
+    // key the durable fallback by the id the hook ACTUALLY sees, so linkage
+    // survives env loss (restart / resume) and `resolve_parent_in` can find it.
+    // Idempotent (last-write-wins) and cheap; only when both ids are present.
+    let env_parent = std::env::var(plumbing::PARENT_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if !session_id.is_empty() {
+        if let Some(parent) = env_parent.as_deref() {
+            let _ = plumbing::record_parent_in(&home, &session_id, parent);
+        }
+    }
+
+    // 2. A genuine user turn resets this session's consecutive-block budget. The
+    //    reset is taken under the inbox lock so it serialises against a
+    //    concurrent Stop-drain's block increment (no lost update).
     if base_event == "UserPromptSubmit" && !session_id.is_empty() {
         let inbox = plumbing::Inbox::open_in(&plumbing::paths::inbox_dir_in(&home), &session_id);
-        let mut budget = inbox.read_budget();
-        budget.reset();
-        let _ = inbox.write_budget(&budget);
+        let _ = inbox.reset_budget();
     }
 
     // 3. Stop: route this session's completion up to its parent, then drain its
     //    own inbox for child completions.
     if base_event == "Stop" && !session_id.is_empty() {
-        // (a) Route our completion. With a resolvable parent it lands in that
-        //     parent's durable inbox; without one it dead-letters (a managed
-        //     session's completion is never silently dropped). A genuine leaf
-        //     that is also an orphan still records, so an operator can audit it.
-        let env_parent = std::env::var(plumbing::PARENT_ENV).ok();
-        let parent_id = plumbing::resolve_parent_in(&home, &session_id, env_parent.as_deref())
-            .unwrap_or_default();
-        let summary = done_summary.clone().unwrap_or_default();
-        let rec = plumbing::InboxRecord::new(&session_id, &parent_id, summary, &event, now_ms);
-        let _ = plumbing::commit_completion(&home, &rec);
+        // (a) Route our completion ONLY when this session has a resolvable
+        //     parent. The hooks are installed globally, so every Claude session
+        //     on the host runs this verb; a session with no linkage (a truly
+        //     unrelated host session) must do ZERO durable writes here — no
+        //     commit, no dead-letter — or every unrelated Stop would grow the
+        //     dead-letter sink without bound. Genuine ATC children self-register
+        //     above, so they still resolve (even after env loss) and still route.
+        if let Some(parent_id) =
+            plumbing::resolve_parent_in(&home, &session_id, env_parent.as_deref())
+        {
+            let summary = done_summary.clone().unwrap_or_default();
+            let rec = plumbing::InboxRecord::new(&session_id, &parent_id, summary, &event, now_ms);
+            let _ = plumbing::commit_completion(&home, &rec);
+        }
 
-        // (b) Drain our own inbox — are we a parent with finished children?
+        // (b) Drain our own inbox — are we a parent with finished children? The
+        //     budget check + drain happen under one inbox lock: completions are
+        //     consumed only on the drain that also emits them (never destroyed
+        //     when the budget is exhausted), and the budget read-modify-write
+        //     cannot race the UserPromptSubmit reset above.
         let inbox = plumbing::Inbox::open_in(&plumbing::paths::inbox_dir_in(&home), &session_id);
         if !inbox.is_empty() {
-            let mut budget = inbox.read_budget();
-            let completions = inbox.drain()?;
-            if let Some(decision) = plumbing::decide(
-                &completions,
-                budget.consecutive_blocks,
-                plumbing::DEFAULT_BLOCK_BUDGET,
-            ) {
-                budget.record_block();
-                let _ = inbox.write_budget(&budget);
+            let (_completions, decision) =
+                inbox.drain_with_budget(plumbing::DEFAULT_BLOCK_BUDGET)?;
+            if let Some(decision) = decision {
                 // The block JSON on stdout is what feeds the completions back
                 // into this session as its next turn.
                 println!("{}", serde_json::to_string(&decision)?);

@@ -87,14 +87,18 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // restart-safe fallback.
     let mut session_env: Vec<(String, String)> = Vec::new();
     if let Some(parent_id) = args.parent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Seed the live, in-band linkage: the child's Stop hook reads
+        // AINB_PARENT_SESSION first and routes its completion to the parent's
+        // inbox with no disk lookup. The durable child→parent map is NOT written
+        // here: claude mints its own session id (we don't pass --session-id), so
+        // a map keyed by ainb's Uuid would never match the id the hook reports.
+        // Instead the hook self-registers the durable fallback under the
+        // hook-observed id (see `fleet atc hook`), keying the map by the id any
+        // later lookup actually sees.
         session_env.push((
             crate::fleet::plumbing::PARENT_ENV.to_string(),
             parent_id.to_string(),
         ));
-        if let Ok(home) = crate::fleet::plumbing::paths::ainb_home() {
-            let _ =
-                crate::fleet::plumbing::record_parent_in(&home, &session_id.to_string(), parent_id);
-        }
         info!("Linked session to parent {parent_id} (event-driven inbox routing)");
     }
 
