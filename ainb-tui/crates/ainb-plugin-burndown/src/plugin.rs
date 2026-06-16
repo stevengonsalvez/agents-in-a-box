@@ -1142,22 +1142,20 @@ mod handle_key_dispatch_tests {
 
     #[test]
     fn arrow_keys_advance_provider_filter() {
-        // `next_provider` / `prev_provider` walk a 4-state internal
-        // `UsageProvider` enum and derive `provider_filter` from it.
-        // Asserting a round-trip is brittle — Gemini/Copilot both map
-        // back to `All`, so Left after one Right doesn't return to
-        // the starting filter. Just confirm each arrow claims the
-        // key and mutates state at least once.
+        // `◀/▶` step the single `provider_filter` ring directly (prev is
+        // the exact inverse of next), so `▶` then `◀` round-trips back to
+        // the starting filter — and both directions always mutate.
         let mut p = BurndownPlugin::default();
         let starting = p.ui.provider_filter;
         assert!(p.dispatch_key_pure(&KeyCode::Right));
-        let after_right = p.ui.provider_filter;
-        let mut p = BurndownPlugin::default();
+        assert_ne!(
+            p.ui.provider_filter, starting,
+            "▶ must mutate provider_filter"
+        );
         assert!(p.dispatch_key_pure(&KeyCode::Left));
-        let after_left = p.ui.provider_filter;
-        assert!(
-            after_right != starting || after_left != starting,
-            "at least one arrow direction must mutate provider_filter from default {starting:?}"
+        assert_eq!(
+            p.ui.provider_filter, starting,
+            "◀ after ▶ returns to the starting filter (inverse ring)"
         );
     }
 

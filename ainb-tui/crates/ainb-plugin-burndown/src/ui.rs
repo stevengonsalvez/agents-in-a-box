@@ -45,67 +45,6 @@ const TERMINAL_CYAN: Color = Color::Rgb(125, 211, 200);
 const BAR_THRESHOLD_HIGH: f64 = 0.66;
 const BAR_THRESHOLD_MED: f64 = 0.33;
 
-/// Which agent provider's usage to show
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UsageProvider {
-    #[default]
-    Claude,
-    Codex,
-    Gemini,
-    Copilot,
-}
-
-impl UsageProvider {
-    fn all() -> &'static [UsageProvider] {
-        &[
-            UsageProvider::Claude,
-            UsageProvider::Codex,
-            UsageProvider::Gemini,
-            UsageProvider::Copilot,
-        ]
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            UsageProvider::Claude => "✻ Claude Code",
-            UsageProvider::Codex => "✦ Codex CLI",
-            UsageProvider::Gemini => "✨ Gemini CLI",
-            UsageProvider::Copilot => "🐙 Copilot",
-        }
-    }
-
-    fn short_label(&self) -> &'static str {
-        match self {
-            UsageProvider::Claude => "Claude",
-            UsageProvider::Codex => "Codex",
-            UsageProvider::Gemini => "Gemini",
-            UsageProvider::Copilot => "Copilot",
-        }
-    }
-
-    pub fn has_data(&self) -> bool {
-        matches!(self, UsageProvider::Claude | UsageProvider::Codex)
-    }
-
-    fn next(&self) -> Self {
-        match self {
-            UsageProvider::Claude => UsageProvider::Codex,
-            UsageProvider::Codex => UsageProvider::Gemini,
-            UsageProvider::Gemini => UsageProvider::Copilot,
-            UsageProvider::Copilot => UsageProvider::Claude,
-        }
-    }
-
-    fn prev(&self) -> Self {
-        match self {
-            UsageProvider::Claude => UsageProvider::Copilot,
-            UsageProvider::Codex => UsageProvider::Claude,
-            UsageProvider::Gemini => UsageProvider::Codex,
-            UsageProvider::Copilot => UsageProvider::Gemini,
-        }
-    }
-}
-
 /// Which sub-tab is active in the usage view
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageTab {
@@ -282,7 +221,6 @@ pub enum UsageFilterTarget {
 // snapshot tests for the zoom view.
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
-    pub provider: UsageProvider,
     pub active_tab: UsageTab,
     /// Most-recent parsed usage snapshot. Held as `Arc` so the plugin
     /// can share the same instance across `ui.data` and the cached
@@ -389,7 +327,6 @@ const MIN_COL: u16 = 3;
 impl Default for UsageViewState {
     fn default() -> Self {
         Self {
-            provider: UsageProvider::Claude,
             active_tab: UsageTab::Burndown,
             data: None,
             fresh_pivot: false,
@@ -429,36 +366,22 @@ enum StepDirection {
 }
 
 impl UsageViewState {
+    /// `▶` — step the single provider filter forward (wraps).
     pub fn next_provider(&mut self) {
-        self.provider = self.provider.next();
-        self.provider_filter = match self.provider {
-            UsageProvider::Claude => UsageProviderFilter::Claude,
-            UsageProvider::Codex => UsageProviderFilter::Codex,
-            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
-        };
+        self.provider_filter = self.provider_filter.next();
         self.scroll_offset = 0;
     }
 
+    /// `◀` — step the single provider filter backward (wraps).
     pub fn prev_provider(&mut self) {
-        self.provider = self.provider.prev();
-        self.provider_filter = match self.provider {
-            UsageProvider::Claude => UsageProviderFilter::Claude,
-            UsageProvider::Codex => UsageProviderFilter::Codex,
-            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
-        };
+        self.provider_filter = self.provider_filter.prev();
         self.scroll_offset = 0;
     }
 
+    /// `p` — alias for [`Self::next_provider`]; the filter is the one
+    /// provider control, so `p` and `▶` advance the same ring.
     pub fn cycle_provider_filter(&mut self) {
-        self.provider_filter = match self.provider_filter {
-            UsageProviderFilter::All => UsageProviderFilter::Claude,
-            UsageProviderFilter::Claude => UsageProviderFilter::Codex,
-            UsageProviderFilter::Codex => UsageProviderFilter::Cursor,
-            UsageProviderFilter::Cursor => UsageProviderFilter::Copilot,
-            UsageProviderFilter::Copilot => UsageProviderFilter::Gemini,
-            UsageProviderFilter::Gemini => UsageProviderFilter::All,
-        };
-        self.scroll_offset = 0;
+        self.next_provider();
     }
 
     pub fn set_period(&mut self, period: UsagePeriod) {
@@ -1071,7 +994,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         }
     } else {
         let data = state.data.as_ref().unwrap();
-        if data.calls.is_empty() && !state.provider.has_data() {
+        if data.calls.is_empty() && !state.provider_filter.has_data() {
             render_no_data(buf, layout[content_idx], state);
         } else {
             match state.active_tab {
@@ -1224,7 +1147,7 @@ fn render_summary_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             ),
             Span::styled(" sessions", Style::default().fg(MUTED_GRAY)),
         ]);
-    } else if state.provider.has_data() {
+    } else if state.provider_filter.has_data() {
         spans.push(Span::styled(
             "  │  Loading...",
             Style::default().fg(MUTED_GRAY),
@@ -1247,32 +1170,30 @@ fn render_provider_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Style::default().fg(MUTED_GRAY),
     )];
 
-    for (i, provider) in UsageProvider::all().iter().enumerate() {
+    for (i, filter) in UsageProviderFilter::all().iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
         }
 
-        let is_active = *provider == state.provider;
+        let is_active = *filter == state.provider_filter;
         let style = if is_active {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else if provider.has_data() {
+        } else if filter.has_data() {
             Style::default().fg(SOFT_WHITE)
         } else {
             Style::default().fg(MUTED_GRAY)
         };
 
-        spans.push(Span::styled(provider.label(), style));
+        spans.push(Span::styled(provider_bar_label(*filter), style));
     }
 
     spans.push(Span::styled("    ", Style::default()));
     spans.push(Span::styled(
-        "◀/▶",
+        "◀/▶ p",
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(" switch", Style::default().fg(MUTED_GRAY)));
-    spans.push(Span::styled("  │  p ", Style::default().fg(GOLD)));
     spans.push(Span::styled(
-        format!("filter: {}", provider_filter_label(state.provider_filter)),
+        " switch provider",
         Style::default().fg(MUTED_GRAY),
     ));
     spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
@@ -1320,7 +1241,7 @@ fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                state.provider.label(),
+                provider_bar_label(state.provider_filter),
                 Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -3040,7 +2961,8 @@ fn render_burndown_header(buf: &mut Buffer, area: Rect, data: &UsageData, period
     ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
-/// Build the "Period: …  Provider: …" labelled strip.
+/// Build the "Period: …" labelled strip. (Provider selection lives in
+/// the single top provider bar — see [`render_provider_bar`].)
 ///
 /// Period strip layout:
 /// ```text
@@ -3052,7 +2974,7 @@ fn render_burndown_header(buf: &mut Buffer, area: Rect, data: &UsageData, period
 ///
 /// Returned as a `Vec<Line>` so tests can assert chip ordering and
 /// active-marker placement without hitting the Frame.
-fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
+fn build_period_strip(state: &UsageViewState) -> Vec<Line<'static>> {
     let mut period_spans: Vec<Span<'static>> =
         vec![Span::styled("Period: ", Style::default().fg(MUTED_GRAY))];
 
@@ -3111,23 +3033,9 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
         matches!(state.period, UsagePeriod::Custom { .. }),
     ));
 
-    let mut provider_spans: Vec<Span<'static>> =
-        vec![Span::styled("Provider: ", Style::default().fg(MUTED_GRAY))];
-    let providers: [(&str, UsageProviderFilter); 3] = [
-        ("All", UsageProviderFilter::All),
-        ("Claude", UsageProviderFilter::Claude),
-        ("Codex", UsageProviderFilter::Codex),
-    ];
-    for (i, (label, value)) in providers.iter().enumerate() {
-        if i > 0 {
-            provider_spans.push(Span::styled("  ", Style::default()));
-        }
-        provider_spans.push(provider_chip_span(label, *value == state.provider_filter));
-    }
-    provider_spans.push(Span::styled("  (P)", Style::default().fg(MUTED_GRAY)));
-
-    // Two label rows so narrow terminals can wrap cleanly.
-    vec![Line::from(period_spans), Line::from(provider_spans)]
+    // Provider selection lives in the single top provider bar
+    // (`render_provider_bar`); this strip is period-only.
+    vec![Line::from(period_spans)]
 }
 
 /// Render `[◀ <label> ▶ <key> <name>]` for the inline Month/Quarter
@@ -3190,20 +3098,8 @@ fn period_chip_span(label: &str, key: char, active: bool) -> Span<'static> {
     }
 }
 
-fn provider_chip_span(label: &str, active: bool) -> Span<'static> {
-    let text = format!(" {label} ");
-    if active {
-        Span::styled(
-            text,
-            Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(text, Style::default().fg(MUTED_GRAY))
-    }
-}
-
 fn render_period_row(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
-    let lines = build_period_provider_strip(state);
+    let lines = build_period_strip(state);
     ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
@@ -4476,14 +4372,17 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     crate::ui_helpers::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
-fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
+/// Emoji label for a provider chip in the top provider bar. `All` and
+/// the no-data stubs (`Cursor`, `Gemini`) still render so the user can
+/// see — and select — every filter.
+fn provider_bar_label(filter: UsageProviderFilter) -> &'static str {
     match filter {
         UsageProviderFilter::All => "All",
-        UsageProviderFilter::Claude => "Claude",
-        UsageProviderFilter::Codex => "Codex",
-        UsageProviderFilter::Cursor => "Cursor",
-        UsageProviderFilter::Copilot => "Copilot",
-        UsageProviderFilter::Gemini => "Gemini",
+        UsageProviderFilter::Claude => "✻ Claude Code",
+        UsageProviderFilter::Codex => "✦ Codex CLI",
+        UsageProviderFilter::Cursor => "▸ Cursor",
+        UsageProviderFilter::Copilot => "🐙 Copilot",
+        UsageProviderFilter::Gemini => "✨ Gemini CLI",
     }
 }
 
@@ -4514,7 +4413,7 @@ fn format_cost(cost: Option<f64>) -> String {
 }
 
 #[cfg(test)]
-mod period_provider_strip_tests {
+mod period_strip_tests {
     use super::*;
 
     fn flatten(line: &Line<'_>) -> String {
@@ -4532,8 +4431,12 @@ mod period_provider_strip_tests {
     fn period_row_lists_all_options_with_key_hints() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::Week;
-        let lines = build_period_provider_strip(&state);
-        assert_eq!(lines.len(), 2);
+        let lines = build_period_strip(&state);
+        assert_eq!(
+            lines.len(),
+            1,
+            "strip is period-only; provider moved to the top bar"
+        );
         let row = flatten(&lines[0]);
         for needle in [
             "Period:",
@@ -4555,7 +4458,7 @@ mod period_provider_strip_tests {
     fn period_row_highlights_active_period() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::Today;
-        let lines = build_period_provider_strip(&state);
+        let lines = build_period_strip(&state);
         let active = highlighted_chip(&lines[0]).expect("a period chip should be highlighted");
         assert!(active.contains("Today"), "got {active}");
     }
@@ -4564,18 +4467,37 @@ mod period_provider_strip_tests {
     fn period_row_highlights_90d_chip_when_last_n_days_90() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::LastNDays(90);
-        let lines = build_period_provider_strip(&state);
+        let lines = build_period_strip(&state);
         let active = highlighted_chip(&lines[0]).expect("90d should be highlighted");
         assert!(active.contains("90d"), "got {active}");
     }
 
     #[test]
-    fn provider_row_highlights_active_provider_filter() {
+    fn provider_switch_is_a_single_control_cycling_the_full_filter_ring() {
+        // One provider control now: ◀/▶ and `p` all step
+        // `provider_filter` through every provider, Copilot included.
+        // (The old top ◀/▶ forced Gemini/Copilot back to `All`, and a
+        // second redundant provider row lived inside the period strip.)
         let mut state = UsageViewState::default();
-        state.provider_filter = UsageProviderFilter::Codex;
-        let lines = build_period_provider_strip(&state);
-        let active = highlighted_chip(&lines[1]).expect("a provider chip should be highlighted");
-        assert_eq!(active, "Codex");
+        assert_eq!(state.provider_filter, UsageProviderFilter::All);
+        let ring = [
+            UsageProviderFilter::Claude,
+            UsageProviderFilter::Codex,
+            UsageProviderFilter::Cursor,
+            UsageProviderFilter::Copilot,
+            UsageProviderFilter::Gemini,
+            UsageProviderFilter::All,
+        ];
+        for expected in ring {
+            state.next_provider();
+            assert_eq!(state.provider_filter, expected);
+        }
+        // `p` is an alias for ▶.
+        state.cycle_provider_filter();
+        assert_eq!(state.provider_filter, UsageProviderFilter::Claude);
+        // ◀ steps back.
+        state.prev_provider();
+        assert_eq!(state.provider_filter, UsageProviderFilter::All);
     }
 }
 
