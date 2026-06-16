@@ -7,6 +7,13 @@
   },
   "license": "MIT",
   "keywords": ["reflect", "memory", "recall", "learnings", "self-improvement"],
-  "skills": ["skills/"],
-  "hooks": "copilot-hooks.json"
+  "skills": [
+    "./skills/reflect/",
+    "./skills/recall/",
+    "./skills/ingest/",
+    "./skills/consolidate/",
+    "./skills/reflect-status/",
+    "./skills/errors-ack/",
+    "./skills/cost/"
+  ]
 }
