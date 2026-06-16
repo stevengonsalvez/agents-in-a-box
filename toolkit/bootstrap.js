@@ -1111,6 +1111,54 @@ async function installReflectKb(tool, options = {}) {
     return result;
 }
 
+// ainb installer — the terminal dev-env manager CLI (backs the ainb-fleet /
+// ainb-hooks plugins). Machine-global like reflect-kb; installed once via the
+// stevengonsalvez/agents-in-a-box Homebrew tap. Idempotent: skips if `ainb`
+// already resolves. Non-fatal — a missing brew just yields a warning with the
+// curl fallback, never aborts the bootstrap. Source of truth: the `ainb` entry
+// under external-packages: in external-dependencies.yaml.
+async function installAinb() {
+    const result = { errors: [], warnings: [], version: null, skippedReason: null };
+    const { execSync } = await import('child_process');
+    const sh = (cmd, opts = {}) => execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], ...opts }).toString().trim();
+
+    // Already installed? Skip (matches reflect-kb's detect-and-skip behaviour).
+    try {
+        const v = sh('ainb --version');
+        result.version = (v.match(/\d+\.\d+(?:\.\d+)?/) || [null])[0];
+        result.skippedReason = `ainb ${result.version || ''} already installed`.trim();
+        return result;
+    } catch (_) { /* not installed — continue */ }
+
+    // Needs Homebrew. No brew → warn with the documented curl fallback.
+    try {
+        sh('command -v brew');
+    } catch (_) {
+        result.warnings.push(
+            'Homebrew not found; install ainb manually: ' +
+            'curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash'
+        );
+        return result;
+    }
+
+    try {
+        sh('brew tap stevengonsalvez/agents-in-a-box', { stdio: 'pipe' });
+        sh('brew install ainb', { stdio: 'pipe' });
+    } catch (err) {
+        const stderr = (err.stderr ? err.stderr.toString() : err.message) || '';
+        result.errors.push(`brew install ainb failed: ${stderr.split('\n').slice(-5).join(' | ')}`);
+        return result;
+    }
+
+    try {
+        const v = sh('ainb --version');
+        result.version = (v.match(/\d+\.\d+(?:\.\d+)?/) || [null])[0];
+    } catch (_) {
+        result.warnings.push('ainb installed but `ainb --version` did not respond — check PATH');
+    }
+    return result;
+}
+
 async function handleSharedContentCopy(tool, config, targetFolder) {
     if (!targetFolder) {
         const answers = await inquirer.prompt([
@@ -1801,6 +1849,26 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
         }
         for (const msg of reflectResult.warnings) {
             console.log(`  ⚠ reflect-kb: ${msg}`);
+        }
+
+        // ainb CLI — terminal dev-env manager (backs ainb-fleet/ainb-hooks
+        // plugins). Machine-global, brew-installed, idempotent. Non-fatal.
+        showProgress('Installing ainb (terminal dev-env manager)');
+        const ainbResult = await installAinb();
+        if (ainbResult.errors.length > 0) {
+            completeProgress('ainb install failed — see warnings below');
+            for (const msg of ainbResult.errors) {
+                console.log(`  ⚠ ainb: ${msg}`);
+            }
+        } else {
+            const versionStr = ainbResult.version ? ` v${ainbResult.version}` : '';
+            const action = ainbResult.skippedReason
+                ? `skipped (${ainbResult.skippedReason})`
+                : `installed${versionStr}`;
+            completeProgress(`ainb ${action}`);
+        }
+        for (const msg of ainbResult.warnings) {
+            console.log(`  ⚠ ainb: ${msg}`);
         }
     }
 

@@ -64,6 +64,23 @@ Read-only. Checks every applicable manifest entry has its `SKILL.md` at the expe
 2. If the tool consumes the manifest, add it to the relevant `applies-to` lists in `external-dependencies.yaml` (and to `TOOL_CANONICAL_NAMES` if its manifest name differs from its key).
 3. Run `node bootstrap.js --tool=<new> --verify` to confirm parity.
 
+## Machine-global external packages (CLIs)
+
+On any home-scoped install (e.g. `claude-code-4.5`), bootstrap also installs the
+machine-global CLIs declared under `external-packages:` in
+`external-dependencies.yaml`. Each is idempotent — bootstrap detects an existing
+install via `<cli> --version` and skips reinstall.
+
+| CLI | installer | backs |
+|---|---|---|
+| `reflect` | `uv tool install …reflect-kb[graph]` | reflect plugin + retrieval KB |
+| `ainb` | `brew tap stevengonsalvez/agents-in-a-box && brew install ainb` | ainb-fleet / ainb-hooks plugins (terminal dev-env manager) |
+
+`ainb` falls back to the curl installer (`ainb-tui/install.sh`) when Homebrew is
+absent. The same CLIs are refreshed by `toolkit/scripts/update-externals.sh packages`.
+External *plugins* (Claude marketplace) are tracked under `claude-plugins:` and
+installed via the generated `setup-external.sh` / `update-externals.sh plugins`.
+
 ## See also
 
 - [Toolkit overview](overview.md)

@@ -52,8 +52,9 @@ update_npx() {
 # ----- claude-plugins -----
 update_plugins() {
   section "claude-plugins (marketplace add + plugin install)"
-  # beads, debug-bridge, ralph-loop, code-review, playground, dev-browser,
-  # skill-creator, open-prose, codex, caveman
+  # beads, debug-bridge, ralph-loop, code-review, skill-creator, discord,
+  # security-guidance, dev-browser, open-prose, codex, caveman, caveman-stats,
+  # ainb-fleet, ainb-hooks, warp  (reflect handled by update_reflect)
   run "claude plugin marketplace add stevengonsalvez/beads-marketplace"
   run "claude plugin install beads@beads-marketplace"
   run "claude plugin marketplace add stevengonsalvez/agent-bridge-marketplace"
@@ -63,6 +64,7 @@ update_plugins() {
   run "claude plugin install code-review@claude-plugins-official"
   run "claude plugin install skill-creator@claude-plugins-official"
   run "claude plugin install discord@claude-plugins-official"
+  run "claude plugin install security-guidance@claude-plugins-official"
   run "claude plugin marketplace add stevengonsalvez/dev-browser-marketplace"
   run "claude plugin install dev-browser@dev-browser-marketplace"
   run "claude plugin marketplace add stevengonsalvez/prose"
@@ -71,6 +73,13 @@ update_plugins() {
   run "claude plugin install codex"
   run "claude plugin marketplace add JuliusBrussee/caveman"
   run "claude plugin install caveman@caveman"
+  run "claude plugin marketplace add warpdotdev/claude-code-warp"
+  run "claude plugin install warp@claude-code-warp"
+  # agents-in-a-box (this repo) marketplace — caveman-stats + ainb fleet/hooks
+  run "claude plugin marketplace add stevengonsalvez/agents-in-a-box"
+  run "claude plugin install caveman-stats@agents-in-a-box"
+  run "claude plugin install ainb-fleet@agents-in-a-box"
+  run "claude plugin install ainb-hooks@agents-in-a-box"
 }
 
 # ----- agent-skills (git clone targets) -----
@@ -149,12 +158,26 @@ update_reflect() {
   echo "   plugins/reflect/adapters/{codex,copilot}/)"
 }
 
-# ----- external-packages (uv tool) -----
+# ----- external-packages (uv tool + brew CLIs) -----
 update_packages() {
   section "external-packages (uv tool)"
   run "uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'"
   # graphify (PyPI: graphifyy, double-y) — knowledge-graph builder used by /graphify skill
   run "uv tool install --force --upgrade graphifyy"
+
+  section "external-packages (brew CLIs)"
+  # ainb — terminal dev-env manager (backs ainb-fleet / ainb-hooks plugins).
+  # Tap clone can go stale; untap+retap is the cheap way to force a fresh pull.
+  if command -v brew >/dev/null 2>&1; then
+    run "brew tap stevengonsalvez/agents-in-a-box"
+    if command -v ainb >/dev/null 2>&1; then
+      run "brew upgrade ainb || true"
+    else
+      run "brew install ainb"
+    fi
+  else
+    echo "  (brew not found — install ainb via: curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash)"
+  fi
 }
 
 case "$SCOPE" in

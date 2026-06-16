@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-05-08"
+updated: "2026-06-16"
 
 # Internal toolkit components (skills, plugins, agents, workflows, utilities)
 # are catalogued in toolkit/catalog.yaml — auto-generated from filesystem
@@ -49,6 +49,22 @@ external-packages:
     overrides:
       env: REFLECT_KB_SOURCE  # local path or git URL — overrides default repo for dev iteration
     docs: "https://github.com/stevengonsalvez/reflect-kb"
+
+  - name: ainb
+    source: stevengonsalvez/agents-in-a-box
+    install: "brew tap stevengonsalvez/agents-in-a-box && brew install ainb"
+    upgrade: "brew upgrade ainb"
+    cli: ainb
+    version-pin: stable
+    requires:
+      - "Homebrew (https://brew.sh) — required; non-brew fallback: curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash"
+    purpose: "Terminal-based development environment manager for Claude Code agents (the ainb TUI)"
+    features:
+      - Manages tmux-backed Claude/Codex agent sessions from one terminal UI
+      - Backs the ainb-fleet / ainb-hooks plugins (see claude-plugins) which surface session state
+      - Installed once per machine via the stevengonsalvez/agents-in-a-box brew tap
+    notes: "Brew tap clone can go stale — pull the tap repo before `brew upgrade ainb` after a release."
+    docs: "https://github.com/stevengonsalvez/agents-in-a-box"
 
 # =============================================================================
 # BUNDLED SKILLS (included in toolkit/packages/skills/)
@@ -433,7 +449,7 @@ claude-plugins:
   - name: reflect
     marketplace: stevengonsalvez/agents-in-a-box
     marketplace_id: agents-in-a-box
-    version: "3.1.0"
+    version: "4.0.0"
     install: |
       claude plugin marketplace add stevengonsalvez/agents-in-a-box
       claude plugin install reflect@agents-in-a-box
@@ -536,6 +552,76 @@ claude-plugins:
       - Companion compression tools for memory/context token optimization
       - Backup original files as FILE.original.md before compression
     docs: "https://github.com/JuliusBrussee/caveman"
+
+  - name: caveman-stats
+    marketplace: stevengonsalvez/agents-in-a-box
+    marketplace_id: agents-in-a-box
+    version: "1.0.0"
+    install: |
+      claude plugin marketplace add stevengonsalvez/agents-in-a-box
+      claude plugin install caveman-stats@agents-in-a-box
+    purpose: "Statusline badge measuring caveman token savings per session (companion to caveman@caveman)"
+    features:
+      - PostToolUse hook writes the ⛏ savings badge to the statusline
+      - Measures only; does not enforce caveman mode (that is caveman@caveman's hooks)
+
+  - name: ainb-fleet
+    marketplace: stevengonsalvez/agents-in-a-box
+    marketplace_id: agents-in-a-box
+    version: "0.1.0"
+    install: |
+      claude plugin marketplace add stevengonsalvez/agents-in-a-box
+      claude plugin install ainb-fleet@agents-in-a-box
+    purpose: "Fleet orchestration for driving every Claude session on the host (standup/broadcast/sequence/needs/daemon)"
+    has_skills: true
+    features:
+      - Multi-session discovery, enrichment, and prioritization (the Jarvis control panel)
+      - Broadcast a prompt to selected sessions; ordered ack-gated sequences
+      - Reads via ainb (JSONL tail + pane); writes via tmux send-keys
+
+  - name: ainb-hooks
+    marketplace: stevengonsalvez/agents-in-a-box
+    marketplace_id: agents-in-a-box
+    version: "0.2.0"
+    install: |
+      claude plugin marketplace add stevengonsalvez/agents-in-a-box
+      claude plugin install ainb-hooks@agents-in-a-box
+    purpose: "Hooks that surface Claude session state to the ainb TUI (companion to the ainb CLI — see external-packages: ainb)"
+    features:
+      - Emits per-session status the ainb fleet view consumes
+      - Pairs with the brew-installed ainb CLI for the terminal dev-env manager
+
+  - name: discord
+    marketplace: anthropics/claude-plugins-official
+    marketplace_id: claude-plugins-official
+    version: "0.0.4"
+    install: |
+      claude plugin marketplace add anthropics/claude-plugins-official
+      claude plugin install discord
+    purpose: "Discord notifications / completion tracking from Claude Code"
+    features:
+      - Auto-notify on task completion to a Discord channel
+
+  - name: security-guidance
+    marketplace: anthropics/claude-plugins-official
+    marketplace_id: claude-plugins-official
+    version: "2.0.6"
+    install: |
+      claude plugin marketplace add anthropics/claude-plugins-official
+      claude plugin install security-guidance
+    purpose: "Security guidance / guardrails surfaced into Claude Code sessions"
+    features:
+      - Defensive security best-practice prompts and checks
+
+  - name: warp
+    marketplace: warpdotdev/claude-code-warp
+    marketplace_id: claude-code-warp
+    version: "2.0.0"
+    install: |
+      claude plugin marketplace add warpdotdev/claude-code-warp
+      claude plugin install warp
+    purpose: "Warp terminal integration for Claude Code"
+    docs: "https://github.com/warpdotdev/claude-code-warp"
 
 # =============================================================================
 # NPX SKILLS (agent skills from npm/GitHub)
