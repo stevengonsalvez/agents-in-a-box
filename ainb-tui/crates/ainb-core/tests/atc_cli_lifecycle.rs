@@ -370,3 +370,268 @@ fn atc_heartbeat_idle_pauses_when_fleet_quiet() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// EVENT-DRIVEN PATH (success criterion 2): a child completion committed to the
+/// parent's durable inbox is drained exactly-once and turned into a
+/// `{"decision":"block",...}` decision, and the parent ATC heartbeat picks the
+/// completion up via the inbox (not the poll-mode `fleet needs` scan).
+///
+/// All through the real `ainb` binary against a tempdir `AINB_HOME`:
+///   1. `inbox commit` a child completion to parent "tower".
+///   2. `inbox peek` shows it undrained.
+///   3. The ATC heartbeat (fake empty `fleet needs`) still surfaces the
+///      completion — proving it arrived event-driven, not from the poll scan.
+///   4. A direct `inbox drain` returns the block decision exactly once; a second
+///      drain returns nothing (exactly-once / no re-delivery).
+#[test]
+fn atc_event_driven_inbox_drains_exactly_once() {
+    let home = std::env::temp_dir().join(format!("atc-evt-{}", std::process::id()));
+    let atc_dir = home.join("atc").join("tower");
+    std::fs::create_dir_all(&atc_dir).unwrap();
+
+    // Fake `ainb` for the heartbeat's `fleet needs` shell-out → empty fleet, so
+    // any completion the heartbeat surfaces MUST have come from the inbox.
+    let fake = home.join("fake-ainb.sh");
+    std::fs::write(&fake, "#!/bin/sh\necho '[]'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake, perms).unwrap();
+    }
+
+    // Provision the ATC instance (no spawn / timer / settings hooks).
+    let out = run(
+        &home,
+        &[
+            "fleet",
+            "atc",
+            "setup",
+            "tower",
+            "--no-spawn",
+            "--no-heartbeat",
+            "--no-hooks",
+        ],
+    );
+    assert!(out.status.success(), "setup failed");
+
+    // 1. A child finishes → commit its completion to tower's inbox.
+    let out = run(
+        &home,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "inbox",
+            "commit",
+            "tower",
+            "--child",
+            "worker-7",
+            "--summary",
+            "merged the PR",
+        ],
+    );
+    assert!(out.status.success(), "inbox commit failed");
+    let committed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        committed["routed"], true,
+        "should route to live parent inbox"
+    );
+
+    // 2. peek shows it undrained (no consume).
+    let out = run(
+        &home,
+        &["--format", "json", "fleet", "atc", "inbox", "peek", "tower"],
+    );
+    assert!(out.status.success());
+    let peeked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(peeked.as_array().unwrap().len(), 1);
+    assert_eq!(peeked[0]["child_id"], "worker-7");
+
+    // 3. The ATC heartbeat surfaces the completion via the inbox (NOT the poll
+    //    scan — fake `fleet needs` returns []). Pre-age idle so a poll-only run
+    //    would idle-pause; the completion must override that.
+    std::fs::write(
+        atc_dir.join("heartbeat-state.json"),
+        r#"{"last_active_ms":0}"#,
+    )
+    .unwrap();
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_BIN", &fake)
+        .args(["--format", "json", "fleet", "atc", "heartbeat", "tower"])
+        .output()
+        .expect("heartbeat");
+    assert!(
+        out.status.success(),
+        "heartbeat failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let hb: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Poll scan was empty, yet the heartbeat did not idle-pause: the inbox
+    // completion woke it. (Delivery is false only because no live tmux session.)
+    assert_eq!(hb["needs_count"], 0, "poll scan empty");
+    assert_eq!(
+        hb["idle_paused"], false,
+        "inbox completion must override idle-pause"
+    );
+
+    // The heartbeat drained the inbox, so a fresh peek is now empty.
+    let out = run(
+        &home,
+        &["--format", "json", "fleet", "atc", "inbox", "peek", "tower"],
+    );
+    let peeked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        peeked.as_array().unwrap().is_empty(),
+        "heartbeat should have drained the inbox: {peeked}"
+    );
+
+    // 4. Commit a fresh completion and drain it directly → block decision once.
+    let out = run(
+        &home,
+        &[
+            "fleet",
+            "atc",
+            "inbox",
+            "commit",
+            "tower",
+            "--child",
+            "worker-9",
+            "--summary",
+            "ran the tests",
+        ],
+    );
+    assert!(out.status.success());
+    let out = run(
+        &home,
+        &[
+            "--format", "json", "fleet", "atc", "inbox", "drain", "tower",
+        ],
+    );
+    assert!(out.status.success(), "drain failed");
+    let drained: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(drained["drained"].as_array().unwrap().len(), 1);
+    assert_eq!(drained["decision"]["decision"], "block");
+    assert!(
+        drained["decision"]["reason"].as_str().unwrap().contains("worker-9"),
+        "block reason must carry the completion: {}",
+        drained["decision"]["reason"]
+    );
+
+    // Second drain → nothing (exactly-once: no re-delivery).
+    let out = run(
+        &home,
+        &[
+            "--format", "json", "fleet", "atc", "inbox", "drain", "tower",
+        ],
+    );
+    let drained2: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        drained2["drained"].as_array().unwrap().is_empty(),
+        "completion re-delivered on second drain: {drained2}"
+    );
+    assert!(drained2["decision"].is_null(), "empty inbox must not block");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// HOOK + DEAD-LETTER (success criterion 2): the `ainb fleet atc hook` verb —
+/// the Rust side of the installed hook script — writes the per-session status
+/// file on every event, routes a child's Stop completion to its parent's inbox,
+/// and dead-letters a Stop completion whose parent is unresolvable.
+#[test]
+fn atc_hook_writes_status_and_routes_completion() {
+    let home = std::env::temp_dir().join(format!("atc-hook-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+
+    // A genuine user turn writes a "running" status file.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "UserPromptSubmit",
+            "--session-id",
+            "child-a",
+        ])
+        .output()
+        .expect("hook");
+    assert!(out.status.success(), "hook (UserPromptSubmit) failed");
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join("status").join("child-a.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["status"], "running");
+
+    // A Stop with a parent (via AINB_PARENT_SESSION) routes a completion to the
+    // parent's inbox, and writes a "done" status (summary on stdin).
+    let payload = r#"{"hook_event_name":"Stop","last_assistant_message":"finished task"}"#;
+    let mut child = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "Stop",
+            "--session-id",
+            "child-a",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hook");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().expect("hook stop");
+    assert!(out.status.success(), "hook (Stop) failed");
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join("status").join("child-a.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["status"], "done");
+    assert_eq!(status["done_summary"], "finished task");
+
+    // The completion landed in tower's inbox (drain it via the CLI).
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args(["--format", "json", "fleet", "atc", "inbox", "peek", "tower"])
+        .output()
+        .expect("peek");
+    let peeked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        peeked.as_array().unwrap().len(),
+        1,
+        "completion not routed to parent"
+    );
+    assert_eq!(peeked[0]["child_id"], "child-a");
+
+    // A Stop with NO parent dead-letters rather than dropping.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "Stop",
+            "--session-id",
+            "orphan-b",
+        ])
+        .output()
+        .expect("hook orphan");
+    assert!(out.status.success());
+    let dl = home.join("inbox").join("dead-letter.jsonl");
+    assert!(dl.exists(), "orphan Stop should dead-letter");
+    assert!(std::fs::read_to_string(dl).unwrap().contains("orphan-b"));
+
+    let _ = std::fs::remove_dir_all(&home);
+}
