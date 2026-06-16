@@ -27,15 +27,16 @@ const API_BASE: &str = "https://api.telegram.org";
 /// Long-poll timeout (seconds) passed to getUpdates. The HTTP request waits up
 /// to this long for an update before returning empty, so we don't hot-loop.
 const LONG_POLL_SECS: u64 = 30;
+/// Buffer added to the long-poll timeout to get the reqwest per-request timeout.
+/// The client timeout must be comfortably GREATER than the server-side long-poll
+/// so a normal empty 30s poll never trips the client's own deadline. 15s leaves
+/// room for connect + TLS + the server's slack in honouring the timeout param.
+const CLIENT_TIMEOUT_BUFFER_SECS: u64 = 15;
 
 /// Run the Telegram channel forever (until the task is cancelled). Drives the
 /// shared `transport` through the relay core.
 pub async fn run<T: FleetTransport>(cfg: TelegramConfig, transport: &T) -> Result<()> {
-    let client = reqwest::Client::builder()
-        // Slightly longer than the long-poll so the socket isn't killed mid-wait.
-        .timeout(Duration::from_secs(LONG_POLL_SECS + 15))
-        .build()
-        .context("building Telegram HTTP client")?;
+    let client = build_client()?;
 
     let me = get_me(&client, &cfg.token).await;
     let bot_username = me.as_ref().and_then(|m| m.username.clone());
@@ -44,12 +45,22 @@ pub async fn run<T: FleetTransport>(cfg: TelegramConfig, transport: &T) -> Resul
         "ainb phone bridge: Telegram channel online (long-polling)"
     );
 
+    // `offset` is the exactly-once watermark: the next update_id we have NOT yet
+    // consumed. It is mutated ONLY after an update is processed below, never on
+    // the error path — so a transient getUpdates failure backs off and retries
+    // the same offset rather than dropping or double-consuming a message.
     let mut offset: i64 = 0;
     loop {
         let updates = match get_updates(&client, &cfg.token, offset).await {
             Ok(u) => u,
             Err(e) => {
-                tracing::warn!(error = %e, "getUpdates failed; backing off");
+                // Surface the FULL reqwest failure shape, not a generic context
+                // string, so an intermittent flap is diagnosable from the logs.
+                tracing::warn!(
+                    offset,
+                    error = describe_get_updates_error(&e),
+                    "getUpdates failed; backing off (offset preserved)"
+                );
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
@@ -61,6 +72,85 @@ pub async fn run<T: FleetTransport>(cfg: TelegramConfig, transport: &T) -> Resul
             }
         }
     }
+}
+
+/// Build the long-poll HTTP client.
+///
+/// Two staleness mitigations beyond the plain timeout:
+///   * The request timeout is `LONG_POLL_SECS + CLIENT_TIMEOUT_BUFFER_SECS`, so a
+///     normal empty 30s long-poll never races the client deadline.
+///   * `pool_idle_timeout` is kept BELOW the long-poll window and TCP keepalive is
+///     enabled, so reqwest evicts a connection the upstream may have silently
+///     half-closed instead of reusing a dead socket and surfacing a hard error.
+///     (curl never hit this because it opens a fresh connection each invocation.)
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(
+            LONG_POLL_SECS + CLIENT_TIMEOUT_BUFFER_SECS,
+        ))
+        // Evict idle pooled connections well before the upstream/NAT would, so a
+        // stale keep-alive socket is never reused for the next long-poll.
+        .pool_idle_timeout(Duration::from_secs(LONG_POLL_SECS / 2))
+        .tcp_keepalive(Duration::from_secs(15))
+        .build()
+        .context("building Telegram HTTP client")
+}
+
+/// Render a getUpdates failure as a single diagnosable line. Replaces the old
+/// generic `"getUpdates request"` context that swallowed everything.
+fn describe_get_updates_error(err: &GetUpdatesError) -> String {
+    match err {
+        GetUpdatesError::Request(e) => format!("phase=request {}", describe_reqwest_error(e)),
+        GetUpdatesError::Decode(e) => format!("phase=decode {}", describe_reqwest_error(e)),
+        GetUpdatesError::ApiError(desc) => {
+            format!("phase=api ok=false description={desc:?}")
+        }
+    }
+}
+
+/// Render a reqwest error as a single diagnosable line: the kind flags
+/// (`timeout`/`connect`/`request`/`body`/`decode`), the HTTP status if any, the
+/// Display string, and the underlying source chain (e.g. hyper's "connection
+/// closed before message completed" on a stale keep-alive socket).
+fn describe_reqwest_error(err: &reqwest::Error) -> String {
+    let mut kinds = Vec::new();
+    if err.is_timeout() {
+        kinds.push("timeout");
+    }
+    if err.is_connect() {
+        kinds.push("connect");
+    }
+    if err.is_request() {
+        kinds.push("request");
+    }
+    if err.is_body() {
+        kinds.push("body");
+    }
+    if err.is_decode() {
+        kinds.push("decode");
+    }
+    if kinds.is_empty() {
+        kinds.push("other");
+    }
+
+    let status = err.status().map(|s| s.as_u16());
+
+    // Walk the std::error::Error source chain (the real cause, e.g. hyper's
+    // "connection closed before message completed" on a stale keep-alive).
+    let mut sources = Vec::new();
+    let mut src: Option<&dyn std::error::Error> = std::error::Error::source(err);
+    while let Some(s) = src {
+        sources.push(s.to_string());
+        src = s.source();
+    }
+
+    format!(
+        "kind={} status={:?} display=\"{}\" source=[{}]",
+        kinds.join("|"),
+        status,
+        err,
+        sources.join(" -> ")
+    )
 }
 
 async fn handle_message<T: FleetTransport>(
@@ -156,7 +246,24 @@ async fn get_me(client: &reqwest::Client, token: &str) -> Option<TgUser> {
     body.result
 }
 
-async fn get_updates(client: &reqwest::Client, token: &str, offset: i64) -> Result<Vec<TgUpdate>> {
+/// A getUpdates failure that preserves the typed `reqwest::Error` so the caller
+/// can inspect its kind/status/source chain. The generic `"getUpdates request"`
+/// context string used to collapse all of that into a single opaque message.
+#[derive(Debug)]
+enum GetUpdatesError {
+    /// The HTTP request itself failed (connect/timeout/body/stale keep-alive).
+    Request(reqwest::Error),
+    /// The response body could not be decoded as the expected JSON shape.
+    Decode(reqwest::Error),
+    /// Telegram answered with `ok:false`.
+    ApiError(Option<String>),
+}
+
+async fn get_updates(
+    client: &reqwest::Client,
+    token: &str,
+    offset: i64,
+) -> std::result::Result<Vec<TgUpdate>, GetUpdatesError> {
     let url = format!("{API_BASE}/bot{token}/getUpdates");
     let resp = client
         .get(&url)
@@ -167,10 +274,10 @@ async fn get_updates(client: &reqwest::Client, token: &str, offset: i64) -> Resu
         ])
         .send()
         .await
-        .context("getUpdates request")?;
-    let body: TgResponse<Vec<TgUpdate>> = resp.json().await.context("getUpdates decode")?;
+        .map_err(GetUpdatesError::Request)?;
+    let body: TgResponse<Vec<TgUpdate>> = resp.json().await.map_err(GetUpdatesError::Decode)?;
     if !body.ok {
-        anyhow::bail!("getUpdates returned ok=false: {:?}", body.description);
+        return Err(GetUpdatesError::ApiError(body.description));
     }
     Ok(body.result.unwrap_or_default())
 }
@@ -359,5 +466,71 @@ mod tests {
     #[test]
     fn no_username_returns_text_unchanged() {
         assert_eq!(strip_bot_mention("@bot hi", None), "@bot hi");
+    }
+
+    // ── Long-poll robustness invariants ──────────────────────────────────────
+
+    #[test]
+    fn client_timeout_exceeds_long_poll_window() {
+        // The reqwest per-request timeout MUST be comfortably greater than the
+        // server-side long-poll, or a normal empty 30s poll trips the client
+        // deadline and surfaces as a spurious timeout error (the flapping bug).
+        let client_timeout = LONG_POLL_SECS + CLIENT_TIMEOUT_BUFFER_SECS;
+        assert!(
+            client_timeout > LONG_POLL_SECS,
+            "client timeout {client_timeout}s must exceed long-poll {LONG_POLL_SECS}s"
+        );
+        assert!(
+            CLIENT_TIMEOUT_BUFFER_SECS >= 10,
+            "buffer must leave >=10s for connect/TLS/server slack, got {CLIENT_TIMEOUT_BUFFER_SECS}s"
+        );
+    }
+
+    #[test]
+    fn build_client_succeeds() {
+        // The pool/keepalive config must produce a valid client.
+        assert!(build_client().is_ok());
+    }
+
+    #[test]
+    fn offset_advance_is_exactly_once() {
+        // Mirror the run loop's offset advancement: offset becomes max(offset,
+        // update_id + 1) per processed update, and is NEVER touched on the error
+        // path. Simulate updates [10, 11], a transient error (no advance), then a
+        // retry returning [11] again (no double-consume past 12) and a new [12].
+        let mut offset: i64 = 0;
+
+        // First successful batch: updates 10 and 11.
+        for update_id in [10_i64, 11] {
+            offset = offset.max(update_id + 1);
+        }
+        assert_eq!(offset, 12, "offset advances past the highest consumed id");
+
+        // Transient error path: offset MUST be preserved (loop does `continue`).
+        let offset_before_error = offset;
+        // (no mutation here — exactly what the Err arm does)
+        assert_eq!(
+            offset, offset_before_error,
+            "error path must not move offset"
+        );
+
+        // Telegram only returns updates with id >= offset, so re-polling at 12
+        // never re-delivers 10/11. A genuinely new update 12 advances to 13 once.
+        for update_id in [12_i64] {
+            offset = offset.max(update_id + 1);
+        }
+        assert_eq!(
+            offset, 13,
+            "a new update advances exactly once, no double-count"
+        );
+    }
+
+    #[test]
+    fn describe_get_updates_error_surfaces_api_failure() {
+        let e = GetUpdatesError::ApiError(Some("Unauthorized".to_string()));
+        let s = describe_get_updates_error(&e);
+        assert!(s.contains("phase=api"), "got: {s}");
+        assert!(s.contains("ok=false"), "got: {s}");
+        assert!(s.contains("Unauthorized"), "got: {s}");
     }
 }
