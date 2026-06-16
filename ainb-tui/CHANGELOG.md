@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-06-16
+### Fixed
+- Merge pull request #285 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: overlay import targets the user config, drop project variant
+
+### Documentation
+- **mcp-pool**: reflect user-config import + re-record GIF
+
+
 ## [1.7.4] - 2026-06-15
 ### Added
 - **session-list**: state colours, blue folders, unboxed selected glyph
