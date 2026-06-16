@@ -134,7 +134,13 @@ impl TmuxPreviewPane {
     }
 
     /// Render the preview content for a session
-    fn render_preview(&mut self, frame: &mut Frame, area: Rect, session: &Session, is_focused: bool) {
+    fn render_preview(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &Session,
+        is_focused: bool,
+    ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Session Preview: {}", session.name),
             PreviewMode::Scroll => format!("Session Preview: {} [SCROLL MODE]", session.name),
