@@ -1644,6 +1644,14 @@ fn build_atc_command() -> Command {
                         .long("no-spawn")
                         .action(clap::ArgAction::SetTrue)
                         .help("Provision files + timer but do not spawn the ainb session"),
+                )
+                .arg(
+                    clap::Arg::new("no-hooks")
+                        .long("no-hooks")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)",
+                        ),
                 ),
         )
         .subcommand(
@@ -1668,6 +1676,52 @@ fn build_atc_command() -> Command {
                 .hide(true)
                 .about("Internal: build + send one [HEARTBEAT] nudge (called by the OS timer)")
                 .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(
+            Command::new("hook")
+                .hide(true)
+                .about("Internal: lifecycle-hook side-effects (status file + inbox + Stop-drain)")
+                .arg(clap::Arg::new("event").long("event").required(true).help("Raw hook event name"))
+                .arg(
+                    clap::Arg::new("session-id")
+                        .long("session-id")
+                        .default_value("")
+                        .help("Session that fired the hook"),
+                )
+                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd")),
+        )
+        .subcommand(
+            Command::new("inbox")
+                .about("Inspect / drain / commit a parent's durable completion inbox")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("peek")
+                        .about("Show undrained completions without consuming them")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id")),
+                )
+                .subcommand(
+                    Command::new("drain")
+                        .about("Drain completions exactly-once and print the Stop-drain decision")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id")),
+                )
+                .subcommand(
+                    Command::new("commit")
+                        .about("Commit a child completion to a parent's inbox (testing/integration)")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id"))
+                        .arg(
+                            clap::Arg::new("child")
+                                .long("child")
+                                .required(true)
+                                .help("Child session id that finished"),
+                        )
+                        .arg(
+                            clap::Arg::new("summary")
+                                .long("summary")
+                                .default_value("")
+                                .help("One-line completion summary"),
+                        ),
+                ),
         )
 }
 
