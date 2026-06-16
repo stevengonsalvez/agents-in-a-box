@@ -95,6 +95,29 @@ spends tokens only **deciding**, not scanning. When the fleet is quiet it sends
 a one-line idle ping; when the session is gone it no-ops harmlessly until
 teardown.
 
+## Event-driven mode (the plumbing)
+
+`setup` also installs an event-driven lifecycle hook set into
+`~/.claude/settings.json` (skip with `--no-hooks`). With it, a child session
+spawned via `ainb run --parent <atc-name>` commits its completion to ATC's
+**durable inbox** the instant its turn ends — so ATC learns about a finished
+child without waiting for the next heartbeat. On each heartbeat ATC drains its
+inbox first and prepends those completions to the nudge (a pending completion
+even overrides idle-pause). The poll-mode `fleet needs` scan stays as the
+always-on fallback, so ATC behaves identically whether or not children have the
+hooks — the plumbing is a pure drop-in enhancement.
+
+```bash
+# Spawn a child that reports completions back to ATC instance "tower":
+ainb run --repo . --parent tower -p "fix the failing tests"
+
+# Inspect / drain a parent's inbox directly (debug):
+ainb fleet atc inbox peek  tower
+ainb fleet atc inbox drain tower
+```
+
+Full design + on-disk formats: [`docs/atc-plumbing.md`](../../../../docs/atc-plumbing.md).
+
 ## The policy (what ATC decides)
 
 The generated `CLAUDE.md` encodes a conservative, **escalate-on-uncertainty**
@@ -132,10 +155,14 @@ place for unmanaged one-off recovery, marked superseded.
 - **Safety is prompt-enforced.** ATC's conservatism lives in the `CLAUDE.md`
   policy, not in a hard sandbox. The default is deliberately to escalate on any
   uncertainty; a wrong autonomous action is costlier than an extra page.
-- **Poll-mode latency.** ATC reacts at its next heartbeat, not the instant a
-  session blocks. The separate plumbing track (hooks → status files → durable
-  inboxes → Stop-hook drain) upgrades ATC to event-driven; it is a drop-in
-  enhancement, not a prerequisite — ATC works standalone today.
+- **Poll-mode latency (mitigated by the plumbing).** In pure poll-mode ATC
+  reacts at its next heartbeat, not the instant a session blocks. The plumbing
+  (hooks → status files → durable inboxes → Stop-hook drain), installed by
+  `setup` and wired into the heartbeat, upgrades ATC to event-driven for any
+  child spawned with `ainb run --parent`: completions arrive the instant the
+  child finishes. It is a drop-in enhancement, not a prerequisite — ATC still
+  works standalone in poll-mode for any session without the hooks. See
+  [`docs/atc-plumbing.md`](../../../../docs/atc-plumbing.md).
 - **tmux fire-and-forget.** Like the rest of the fleet, sends have no ACK; ATC
   confirms effect on the next heartbeat read.
 

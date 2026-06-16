@@ -102,6 +102,44 @@ mapping happens in the consumer, not at the wire.
 `payload` is the verbatim original JSON from the host agent so the
 inbox detail view can show full forensics.
 
+## ATC plumbing (event-driven orchestration)
+
+The same `notify.sh` doubles as the shell shim for the **event-driven ATC
+plumbing**. It is dormant by default and activates only when the hook was
+installed under ATC management — i.e. the command carries `AINB_MANAGED=atc`
+(set by the lifecycle-hook block that `ainb fleet atc setup` merges into
+`~/.claude/settings.json`). A plain notifyd-only install never sets it, so the
+plumbing block is skipped and leaf sessions pay nothing.
+
+When active, after delivering the notifyd envelope the script forwards the parsed
+event to the Rust side:
+
+```sh
+ainb fleet atc hook --event "$AINB_HOOK_EVENT" --session-id "$SID" --cwd "$CWD"
+```
+
+`ainb fleet atc hook` then:
+
+1. Writes an atomic per-session **status file** (`~/.agents-in-a-box/status/<id>.json`).
+2. On `UserPromptSubmit` (a genuine user turn) resets the session's Stop-drain
+   block budget.
+3. On `Stop`: commits a **last-wins completion** to the parent's durable inbox
+   (resolved from `AINB_PARENT_SESSION` or `parents.json`; unresolvable parents
+   dead-letter), then **drains its own inbox** — if it carries child completions
+   and the block budget allows, the script relays
+   `{"decision":"block","reason":<completions>}` on stdout so Claude Code feeds
+   the completions back as the session's next turn.
+
+Empty inbox ⇒ no block, no writes beyond the status file. This durable inbox
+replaces reliance on the claude-peers broker's lossy delivery path. Full design,
+formats, and the consecutive-block budget are documented in
+[`docs/atc-plumbing.md`](../../docs/atc-plumbing.md).
+
+> The lifecycle hooks are installed into `~/.claude/settings.json` by
+> `ainb fleet atc setup` via a read-preserve-modify-write merge that keeps the
+> reflect plugin's and notifyd's hooks intact — they are **not** part of this
+> marketplace manifest (which stays notifyd-only: `Notification` + `Stop`).
+
 ## See also
 
 - `crates/ainb-plugin-notifyd/` — the `ainb-notifyd` daemon
