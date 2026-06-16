@@ -207,8 +207,26 @@
   },
   "enabledPlugins": {
     "warp@claude-code-warp": true,
+    "security-guidance@claude-plugins-official": true,
     "reflect@agents-in-a-box": true,
-    "ainb-fleet@agents-in-a-box": true
+    "ainb-fleet@agents-in-a-box": true,
+    "ainb-hooks@agents-in-a-box": true,
+    "caveman-stats@agents-in-a-box": true,
+    "caveman@caveman": true
+  },
+  "extraKnownMarketplaces": {
+    "agents-in-a-box": {
+      "source": {
+        "source": "directory",
+        "path": "~/d/git/ai-coder-rules"
+      }
+    },
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman"
+      }
+    }
   },
   "skipDangerousModePermissionPrompt": true,
   "teammateMode": "auto",

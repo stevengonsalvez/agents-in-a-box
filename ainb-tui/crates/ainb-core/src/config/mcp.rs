@@ -27,6 +27,12 @@ pub struct McpServerConfig {
     /// Whether this server is enabled by default
     #[serde(default = "default_true")]
     pub enabled_by_default: bool,
+
+    /// Whether this server may be shared across sessions via the MCP pool
+    /// (see `McpPoolConfig`). Set false for stateful servers (browser/db
+    /// bridges) that must not leak state between sessions.
+    #[serde(default = "default_true")]
+    pub shared: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +102,7 @@ impl McpServerConfig {
             },
             required_env: vec![],
             enabled_by_default: true,
+            shared: true,
         }
     }
 
@@ -117,6 +124,7 @@ impl McpServerConfig {
             },
             required_env: vec![],
             enabled_by_default: true,
+            shared: true,
         }
     }
 
@@ -146,6 +154,7 @@ impl McpServerConfig {
                 "TWILIO_FROM_PHONE".to_string(),
             ],
             enabled_by_default: false,
+            shared: true,
         }
     }
 

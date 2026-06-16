@@ -1,0 +1,65 @@
+{
+  "ports": {
+    "A6": {
+      "file": "proof_A6_branch_aware_isolation.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R15": {
+      "file": "proof_R15_per_project_sharding.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R16": {
+      "file": "proof_R16_project_affinity_boost.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R1": {
+      "file": "proof_R1_graph_expansion_arm.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R2": {
+      "file": "proof_R2_cross_encoder_rerank.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R5": {
+      "file": "proof_R5_temporal_arm.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R6": {
+      "file": "proof_R6_query_date_parsing.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R7": {
+      "file": "proof_R7_ood_gate.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "R8": {
+      "file": "proof_R8_multiplicative_bounded_boosts.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "S7": {
+      "file": "proof_S7_chunk_hash_dedup.py",
+      "verdict": "PASS",
+      "returncode": 0
+    },
+    "SG1": {
+      "file": "proof_SG1_cross_turn_contradiction.py",
+      "verdict": "PASS",
+      "returncode": 0
+    }
+  },
+  "summary": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0,
+    "errored": 0
+  }
+}

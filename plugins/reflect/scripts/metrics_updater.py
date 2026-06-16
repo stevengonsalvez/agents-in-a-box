@@ -61,7 +61,12 @@ _METRIC_KEYS = [
     "sidecars_generated",
     "estimated_time_saved",
     "most_updated_agents",
+    "last_consolidation_at",
+    "learnings_since_last_consolidation",
 ]
+
+# Metric keys whose default is the empty string (timestamps).
+_TIMESTAMP_KEYS = ("last_reflection", "last_consolidation_at")
 
 
 def _ensure_defaults() -> None:
@@ -70,11 +75,27 @@ def _ensure_defaults() -> None:
     for key in _METRIC_KEYS:
         if get_metric(key, conn=conn) is None:
             default = {} if key == "most_updated_agents" else 0
-            if key == "last_reflection":
+            if key in _TIMESTAMP_KEYS:
                 default = ""
             elif key == "estimated_time_saved":
                 default = "~0 hours"
             set_metric(key, default, conn=conn)
+
+
+def _refresh_consolidation_counter(conn) -> None:
+    """C2: recompute 'learnings since last consolidation' so reads are live.
+
+    The counter is derived from the learnings table by reflect_synthesis
+    (the auto-trigger owner); refreshing at read-time keeps the exposed
+    metric accurate between launchd ticks. Best-effort — display must
+    never fail because the synthesis module is unavailable.
+    """
+    try:
+        import reflect_synthesis
+
+        reflect_synthesis.learnings_since_last_consolidation(conn=conn)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +192,7 @@ def show_metrics() -> None:
     """Display current metrics."""
     conn = init_db()
     _ensure_defaults()
+    _refresh_consolidation_counter(conn)
     m = get_metrics(conn=conn)
 
     print("\n=== Reflect Metrics ===\n")
@@ -184,6 +206,14 @@ def show_metrics() -> None:
     print(f"Knowledge Notes: {m.get('knowledge_notes_created', 0)}")
     print(f"Sidecars Generated: {m.get('sidecars_generated', 0)}")
     print(f"Estimated Time Saved: {m.get('estimated_time_saved', '~0 hours')}")
+    print(
+        "Learnings Since Last Consolidation: "
+        f"{m.get('learnings_since_last_consolidation', 0)}"
+    )
+    print(
+        "Last Consolidation: "
+        f"{m.get('last_consolidation_at', 'Never') or 'Never'}"
+    )
 
     print(f"\nConfidence Breakdown:")
     print(f"  High: {m.get('confidence_high', 0)}")
@@ -202,7 +232,7 @@ def reset_metrics() -> None:
     conn = init_db()
     for key in _METRIC_KEYS:
         default = {} if key == "most_updated_agents" else 0
-        if key == "last_reflection":
+        if key in _TIMESTAMP_KEYS:
             default = ""
         elif key == "estimated_time_saved":
             default = "~0 hours"
@@ -273,6 +303,7 @@ def main() -> None:
         if args.json:
             conn = init_db()
             _ensure_defaults()
+            _refresh_consolidation_counter(conn)
             print(json.dumps(get_metrics(conn=conn), indent=2, default=str))
         else:
             show_metrics()
@@ -284,6 +315,8 @@ def main() -> None:
             sys.exit(1)
         conn = init_db()
         _ensure_defaults()
+        if args.key == "learnings_since_last_consolidation":
+            _refresh_consolidation_counter(conn)
         val = get_metric(args.key, conn=conn)
         if args.json:
             print(json.dumps({"key": args.key, "value": val}, default=str))

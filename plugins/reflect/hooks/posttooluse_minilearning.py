@@ -161,24 +161,93 @@ def _main_body() -> None:
     tool_input = data.get("tool_input", data.get("toolInput", ""))
     tool_response = get_tool_response(data)
 
-    if not tool_failed(tool_response, tool_name):
-        return  # Successful tool calls don't arm.
+    # SG5: loop detection runs BEFORE the failure check — a loop of
+    # *successful* identical calls is still a stall, and the user's next
+    # prompt correcting it is the highest-signal learning in the session.
+    loop_hit = None
+    try:
+        from loop_detector import record_call
+        loop_hit = record_call(session_id, tool_name, tool_input)
+    except ImportError:  # pragma: no cover
+        pass
+
+    # SG4: test-outcome parsing runs on Bash output BEFORE the failure-arm
+    # path. A confirmed fix (failures N->0) writes a HIGH-confidence learning
+    # directly inside observe_bash — nothing to arm. A regression (0->N) is a
+    # contradiction signal: arm with reason="test-regression" so the next
+    # corrective prompt is captured with test context attached.
+    test_hit = None
+    if tool_name and tool_name.lower() in ("bash", "shell", "execute"):
+        try:
+            from test_outcome_parser import observe_bash
+            test_hit = observe_bash(session_id, tool_input, tool_response)
+        except ImportError:  # pragma: no cover
+            pass
+    regression = bool(test_hit and test_hit.get("kind") == "regression")
+
+    # SG7: TodoWrite completion capture. An item transitioning to
+    # status='completed' is an explicit "done" moment — observe_todowrite
+    # diffs prior vs new todo state and writes a MEDIUM-confidence Process
+    # learning per completion (with in_progress duration + files touched).
+    # Every OTHER file-modifying tool feeds the per-session file-event log
+    # that those completions attribute their work to.
+    try:
+        if tool_name and tool_name.lower() == "todowrite":
+            from todo_state import observe_todowrite
+            hit = observe_todowrite(session_id, tool_input)
+            if hit:
+                forensics_log(
+                    _HOOK_NAME,
+                    f"todo completion(s) captured for session={session_id[:8]}: "
+                    f"{len(hit['completed'])}",
+                )
+        else:
+            from todo_state import record_file_event
+            record_file_event(session_id, tool_name, tool_input)
+    except ImportError:  # pragma: no cover
+        pass
+
+    if not loop_hit and not regression and not tool_failed(tool_response, tool_name):
+        return  # Successful, non-looping tool calls don't arm.
 
     # Write armed file. Truncate large payloads — only need enough for
     # the mini-learning context, not full transcripts.
     try:
+        # M6: armed payloads later land in LLM-bound mini-learnings — strip
+        # <private> spans before scrubbing/truncating. Best-effort import so a
+        # missing filter can never break the hook.
+        try:
+            from privacy_filter import strip_private
+        except ImportError:  # pragma: no cover
+            def strip_private(text: str) -> str:  # type: ignore[no-redef]
+                return text
         path = armed_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "tool": tool_name,
-            "tool_input": scrub_secrets(str(tool_input)[:500]),
-            "tool_response": scrub_secrets(json.dumps(tool_response)[:500]),
+            "tool_input": scrub_secrets(strip_private(str(tool_input))[:500]),
+            "tool_response": scrub_secrets(strip_private(json.dumps(tool_response))[:500]),
             "ts": time.time(),
+            # SG5/SG4: why we armed — lets the mini-learning tag its source
+            # ('loop-correction' / 'test-regression' vs failure-correction).
+            "reason": (
+                "loop" if loop_hit
+                else "test-regression" if regression
+                else "failure"
+            ),
         }
+        if loop_hit:
+            payload["loop"] = dict(loop_hit)
+        if regression:
+            payload["test_outcome"] = dict(test_hit)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
-        forensics_log(_HOOK_NAME, f"armed for session={session_id[:8]} tool={tool_name}")
+        forensics_log(
+            _HOOK_NAME,
+            f"armed for session={session_id[:8]} tool={tool_name} "
+            f"reason={payload['reason']}",
+        )
     except Exception:
         # If even the armed write fails, we silently move on.
         pass

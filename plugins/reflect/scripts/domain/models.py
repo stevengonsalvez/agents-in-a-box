@@ -31,6 +31,8 @@ class LearningRecord:
     source_quote: str = ""
     source_quote_hash: str = ""
     content_hash: str = ""
+    source_memory_ids: list[str] = field(default_factory=list)
+    proof_count: int = 1
     session_id: str = ""
     thread_id: str = ""
     privacy_level: PrivacyLevel = PrivacyLevel.INTERNAL

@@ -654,12 +654,12 @@ mod tests {
     // --- cmd_path test ---
 
     #[test]
-    fn test_config_paths_returns_three_locations() {
+    fn test_config_paths_returns_four_locations() {
         let paths = AppConfig::get_config_paths();
         assert_eq!(
             paths.len(),
-            3,
-            "Expected project, user, and system config paths"
+            4,
+            "Expected project (.ainb + legacy .agents-box), user, and system config paths"
         );
     }
 }

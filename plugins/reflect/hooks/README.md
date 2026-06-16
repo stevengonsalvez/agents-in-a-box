@@ -4,13 +4,14 @@ This directory contains hooks for integrating the reflect skill with Claude Code
 
 ## Available Hooks
 
-The `reflect` plugin wires five Claude Code lifecycle events via `.claude-plugin/plugin.json`. Most hook scripts live in this directory; the two `recall` hooks live under `../skills/recall/hooks/`.
+The `reflect` plugin wires six Claude Code lifecycle events via `.claude-plugin/plugin.json`. Most hook scripts live in this directory; the two `recall` hooks live under `../skills/recall/hooks/`.
 
 | Event | Script | Purpose |
 |-------|--------|---------|
 | `SessionStart` | `../skills/recall/hooks/session_start_recall.py` | Hybrid-search the KB and auto-inject the top learnings into the new session |
 | `SessionStart` | `reflect-drain-bg.sh` | Background-drain the queued reflections from prior sessions (spawned detached; sole queue consumer as of v4.0.0) |
 | `UserPromptSubmit` | `../skills/recall/hooks/user_prompt_submit_recall.py` | Recall against the submitted prompt before the turn runs |
+| `Notification` | `notification_reflect.py` | Arm permission-decision capture when a permission prompt fires (SG8) |
 | `PostToolUse` | `posttooluse_minilearning.py` | Arm low-cost mini-learning capture after each tool call |
 | `Stop` | `stop_reflect.py` | Gate + enqueue short-session reflection when the agent turn ends |
 | `PreCompact` | `precompact_reflect.py --auto --verbose` | Gate + queue the transcript for the bg-drain cascade before context compaction |

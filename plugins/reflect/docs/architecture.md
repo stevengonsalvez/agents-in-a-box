@@ -976,7 +976,7 @@ relationships:
 
 Valid `type` values for entities: `technology`, `error`, `pattern`, `function`, `concept`, `tool`, `artifact`, `code`, `config`, `service`, `platform`, `framework`, `library`.
 
-Valid `type` values for relationships: `caused_by`, `solves`, `requires`, `relates_to`, `uses`, `implements`, `configures`, `triggers`, `part_of`.
+Valid `type` values for relationships — typed causal links (S2): `caused_by`, `causes`, `enables`, `prevents`, `contradicts`, `supersedes`, `part_of`, `uses`; legacy: `solves`, `requires`, `relates_to`, `implements`, `configures`, `triggers`. Prefer a typed causal link over `relates_to` when the direction of effect is known.
 
 Strength scale: 9–10 = direct/causal, 5–7 = moderate, 1–4 = weak.
 

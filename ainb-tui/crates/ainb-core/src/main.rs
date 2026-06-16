@@ -42,6 +42,7 @@ mod editors;
 mod fleet;
 mod git;
 mod interactive;
+mod mcp_pool;
 mod models;
 mod perf;
 mod plugins;
@@ -1730,6 +1731,7 @@ fn setup_logging() {
                 | "presets"
                 | "usage"
                 | "claudecode"
+                | "codex"
                 | "statusline"
                 | "completion"
                 | "--help"
