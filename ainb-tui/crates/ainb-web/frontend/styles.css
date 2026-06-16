@@ -200,6 +200,29 @@ body {
 .cost-val { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .cost-key { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
 
+/* Per-model / per-group breakdown sections under the headline tiles. */
+.cost-section {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 16px 4px 6px;
+}
+.cost-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+.cost-row:hover { background: var(--accent-soft); }
+.cost-row + .cost-row { margin-top: 2px; }
+.cost-row-main { min-width: 0; flex: 1; }
+.cost-row-name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cost-row-meta { color: var(--text-faint); font-size: 12px; margin-top: 2px; }
+.cost-row-val { font-variant-numeric: tabular-nums; font-weight: 650; color: var(--text); flex: 0 0 auto; }
+
 /* ── Empty / placeholder ────────────────────────────── */
 .empty {
   padding: 28px 14px;

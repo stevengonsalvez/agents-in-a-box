@@ -152,17 +152,49 @@
     }
   }
 
-  // Cost (`ainb fleet cost --format json`) — shape is owned by Goal 1 and may
-  // be absent (null) in this build. Render whatever rollup numbers we find.
+  // Cost (`ainb fleet cost --format json`). The payload is the CLI's
+  // `CostReport` (crates/ainb-core/src/cli/fleet/cost.rs), serialized with
+  // serde's default snake_case field names. It is NOT a flat rollup — the
+  // numbers are nested:
+  //   cost.totals  : { cost_usd, session_count, model_count, bucket: TokenBucket }
+  //   cost.models[]: { model, cost_usd, bucket }
+  //   cost.groups[]: { group, cost_usd, session_count, bucket }
+  //   cost.sessions[], cost.daily[], cost.budget_breaches[]  (not surfaced here)
+  // where a TokenBucket is { input_tokens, cache_creation_tokens,
+  // cache_read_tokens, output_tokens, reasoning_tokens, call_count, cost_usd }.
+  // `cost` is `null` when the `fleet cost` verb is absent from this build.
   function fmtUsd(n) {
     if (typeof n !== "number" || !isFinite(n)) return "–";
     return `$${n.toFixed(2)}`;
+  }
+
+  // Compact token counts: 1234 → "1.2k", 6_114_855 → "6.1M".
+  function fmtTokens(n) {
+    if (typeof n !== "number" || !isFinite(n)) return "0";
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+    if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+    if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+    return String(n);
+  }
+
+  // Sum every token category in a TokenBucket, tolerating missing fields.
+  function bucketTokens(bucket) {
+    if (!bucket || typeof bucket !== "object") return 0;
+    return (
+      (bucket.input_tokens || 0) +
+      (bucket.cache_creation_tokens || 0) +
+      (bucket.cache_read_tokens || 0) +
+      (bucket.output_tokens || 0) +
+      (bucket.reasoning_tokens || 0)
+    );
   }
 
   function renderCost(cost) {
     const host = $("cost");
     host.replaceChildren();
 
+    // `null`/absent verb → the surface genuinely isn't available in this build.
     if (cost == null) {
       $("stat-cost").textContent = "–";
       $("cost-meta").textContent = "unavailable";
@@ -170,42 +202,66 @@
       return;
     }
 
-    // Try common rollup shapes without hard-coding one schema.
-    const total =
-      cost.total_usd ?? cost.month_usd ?? cost.today_usd ?? cost.cost_usd ?? null;
-    $("stat-cost").textContent = total != null ? fmtUsd(total) : "–";
-    $("cost-meta").textContent = "";
+    const totals = cost.totals && typeof cost.totals === "object" ? cost.totals : null;
+    const models = Array.isArray(cost.models) ? cost.models : [];
+    const groups = Array.isArray(cost.groups) ? cost.groups : [];
 
-    const cells = [];
-    const push = (key, val) => {
-      if (val != null) cells.push([key, fmtUsd(val)]);
-    };
-    push("today", cost.today_usd);
-    push("week", cost.week_usd);
-    push("month", cost.month_usd);
-    push("projected", cost.projected_usd);
-    push("total", cost.total_usd);
-
-    if (!cells.length) {
-      // Fall back to dumping numeric top-level fields.
-      for (const [k, v] of Object.entries(cost)) {
-        if (typeof v === "number") cells.push([k, fmtUsd(v)]);
-      }
-    }
-
-    if (!cells.length) {
+    // A genuinely empty report: no totals object at all. (A zero-spend report
+    // still carries a `totals` object with cost_usd 0, which we render.)
+    if (!totals) {
+      $("stat-cost").textContent = "–";
+      $("cost-meta").textContent = "";
       host.appendChild(emptyState("◷", "No cost data recorded yet."));
       return;
     }
 
+    const totalUsd = typeof totals.cost_usd === "number" ? totals.cost_usd : 0;
+    const totalTokens = bucketTokens(totals.bucket);
+    $("stat-cost").textContent = fmtUsd(totalUsd);
+    const sessionCount = totals.session_count || 0;
+    const modelCount = totals.model_count || models.length;
+    $("cost-meta").textContent = `${sessionCount} sessions · ${modelCount} models`;
+
+    // Headline tiles: total spend + total tokens across the window.
     const grid = el("div", "cost-grid");
-    for (const [k, v] of cells) {
+    const tile = (val, key) => {
       const cell = el("div", "cost-cell");
-      cell.appendChild(el("div", "cost-val", v));
-      cell.appendChild(el("div", "cost-key", k));
+      cell.appendChild(el("div", "cost-val", val));
+      cell.appendChild(el("div", "cost-key", key));
       grid.appendChild(cell);
-    }
+    };
+    tile(fmtUsd(totalUsd), "total");
+    tile(fmtTokens(totalTokens), "tokens");
     host.appendChild(grid);
+
+    // Per-model breakdown (already sorted by descending cost server-side).
+    if (models.length) {
+      host.appendChild(el("div", "cost-section", "By model"));
+      for (const m of models.slice(0, 8)) {
+        const row = el("div", "cost-row");
+        const main = el("div", "cost-row-main");
+        main.appendChild(el("div", "cost-row-name", m.model || "model"));
+        main.appendChild(el("div", "cost-row-meta", `${fmtTokens(bucketTokens(m.bucket))} tokens`));
+        row.appendChild(main);
+        row.appendChild(el("div", "cost-row-val", fmtUsd(m.cost_usd)));
+        host.appendChild(row);
+      }
+    }
+
+    // Per-group (workspace) rollup, when the fleet join produced any groups.
+    if (groups.length) {
+      host.appendChild(el("div", "cost-section", "By group"));
+      for (const g of groups.slice(0, 8)) {
+        const row = el("div", "cost-row");
+        const main = el("div", "cost-row-main");
+        main.appendChild(el("div", "cost-row-name", g.group || "group"));
+        const n = g.session_count || 0;
+        main.appendChild(el("div", "cost-row-meta", `${n} session${n === 1 ? "" : "s"}`));
+        row.appendChild(main);
+        row.appendChild(el("div", "cost-row-val", fmtUsd(g.cost_usd)));
+        host.appendChild(row);
+      }
+    }
   }
 
   function render(snap) {
