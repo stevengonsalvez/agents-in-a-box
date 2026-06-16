@@ -1293,7 +1293,10 @@ impl AgentProvider {
                     false,
                 ),
             ],
-            status: ProviderStatus::Available,
+            // Greyed-out / non-launchable in the Agents picker for now —
+            // `is_current_available()` blocks selection of non-Available
+            // providers (kept consistent with the new-session Configure wizard).
+            status: ProviderStatus::Disabled,
         }
     }
 

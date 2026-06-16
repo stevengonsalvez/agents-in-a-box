@@ -433,7 +433,11 @@ impl SessionStatus {
     pub fn indicator(&self) -> &'static str {
         match self {
             SessionStatus::Running => "●",
-            SessionStatus::Stopped => "⏸",
+            // cod-debug-pause: a 1-cell Nerd Font glyph. The literal ⏸
+            // (U+23F8) is unicode-width 1 but renders 2-cell as an emoji in
+            // most terminals, so paused rows used to push everything after
+            // them one column right (ragged pill alignment).
+            SessionStatus::Stopped => "\u{ead1}",
             SessionStatus::Idle => "○", // Empty circle for idle
             SessionStatus::Error(_) => "✗",
         }
