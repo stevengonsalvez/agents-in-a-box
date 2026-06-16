@@ -141,6 +141,56 @@ impl Inbox {
         write_atomic(&self.budget_path(), json.as_bytes())
     }
 
+    /// Reset this inbox's block budget to zero under the inbox lock — the
+    /// genuine-user-turn path. Holding the lock serialises the reset against a
+    /// concurrent Stop-drain's block increment so neither read-modify-write
+    /// clobbers the other (see [`Self::drain_with_budget`]).
+    pub fn reset_budget(&self) -> Result<()> {
+        let _guard = self.lock()?;
+        let mut budget = self.read_budget();
+        budget.reset();
+        self.write_budget(&budget)
+    }
+
+    /// The Stop-drain decision, computed under a single hold of the inbox lock so
+    /// the budget read-modify-write cannot race a concurrent `UserPromptSubmit`
+    /// reset (M2) and so completions are never consumed unless they will actually
+    /// be emitted (H1).
+    ///
+    /// Behaviour, all under one lock:
+    ///   * Read the current block budget. If it is already exhausted
+    ///     (`consecutive_blocks >= budget_cap`), do **not** drain — leave the
+    ///     completions in the inbox so a later genuine user turn (which resets the
+    ///     budget) lets them drain and deliver. Returns `None` with the inbox
+    ///     untouched.
+    ///   * Otherwise drain the inbox exactly-once. If the drain yielded fresh
+    ///     completions, increment + persist the budget and return the block
+    ///     decision carrying them. An empty drain leaves the budget untouched and
+    ///     returns `None`.
+    ///
+    /// Net: a completion is consumed only on the drain that also emits it, so it
+    /// is delivered exactly once and never silently destroyed.
+    pub fn drain_with_budget(
+        &self,
+        budget_cap: u32,
+    ) -> Result<(Vec<InboxRecord>, Option<super::drain::StopDecision>)> {
+        let _guard = self.lock()?;
+        let mut budget = self.read_budget();
+        // Budget exhausted → do NOT drain. Leaving the completions in the inbox
+        // means a later reset (genuine user turn) lets them deliver, rather than
+        // consuming them here only to emit nothing (data loss).
+        if budget.consecutive_blocks >= budget_cap.max(1) {
+            return Ok((Vec::new(), None));
+        }
+        let completions = self.drain_locked()?;
+        let decision = super::drain::decide(&completions, budget.consecutive_blocks, budget_cap);
+        if decision.is_some() {
+            budget.record_block();
+            self.write_budget(&budget)?;
+        }
+        Ok((completions, decision))
+    }
+
     /// Acquire an exclusive advisory lock guarding this inbox's files. Held for
     /// the duration of a commit or drain so concurrent children / a draining
     /// parent never interleave a read-modify-write.
@@ -228,6 +278,12 @@ impl Inbox {
     /// offline is still present in the JSONL and is delivered on this drain.
     pub fn drain(&self) -> Result<Vec<InboxRecord>> {
         let _guard = self.lock()?;
+        self.drain_locked()
+    }
+
+    /// The exactly-once drain body, assuming the caller already holds the inbox
+    /// lock (e.g. [`Self::drain_with_budget`]). Never acquires the lock itself.
+    fn drain_locked(&self) -> Result<Vec<InboxRecord>> {
         let consumed = self.read_consumed();
         let all = self.read_records();
         let fresh: Vec<InboxRecord> =
@@ -240,33 +296,69 @@ impl Inbox {
 
         // Record the freshly-delivered fingerprints BEFORE clearing the JSONL,
         // so a crash between the two writes re-delivers nothing (the marker
-        // already names them) rather than double-delivering.
-        let mut new_consumed = consumed;
+        // already names them) rather than double-delivering. Each marker carries
+        // the completion's timestamp so eviction is oldest-first by recency, not
+        // by an arbitrary hex sort (a re-committed old turn past the cap must not
+        // re-deliver).
+        let mut entries = self.read_consumed_entries();
         for r in &fresh {
-            new_consumed.insert(r.turn_fingerprint.clone());
+            entries.push((r.ts, r.turn_fingerprint.clone()));
         }
-        self.write_consumed(&new_consumed)?;
+        self.write_consumed_entries(entries)?;
         // Clear delivered records from the JSONL (removes the file when empty).
         self.rewrite(&[])?;
         Ok(fresh)
     }
 
-    /// Read the set of already-consumed turn fingerprints from the sidecar marker.
+    /// Read the set of already-consumed turn fingerprints for membership testing.
+    /// Built from the recency-ordered entries (timestamp is ignored here).
     fn read_consumed(&self) -> HashSet<String> {
-        std::fs::read_to_string(self.consumed_path())
-            .map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
-            .unwrap_or_default()
+        self.read_consumed_entries().into_iter().map(|(_, fp)| fp).collect()
     }
 
-    /// Atomically persist the consumed-fingerprint set. Capped to the most
-    /// recent `CONSUMED_CAP` fingerprints so the marker cannot grow unbounded.
-    fn write_consumed(&self, set: &HashSet<String>) -> Result<()> {
+    /// Read the consumed marker as `(ts_ms, fingerprint)` entries. Each line is
+    /// `"<ts_ms> <fingerprint>"`; a bare-hex line (legacy format) is tolerated as
+    /// `ts = 0` so an upgrade in place never re-delivers old turns.
+    fn read_consumed_entries(&self) -> Vec<(i64, String)> {
+        let Ok(text) = std::fs::read_to_string(self.consumed_path()) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| match l.split_once(' ') {
+                Some((ts, fp)) => (ts.trim().parse::<i64>().unwrap_or(0), fp.trim().to_string()),
+                // Legacy bare-hex line: no timestamp → treat as oldest (ts = 0).
+                None => (0, l.to_string()),
+            })
+            .collect()
+    }
+
+    /// Atomically persist the consumed entries, evicting OLDEST-first by
+    /// timestamp so the marker stays bounded at `CONSUMED_CAP` while always
+    /// remembering the most recent turns. De-dupes by fingerprint, keeping the
+    /// newest timestamp seen for each.
+    fn write_consumed_entries(&self, entries: Vec<(i64, String)>) -> Result<()> {
         const CONSUMED_CAP: usize = 1000;
-        let mut lines: Vec<&String> = set.iter().collect();
-        // Stable order keeps the file diff-friendly; cap from the end.
-        lines.sort();
-        let start = lines.len().saturating_sub(CONSUMED_CAP);
-        let body = lines[start..].iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        // Collapse duplicate fingerprints to their newest timestamp.
+        let mut newest: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (ts, fp) in entries {
+            let e = newest.entry(fp).or_insert(ts);
+            if ts > *e {
+                *e = ts;
+            }
+        }
+        let mut deduped: Vec<(i64, String)> = newest.into_iter().map(|(fp, ts)| (ts, fp)).collect();
+        // Sort by recency (ts asc, fingerprint as a stable tiebreak), then keep
+        // the newest CONSUMED_CAP — evicting the oldest, not an arbitrary hex
+        // suffix.
+        deduped.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let start = deduped.len().saturating_sub(CONSUMED_CAP);
+        let body = deduped[start..]
+            .iter()
+            .map(|(ts, fp)| format!("{ts} {fp}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         write_atomic(&self.consumed_path(), body.as_bytes())
     }
 }
@@ -447,5 +539,166 @@ mod tests {
         let c = InboxRecord::new("c1", "p", "different", "Stop", 1);
         assert_eq!(a.turn_fingerprint, b.turn_fingerprint);
         assert_ne!(a.turn_fingerprint, c.turn_fingerprint);
+    }
+
+    // --- H1: budget exhaustion must NOT consume completions ------------------
+
+    /// Regression (H1): when the block budget is exhausted, `drain_with_budget`
+    /// must NOT drain — the completions stay in the inbox so a later genuine
+    /// user turn (which resets the budget) can deliver them. The pre-fix code
+    /// drained unconditionally then emitted nothing → the completions were
+    /// consumed but delivered nowhere (permanent data loss).
+    #[test]
+    fn budget_exhaustion_does_not_consume_completions_then_reset_delivers_once() {
+        let dir = TempDir::new().unwrap();
+        let inbox = Inbox::open_in(dir.path(), "atc");
+        inbox.commit(&rec("c1", "atc", "important completion", 1)).unwrap();
+
+        // Drive the budget to the cap.
+        let mut budget = super::super::drain::BlockBudget::default();
+        for _ in 0..super::super::drain::DEFAULT_BLOCK_BUDGET {
+            budget.record_block();
+        }
+        inbox.write_budget(&budget).unwrap();
+
+        // Budget exhausted → no emission AND the inbox is left untouched.
+        let (drained, decision) =
+            inbox.drain_with_budget(super::super::drain::DEFAULT_BLOCK_BUDGET).unwrap();
+        assert!(drained.is_empty(), "exhausted budget must not drain");
+        assert!(decision.is_none(), "exhausted budget must not emit a block");
+        assert!(
+            !inbox.is_empty(),
+            "completions must remain in the inbox, not be silently consumed"
+        );
+        assert_eq!(inbox.peek().len(), 1, "the completion is still pending");
+
+        // A genuine user turn resets the budget; now the completion delivers...
+        inbox.reset_budget().unwrap();
+        let (drained, decision) =
+            inbox.drain_with_budget(super::super::drain::DEFAULT_BLOCK_BUDGET).unwrap();
+        assert_eq!(
+            drained.len(),
+            1,
+            "reset budget delivers the held completion"
+        );
+        assert_eq!(drained[0].summary, "important completion");
+        assert!(decision.is_some(), "reset budget emits the block");
+
+        // ...exactly once: a follow-up drain delivers nothing.
+        let (drained, decision) =
+            inbox.drain_with_budget(super::super::drain::DEFAULT_BLOCK_BUDGET).unwrap();
+        assert!(
+            drained.is_empty(),
+            "no re-delivery after the held completion drained"
+        );
+        assert!(decision.is_none());
+    }
+
+    // --- M1: consumed-marker eviction is oldest-first by recency -------------
+
+    /// Regression (M1): the consumed marker must evict the OLDEST fingerprints
+    /// when over the cap, not the lexically-smallest hex (which evicts randomly
+    /// w.r.t. time and lets a re-committed old turn re-deliver). We write >1000
+    /// markers over strictly increasing timestamps and assert the oldest are
+    /// gone while the most recent are remembered.
+    #[test]
+    fn consumed_marker_evicts_oldest_by_recency_not_hex() {
+        let dir = TempDir::new().unwrap();
+        let inbox = Inbox::open_in(dir.path(), "atc");
+
+        // Build 1100 (ts, fingerprint) entries with increasing ts. Use the real
+        // fingerprint helper so the values are realistic hex strings.
+        let mut entries: Vec<(i64, String)> = Vec::new();
+        for ts in 0..1100i64 {
+            let fp = fingerprint("child", "summary", ts);
+            entries.push((ts, fp));
+        }
+        let oldest_fp = entries[0].1.clone(); // ts = 0, must be evicted
+        let recent_fp = entries[1099].1.clone(); // newest, must survive
+        inbox.write_consumed_entries(entries).unwrap();
+
+        let remembered = inbox.read_consumed();
+        assert_eq!(remembered.len(), 1000, "capped to CONSUMED_CAP");
+        assert!(
+            !remembered.contains(&oldest_fp),
+            "the oldest fingerprint must be evicted"
+        );
+        assert!(
+            remembered.contains(&recent_fp),
+            "the most recent fingerprint must be remembered"
+        );
+
+        // And the boundary: ts=99 should be gone (in the oldest 100), ts=100 the
+        // first survivor.
+        assert!(!remembered.contains(&fingerprint("child", "summary", 99)));
+        assert!(remembered.contains(&fingerprint("child", "summary", 100)));
+    }
+
+    /// Legacy bare-hex consumed lines (no timestamp) are tolerated on read and
+    /// treated as oldest (ts = 0), so an in-place upgrade never re-delivers an
+    /// already-consumed turn.
+    #[test]
+    fn consumed_marker_tolerates_legacy_bare_hex_lines() {
+        let dir = TempDir::new().unwrap();
+        let inbox = Inbox::open_in(dir.path(), "atc");
+        let legacy = fingerprint("c1", "old-turn", 5);
+        // Write a legacy-format marker file (bare hex, no ts prefix).
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(inbox.consumed_path(), format!("{legacy}\n")).unwrap();
+
+        let remembered = inbox.read_consumed();
+        assert!(
+            remembered.contains(&legacy),
+            "legacy bare-hex marker must still count as consumed"
+        );
+
+        // Committing + draining the same turn must NOT re-deliver it.
+        inbox.commit(&InboxRecord::new("c1", "atc", "old-turn", "Stop", 5)).unwrap();
+        assert!(
+            inbox.drain().unwrap().is_empty(),
+            "legacy-consumed turn re-delivered"
+        );
+    }
+
+    // --- M2: budget reset + block-increment serialise under the lock ---------
+
+    /// Regression (M2): the block-budget read-modify-write must happen under the
+    /// inbox lock, so concurrent block increments cannot lose updates. We run N
+    /// threads that each commit a turn then `drain_with_budget` (a block, which
+    /// increments the budget) against a budget cap large enough that none are
+    /// refused, and assert NO increments were lost (final count == N). The
+    /// pre-fix unlocked read-modify-write loses increments under contention →
+    /// final count < N.
+    #[test]
+    fn concurrent_block_increments_lose_no_updates_under_lock() {
+        use std::sync::Arc;
+        const N: u32 = 64;
+        let dir = Arc::new(TempDir::new().unwrap());
+        let path = dir.path().to_path_buf();
+        // A cap above N so every drain is permitted to block (and thus bump).
+        let cap = N + 10;
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let inbox = Inbox::open_in(&p, "atc");
+                // Each thread commits a DISTINCT child so every drain has a fresh
+                // completion to emit (a block), incrementing the budget once.
+                let child = format!("c{i}");
+                inbox.commit(&rec(&child, "atc", "x", i64::from(i) + 1)).unwrap();
+                let (_drained, decision) = inbox.drain_with_budget(cap).unwrap();
+                // Each thread that drained a fresh completion blocked exactly once.
+                decision.is_some()
+            }));
+        }
+        let blocked: u32 = handles.into_iter().map(|h| u32::from(h.join().unwrap())).sum();
+
+        let budget = Inbox::open_in(&path, "atc").read_budget();
+        assert_eq!(
+            budget.consecutive_blocks, blocked,
+            "lost-update: {blocked} blocks emitted but budget counted {}",
+            budget.consecutive_blocks
+        );
     }
 }
