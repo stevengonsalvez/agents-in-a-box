@@ -68,11 +68,15 @@ try:
     from hook_input import get_session_id, get_tool_name, get_tool_response  # noqa: E402
 except ImportError:
     def get_session_id(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
         for k in ("session_id", "sessionId"):
             if k in data:
                 return data[k]
         return default
     def get_tool_name(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
         for k in ("tool", "tool_name", "toolName"):
             if k in data:
                 return data[k]
@@ -80,6 +84,8 @@ except ImportError:
     def get_tool_response(data, default=None):  # type: ignore[no-redef]
         if default is None:
             default = {}
+        if not isinstance(data, dict):
+            return default
         for k in ("tool_response", "response", "toolResult"):
             if k in data:
                 return data[k]

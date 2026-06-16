@@ -67,17 +67,21 @@ try:
     from hook_input import get_session_id, get_transcript_path, get_cwd  # noqa: E402
 except ImportError:
     def get_session_id(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
         for k in ("session_id", "sessionId"):
             if k in data:
                 return data[k]
         return default
     def get_transcript_path(data, default=""):  # type: ignore[no-redef]
+        if not isinstance(data, dict):
+            return default
         for k in ("transcript_path", "transcriptPath"):
             if k in data:
                 return data[k]
         return default
     def get_cwd(data, default=""):  # type: ignore[no-redef]
-        return data["cwd"] if "cwd" in data else default
+        return data["cwd"] if isinstance(data, dict) and "cwd" in data else default
 
 
 def state_dir() -> Path:
