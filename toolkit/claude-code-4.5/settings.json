@@ -4,7 +4,22 @@
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_WORKFLOWS": "1",
     "DISABLE_GROWTHBOOK": "1",
-    "ECC_HOOK_PROFILE": "standard"
+    "ECC_HOOK_PROFILE": "standard",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+    "OTEL_LOGS_EXPORT_INTERVAL": "5000",
+    "OTEL_TRACES_EXPORT_INTERVAL": "5000",
+    "OTEL_LOG_USER_PROMPTS": "1",
+    "OTEL_LOG_TOOL_DETAILS": "1",
+    "OTEL_LOG_TOOL_CONTENT": "1",
+    "OTEL_METRICS_INCLUDE_VERSION": "1",
+    "OTEL_METRICS_INCLUDE_ENTRYPOINT": "1"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -217,8 +232,8 @@
   "extraKnownMarketplaces": {
     "agents-in-a-box": {
       "source": {
-        "source": "directory",
-        "path": "~/d/git/ai-coder-rules"
+        "source": "github",
+        "repo": "stevengonsalvez/agents-in-a-box"
       }
     },
     "caveman": {
@@ -232,6 +247,9 @@
   "teammateMode": "auto",
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
+  "inputNeededNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
-  "permissionMode": "bypassPermissions"
+  "permissionMode": "bypassPermissions",
+  "effortLevel": "xhigh",
+  "tui": "fullscreen"
 }
