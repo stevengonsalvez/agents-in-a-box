@@ -2,8 +2,9 @@
 
 > **Deprecated — superseded by the native Rust bridge `ainb fleet bridge`.**
 > The single-binary Rust daemon (in `ainb-core`, run via `ainb fleet bridge run`)
-> ports this bridge's verified behaviour AND adds a Slack (socket-mode) channel,
-> with no separate Python runtime to install or manage. Prefer it for new setups.
+> ports this bridge's verified behaviour AND adds Slack (socket-mode) and Discord
+> (gateway) channels, with no separate Python runtime to install or manage. Prefer
+> it for new setups.
 > See [`docs/fleet-bridge.md`](../../../docs/fleet-bridge.md) for config + a
 > Python→Rust migration guide. This Python implementation is retained (not
 > deleted) for existing installs and as the behavioral reference spec; it will be
@@ -173,8 +174,10 @@ token — every external boundary is mocked or driven through a temp transcript.
 
 ## Known limitations / follow-ups
 
-- **Slack / Discord deferred** — Telegram only for this cut; the routing, format,
-  and capture layers are platform-agnostic so a Slack adapter slots in cleanly.
+- **Slack / Discord** — landed in the native Rust bridge (`ainb fleet bridge`),
+  not this Python daemon. The routing, format, and capture layers are
+  platform-agnostic, which is what let the Slack and Discord adapters slot in
+  cleanly there. This Python bridge remains Telegram-only.
 - **No busy-queue / hooks** — agent-deck's per-conductor busy queue and
   pre/post-message hooks are not ported (they depend on the conductor track).
 - **No heartbeat / NEED: escalation** — those belong to the conductor track.

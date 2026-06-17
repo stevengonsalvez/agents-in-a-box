@@ -5,6 +5,7 @@
 //
 //   * Telegram (long-polling getUpdates over reqwest) — `telegram.rs`
 //   * Slack    (socket-mode WebSocket via tokio-tungstenite) — `slack.rs`
+//   * Discord  (raw Gateway WebSocket via tokio-tungstenite) — `discord.rs`
 //
 // Both channels share ONE relay/routing core (`relay.rs`) over one transport
 // (`transport.rs`: discover via `ainb list`, deliver via tmux send-keys with the
@@ -18,6 +19,7 @@
 // unit-tested without a live fleet or network.
 
 pub mod config;
+pub mod discord;
 pub mod format;
 pub mod heartbeat;
 pub mod redact;
@@ -45,7 +47,10 @@ pub async fn run() -> Result<()> {
 /// Run with an already-loaded config (the testable seam — no disk access).
 pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
     if !cfg.any_channel() {
-        bail!("no bridge channel configured — add [fleet.bridge.telegram] or [fleet.bridge.slack]");
+        bail!(
+            "no bridge channel configured — add [fleet.bridge.telegram], \
+             [fleet.bridge.slack], or [fleet.bridge.discord]"
+        );
     }
 
     // The shared transport is cheap (a zero-sized marker); each channel borrows
@@ -75,6 +80,13 @@ pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
         tasks.push(tokio::spawn(async move {
             if let Err(e) = slack::run(sl, transport, hb).await {
                 tracing::error!(error = %e, "Slack channel exited with error");
+            }
+        }));
+    }
+    if let Some(dc) = cfg.discord {
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = discord::run(dc, transport).await {
+                tracing::error!(error = %e, "Discord channel exited with error");
             }
         }));
     }

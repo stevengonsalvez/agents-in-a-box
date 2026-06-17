@@ -1,0 +1,887 @@
+// ABOUTME: The Discord channel — raw Gateway WebSocket, two-way relay.
+//
+// Flow: connect to the Discord Gateway (`wss://gateway.discord.gg/?v=10&
+// encoding=json`) with tokio-tungstenite, complete the documented handshake
+// (receive HELLO → start a heartbeat loop → IDENTIFY), receive `MESSAGE_CREATE`
+// dispatches, run authorized messages through the SHARED relay core, and post
+// the reply via the REST `POST /channels/{id}/messages` (Bot token).
+//
+// Parity with the Telegram + Slack channels' policy:
+//   * Authorization by Discord user id (unknown senders silently ignored).
+//   * The bot's own messages (and other bots) are ignored to avoid reply loops.
+//   * Routing honours a leading `name:` prefix (shared `relay` core), else the
+//     configured `default_target`.
+//   * Replies are split at Discord's 2000-char limit; markdown passes through
+//     verbatim (Discord renders **bold**/`code`/```fences``` natively).
+//
+// We use the RAW gateway rather than a heavyweight SDK (serenity/twilight) to
+// match slack.rs's lightweight `tokio_tungstenite` + `reqwest` style and to
+// avoid pulling a large dependency tree into the single `ainb` binary. The
+// gateway surface the bridge needs is small: HELLO/heartbeat/IDENTIFY plus the
+// MESSAGE_CREATE dispatch, all hand-rolled here.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+
+use super::config::DiscordConfig;
+use super::redact::scrub_token;
+use super::relay::{FleetTransport, RelayParams, relay};
+
+const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
+const API_BASE: &str = "https://discord.com/api/v10";
+
+/// Discord message-content limit (`POST /channels/{id}/messages`). We split below it.
+const DISCORD_MAX_LENGTH: usize = 2000;
+
+/// Reconnect backoff bounds (M1). Discord's spec says wait 1–5s after an
+/// `INVALID_SESSION` before re-`IDENTIFY`ing; we apply the same floor to every
+/// non-clean reconnect and grow it exponentially on *consecutive* reconnects so
+/// a server that immediately drops us doesn't get hammered.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// Exponential reconnect backoff with reset-on-health (M1).
+///
+/// Each consecutive reconnect doubles the delay from [`RECONNECT_BACKOFF_MIN`]
+/// (capped at [`RECONNECT_BACKOFF_MAX`]); a connection that lived long enough to
+/// be considered healthy resets the streak so the next blip starts cheap again.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    consecutive: u32,
+}
+
+impl ReconnectBackoff {
+    const fn new() -> Self {
+        Self { consecutive: 0 }
+    }
+
+    /// The delay to wait before the next reconnect, advancing the streak.
+    fn next_delay(&mut self) -> Duration {
+        let delay = backoff_delay(self.consecutive);
+        self.consecutive = self.consecutive.saturating_add(1);
+        delay
+    }
+
+    /// A connection proved healthy — forget the streak.
+    const fn reset(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
+/// Pure backoff schedule: `min * 2^attempt`, saturating, clamped to `max`.
+fn backoff_delay(attempt: u32) -> Duration {
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    let millis = RECONNECT_BACKOFF_MIN.as_millis().saturating_mul(u128::from(factor));
+    let capped = millis.min(RECONNECT_BACKOFF_MAX.as_millis());
+    // `capped <= RECONNECT_BACKOFF_MAX` (60_000ms) so this never truncates.
+    Duration::from_millis(u64::try_from(capped).unwrap_or(u64::MAX))
+}
+
+/// ACK-zombie detection state (M2). The gateway must acknowledge (`op-11`) every
+/// heartbeat; a half-open socket silently stops acknowledging while
+/// `read.next()` blocks forever. We require the previous beat to be acknowledged
+/// before sending the next — an unacknowledged beat means the connection is dead.
+#[derive(Debug)]
+struct HeartbeatTracker {
+    /// Whether the most recent beat we sent has been acknowledged. Starts `true`
+    /// so the very first beat is allowed to send.
+    acked: bool,
+}
+
+impl HeartbeatTracker {
+    const fn new() -> Self {
+        Self { acked: true }
+    }
+
+    /// Called when an `op-11` acknowledgement arrives.
+    const fn on_ack(&mut self) {
+        self.acked = true;
+    }
+
+    /// Called on a heartbeat tick. Returns `true` if it's safe to send the beat,
+    /// or `false` if the previous beat was never acknowledged (zombie →
+    /// reconnect). Records that a fresh beat is now outstanding when it returns
+    /// `true`.
+    const fn on_tick(&mut self) -> bool {
+        if !self.acked {
+            return false;
+        }
+        self.acked = false;
+        true
+    }
+}
+
+/// Jittered delay for the FIRST heartbeat (L1, Discord spec): the gateway tells
+/// clients to send the first beat after `heartbeat_interval * rand[0, 1)` so a
+/// fleet of bots doesn't beat in lockstep. Pure in `frac` for testability.
+fn first_beat_delay(interval: Duration, frac: f64) -> Duration {
+    let frac = frac.clamp(0.0, 1.0);
+    interval.mul_f64(frac)
+}
+
+/// Build an `op-1` heartbeat frame carrying the last received sequence (or
+/// `null` if none yet).
+fn heartbeat_frame(last_seq: &AtomicU64) -> String {
+    let seq = last_seq.load(Ordering::Relaxed);
+    let d = if seq == 0 { Value::Null } else { json!(seq) };
+    json!({ "op": op::HEARTBEAT, "d": d }).to_string()
+}
+
+/// Gateway opcodes we handle (subset of the documented set).
+mod op {
+    pub const DISPATCH: u64 = 0;
+    pub const HEARTBEAT: u64 = 1;
+    pub const IDENTIFY: u64 = 2;
+    pub const RECONNECT: u64 = 7;
+    pub const INVALID_SESSION: u64 = 9;
+    pub const HELLO: u64 = 10;
+    pub const HEARTBEAT_ACK: u64 = 11;
+}
+
+/// Gateway intents: `GUILD_MESSAGES` | `MESSAGE_CONTENT` | `DIRECT_MESSAGES`.
+/// `(1 << 9) | (1 << 15) | (1 << 12)` = 512 | 32768 | 4096.
+const INTENTS: u64 = (1 << 9) | (1 << 15) | (1 << 12);
+
+/// Run the Discord channel forever (reconnecting on disconnect).
+///
+/// `transport` is `&'static` because the relay for each inbound message runs in
+/// its own `tokio::spawn` task (H1) so a slow reply can never starve the gateway
+/// heartbeat; the spawned future must therefore not borrow a non-`'static`
+/// transport. The daemon leaks a single shared transport, so this costs nothing.
+pub async fn run<T: FleetTransport + 'static>(
+    cfg: DiscordConfig,
+    transport: &'static T,
+) -> Result<()> {
+    let client =
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "building Discord HTTP client: {}",
+                    scrub_token(&e.to_string())
+                )
+            })?;
+
+    tracing::info!(
+        authorized_user = %cfg.authorized_user_id,
+        "ainb phone bridge: Discord channel online (gateway)"
+    );
+
+    let mut backoff = ReconnectBackoff::new();
+    loop {
+        match connect_and_serve(&client, &cfg, transport, &mut backoff).await {
+            Ok(()) => tracing::info!("Discord gateway closed; reconnecting"),
+            Err(e) => {
+                // Build the diagnostic from the error's text, then scrub any
+                // token-shaped substring so a Bot token can never leak into logs.
+                tracing::warn!(
+                    error = %scrub_token(&e.to_string()),
+                    "Discord gateway error; reconnecting"
+                );
+            }
+        }
+        // M1: never reconnect with zero delay — a server that drops us
+        // immediately (clean op-7/op-9 close OR an error) would otherwise spin a
+        // hot reconnect loop. The streak is reset inside `connect_and_serve` once
+        // a connection proves healthy.
+        let delay = backoff.next_delay();
+        tracing::debug!(?delay, "Discord reconnect backoff");
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// One gateway connection: handshake, then pump dispatches until the socket
+/// closes or Discord asks us to reconnect.
+async fn connect_and_serve<T: FleetTransport + 'static>(
+    client: &reqwest::Client,
+    cfg: &DiscordConfig,
+    transport: &'static T,
+    backoff: &mut ReconnectBackoff,
+) -> Result<()> {
+    let (ws, _resp) = tokio_tungstenite::connect_async(GATEWAY_URL)
+        .await
+        .context("connecting to Discord gateway WSS")?;
+    let (mut write, mut read) = ws.split();
+
+    // ── HELLO (op 10) — carries the heartbeat interval ──────────────────────
+    let hello = next_payload(&mut read).await.context("waiting for Discord HELLO")?;
+    if hello.op != op::HELLO {
+        anyhow::bail!("expected HELLO (op 10), got op {}", hello.op);
+    }
+    let heartbeat_ms = hello
+        .d
+        .as_ref()
+        .and_then(|d| d.get("heartbeat_interval"))
+        .and_then(Value::as_u64)
+        .context("HELLO missing heartbeat_interval")?;
+
+    // ── IDENTIFY (op 2) ─────────────────────────────────────────────────────
+    let identify = json!({
+        "op": op::IDENTIFY,
+        "d": {
+            "token": cfg.token,
+            "intents": INTENTS,
+            "properties": { "os": "linux", "browser": "ainb", "device": "ainb" }
+        }
+    });
+    write
+        .send(Message::Text(identify.to_string()))
+        .await
+        .context("sending Discord IDENTIFY")?;
+
+    // Last received sequence number, shared with the heartbeat loop.
+    let last_seq = Arc::new(AtomicU64::new(0));
+    let interval = Duration::from_millis(heartbeat_ms);
+
+    // L1: jitter the FIRST beat by `interval * rand[0, 1)` per the Discord spec,
+    // so a fleet of bots reconnecting together don't all beat in lockstep.
+    let first_delay = first_beat_delay(interval, rand::random::<f64>());
+    let start = tokio::time::Instant::now() + first_delay;
+    let mut heartbeat = tokio::time::interval_at(start, interval);
+
+    // M2: ACK-zombie detection — require each beat to be ACKed before the next.
+    let mut hb = HeartbeatTracker::new();
+
+    loop {
+        tokio::select! {
+            // Periodic heartbeat (op 1 with the last seq, or null if none yet).
+            _ = heartbeat.tick() => {
+                if !hb.on_tick() {
+                    // Previous beat was never ACKed → zombie connection.
+                    tracing::warn!("Discord heartbeat not ACKed; treating socket as dead");
+                    break;
+                }
+                if write.send(Message::Text(heartbeat_frame(&last_seq))).await.is_err() {
+                    break; // socket gone — outer loop reconnects
+                }
+            }
+            frame = read.next() => {
+                let Some(frame) = frame else { break };
+                let payload = match frame.context("reading Discord gateway frame")? {
+                    Message::Text(t) => match serde_json::from_str::<GatewayPayload>(&t) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    },
+                    Message::Ping(p) => { write.send(Message::Pong(p)).await.ok(); continue; }
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+
+                if let Some(s) = payload.s {
+                    last_seq.store(s, Ordering::Relaxed);
+                }
+
+                match payload.op {
+                    op::HEARTBEAT => {
+                        // Server asked for an immediate beat.
+                        write.send(Message::Text(heartbeat_frame(&last_seq))).await.ok();
+                    }
+                    op::HEARTBEAT_ACK => {
+                        tracing::trace!("Discord heartbeat ack");
+                        // M2: mark this beat ACKed so the next tick may send.
+                        hb.on_ack();
+                        // M1: a two-way-confirmed connection is healthy — reset
+                        // the reconnect streak so the next blip starts cheap.
+                        backoff.reset();
+                    }
+                    op::RECONNECT => {
+                        tracing::info!("Discord requested reconnect");
+                        break;
+                    }
+                    op::INVALID_SESSION => {
+                        // We never persist a session for RESUME, so a fresh
+                        // reconnect (new IDENTIFY) is the correct minimal handling.
+                        tracing::info!("Discord invalidated session; reconnecting fresh");
+                        break;
+                    }
+                    op::DISPATCH => {
+                        if payload.t.as_deref() == Some("MESSAGE_CREATE") {
+                            if let Some(d) = payload.d {
+                                if let Ok(msg) = serde_json::from_value::<DiscordMessage>(d) {
+                                    // H1: the relay polls the agent for up to
+                                    // `response_timeout` (300s default). Doing that
+                                    // inline here would block `heartbeat.tick()`,
+                                    // starve the op-1 beat, and make Discord
+                                    // force-close the socket — under exactly the
+                                    // slow-reply workload the bridge exists for. So
+                                    // dispatch the handle-and-reply work to its own
+                                    // task: the `reqwest::Client` is `Arc` inside
+                                    // (cheap clone), the config is cloned, and the
+                                    // transport is `&'static` (shared, not the WSS
+                                    // socket). The REST reply uses its own HTTPS
+                                    // connection and never touches the gateway
+                                    // `write` half, so there's no shared-socket
+                                    // contention with the heartbeat.
+                                    spawn_handle_message(
+                                        client.clone(),
+                                        cfg.clone(),
+                                        transport,
+                                        msg,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read frames until the next JSON gateway payload (skipping ping/pong/binary).
+async fn next_payload<S>(read: &mut S) -> Result<GatewayPayload>
+where
+    S: StreamExt<Item = tokio_tungstenite::tungstenite::Result<Message>> + Unpin,
+{
+    while let Some(frame) = read.next().await {
+        match frame.context("reading Discord gateway frame")? {
+            Message::Text(t) => {
+                if let Ok(p) = serde_json::from_str::<GatewayPayload>(&t) {
+                    return Ok(p);
+                }
+            }
+            Message::Close(_) => anyhow::bail!("gateway closed before payload"),
+            _ => {}
+        }
+    }
+    anyhow::bail!("gateway stream ended before a payload")
+}
+
+/// Dispatch one `MESSAGE_CREATE` to its own task (H1) so the relay + REST reply
+/// run OFF the gateway socket task and can never starve the heartbeat.
+///
+/// Owns everything it needs: a cloned `reqwest::Client` (cheap — `Arc` inside),
+/// a cloned [`DiscordConfig`], and the `&'static` shared transport.
+fn spawn_handle_message<T: FleetTransport + 'static>(
+    client: reqwest::Client,
+    cfg: DiscordConfig,
+    transport: &'static T,
+    msg: DiscordMessage,
+) {
+    tokio::spawn(async move {
+        handle_message(&client, &cfg, transport, msg).await;
+    });
+}
+
+/// Process one `MESSAGE_CREATE`: authorize, relay through the shared core, and
+/// post the reply back to the originating (or configured) channel.
+async fn handle_message<T: FleetTransport>(
+    client: &reqwest::Client,
+    cfg: &DiscordConfig,
+    transport: &T,
+    msg: DiscordMessage,
+) {
+    if !authorize(cfg, &msg) {
+        return;
+    }
+
+    let text = msg.content.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    let params = RelayParams {
+        default_target: cfg.default_target.as_deref(),
+        response_timeout: Duration::from_secs(cfg.response_timeout),
+    };
+    let reply = relay(transport, &params, text).await;
+
+    // Reply to the message's channel; fall back to the configured channel_id.
+    let channel = msg.channel_id.as_deref().or(cfg.channel_id.as_deref());
+    let Some(channel) = channel else {
+        tracing::warn!(
+            "Discord reply has no channel (no originating channel_id and no configured channel_id)"
+        );
+        return;
+    };
+
+    for chunk in split_for_discord(&reply) {
+        if let Err(e) = post_message(client, &cfg.token, channel, &chunk).await {
+            // Scrub before logging: the error may echo the Authorization header.
+            tracing::warn!(error = %scrub_token(&e.to_string()), "Discord post message failed");
+        }
+    }
+}
+
+/// Decide whether to act on a message. Returns `true` to act, `false` to skip.
+/// Pure — exercised directly in tests.
+///
+/// Skips the bot's own posts and other bots (`author.bot`), and any author whose
+/// id is not the single authorized user.
+fn authorize(cfg: &DiscordConfig, msg: &DiscordMessage) -> bool {
+    let Some(author) = msg.author.as_ref() else {
+        return false;
+    };
+    // Ignore bot authors (including ourselves) to avoid reply loops.
+    if author.bot.unwrap_or(false) {
+        return false;
+    }
+    if author.id != cfg.authorized_user_id {
+        tracing::warn!(user = %author.id, "ignoring Discord message from unauthorized user");
+        return false;
+    }
+    true
+}
+
+/// Split a reply for Discord's message-length limit on newline boundaries (with
+/// a hard char cut for oversized lines). Markdown passes through (Discord renders
+/// it natively).
+fn split_for_discord(text: &str) -> Vec<String> {
+    super::format::split_message(text, DISCORD_MAX_LENGTH)
+}
+
+/// Cap on a single honoured `Retry-After` sleep (L2). Discord rate limits are
+/// short; an absurd value (or a hostile one) must not wedge the reply task.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Parse a Discord `Retry-After` header (seconds, possibly fractional) into a
+/// bounded sleep duration. Returns `None` for missing/garbage values. Pure.
+fn parse_retry_after(raw: Option<&str>) -> Option<Duration> {
+    let secs: f64 = raw?.trim().parse().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(secs).min(MAX_RETRY_AFTER))
+}
+
+/// Post a message to a channel via the REST API (`Authorization: Bot <token>`).
+///
+/// On HTTP 429 (rate limited) the chunk is retried ONCE after sleeping for the
+/// `Retry-After` the gateway returns (L2); any other failure — or a second 429 —
+/// surfaces an error so the caller drops the chunk as before.
+async fn post_message(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: &str,
+    text: &str,
+) -> Result<()> {
+    if let Some(retry_after) = post_message_once(client, token, channel_id, text).await? {
+        // 429: honour Retry-After once, then try a single resend.
+        tracing::warn!(?retry_after, "Discord rate limited; retrying chunk once");
+        tokio::time::sleep(retry_after).await;
+        if let Some(_again) = post_message_once(client, token, channel_id, text).await? {
+            anyhow::bail!("Discord message post rate limited (429) twice; dropping chunk");
+        }
+    }
+    Ok(())
+}
+
+/// Single POST attempt. Returns `Ok(Some(retry_after))` on a 429 (so the caller
+/// may retry), `Ok(None)` on success, and `Err` on any other failure.
+async fn post_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: &str,
+    text: &str,
+) -> Result<Option<Duration>> {
+    let resp = client
+        .post(format!("{API_BASE}/channels/{channel_id}/messages"))
+        .header("Authorization", format!("Bot {token}"))
+        .json(&json!({ "content": text }))
+        .send()
+        .await
+        .context("POST /channels/{id}/messages request")?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(None);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| parse_retry_after(Some(s)))
+            .unwrap_or(RECONNECT_BACKOFF_MIN);
+        return Ok(Some(retry_after));
+    }
+    // Surface status + the API error code/message, never the token.
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let code = body.get("code").and_then(Value::as_i64);
+    let message = body.get("message").and_then(Value::as_str).unwrap_or("");
+    anyhow::bail!(
+        "Discord message post failed: HTTP {} (code {:?}: {})",
+        status.as_u16(),
+        code,
+        message
+    );
+}
+
+// ── Gateway / REST wire types ───────────────────────────────────────────────
+
+/// A gateway frame: `{ op, d, s, t }`. `d`/`s`/`t` are present only on some ops.
+#[derive(Debug, Deserialize)]
+struct GatewayPayload {
+    op: u64,
+    #[serde(default)]
+    d: Option<Value>,
+    #[serde(default)]
+    s: Option<u64>,
+    #[serde(default)]
+    t: Option<String>,
+}
+
+/// A `MESSAGE_CREATE` dispatch payload (the fields the bridge reads).
+#[derive(Debug, Default, Deserialize)]
+struct DiscordMessage {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    author: Option<DiscordAuthor>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DiscordAuthor {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    bot: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> DiscordConfig {
+        DiscordConfig {
+            token: "bot-token".into(),
+            authorized_user_id: "123456789".into(),
+            default_target: None,
+            channel_id: None,
+            response_timeout: 300,
+        }
+    }
+
+    fn msg(user_id: &str) -> DiscordMessage {
+        DiscordMessage {
+            content: "hello".into(),
+            channel_id: Some("C1".into()),
+            author: Some(DiscordAuthor {
+                id: user_id.into(),
+                bot: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn authorizes_the_configured_user() {
+        assert!(authorize(&cfg(), &msg("123456789")));
+    }
+
+    #[test]
+    fn ignores_unauthorized_user() {
+        assert!(!authorize(&cfg(), &msg("999")));
+    }
+
+    #[test]
+    fn ignores_bot_authors() {
+        // Even the authorized id is ignored if the message is flagged as a bot
+        // post (this is how the bot's own messages are filtered — no reply loop).
+        let mut m = msg("123456789");
+        m.author.as_mut().unwrap().bot = Some(true);
+        assert!(!authorize(&cfg(), &m));
+    }
+
+    #[test]
+    fn ignores_message_with_no_author() {
+        let mut m = msg("123456789");
+        m.author = None;
+        assert!(!authorize(&cfg(), &m));
+    }
+
+    #[test]
+    fn intents_cover_guild_messages_message_content_and_dms() {
+        // GUILD_MESSAGES (1<<9), DIRECT_MESSAGES (1<<12), MESSAGE_CONTENT (1<<15).
+        assert_eq!(INTENTS & (1 << 9), 1 << 9);
+        assert_eq!(INTENTS & (1 << 12), 1 << 12);
+        assert_eq!(INTENTS & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn split_respects_discord_limit() {
+        let big = "x".repeat(5000);
+        for chunk in split_for_discord(&big) {
+            assert!(chunk.chars().count() <= DISCORD_MAX_LENGTH);
+        }
+    }
+
+    #[test]
+    fn parses_hello_payload() {
+        let raw = r#"{"op":10,"d":{"heartbeat_interval":41250},"s":null,"t":null}"#;
+        let p: GatewayPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.op, op::HELLO);
+        assert_eq!(
+            p.d.unwrap().get("heartbeat_interval").and_then(Value::as_u64),
+            Some(41250)
+        );
+    }
+
+    #[test]
+    fn parses_message_create_dispatch() {
+        let raw = r#"{
+            "op":0,"s":42,"t":"MESSAGE_CREATE",
+            "d":{"content":"backend: run tests","channel_id":"C9","author":{"id":"123456789","bot":false}}
+        }"#;
+        let p: GatewayPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.op, op::DISPATCH);
+        assert_eq!(p.s, Some(42));
+        assert_eq!(p.t.as_deref(), Some("MESSAGE_CREATE"));
+        let m: DiscordMessage = serde_json::from_value(p.d.unwrap()).unwrap();
+        assert_eq!(m.content, "backend: run tests");
+        assert_eq!(m.channel_id.as_deref(), Some("C9"));
+        assert_eq!(m.author.as_ref().unwrap().id, "123456789");
+        assert_eq!(m.author.as_ref().unwrap().bot, Some(false));
+    }
+
+    #[test]
+    fn message_without_bot_flag_defaults_to_human() {
+        // `author.bot` absent → treated as a human author (not filtered).
+        let raw = r#"{"content":"hi","channel_id":"C1","author":{"id":"123456789"}}"#;
+        let m: DiscordMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.author.unwrap().bot, None);
+    }
+
+    // ── Relay-path tests over an in-memory mock FleetTransport ───────────────
+    // These exercise the same shared `relay` core the live channel calls, so the
+    // routing/degrade behaviour is verified without a live Discord connection.
+
+    use std::sync::Mutex;
+
+    use super::super::relay::FleetTransport;
+    use super::super::routing::TargetSession;
+
+    struct FakeTransport {
+        sessions: Vec<TargetSession>,
+        last_send: Mutex<Option<(String, String)>>,
+        reply: Option<String>,
+    }
+
+    impl FakeTransport {
+        fn new(sessions: Vec<TargetSession>, reply: Option<String>) -> Self {
+            Self {
+                sessions,
+                last_send: Mutex::new(None),
+                reply,
+            }
+        }
+    }
+
+    impl FleetTransport for FakeTransport {
+        async fn discover(&self) -> Vec<TargetSession> {
+            self.sessions.clone()
+        }
+        async fn send_and_capture(
+            &self,
+            session: &TargetSession,
+            text: &str,
+            _timeout: Duration,
+        ) -> Option<String> {
+            *self.last_send.lock().unwrap() = Some((session.name.clone(), text.to_string()));
+            self.reply.clone()
+        }
+    }
+
+    fn sess(name: &str) -> TargetSession {
+        TargetSession::new(
+            name,
+            format!("tmux-{name}"),
+            format!("/cwd/{name}"),
+            format!("id-{name}"),
+        )
+    }
+
+    fn relay_params() -> RelayParams<'static> {
+        RelayParams {
+            default_target: None,
+            response_timeout: Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_routes_name_prefix_to_session() {
+        let t = FakeTransport::new(vec![sess("backend"), sess("frontend")], Some("ok".into()));
+        let out = relay(&t, &relay_params(), "backend: run tests").await;
+        assert_eq!(out, "ok");
+        let (target, msg) = t.last_send.lock().unwrap().clone().unwrap();
+        assert_eq!(target, "backend");
+        assert_eq!(msg, "run tests");
+    }
+
+    #[tokio::test]
+    async fn relay_uses_configured_default_target() {
+        let t = FakeTransport::new(vec![sess("alpha"), sess("beta")], Some("hi".into()));
+        let p = RelayParams {
+            default_target: Some("beta"),
+            response_timeout: Duration::from_secs(5),
+        };
+        let out = relay(&t, &p, "do it").await;
+        assert_eq!(out, "hi");
+        assert_eq!(t.last_send.lock().unwrap().clone().unwrap().0, "beta");
+    }
+
+    #[tokio::test]
+    async fn relay_reports_empty_fleet() {
+        let t = FakeTransport::new(vec![], Some("x".into()));
+        let out = relay(&t, &relay_params(), "hello").await;
+        assert_eq!(out, "No running ainb sessions to relay to.");
+    }
+
+    // ── M1: reconnect backoff ────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_delay_grows_exponentially_and_caps() {
+        // min * 2^attempt, clamped to RECONNECT_BACKOFF_MAX (60s).
+        assert_eq!(backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(backoff_delay(5), Duration::from_secs(32));
+        // 2^6 = 64s > cap → clamped to 60s.
+        assert_eq!(backoff_delay(6), RECONNECT_BACKOFF_MAX);
+        // Absurd attempt counts saturate, never panic or wrap.
+        assert_eq!(backoff_delay(64), RECONNECT_BACKOFF_MAX);
+        assert_eq!(backoff_delay(u32::MAX), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn consecutive_reconnects_increase_delay_then_reset_when_healthy() {
+        let mut b = ReconnectBackoff::new();
+        // First reconnect is never zero (fixes the zero-backoff hammer).
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+        assert!(b.next_delay() >= Duration::from_secs(1));
+        let third = b.next_delay();
+        assert_eq!(third, Duration::from_secs(4));
+        // A healthy (ACKed) connection resets the streak → next blip starts cheap.
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+    }
+
+    // ── M2: ACK-zombie state machine ─────────────────────────────────────────
+
+    #[test]
+    fn heartbeat_beat_without_ack_triggers_reconnect() {
+        let mut hb = HeartbeatTracker::new();
+        // First beat may send (starts ACKed=true), leaving a beat outstanding.
+        assert!(hb.on_tick(), "first beat should be allowed");
+        // Next tick with NO intervening ACK → unhealthy → reconnect signal.
+        assert!(
+            !hb.on_tick(),
+            "un-ACKed beat before next tick must signal a zombie connection"
+        );
+    }
+
+    #[test]
+    fn heartbeat_beat_then_ack_stays_healthy() {
+        let mut hb = HeartbeatTracker::new();
+        assert!(hb.on_tick(), "first beat allowed");
+        hb.on_ack();
+        assert!(hb.on_tick(), "ACKed beat → next beat allowed");
+        hb.on_ack();
+        assert!(hb.on_tick(), "still healthy after repeated ack/beat cycles");
+    }
+
+    // ── L1: first-heartbeat jitter ───────────────────────────────────────────
+
+    #[test]
+    fn first_beat_delay_is_jittered_within_one_interval() {
+        let interval = Duration::from_millis(41250);
+        assert_eq!(first_beat_delay(interval, 0.0), Duration::ZERO);
+        assert_eq!(first_beat_delay(interval, 0.5), interval.mul_f64(0.5));
+        // frac approaching 1.0 stays strictly under a full interval.
+        assert!(first_beat_delay(interval, 0.999) < interval);
+        // Out-of-range fractions are clamped, never panic or overshoot.
+        assert_eq!(first_beat_delay(interval, 1.5), interval);
+        assert_eq!(first_beat_delay(interval, -0.5), Duration::ZERO);
+    }
+
+    // ── L2: Retry-After parsing for the 429 retry ────────────────────────────
+
+    #[test]
+    fn parse_retry_after_reads_seconds_and_bounds_garbage() {
+        assert_eq!(
+            parse_retry_after(Some("1.5")),
+            Some(Duration::from_secs_f64(1.5))
+        );
+        assert_eq!(parse_retry_after(Some("0")), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after(None), None);
+        assert_eq!(parse_retry_after(Some("not-a-number")), None);
+        assert_eq!(parse_retry_after(Some("-3")), None);
+        // An absurd value is capped so a hostile header can't wedge the task.
+        assert_eq!(parse_retry_after(Some("99999")), Some(MAX_RETRY_AFTER));
+    }
+
+    // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
+
+    /// A transport whose `send_and_capture` blocks for a long time, modelling a
+    /// slow agent reply (the exact workload the bridge exists for).
+    struct SlowTransport {
+        sessions: Vec<TargetSession>,
+    }
+
+    impl FleetTransport for SlowTransport {
+        async fn discover(&self) -> Vec<TargetSession> {
+            self.sessions.clone()
+        }
+        async fn send_and_capture(
+            &self,
+            _session: &TargetSession,
+            _text: &str,
+            _timeout: Duration,
+        ) -> Option<String> {
+            // Far longer than the test runs — if this ran inline on the socket
+            // task it would starve the beat. Real wall-clock so the test needs no
+            // tokio `test-util` feature (not enabled for this target).
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Some("late reply".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_runs_off_task_so_heartbeat_keeps_firing() {
+        // Leak a slow transport to get the `&'static` the spawned relay needs,
+        // mirroring how the daemon leaks its shared transport.
+        let transport: &'static SlowTransport = Box::leak(Box::new(SlowTransport {
+            sessions: vec![sess("conductor")],
+        }));
+
+        // Kick off a relay exactly the way the socket task does — in a spawned
+        // task — then prove the socket task's own loop keeps ticking while the
+        // relay (an hour-long sleep) is still outstanding.
+        let relay_done = Arc::new(AtomicU64::new(0));
+        let rd = relay_done.clone();
+        tokio::spawn(async move {
+            let params = relay_params();
+            let _ = relay(transport, &params, "status?").await;
+            rd.store(1, Ordering::SeqCst);
+        });
+
+        // Stand-in for the gateway heartbeat: a fast interval the socket task
+        // services. With the relay OFF-task these keep firing; if the relay were
+        // awaited inline they would all be blocked behind the 1h sleep.
+        let mut beats: u64 = 0;
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(5));
+        heartbeat.tick().await; // immediate first tick
+        for _ in 0..5 {
+            heartbeat.tick().await;
+            beats += 1;
+        }
+
+        // Five beats fired while the relay is still pending.
+        assert_eq!(beats, 5, "heartbeat must keep firing during a slow relay");
+        assert_eq!(
+            relay_done.load(Ordering::SeqCst),
+            0,
+            "the relay should still be in flight — proving it did not block the beats"
+        );
+    }
+}

@@ -15,22 +15,23 @@ use super::routing::{TargetSession, parse_target_prefix, resolve_target};
 /// `ainb`/tmux (`transport.rs`); tests substitute an in-memory fake so the
 /// routing + degrade logic is verified without a live fleet.
 ///
-/// Uses native `async fn` in traits (stable since Rust 1.75) — the relay only
-/// ever calls it through a generic `&T`, never a `dyn` object, so the
-/// `async_fn_in_trait` auto-trait caveat does not apply here (the returned
-/// futures are awaited inline in `Send` channel tasks).
-#[allow(async_fn_in_trait)]
+/// Uses native `async fn` in traits (stable since Rust 1.75). The methods spell
+/// out `impl Future<…> + Send` explicitly (rather than bare `async fn`) so the
+/// returned futures are guaranteed `Send`: the Discord channel runs the relay in
+/// its own `tokio::spawn` task (so a slow agent reply can't starve the gateway
+/// heartbeat), and `tokio::spawn` requires a `Send` future. The relay is still
+/// only ever called through a generic `&T`, never a `dyn` object.
 pub trait FleetTransport: Send + Sync {
     /// Currently-running relay targets.
-    async fn discover(&self) -> Vec<TargetSession>;
+    fn discover(&self) -> impl std::future::Future<Output = Vec<TargetSession>> + Send;
     /// Send `text` to `session` and capture its end-of-turn reply (or `None`
     /// on send failure / timeout).
-    async fn send_and_capture(
+    fn send_and_capture(
         &self,
         session: &TargetSession,
         text: &str,
         timeout: Duration,
-    ) -> Option<String>;
+    ) -> impl std::future::Future<Output = Option<String>> + Send;
 }
 
 /// Parameters that shape a single relay, supplied per-channel.
