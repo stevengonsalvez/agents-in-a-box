@@ -1,0 +1,15 @@
+document_id: ex-03-zsh-glob-nomatch
+extracted_at: '2026-01-20T00:00:00'
+entities:
+  - name: "zsh"
+    type: tool
+    description: "shell"
+  - name: "null-glob"
+    type: config
+    description: "zsh option for empty glob expansion"
+relationships:
+  - source: "null-glob"
+    target: "zsh"
+    type: configures
+    description: "controls unmatched glob behaviour"
+    strength: 7

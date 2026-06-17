@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template (A3): hourly forget sweep.
+
+  Runs reflect_forget_sweep.py every hour to archive learnings whose
+  per-row `forget_after` ISO TTL has passed (agentmemory auto-forget
+  shape). Absent forget_after = permanent; the sweep is idempotent and
+  non-destructive (status -> archived, note file moved to .forgotten/).
+
+  INSTALL (replace {{PLUGIN_ROOT}}):
+    sed "s|{{PLUGIN_ROOT}}|$HOME/.claude/.../reflect|g" \
+      com.reflect.forget.plist > ~/Library/LaunchAgents/com.reflect.forget.plist
+    launchctl load ~/Library/LaunchAgents/com.reflect.forget.plist
+  UNINSTALL:
+    launchctl unload ~/Library/LaunchAgents/com.reflect.forget.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.reflect.forget</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>{{PLUGIN_ROOT}}/scripts/reflect_forget_sweep.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/reflect-forget-launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/reflect-forget-launchd.err</string>
+</dict>
+</plist>

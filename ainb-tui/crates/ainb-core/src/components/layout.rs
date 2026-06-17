@@ -98,6 +98,11 @@ impl LayoutComponent {
             // without this the dialog could be live + interactive but
             // invisible (e.g. the first-run notify-install prompt fired
             // on the HomeScreen).
+            // MCP pool overlay paints above the screen, below a confirmation
+            // dialog (so a stop confirmation sits on top of it).
+            if let Some(ref overlay) = state.mcp_overlay {
+                crate::components::mcp_overlay::render(frame, frame_size, overlay);
+            }
             if state.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
@@ -193,6 +198,11 @@ impl LayoutComponent {
         if state.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
+        }
+
+        // MCP pool overlay (above the screen, below the confirmation dialog).
+        if let Some(ref overlay) = state.mcp_overlay {
+            crate::components::mcp_overlay::render(frame, frame.size(), overlay);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
@@ -611,83 +621,12 @@ impl LayoutComponent {
     fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         let mut status_spans: Vec<Span> = vec![];
 
-        // Current workspace/repo info
-        if let Some(workspace_idx) = state.selected_workspace_index {
-            if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                if let Some(repo_name) = workspace.path.file_name().and_then(|n| n.to_str()) {
-                    status_spans.push(Span::styled("📁 ", Style::default().fg(GOLD)));
-                    status_spans.push(Span::styled(
-                        repo_name.to_string(),
-                        Style::default().fg(SOFT_WHITE),
-                    ));
-                }
-            }
-        }
-
-        // Active session info
-        if let Some(_session_id) = state.get_selected_session_id() {
-            if let Some(workspace_idx) = state.selected_workspace_index {
-                if let Some(session_idx) = state.selected_session_index {
-                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        if let Some(session) = workspace.sessions.get(session_idx) {
-                            // Separator
-                            if !status_spans.is_empty() {
-                                status_spans.push(Span::styled(
-                                    "  │  ",
-                                    Style::default().fg(SUBDUED_BORDER),
-                                ));
-                            }
-
-                            // Branch info
-                            status_spans
-                                .push(Span::styled("🌿 ", Style::default().fg(SELECTION_GREEN)));
-                            status_spans.push(Span::styled(
-                                session.branch_name.clone(),
-                                Style::default().fg(SOFT_WHITE),
-                            ));
-
-                            // Container info
-                            if let Some(container_id) = &session.container_id {
-                                let short_id = &container_id[..8.min(container_id.len())];
-                                let (status_icon, status_color) = match session.status {
-                                    crate::models::SessionStatus::Running => {
-                                        ("🟢", SELECTION_GREEN)
-                                    }
-                                    crate::models::SessionStatus::Stopped => {
-                                        ("🔴", Color::Rgb(230, 100, 100))
-                                    }
-                                    crate::models::SessionStatus::Idle => ("🟡", WARNING_ORANGE),
-                                    crate::models::SessionStatus::Error(_) => {
-                                        ("❌", Color::Rgb(230, 100, 100))
-                                    }
-                                };
-                                status_spans.push(Span::styled(
-                                    "  │  ",
-                                    Style::default().fg(SUBDUED_BORDER),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("{} ", status_icon),
-                                    Style::default().fg(status_color),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("{} ", session.name),
-                                    Style::default().fg(SOFT_WHITE),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("({})", short_id),
-                                    Style::default().fg(MUTED_GRAY),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Claude chat status
-        if !status_spans.is_empty() {
-            status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
-        }
+        // Claude-chat popup toggle — a small global indicator. The
+        // workspace / branch / session-status that used to live here were
+        // removed: they duplicated the bottom "Session Info" line. This
+        // top bar is now a dedicated, full-width live-quota line so both
+        // providers fit (and degrade gracefully) instead of being squeezed
+        // out by that duplicated content.
         if state.claude_chat_visible {
             status_spans.push(Span::styled("🗨️ ", Style::default().fg(SELECTION_GREEN)));
             status_spans.push(Span::styled("ON", Style::default().fg(SELECTION_GREEN)));
@@ -696,24 +635,17 @@ impl LayoutComponent {
             status_spans.push(Span::styled("OFF", Style::default().fg(MUTED_GRAY)));
         }
 
-        // Live OAuth window: append a compact widget when wired AND fresh,
-        // a red CTA when not wired (and the user hasn't declined).
-        // The status bar gracefully degrades on narrow terminals — we
-        // measure the existing content first and drop the live widget if
-        // it wouldn't fit.
-        let live_spans = build_live_status_spans(state);
-        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
-        // 4 chars for the " │  " separator we'd add
-        let live_w: usize = live_spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum::<usize>()
-            .saturating_add(5);
+        // Live OAuth quota (claude + codex). With the duplicated content
+        // gone the widget gets nearly the whole bar; it abbreviate-then-
+        // sheds to fit whatever columns remain (see `build_live_widget_spans`).
+        // The unwired case still falls back to the red CTA.
         let area_inner_w = area.width.saturating_sub(2) as usize; // borders
-        if !live_spans.is_empty() && existing_w + live_w <= area_inner_w {
-            if !status_spans.is_empty() {
-                status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
-            }
+        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
+        const SEP_W: usize = 5; // "  │  "
+        let avail = area_inner_w.saturating_sub(existing_w + SEP_W);
+        let live_spans = build_live_status_spans(state, avail);
+        if !live_spans.is_empty() {
+            status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
             status_spans.extend(live_spans);
         }
 
@@ -976,7 +908,7 @@ impl Default for LayoutComponent {
 /// The settings.json read goes through [`AppState::statusline_status_cached`]
 /// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
 /// filesystem reads.
-pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
+pub fn build_live_status_spans(state: &mut AppState, max_width: usize) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
@@ -993,8 +925,13 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
     let live = state.live_window_watcher.snapshot();
-    if live.source == Source::Tier1Cache {
-        return build_live_widget_spans(&live);
+    // Render the widget when Claude Tier1 data is flowing OR Codex usage is
+    // present — Codex is overlaid independently (separate cache, its own
+    // poller), so a user who runs Codex but never wired the Claude
+    // statusline still sees their Codex burn instead of the CTA.
+    let has_codex = live.codex_five_hour_pct.is_some() || live.codex_seven_day_pct.is_some();
+    if live.source == Source::Tier1Cache || has_codex {
+        return build_live_widget_spans(&live, max_width);
     }
 
     match status {
@@ -1006,60 +943,219 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
         Some(StatuslineStatus::NotConfigured | StatuslineStatus::Other(_))
             if decision != StatuslineDecision::Declined =>
         {
-            build_cta_spans()
+            // Vanish (don't clip) the CTA when it can't fit — parity with
+            // the quota widget's shed behaviour and with the old width gate.
+            let cta = build_cta_spans();
+            if spans_width(&cta) <= max_width {
+                cta
+            } else {
+                Vec::new()
+            }
         }
         _ => Vec::new(),
     }
 }
 
-fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
+/// Detail level for the live quota widget, richest → poorest. The renderer
+/// picks the richest level whose rendered width fits the available columns
+/// (abbreviate-then-shed): drop the reset dates, then abbreviate the labels
+/// + weekly into `cl 81%/24%`, then shed the weekly entirely to `cl81%`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaDetail {
+    /// `claude 5h 81% ↻ Jun 15 16:50 · wk 24% ↻ Jun 15 18:00`
+    FullDated,
+    /// `claude 5h 81% · wk 24%`
+    Full,
+    /// `cl 81%/24%` (5h%/wk%, abbreviated provider label)
+    Abbrev,
+    /// `cl81%` (5h only — last resort, both providers still visible)
+    Tiny,
+}
 
-    if let Some(pct) = live.five_hour_pct {
-        out.push(Span::styled("5h ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_5h(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.five_hour_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
+/// All detail levels, richest → poorest.
+const QUOTA_DETAIL_LADDER: [QuotaDetail; 4] = [
+    QuotaDetail::FullDated,
+    QuotaDetail::Full,
+    QuotaDetail::Abbrev,
+    QuotaDetail::Tiny,
+];
+
+/// Total display width (columns) of a span list.
+fn spans_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Best-fit live quota spans for `max_width` columns. Tries each detail
+/// level richest → poorest and returns the first that fits; if even the
+/// poorest overflows it is returned anyway (ratatui clips — showing a
+/// clipped `cl81% cx14%` beats a blank bar). Empty when there's no data.
+fn build_live_widget_spans(
+    live: &crate::models::live_window::LiveWindow,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    let mut poorest = Vec::new();
+    for detail in QUOTA_DETAIL_LADDER {
+        let spans = quota_spans(live, detail);
+        if spans.is_empty() {
+            return spans; // no data at all → nothing to render
         }
+        if spans_width(&spans) <= max_width {
+            return spans;
+        }
+        poorest = spans;
     }
-    if let Some(pct) = live.seven_day_pct {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled("wk ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_7d(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.seven_day_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
-        }
-    }
-    // today_cost_usd intentionally not rendered: Claude Code's
-    // /cost/total_cost_usd is the lifetime cost of a *single* session
-    // (whichever invoked the statusline most recently), not today's
-    // total. Misleading at a glance — keep the field on the cache
-    // schema but don't surface it. The old combined "⏱ Xh Ym" countdown
-    // was likewise dropped in favour of the absolute per-window reset
-    // instants ("↻ <date> <time>") rendered next to each bar above.
+    poorest
+}
+
+/// Build both provider clusters (`claude …   codex …`) at one detail level.
+fn quota_spans(
+    live: &crate::models::live_window::LiveWindow,
+    detail: QuotaDetail,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    push_provider(
+        &mut out,
+        ("claude", "cl"),
+        live.five_hour_pct,
+        live.five_hour_resets_at,
+        live.seven_day_pct,
+        live.seven_day_resets_at,
+        detail,
+    );
+    push_provider(
+        &mut out,
+        ("codex", "cx"),
+        live.codex_five_hour_pct,
+        live.codex_five_hour_resets_at,
+        live.codex_seven_day_pct,
+        live.codex_seven_day_resets_at,
+        detail,
+    );
     out
+}
+
+/// Render one provider cluster at `detail` onto `out`, separated from a
+/// preceding cluster by a gap. No-op when both windows are absent
+/// (hide-on-fail). `labels` is `(full, abbreviated)`.
+#[allow(clippy::too_many_arguments)]
+fn push_provider(
+    out: &mut Vec<Span<'static>>,
+    labels: (&str, &str),
+    five_pct: Option<u8>,
+    five_reset: Option<chrono::DateTime<chrono::Utc>>,
+    seven_pct: Option<u8>,
+    seven_reset: Option<chrono::DateTime<chrono::Utc>>,
+    detail: QuotaDetail,
+) {
+    if five_pct.is_none() && seven_pct.is_none() {
+        return;
+    }
+    let (full_label, abbr_label) = labels;
+    let label_style = Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD);
+    if !out.is_empty() {
+        let gap = match detail {
+            QuotaDetail::Abbrev | QuotaDetail::Tiny => "  ",
+            _ => "   ",
+        };
+        out.push(Span::styled(gap, Style::default()));
+    }
+
+    match detail {
+        QuotaDetail::FullDated | QuotaDetail::Full => {
+            let show_reset = detail == QuotaDetail::FullDated;
+            out.push(Span::styled(format!("{full_label} "), label_style));
+            let mut first = true;
+            push_quota_window(
+                out,
+                "5h",
+                five_pct,
+                bar_color_5h,
+                five_reset,
+                show_reset,
+                &mut first,
+            );
+            push_quota_window(
+                out,
+                "wk",
+                seven_pct,
+                bar_color_7d,
+                seven_reset,
+                show_reset,
+                &mut first,
+            );
+        }
+        QuotaDetail::Abbrev => {
+            // `cl 81%/24%`
+            out.push(Span::styled(format!("{abbr_label} "), label_style));
+            if let Some(p) = five_pct {
+                out.push(Span::styled(
+                    format!("{p}%"),
+                    Style::default().fg(bar_color_5h(p)).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some(p) = seven_pct {
+                if five_pct.is_some() {
+                    out.push(Span::styled("/", Style::default().fg(MUTED_GRAY)));
+                }
+                out.push(Span::styled(
+                    format!("{p}%"),
+                    Style::default().fg(bar_color_7d(p)).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        QuotaDetail::Tiny => {
+            // `cl81%` — 5h only (fall back to wk if 5h is absent) so the
+            // provider still shows a number in the tightest space.
+            out.push(Span::styled(abbr_label.to_string(), label_style));
+            let (pct, color): (u8, fn(u8) -> Color) = match (five_pct, seven_pct) {
+                (Some(p), _) => (p, bar_color_5h),
+                (None, Some(p)) => (p, bar_color_7d),
+                (None, None) => return,
+            };
+            out.push(Span::styled(
+                format!("{pct}%"),
+                Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+}
+
+/// Push one window — `5h NN%` (+ ` ↻ <reset>` when `show_reset`) — within a
+/// provider cluster, with a ` · ` separator before all but the first
+/// window. No-op when `pct` is `None`.
+#[allow(clippy::too_many_arguments)]
+fn push_quota_window(
+    out: &mut Vec<Span<'static>>,
+    label: &str,
+    pct: Option<u8>,
+    color: fn(u8) -> Color,
+    reset: Option<chrono::DateTime<chrono::Utc>>,
+    show_reset: bool,
+    first: &mut bool,
+) {
+    let Some(pct) = pct else {
+        return;
+    };
+    if !*first {
+        out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
+    }
+    *first = false;
+    out.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(MUTED_GRAY),
+    ));
+    out.push(Span::styled(
+        format!("{pct}%"),
+        Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
+    ));
+    if show_reset {
+        if let Some(reset) = reset {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
+    }
 }
 
 fn build_cta_spans() -> Vec<Span<'static>> {
@@ -1069,21 +1165,6 @@ fn build_cta_spans() -> Vec<Span<'static>> {
         Span::styled("Live Claude Code usage off", Style::default().fg(red)),
         Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
-}
-
-/// Three-cell mini-bar: ▰ for filled, ▱ for empty. Matches the brief.
-fn mini_bar(pct: u8) -> String {
-    let cells = ((pct as f64 / 100.0) * 3.0).round() as usize;
-    let filled = cells.min(3);
-    let empty = 3 - filled;
-    let mut s = String::with_capacity(3);
-    for _ in 0..filled {
-        s.push('▰');
-    }
-    for _ in 0..empty {
-        s.push('▱');
-    }
-    s
 }
 
 fn bar_color_5h(pct: u8) -> Color {
@@ -1147,9 +1228,11 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
-        let spans = build_live_widget_spans(&live);
+        let spans = build_live_widget_spans(&live, 1000);
         let text = flatten(&spans);
+        assert!(text.contains("claude"), "provider label present: {text}");
         assert!(text.contains("5h"));
         assert!(text.contains("40%"));
         assert!(text.contains("wk"));
@@ -1158,8 +1241,8 @@ mod live_widget_tests {
         // it's a single session's lifetime cost, not today's total.
         assert!(!text.contains("$"));
         assert!(!text.contains("today"));
-        // The combined "⏱ Xh Ym" countdown is gone; each window now carries
-        // its own absolute reset stamp prefixed by ↻ (local-tz date+time).
+        // The combined "⏱ Xh Ym" countdown is gone; each window carries its
+        // own absolute reset stamp prefixed by ↻ (local-tz date+time).
         assert!(!text.contains("⏱"));
         assert_eq!(text.matches('↻').count(), 2, "one reset stamp per window");
     }
@@ -1176,9 +1259,11 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
-        let spans = build_live_widget_spans(&live);
+        let spans = build_live_widget_spans(&live, 1000);
         let text = flatten(&spans);
+        assert!(text.contains("claude"));
         assert!(text.contains("5h"));
         assert!(!text.contains("wk"));
         assert!(!text.contains("$"));
@@ -1187,12 +1272,140 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn mini_bar_clamps_and_buckets() {
-        assert_eq!(mini_bar(0), "▱▱▱");
-        assert_eq!(mini_bar(33), "▰▱▱");
-        assert_eq!(mini_bar(50), "▰▰▱");
-        assert_eq!(mini_bar(99), "▰▰▰");
-        assert_eq!(mini_bar(100), "▰▰▰");
+    fn live_widget_renders_codex_windows_next_to_claude() {
+        use chrono::{TimeZone, Utc};
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            source: Source::Tier1Cache,
+            codex_five_hour_pct: Some(10),
+            codex_five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 15, 0, 21, 0).unwrap()),
+            codex_seven_day_pct: Some(44),
+            codex_seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap()),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        // Both provider clusters render: `claude 5h 40% · wk 8%   codex …`.
+        assert!(text.contains("claude"), "claude cluster present: {text}");
+        assert!(text.contains("40%"));
+        assert!(text.contains("8%"));
+        assert!(text.contains("codex"), "codex cluster present: {text}");
+        assert!(text.contains("10%"));
+        assert!(text.contains("44%"));
+        // Claude leads, Codex follows (overlaid second).
+        assert!(text.starts_with("claude"), "claude leads: {text}");
+        let (claude_at, codex_at) = (text.find("claude").unwrap(), text.find("codex").unwrap());
+        assert!(claude_at < codex_at, "claude before codex: {text}");
+        // Only the two Codex windows carry reset instants here → two ↻.
+        assert_eq!(text.matches('↻').count(), 2);
+    }
+
+    #[test]
+    fn live_widget_renders_codex_only_when_claude_absent() {
+        // User runs Codex but never wired the Claude statusline.
+        let live = LiveWindow {
+            source: Source::None,
+            codex_five_hour_pct: Some(10),
+            codex_seven_day_pct: Some(44),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        // Codex is the first (and only) cluster — no Claude cluster precedes it.
+        assert!(
+            text.starts_with("codex"),
+            "codex leads when Claude absent: {text}"
+        );
+        assert!(!text.contains("claude"));
+    }
+
+    #[test]
+    fn live_widget_omits_codex_when_absent() {
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            source: Source::Tier1Cache,
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        assert!(text.contains("claude"));
+        assert!(!text.contains("codex"));
+    }
+
+    /// Both providers, all four windows + resets, for the degradation tests.
+    fn both_providers_live() -> LiveWindow {
+        use chrono::{TimeZone, Utc};
+        LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap()),
+            seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 12, 5, 0, 0).unwrap()),
+            source: Source::Tier1Cache,
+            codex_five_hour_pct: Some(10),
+            codex_five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 15, 0, 21, 0).unwrap()),
+            codex_seven_day_pct: Some(44),
+            codex_seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn degrade_full_dated_when_room() {
+        // Wide → richest: full labels, all four windows, four ↻ reset stamps.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 1000));
+        assert!(text.contains("claude") && text.contains("codex"));
+        assert!(text.contains("5h ") && text.contains("wk "));
+        assert_eq!(
+            text.matches('↻').count(),
+            4,
+            "all four reset stamps: {text}"
+        );
+    }
+
+    #[test]
+    fn degrade_drops_dates_first() {
+        // 60 cols fits the no-dates form (~45) but not the dated one (~100+).
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 60));
+        assert!(text.contains("claude") && text.contains("codex"));
+        assert!(text.contains("40%") && text.contains("8%"));
+        assert!(text.contains("wk "), "weekly still shown: {text}");
+        assert!(!text.contains('↻'), "reset dates dropped first: {text}");
+    }
+
+    #[test]
+    fn degrade_abbreviates_then() {
+        // 30 cols fits the abbreviated `cl 40%/8%  cx 10%/44%` (~21) only.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 30));
+        assert!(text.contains("cl ") && text.contains("cx "));
+        assert!(!text.contains("claude") && !text.contains("codex"));
+        assert!(
+            text.contains("40%") && text.contains("8%"),
+            "5h+wk kept: {text}"
+        );
+        assert!(text.contains('/'), "abbreviated 5h/wk: {text}");
+        assert!(!text.contains('↻'));
+    }
+
+    #[test]
+    fn degrade_tiny_keeps_both_providers() {
+        // 15 cols fits only `cl40% cx10%` (~12): 5h-only, both providers.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 15));
+        assert!(text.contains("cl40%"), "claude 5h kept: {text}");
+        assert!(text.contains("cx10%"), "codex 5h kept: {text}");
+        assert!(!text.contains('/'), "weekly shed: {text}");
+        assert!(!text.contains("wk"));
+    }
+
+    #[test]
+    fn degrade_tiny_is_floor_even_if_overflowing() {
+        // Absurdly narrow → still return the Tiny floor (clipped), not blank.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 1));
+        assert!(!text.is_empty(), "floor renders rather than blanking");
+        assert!(text.contains("cl40%"));
+    }
+
+    #[test]
+    fn degrade_empty_when_no_data() {
+        let text = flatten(&build_live_widget_spans(&LiveWindow::empty(), 1000));
+        assert!(text.is_empty(), "no data → nothing, regardless of width");
     }
 
     #[test]

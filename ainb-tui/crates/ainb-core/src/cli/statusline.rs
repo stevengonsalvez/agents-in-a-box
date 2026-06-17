@@ -123,7 +123,7 @@ fn rate_window_from_value(value: &serde_json::Value) -> Option<RateWindow> {
 /// dropped the integer form, so the reset instant never reached the cache
 /// and the TUI's per-window "↻ <reset>" affordance had nothing to render.
 /// Accept both forms here.
-fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
     if let Some(s) = value.as_str() {
         // Already a timestamp string — trust it as-is.
         return Some(s.to_string());
@@ -137,7 +137,7 @@ fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
     chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339())
 }
 
-fn round_pct(p: f64) -> u8 {
+pub(crate) fn round_pct(p: f64) -> u8 {
     p.clamp(0.0, 100.0).round() as u8
 }
 

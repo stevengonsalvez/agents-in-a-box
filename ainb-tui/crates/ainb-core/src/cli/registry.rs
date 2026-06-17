@@ -103,11 +103,13 @@ impl CommandRegistry {
         r.register(UsageCommand);
         r.register(StatuslineCommand);
         r.register(ClaudecodeCommand);
+        r.register(CodexCommand);
         r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
+        r.register(McpCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r
@@ -908,6 +910,61 @@ impl CliCommand for ClaudecodeCommand {
     }
 }
 
+/// Canonical `ainb codex <subcmd>` provider-namespaced surface — the Codex
+/// analog of [`ClaudecodeCommand`].
+///
+/// Today: only `statusline`, which pulls Codex OAuth quota
+/// (`chatgpt.com/backend-api/wham/usage`) and caches it for the ainb TUI
+/// top bar. Unlike `claudecode statusline` (Claude PUSHES its windows to a
+/// render-time subprocess), this command makes a throttled network call —
+/// it is driven by the Codex `stop` hook and the TUI background poller,
+/// never by a prompt render. Hide-on-fail; never errors out to the caller.
+pub struct CodexCommand;
+impl CliCommand for CodexCommand {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Codex-specific commands (statusline, etc.). \
+                     Provider-namespaced — the Codex analog of `claudecode`.",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("statusline")
+                        .about(
+                            "Pull Codex OAuth quota (5h + weekly) from \
+                             chatgpt.com and cache it for the ainb TUI top bar. \
+                             Throttled; hide-on-fail when Codex is not logged in.",
+                        )
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Bypass the throttle and pull now."),
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let (sub_name, force) = match matches.subcommand() {
+            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("force")),
+            _ => (None, false),
+        };
+        Box::pin(async move {
+            match sub_name.as_deref() {
+                Some("statusline") => crate::cli::codex_statusline::execute(force).await,
+                _ => Err(anyhow::anyhow!(
+                    "codex requires a subcommand (e.g. `statusline`)"
+                )),
+            }
+        })
+    }
+}
+
 /// `ainb tmux {install,status}` — manage the bundled rich tmux.conf at
 /// `~/.tmux.conf`. See `crate::cli::tmux_install` for the implementation.
 pub struct TmuxCommand;
@@ -1003,6 +1060,12 @@ impl CliCommand for NotifydCommand {
                     .help("Target Codex CLI"),
             )
             .arg(
+                clap::Arg::new("copilot")
+                    .long("copilot")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target GitHub Copilot CLI"),
+            )
+            .arg(
                 clap::Arg::new("all")
                     .long("all")
                     .action(clap::ArgAction::SetTrue)
@@ -1044,7 +1107,12 @@ impl CliCommand for NotifydCommand {
             Status,
         }
         let agents = |m: &ArgMatches| {
-            cli::agents_from_flags(m.get_flag("claude"), m.get_flag("codex"), m.get_flag("all"))
+            cli::agents_from_flags(
+                m.get_flag("claude"),
+                m.get_flag("codex"),
+                m.get_flag("copilot"),
+                m.get_flag("all"),
+            )
         };
         // No sub-verb → `run` (matches the standalone binary's default
         // and the lazy-spawn call `ainb notifyd`).
@@ -1404,6 +1472,74 @@ impl CliCommand for FleetCommand {
     }
 }
 
+pub struct McpCommand;
+impl CliCommand for McpCommand {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+    fn build(&self, app: Command) -> Command {
+        let daemon =
+            Command::new("daemon").about("Run the shared MCP pool daemon (foreground)").arg(
+                clap::Arg::new("idle-grace")
+                    .long("idle-grace")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("Override [mcp_pool].idle_grace_secs (seconds)"),
+            );
+        let proxy = Command::new("proxy")
+            .about("Stdio shim: bridge this process's stdio onto a pool socket")
+            .arg(clap::Arg::new("socket").required(true).help("Unix socket path"))
+            .arg(
+                clap::Arg::new("session")
+                    .long("session")
+                    .help("Session label to announce to the pool (shown in `ainb mcp status`)"),
+            );
+        let status = Command::new("status").about("Query the pool daemon (JSON)");
+        let stop = Command::new("stop")
+            .about("Stop the pool daemon (or one server with `stop <server>`)")
+            .arg(clap::Arg::new("server").help(
+                "Stop just this server (next attach respawns it); omit to stop the whole daemon",
+            ));
+        let import = Command::new("import")
+            .about("Import stdio servers from .mcp.json / Claude user scope into ainb config")
+            .arg(
+                clap::Arg::new("user")
+                    .long("user")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Write to user config instead of project .ainb/config.toml"),
+            );
+        let install = Command::new("install")
+            .about("Point other agent CLIs' MCP configs at the pool shim")
+            .arg(
+                clap::Arg::new("codex")
+                    .long("codex")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Wire ~/.codex/config.toml"),
+            )
+            .arg(
+                clap::Arg::new("copilot")
+                    .long("copilot")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Wire ~/.copilot/mcp-config.json"),
+            );
+        app.subcommand(
+            Command::new(self.name())
+                .about("Shared MCP server pool: daemon / proxy / status / stop / import / install")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(daemon)
+                .subcommand(proxy)
+                .subcommand(status)
+                .subcommand(stop)
+                .subcommand(import)
+                .subcommand(install),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::mcp::execute(&matches).await })
+    }
+}
+
 /// The `hangar` namespace — Hangar managed-agents control plane.
 ///
 /// Augments the derive-side [`HangarCommand`](crate::cli::hangar::HangarCommand)
@@ -1445,14 +1581,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_five_commands() {
+    fn built_ins_registers_twenty_seven_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + doctor + reflect + claudecode namespace
-        // + tmux namespace + abtop + plugin stub + fleet + hidden notifyd
-        // + hangar = 25. The TUI is NOT in the registry — main.rs handles
+        // main's 26 (built-ins + doctor + reflect + claudecode + codex + tmux
+        // + abtop + plugin stub + fleet + hidden notifyd + hangar) + the mcp
+        // namespace = 27. The TUI is NOT in the registry — main.rs handles
         // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 25, "expected 25 entries, got {names:?}");
+        assert_eq!(names.len(), 27, "expected 27 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1472,11 +1608,13 @@ mod tests {
             "usage",
             "statusline",
             "claudecode",
+            "codex",
             "tmux",
             "completion",
             "abtop",
             "plugin",
             "fleet",
+            "mcp",
             "notifyd",
             "hangar",
         ] {

@@ -13,8 +13,27 @@ spend over time. Tokens are the hard data; $ is authoritative where the drainer
 recorded ``cost_usd`` from ``claude -p`` and an *estimate* otherwise.
 
 Usage:
-    reflect_cost.py [--since 30d] [--by day|transcript|model|outcome]
+    reflect_cost.py [--since 30d] [--by day|transcript|model|outcome|writer]
                     [--top N] [--json] [--state-dir DIR]
+                    [--followup] [--metrics-path FILE] [--quota]
+
+``--by writer`` groups on the M2 writer-output classification
+(``writer_class``: valid/prose/idle/poisoned/malformed) recorded per run by
+the drainer — the writer-health view. Pre-M2 events show as ``?``.
+
+``--quota`` (M3) switches to the subscription-quota view: the per-window
+rate-limit snapshot the drainer ingested from its ``claude -p`` runs
+(``quota-state.json``) plus whether the writer gate is currently open or
+closed and any standing 'quota_near_limit' deferral. Reads disk state only —
+never issues an API call.
+
+``--followup`` (A4) switches to the recall-quality diagnostic: reads the
+op="recall_search" lines recall.py appends to ``~/.learnings/metrics.jsonl``
+(override with --metrics-path / $REFLECT_METRICS_PATH) and reports the
+followup rate — the share of searches where the SAME session searched again
+within the window (default 30s) and got a fully disjoint result set, i.e.
+recall didn't satisfy the first time. High rate = tune rerank weights / graph
+arm budget / OOD threshold. Directional: rapid topic switches may overcount.
 
 Cached-vs-uncached framing (the 2026-05-31 lesson):
     cache_read     = cheap reuse (0.1x)   — what SHOULD dominate
@@ -70,6 +89,78 @@ def state_dir(override: str = "") -> Path:
     if override:
         return Path(override).expanduser()
     return Path(os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect")))
+
+
+def metrics_path(override: str = "") -> Path:
+    """A4: resolve the recall metrics log (the engine's metrics.jsonl)."""
+    import os
+    if override:
+        return Path(override).expanduser()
+    env = (os.environ.get("REFLECT_METRICS_PATH") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".learnings" / "metrics.jsonl"
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    """Tolerant JSONL loader — skips blank/corrupt lines, never raises."""
+    events: list[dict] = []
+    if not path.exists():
+        return events
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                events.append(parsed)
+    return events
+
+
+def followup_stats(events: list[dict]) -> dict:
+    """A4: aggregate op="recall_search" lines into the followup-rate view."""
+    searches = [e for e in events if e.get("op") == "recall_search"]
+    followups = sum(1 for e in searches if e.get("followup"))
+    total = len(searches)
+    windows = [
+        e.get("window_seconds") for e in searches
+        if isinstance(e.get("window_seconds"), (int, float))
+    ]
+    return {
+        "searches": total,
+        "followups": followups,
+        "rate": (followups / total) if total else 0.0,
+        "window_seconds": windows[-1] if windows else 30.0,
+    }
+
+
+def render_followup(stats: dict, since: str) -> str:
+    """A4: one-screen followup-rate report."""
+    total = stats["searches"]
+    if not total:
+        return (
+            f"No tracked recall searches in the last {since}.\n"
+            "(recall.py records op=recall_search lines only for session-"
+            "anchored, non-empty searches — run some recalls first.)"
+        )
+    pct = 100.0 * stats["rate"]
+    lines = [
+        f"recall followup rate — last {since}",
+        "",
+        f"  searches tracked : {total}",
+        f"  followups        : {stats['followups']} "
+        f"(re-search within {stats['window_seconds']:.0f}s, disjoint results)",
+        f"  followup rate    : {pct:.0f}%",
+        "",
+        "High rate = the first recall didn't satisfy — tune rerank weights, "
+        "give the graph arm more budget, or lower the OOD threshold. "
+        "Directional only: rapid topic switches can overcount.",
+    ]
+    return "\n".join(lines)
 
 
 def _parse_since(s: str) -> timedelta | None:
@@ -140,6 +231,8 @@ def _bucket_key(e: dict, by: str) -> str:
         return str(e.get("model") or "?")
     if by == "outcome":
         return str(e.get("outcome") or "?")
+    if by == "writer":
+        return str(e.get("writer_class") or "?")
     return "?"
 
 
@@ -177,7 +270,7 @@ def aggregate(events: list[dict], by: str) -> dict[str, dict]:
 
 def render(agg: dict[str, dict], by: str, top: int, outlier_tokens: int) -> str:
     keys = sorted(agg.keys())
-    if by in ("transcript", "model", "outcome"):
+    if by in ("transcript", "model", "outcome", "writer"):
         keys = sorted(agg.keys(), key=lambda k: agg[k]["tokens"], reverse=True)
         if top:
             keys = keys[:top]
@@ -220,18 +313,59 @@ def render(agg: dict[str, dict], by: str, top: int, outlier_tokens: int) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="reflect drain cost report")
     ap.add_argument("--since", default="30d", help="window, e.g. 30d / 7d / 24h")
-    ap.add_argument("--by", default="day", choices=["day", "transcript", "model", "outcome"])
-    ap.add_argument("--top", type=int, default=15, help="limit rows for transcript/model/outcome")
+    ap.add_argument("--by", default="day", choices=["day", "transcript", "model", "outcome", "writer"])
+    ap.add_argument("--top", type=int, default=15, help="limit rows for transcript/model/outcome/writer")
     ap.add_argument("--outlier-tokens", type=int, default=5_000_000,
                     help="flag any single run above this many tokens")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--state-dir", default="")
+    ap.add_argument("--followup", action="store_true",
+                    help="A4: report the recall followup rate from "
+                         "metrics.jsonl instead of drain spend")
+    ap.add_argument("--metrics-path", default="",
+                    help="A4: metrics.jsonl location (default "
+                         "~/.learnings/metrics.jsonl or $REFLECT_METRICS_PATH)")
+    ap.add_argument("--quota", action="store_true",
+                    help="M3: report the subscription-quota windows and "
+                         "writer-gate state instead of drain spend")
     args = ap.parse_args()
+
+    window = _parse_since(args.since)
+
+    if args.quota:  # M3: subscription-quota view
+        sd = state_dir(args.state_dir)
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import quota_store  # noqa: PLC0415
+        except ImportError:
+            print("quota_store.py not found — update the reflect plugin (M3+).")
+            return
+        if args.json:
+            print(json.dumps(quota_store.status_payload(sd), indent=2))
+        else:
+            print(quota_store.render_status(sd))
+        return
+
+    if args.followup:  # A4: recall-quality diagnostic view
+        mp = metrics_path(args.metrics_path)
+        metric_events = _load_jsonl(mp)
+        if window is not None:
+            cutoff = datetime.now(timezone.utc) - window
+            metric_events = [
+                e for e in metric_events
+                if (_event_ts(e) or datetime.min.replace(tzinfo=timezone.utc))
+                >= cutoff
+            ]
+        stats = followup_stats(metric_events)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print(render_followup(stats, args.since))
+        return
 
     sd = state_dir(args.state_dir)
     events = _load_events(sd)
 
-    window = _parse_since(args.since)
     if window is not None:
         cutoff = datetime.now(timezone.utc) - window
         events = [e for e in events if (_event_ts(e) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]

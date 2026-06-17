@@ -1,0 +1,91 @@
+# O3 — Project persona / preference field schema
+#
+# A per-project scope object carrying structured persona/preference fields —
+# the project's "disposition". Modelled on Hindsight's banks.disposition JSONB
+# persona object (hindsight-api-slim/hindsight_api/models.py L287-L300,
+# commit c255d35).
+#
+# These fields are AGGREGATED from the O1 consolidated-observations layer — they
+# are NEVER hand-authored. The drain's second pass emits persona CREATE/UPDATE
+# actions; reflect_cascade.execute_persona_actions applies them to the
+# reflect_db ``project_persona`` table (one row per
+# (project_id, field_name)). Confidence rises with the count of distinct source
+# observations cited as evidence (see reflect_db.persona_confidence).
+#
+# WHY: open-domain queries can do a deterministic field lookup
+# (testing_style == 'TDD' -> answered) BEFORE running full recall — the agent
+# gets the project's disposition without an LLM call. recall.py checks persona
+# fields FIRST on open-domain queries (recall_persona_field) and only falls back
+# to the O1 observation tier / raw learnings on a miss.
+#
+# The schema is TYPED-BUT-OPEN: the field names below are the canonical, known
+# fields with their expected value vocabulary, but the table accepts any
+# field_name (open-domain) so the drain can introduce new disposition axes
+# without a migration. Unknown fields simply carry free-text values.
+
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Project Persona / Preference Schema
+description: >-
+  Structured, evidence-backed disposition fields for a single project scope.
+  Aggregated from O1 observations; surfaced by O3 open-domain field lookup.
+
+type: object
+description: One persona object per project_id; keys are persona field names.
+
+# Confidence model (deterministic, no LLM):
+#   confidence = min(1.0, distinct_source_observation_count / SATURATION)
+#   with SATURATION = 12 — so ~10 distinct corroborating observations cross the
+#   0.8 high-confidence threshold, and a field with 1-2 contradictory or thin
+#   sources stays well below it. A field is only emitted as "answered" by the
+#   open-domain lookup when confidence >= PERSONA_CONFIDENCE_THRESHOLD (0.8).
+
+properties:
+
+  testing_style:
+    type: string
+    description: The project's prevailing approach to tests.
+    examples: [TDD, BDD, "test-after", "integration-first", "snapshot", manual]
+
+  commit_style:
+    type: string
+    description: How commits are shaped and messaged.
+    examples: ["conventional", "small-single-concern", "squash-merge", "atomic"]
+
+  error_handling:
+    type: string
+    description: Preferred error-handling discipline.
+    examples: ["explicit-result-types", "exceptions", "fail-fast", "graceful-degradation"]
+
+  naming_convention:
+    type: string
+    description: House naming style.
+    examples: [snake_case, camelCase, PascalCase, kebab-case]
+
+  review_strictness:
+    type: string
+    description: How strict code review / merge gating is.
+    examples: [strict, lenient, "blocking-on-coverage", "two-approver"]
+
+  documentation_style:
+    type: string
+    description: Expected documentation discipline.
+    examples: ["docstrings-required", "readme-only", "inline-comments", "minimal"]
+
+  dependency_policy:
+    type: string
+    description: How dependencies are managed.
+    examples: ["pin-with-lockfile", "minimal-deps", "vendor", "latest"]
+
+  language_preference:
+    type: string
+    description: Primary language / runtime disposition.
+    examples: [python, typescript, rust, go]
+
+# Every persona field row carries:
+#   project_id                 - the scope this disposition belongs to
+#   field_name                 - one of the keys above, or an open-domain name
+#   value                      - the aggregated disposition value
+#   confidence                 - [0,1], rises with distinct source observations
+#   source_observation_ids[]   - the O1 observation ids this value is distilled
+#                                from (the provenance / evidence set)
+#   last_updated               - ISO timestamp of the last fold

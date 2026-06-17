@@ -132,6 +132,25 @@ show_git_status = true
 # args = ["-y", "@context7/mcp-server"]
 # environment = {}
 # init_strategy = "lazy"  # Options: "lazy", "eager", "none"
+# shared = true           # Pool this server across sessions (default: true).
+#                         # Set false for stateful servers (browser/db bridges).
+
+# =============================================================================
+# MCP Pool (shared MCP server processes for host/tmux sessions)
+# =============================================================================
+# When enabled, ainb runs `ainb mcp daemon` which spawns each shared MCP
+# server ONCE and fronts it with a unix socket under
+# ~/.agents-in-a-box/mcp/sockets/. New sessions get a generated .mcp.json in
+# their worktree whose pooled entries point at the `ainb mcp proxy` stdio
+# shim — so N concurrent sessions share 1 server process instead of N.
+#
+# [mcp_pool]
+# enabled = true          # Master switch (default: true)
+# idle_grace_secs = 300   # Reap a pooled server this many seconds after its
+#                         # last client detaches (default: 300)
+# monitor_refresh_secs = 2 # TUI pool overlay (sidebar MCP / `m`) auto-refresh
+#                         # cadence while OPEN (default: 2; 0 = on-open + manual).
+#                         # The overlay never polls when closed.
 
 # =============================================================================
 # Plugins

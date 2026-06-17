@@ -39,7 +39,16 @@ pub enum AppEvent {
     NextWorkspace,
     PreviousWorkspace,
     ToggleHelp,
-    RefreshWorkspaces,  // Manual refresh of workspace data
+    // Shared MCP pool overlay
+    McpOverlayOpen,
+    McpOverlayClose,
+    McpOverlayPrev,
+    McpOverlayNext,
+    McpOverlayRefresh,
+    McpOverlayStopServer,
+    McpOverlayStopDaemon,
+    McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
+    RefreshWorkspaces, // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
@@ -893,6 +902,23 @@ impl EventHandler {
                 }
                 _ => return None,
             }
+        }
+
+        // MCP pool overlay captures all keys while open (after the
+        // confirmation dialog, so a stop-confirmation sits on top of it).
+        if state.mcp_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
+                    Some(AppEvent::McpOverlayClose)
+                }
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
+                KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
+                KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
+                KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
+                KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
+                _ => None,
+            };
         }
 
         // Handle "Other tmux" rename mode (high priority)
@@ -2107,6 +2133,10 @@ impl EventHandler {
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
+            // `p` for "pool" — opens the shared MCP pool observability
+            // overlay. `m` is taken by the learnings/Memory browser, so the
+            // pool tile + global keybind use `p` instead.
+            KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2328,6 +2358,54 @@ impl EventHandler {
                 state.current_screen = target;
             }
             AppEvent::ToggleHelp => state.toggle_help(),
+            AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
+            AppEvent::McpOverlayClose => state.close_mcp_overlay(),
+            AppEvent::McpOverlayPrev => state.mcp_overlay_move(-1),
+            AppEvent::McpOverlayNext => state.mcp_overlay_move(1),
+            AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
+            AppEvent::McpOverlayStopServer => {
+                if let Some(name) =
+                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                {
+                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                        title: "Stop MCP server".to_string(),
+                        message: format!(
+                            "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
+                        ),
+                        confirm_action: crate::app::state::ConfirmAction::McpStopServer(name),
+                        selected_option: false,
+                        warning: None,
+                        options: None,
+                        selected_index: 0,
+                    });
+                }
+            }
+            AppEvent::McpOverlayStopDaemon => {
+                let (servers, sessions) = state
+                    .mcp_overlay
+                    .as_ref()
+                    .map(|o| {
+                        let s: usize = o.servers.iter().map(|x| x.clients).sum();
+                        (o.servers.len(), s)
+                    })
+                    .unwrap_or((0, 0));
+                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    title: "Stop the MCP pool".to_string(),
+                    message: format!(
+                        "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
+                    ),
+                    confirm_action: crate::app::state::ConfirmAction::McpStopDaemon,
+                    selected_option: false,
+                    warning: None,
+                    options: None,
+                    selected_index: 0,
+                });
+            }
+            // The overlay is a global pool view (not bound to any worktree),
+            // so import always targets the user config — the only config read
+            // from anywhere. cwd's .mcp.json is still pulled in as a source.
+            // Additive (never overwrites), so it fires without a confirmation.
+            AppEvent::McpOverlayImport => state.mcp_import(true),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -3067,6 +3145,12 @@ impl EventHandler {
                                     let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
                                 }
                             }
+                            crate::app::state::ConfirmAction::McpStopServer(name) => {
+                                state.mcp_stop_server(&name);
+                            }
+                            crate::app::state::ConfirmAction::McpStopDaemon => {
+                                state.mcp_stop_daemon();
+                            }
                             crate::app::state::ConfirmAction::Cancel => {
                                 // Explicit Cancel ("Not now"): dialog already
                                 // taken; nothing persisted, so we re-ask next
@@ -3471,6 +3555,10 @@ impl EventHandler {
                             tracing::info!("Navigating to SessionRecovery view");
                             state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
+                        HomeTile::Mcp => {
+                            tracing::info!("Opening MCP pool overlay");
+                            state.toggle_mcp_overlay();
+                        }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
@@ -3536,6 +3624,11 @@ impl EventHandler {
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                    }
+                    SidebarItem::Mcp => {
+                        // Opens the overlay on top of the current screen (not a
+                        // screen switch) and fires the first lazy fetch.
+                        state.toggle_mcp_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -5506,6 +5599,59 @@ mod panel_back_tests {
 
         assert_eq!(state.current_screen, ids::LEARNINGS);
         assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+    }
+
+    /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
+    /// the learnings/Memory browser. Locking both arms here guards against
+    /// a future refactor re-colliding the two on `m` (which silently made
+    /// the overlay unreachable when the Memory tile landed).
+    #[test]
+    fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(p, &mut state)
+            .expect("`p` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayOpen),
+            "`p` must open the MCP pool overlay, got {evt:?}"
+        );
+
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(m, &mut state)
+            .expect("`m` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must stay the learnings/Memory browser, got {evt:?}"
+        );
+    }
+
+    /// While the MCP overlay is open it captures all keys. `i` imports (into
+    /// the global user config — the overlay isn't bound to a worktree). Lock
+    /// the keybind so the action bar can't drift from it.
+    #[test]
+    fn mcp_overlay_import_key_dispatches() {
+        let mut state = AppState::default();
+        state.mcp_overlay = Some(crate::app::state::McpOverlayState {
+            pool_enabled: true,
+            daemon_running: true,
+            servers: vec![],
+            selected: 0,
+            loading: false,
+            last_refreshed: None,
+            refresh_secs: 0,
+            fetch_rx: None,
+            last_action: None,
+        });
+
+        let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(i, &mut state)
+            .expect("`i` in the overlay must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayImport),
+            "`i` must dispatch McpOverlayImport, got {evt:?}"
+        );
     }
 
     /// Re-firing the open event while already on the panel must not

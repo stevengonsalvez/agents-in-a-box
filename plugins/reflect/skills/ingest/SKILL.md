@@ -73,6 +73,20 @@ Everything flows to:
 │   │   └── ...
 │   └── episodes/               Session episode notes
 ├── nano_graphrag_cache/        GraphRAG index (nodes, edges, communities)
+├── shards/                     R15: per-project shard KBs (each its own
+│   ├── <project-a>/            documents/ + nano_graphrag_cache/). Recall
+│   │   ├── documents/          defaults to the CURRENT project's shard for
+│   │   ├── nano_graphrag_cache/ faster, cross-project-noise-free injection;
+│   │   └── branches/           A6: per-branch / per-worktree sub-shards.
+│   │       ├── feat__auth/     Worktrees of one repo (agents-in-a-box runs
+│   │       │   ├── documents/  /.agents-in-a-box/worktrees/...) get SEPARATE
+│   │       │   └── nano_graphrag_cache/ sub-shards so feat/auth and
+│   │       └── feat__payment/  feat/payment don't pollute each other's recall.
+│   └── <project-b>/            Recall defaults to the CURRENT branch's sub-
+│                                shard; trunk (main/master) uses the project
+│                                shard. `reflect:recall --all-branches` pools
+│                                every branch of the project; `--global` pools
+│                                every project at the top-level KB.
 └── .memory-ingest-log.yaml     Tracks what's been ingested (prevents reprocessing)
 
 # The `reflect` CLI itself is installed separately via:
@@ -210,7 +224,7 @@ entities:
 relationships:
   - source: "{entity A name}"                        # NOT 'from'
     target: "{entity B name}"                        # NOT 'to'
-    type: caused_by | solves | requires | relates_to
+    type: caused_by | causes | enables | prevents | contradicts | supersedes | part_of | uses | solves | requires | relates_to | implements | configures | triggers
     description: "{how they relate}"                 # REQUIRED
     strength: 1-10                                   # optional, default 5
 ```
@@ -226,6 +240,9 @@ Relationship hints by memory kind:
 - feedback: `solves` or `relates_to`
 - project: `requires` or `relates_to`
 - reference: `relates_to` to external resources
+- when the direction of effect is known, prefer a typed causal link (S2) —
+  `caused_by` / `causes` / `enables` / `prevents` / `contradicts` /
+  `supersedes` / `part_of` / `uses` — over flat `relates_to`
 
 Validate before writing:
 ```bash
@@ -337,6 +354,13 @@ Sources: $SOURCES"
 ```bash
 python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/metrics_updater.py \
     --knowledge-notes $COUNT --sidecars $COUNT
+```
+
+Also rebuild the skills index (R20) so retrieval can match queries against
+installed skills without a filesystem scan:
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/skill_index.py rebuild
 ```
 
 ### Step 10: Report

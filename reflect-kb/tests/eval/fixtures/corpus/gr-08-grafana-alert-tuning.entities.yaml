@@ -1,0 +1,15 @@
+document_id: gr-08-grafana-alert-tuning
+extracted_at: '2026-04-15T00:00:00'
+entities:
+  - name: "grafana-alerting"
+    type: tool
+    description: "alert rules"
+  - name: "oomkill"
+    type: error
+    description: "kernel OOM pod kill"
+relationships:
+  - source: "grafana-alerting"
+    target: "oomkill"
+    type: prevents
+    description: "early slope detection avoids kills"
+    strength: 6

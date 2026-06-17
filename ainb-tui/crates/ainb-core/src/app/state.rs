@@ -814,10 +814,157 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    McpStopServer(String), // Stop one pooled MCP server (reaps its child)
+    McpStopDaemon,     // Stop the whole MCP pool daemon
     SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
     OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
     DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+// ============================================================================
+// MCP Pool observability overlay
+// ============================================================================
+
+/// Result of one off-thread fetch of the daemon's control-socket `status`.
+#[derive(Debug, Clone)]
+pub struct McpFetchResult {
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub error: Option<String>,
+    /// One-shot status line for an action that produced this result (e.g.
+    /// `import`). `None` for plain refreshes — the overlay keeps its prior
+    /// `last_action` so a refresh doesn't wipe the import summary.
+    pub action_msg: Option<String>,
+}
+
+/// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
+/// the overlay is open; dropping it (on close) stops all refresh activity —
+/// nothing polls the daemon when the overlay isn't showing.
+pub struct McpOverlayState {
+    pub pool_enabled: bool,
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub selected: usize,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Auto-refresh cadence while open; 0 = on-open + manual (`r`) only.
+    pub refresh_secs: u64,
+    /// Receiver for the in-flight fetch (None when no fetch is pending — the
+    /// one-outstanding-request guard).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
+    /// Status line from the last in-overlay action (e.g. `import`). Sticky
+    /// across plain refreshes; cleared only when the overlay closes.
+    pub last_action: Option<String>,
+}
+
+impl std::fmt::Debug for McpOverlayState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOverlayState")
+            .field("pool_enabled", &self.pool_enabled)
+            .field("daemon_running", &self.daemon_running)
+            .field("servers", &self.servers.len())
+            .field("selected", &self.selected)
+            .field("loading", &self.loading)
+            .field("fetch_pending", &self.fetch_rx.is_some())
+            .field("last_action", &self.last_action)
+            .finish()
+    }
+}
+
+impl McpOverlayState {
+    pub fn selected_server_name(&self) -> Option<String> {
+        self.servers.get(self.selected).map(|s| s.name.clone())
+    }
+}
+
+/// Blocking control-socket fetch — always run via `spawn_blocking`. Probes the
+/// daemon and parses its `status` JSON into the snapshot.
+pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
+    if !crate::mcp_pool::client::daemon_alive() {
+        return McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: None,
+            action_msg: None,
+        };
+    }
+    match crate::mcp_pool::client::daemon_status() {
+        Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => {
+                let servers = v
+                    .get("servers")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or_default();
+                McpFetchResult {
+                    daemon_running: true,
+                    servers,
+                    error: None,
+                    action_msg: None,
+                }
+            }
+            Err(e) => McpFetchResult {
+                daemon_running: true,
+                servers: Vec::new(),
+                error: Some(format!("parse status: {e}")),
+                action_msg: None,
+            },
+        },
+        Err(e) => McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: Some(e.to_string()),
+            action_msg: None,
+        },
+    }
+}
+
+/// Blocking `import` action for the overlay — runs `ainb mcp import` (project
+/// scope, or user config when `to_user`), then registers any newly-imported
+/// servers with the live daemon so they appear in the table immediately
+/// (the daemon spawns each lazily on first attach). Always run via
+/// `spawn_blocking`. Returns a fresh status snapshot tagged with a summary.
+pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
+    let summary = match crate::mcp_pool::import::execute(to_user) {
+        Ok(report) => {
+            // Push the just-imported definitions to a running daemon so the
+            // overlay reflects them without waiting for a new session.
+            if !report.imported.is_empty() && crate::mcp_pool::client::daemon_alive() {
+                if let Ok(config) = crate::config::AppConfig::load() {
+                    let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
+                        .into_iter()
+                        .filter(|s| report.imported.contains(&s.name))
+                        .collect();
+                    if !fresh.is_empty() {
+                        let _ = crate::mcp_pool::client::register_servers(&fresh);
+                    }
+                }
+            }
+            let mut parts = Vec::new();
+            if report.imported.is_empty() {
+                parts.push("nothing new to import".to_string());
+            } else {
+                parts.push(format!("imported {}", report.imported.join(", ")));
+            }
+            if !report.skipped_existing.is_empty() {
+                parts.push(format!(
+                    "already configured: {}",
+                    report.skipped_existing.join(", ")
+                ));
+            }
+            if !report.skipped_unresolvable.is_empty() {
+                parts.push(format!(
+                    "skipped (not on host): {}",
+                    report.skipped_unresolvable.join(", ")
+                ));
+            }
+            format!("{} → {}", parts.join(" · "), report.target.display())
+        }
+        Err(e) => format!("import failed: {e}"),
+    };
+    let mut result = mcp_fetch_blocking();
+    result.action_msg = Some(summary);
+    result
 }
 
 // ============================================================================
@@ -831,6 +978,7 @@ pub enum HomeTile {
     Config,   // Settings & presets
     Sessions, // Session manager
     Recovery, // Recover orphaned sessions
+    Mcp,      // Shared MCP pool overlay
     Stats,    // Analytics & usage
     Help,     // Docs & guides
 }
@@ -843,6 +991,7 @@ impl HomeTile {
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
+            HomeTile::Mcp,
             HomeTile::Stats,
             HomeTile::Help,
         ]
@@ -855,6 +1004,7 @@ impl HomeTile {
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
+            HomeTile::Mcp => "MCP",
             HomeTile::Stats => "Stats",
             HomeTile::Help => "Help",
         }
@@ -867,6 +1017,7 @@ impl HomeTile {
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
+            HomeTile::Mcp => "Shared Pool",
             HomeTile::Stats => "Usage & Analytics",
             HomeTile::Help => "Docs & Guides",
         }
@@ -879,6 +1030,7 @@ impl HomeTile {
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
+            HomeTile::Mcp => "🧬",
             HomeTile::Stats => "📊",
             HomeTile::Help => "❓",
         }
@@ -1141,7 +1293,10 @@ impl AgentProvider {
                     false,
                 ),
             ],
-            status: ProviderStatus::Available,
+            // Greyed-out / non-launchable in the Agents picker for now —
+            // `is_current_available()` blocks selection of non-Available
+            // providers (kept consistent with the new-session Configure wizard).
+            status: ProviderStatus::Disabled,
         }
     }
 
@@ -1311,6 +1466,7 @@ pub enum ConfigCategory {
     AgentDefaults,
     Editor,
     Plugins,
+    McpPool,
     Permissions,
     Appearance,
     Analytics,
@@ -1325,6 +1481,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults,
             ConfigCategory::Editor,
             ConfigCategory::Plugins,
+            ConfigCategory::McpPool,
             ConfigCategory::Permissions,
             ConfigCategory::Appearance,
             ConfigCategory::Analytics,
@@ -1339,6 +1496,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Agent Defaults",
             ConfigCategory::Editor => "Editor",
             ConfigCategory::Plugins => "Plugins",
+            ConfigCategory::McpPool => "MCP Pool",
             ConfigCategory::Permissions => "Permissions",
             ConfigCategory::Appearance => "Appearance",
             ConfigCategory::Analytics => "Analytics",
@@ -1353,6 +1511,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "🤖",
             ConfigCategory::Editor => "📝",
             ConfigCategory::Plugins => "🔌",
+            ConfigCategory::McpPool => "🧬",
             ConfigCategory::Permissions => "🛡️",
             ConfigCategory::Appearance => "🎨",
             ConfigCategory::Analytics => "📊",
@@ -1367,6 +1526,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Model, temperature, max tokens",
             ConfigCategory::Editor => "Preferred code editor for sessions",
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
+            ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
             ConfigCategory::Permissions => "File write, shell, git approval",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
             ConfigCategory::Analytics => "Usage tracking, cost alerts",
@@ -1709,6 +1869,27 @@ impl Default for ConfigScreenState {
             }],
         );
 
+        // MCP Pool (per-server `shared.*` toggles appended in from_app_config)
+        settings.insert(
+            ConfigCategory::McpPool,
+            vec![
+                ConfigSetting {
+                    key: "pool_enabled".to_string(),
+                    label: "Shared MCP Pool".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "One MCP server process shared across all host sessions"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "idle_grace_secs".to_string(),
+                    label: "Idle Grace (seconds)".to_string(),
+                    value: ConfigValue::Number(300),
+                    description: "Reap a pooled server this long after its last session detaches"
+                        .to_string(),
+                },
+            ],
+        );
+
         // Analytics
         settings.insert(
             ConfigCategory::Analytics,
@@ -1975,6 +2156,34 @@ impl ConfigScreenState {
             }
         }
 
+        // Update MCP Pool from config + append one shared-toggle per server
+        if let Some(settings) = state.settings.get_mut(&ConfigCategory::McpPool) {
+            for setting in settings.iter_mut() {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        setting.value = ConfigValue::Bool(config.mcp_pool.enabled);
+                    }
+                    "idle_grace_secs" => {
+                        setting.value = ConfigValue::Number(config.mcp_pool.idle_grace_secs as i64);
+                    }
+                    _ => {}
+                }
+            }
+            let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+            names.sort();
+            for name in names {
+                let server = &config.mcp_servers[name];
+                settings.push(ConfigSetting {
+                    key: format!("shared.{name}"),
+                    label: format!("Share: {name}"),
+                    value: ConfigValue::Bool(server.shared),
+                    description: format!(
+                        "Pool '{name}' across sessions (disable for stateful servers)"
+                    ),
+                });
+            }
+        }
+
         // Update Analytics from config
         if let Some(settings) = state.settings.get_mut(&ConfigCategory::Analytics) {
             for setting in settings.iter_mut() {
@@ -2084,6 +2293,33 @@ impl ConfigScreenState {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Apply MCP Pool settings
+        if let Some(settings) = self.settings.get(&ConfigCategory::McpPool) {
+            for setting in settings {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        if let ConfigValue::Bool(enabled) = &setting.value {
+                            config.mcp_pool.enabled = *enabled;
+                        }
+                    }
+                    "idle_grace_secs" => {
+                        if let ConfigValue::Number(secs) = &setting.value {
+                            config.mcp_pool.idle_grace_secs = (*secs).max(0) as u64;
+                        }
+                    }
+                    key => {
+                        if let (Some(name), ConfigValue::Bool(shared)) =
+                            (key.strip_prefix("shared."), &setting.value)
+                        {
+                            if let Some(server) = config.mcp_servers.get_mut(name) {
+                                server.shared = *shared;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2585,6 +2821,8 @@ pub struct AppState {
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
+    // Shared MCP pool observability overlay (None = closed; no refresh runs).
+    pub mcp_overlay: Option<McpOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3158,6 +3396,7 @@ impl Default for AppState {
             pending_async_action: None,
             async_operation_cancelled: false,
             confirmation_dialog: None,
+            mcp_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -4292,6 +4531,180 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    // ── Shared MCP pool overlay ────────────────────────────────────────────
+    // The overlay is opened on demand and refreshed lazily. All daemon I/O
+    // runs off-thread (spawn_blocking); the render loop only reads the cached
+    // snapshot. Nothing polls while the overlay is closed.
+
+    /// Toggle the MCP pool overlay. Opening seeds config + fires the first
+    /// fetch; closing drops the snapshot (and thus all refresh activity).
+    pub fn toggle_mcp_overlay(&mut self) {
+        if self.mcp_overlay.is_some() {
+            self.mcp_overlay = None;
+            return;
+        }
+        let config = crate::config::AppConfig::load().unwrap_or_default();
+        self.mcp_overlay = Some(McpOverlayState {
+            pool_enabled: config.mcp_pool.enabled,
+            daemon_running: false,
+            servers: Vec::new(),
+            selected: 0,
+            loading: true,
+            last_refreshed: None,
+            refresh_secs: config.mcp_pool.monitor_refresh_secs,
+            fetch_rx: None,
+            last_action: None,
+        });
+        self.spawn_mcp_fetch();
+    }
+
+    pub fn close_mcp_overlay(&mut self) {
+        self.mcp_overlay = None;
+    }
+
+    pub fn mcp_overlay_move(&mut self, delta: i32) {
+        if let Some(o) = self.mcp_overlay.as_mut() {
+            if o.servers.is_empty() {
+                return;
+            }
+            let n = o.servers.len() as i32;
+            o.selected = ((o.selected as i32 + delta).rem_euclid(n)) as usize;
+        }
+    }
+
+    /// Spawn one off-thread fetch of the daemon status, unless one is already
+    /// in flight (the one-outstanding-request guard). The blocking control
+    /// socket call runs on the blocking pool so the executor never stalls.
+    pub fn spawn_mcp_fetch(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return; // a fetch is already pending
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed fetch and, while the overlay is open, fire the next
+    /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
+    /// `try_recv` never waits, and no fetch is spawned when one is pending or
+    /// the cadence is disabled. Called from the 250ms app tick.
+    pub fn check_mcp_overlay(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.daemon_running = result.daemon_running;
+                o.servers = result.servers;
+                // Sticky: only an action (import) sets a message; plain
+                // refreshes carry None and leave the prior summary in place.
+                if result.action_msg.is_some() {
+                    o.last_action = result.action_msg;
+                }
+                o.last_refreshed = Some(std::time::Instant::now());
+                if o.selected >= o.servers.len() {
+                    o.selected = o.servers.len().saturating_sub(1);
+                }
+            }
+        }
+
+        // Lazy auto-refresh: only while open, only when nothing is pending,
+        // only if a cadence is configured and it has elapsed.
+        let due = o.refresh_secs > 0
+            && o.fetch_rx.is_none()
+            && o.last_refreshed
+                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
+                .unwrap_or(false);
+        if due {
+            self.spawn_mcp_fetch();
+        }
+    }
+
+    /// Stop the selected pooled server (off-thread), then refresh.
+    pub fn mcp_stop_server(&mut self, name: &str) {
+        let name = name.to_string();
+        self.mcp_stop_then_refresh(move || {
+            let _ = crate::mcp_pool::client::stop_server(&name);
+        });
+    }
+
+    /// Import MCP servers into ainb config (off-thread), register the new
+    /// ones with the live daemon, then refresh the table. `to_user` targets
+    /// the user config (`~/.agents-in-a-box/config/config.toml`) instead of
+    /// the project's `./.ainb/config.toml`. Never blocks the TUI — the
+    /// import + control-socket calls run on the blocking pool and the result
+    /// (summary + fresh snapshot) is delivered through the overlay channel.
+    pub fn mcp_import(&mut self, to_user: bool) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch
+        o.loading = true;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || mcp_import_blocking(to_user))
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("import task failed: {e}")),
+                    action_msg: Some(format!("import failed: {e}")),
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Stop the whole pool daemon (off-thread), then refresh.
+    pub fn mcp_stop_daemon(&mut self) {
+        self.mcp_stop_then_refresh(|| {
+            let _ = crate::mcp_pool::client::daemon_stop();
+        });
+    }
+
+    /// Run a blocking stop action off-thread, then fetch fresh status and
+    /// deliver it through the overlay's channel — so the table reflects the
+    /// change as soon as the stop completes (no immediate-fetch race that
+    /// reads pre-stop state).
+    fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch (its result is discarded)
+        o.loading = true;
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(stop).await;
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from
@@ -10126,6 +10539,9 @@ impl App {
         if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;
         }
+
+        // Drain + lazily refresh the MCP pool overlay (no-op when closed).
+        self.state.check_mcp_overlay();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

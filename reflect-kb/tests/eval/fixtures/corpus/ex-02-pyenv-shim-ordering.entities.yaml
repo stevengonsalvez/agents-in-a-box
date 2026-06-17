@@ -1,0 +1,15 @@
+document_id: ex-02-pyenv-shim-ordering
+extracted_at: '2026-02-15T00:00:00'
+entities:
+  - name: "pyenv"
+    type: tool
+    description: "python version manager"
+  - name: "PATH-ordering"
+    type: concept
+    description: "shell resolution order"
+relationships:
+  - source: "pyenv"
+    target: "PATH-ordering"
+    type: requires
+    description: "shims must precede system binaries"
+    strength: 9

@@ -1,7 +1,7 @@
 # ainb-hooks
 
-Plugin that emits Claude Code and Codex CLI lifecycle events to the
-**ainb notification inbox** via a Unix socket. Powers session-state
+Plugin that emits Claude Code, Codex CLI, and GitHub Copilot CLI lifecycle
+events to the **ainb notification inbox** via a Unix socket. Powers session-state
 badges, the dedicated Inbox screen, and optional OS notifications in
 `ainb-tui`.
 
@@ -37,29 +37,33 @@ plugins/ainb-hooks/
 │   └── plugin.json          # Claude Code marketplace manifest
 ├── codex/
 │   └── hooks.json           # Codex ~/.codex/hooks.json merge template
+├── copilot/
+│   └── hooks.json           # Copilot ~/.copilot/hooks/ainb.json drop-in (native format)
 ├── hooks/
-│   └── notify.sh            # universal hook script (claude + codex)
+│   └── notify.sh            # universal hook script (claude + codex + copilot)
 └── README.md
 ```
 
-The same `notify.sh` is used by both agents:
+The same `notify.sh` is used by all three agents:
 
 - **Claude Code** pipes the hook payload as JSON on stdin.
 - **Codex CLI** passes the hook payload as JSON in `argv[1]`.
+- **GitHub Copilot CLI** pipes the hook payload as JSON on stdin.
 
 `notify.sh` autodetects the source and uses the right input. The agent
-is identified via `AINB_AGENT={claude,codex}` set in the registering
+is identified via `AINB_AGENT={claude,codex,copilot}` set in the registering
 command line.
 
 ## Install
 
-The recommended install path is the `ainb hooks install` CLI (in `ainb-tui`),
-which handles plugin manifests, config merges, and notifyd lifecycle:
+The recommended install path is the `ainb-notifyd` CLI (the daemon doubles as
+the hook installer; `ainb notifyd …` is a hidden alias), which handles plugin
+manifests, config merges, and notifyd lifecycle:
 
 ```bash
-ainb hooks install --claude --codex
-ainb hooks status
-ainb hooks uninstall --all
+ainb-notifyd install --claude --codex --copilot   # or: --all
+ainb-notifyd status
+ainb-notifyd uninstall --all
 ```
 
 The CLI:
@@ -67,16 +71,23 @@ The CLI:
 1. Drops `.claude-plugin/plugin.json` at `~/.claude/plugins/ainb-hooks/` (Claude).
 2. Merges this directory's `codex/hooks.json` into `~/.codex/hooks.json` as a
    managed block (Codex).
-3. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites
-   the `__AINB_HOOK_SCRIPT__` placeholder in the codex template to that
+3. Writes this directory's `copilot/hooks.json` to `~/.copilot/hooks/ainb.json`
+   as a standalone drop-in (Copilot loads every `*.json` in `~/.copilot/hooks/`
+   and combines them, so ainb owns one file; uninstall deletes just that file).
+4. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites
+   the `__AINB_HOOK_SCRIPT__` placeholder in each agent's template to that
    absolute path.
-4. Records the install method in `~/.agents-in-a-box/install.json` so
+5. Records the install method in `~/.agents-in-a-box/install.json` so
    `ainb hooks uninstall` is fully reversible.
 
 ## Hook events
 
-Both agents use identical PascalCase event names: `SessionStart`,
+Claude and Codex use identical PascalCase event names: `SessionStart`,
 `UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop`, `PreCompact`.
+Copilot's hook format differs — camelCase events in a `{"version":1,"hooks":…}`
+drop-in — so its template registers `notification` + `agentStop` (the
+human-facing pair). Only the user-facing events are hooked on every agent;
+telemetry events are intentionally left out so they don't bury the signal.
 
 The matcher `Notification:idle_prompt` (Claude) and Codex's variants
 (`request_user_input`, `wait_for_user`, etc.) all carry the same

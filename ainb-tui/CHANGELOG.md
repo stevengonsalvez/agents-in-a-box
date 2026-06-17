@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-06-16
+### Fixed
+- Merge pull request #285 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: overlay import targets the user config, drop project variant
+
+### Documentation
+- **mcp-pool**: reflect user-config import + re-record GIF
+
+
+## [1.7.4] - 2026-06-15
+### Added
+- **session-list**: state colours, blue folders, unboxed selected glyph
+
+### Fixed
+- **notifyd**: tolerate copilot + unknown agents in install.json
+- **session-list**: 1-cell Nerd Font pause glyph for stopped status
+
+
+## [1.7.3] - 2026-06-15
+### Added
+- Merge pull request #282 from stevengonsalvez/feat/statusline-ttl-10min
+- Merge pull request #283 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: import servers from the pool overlay
+- **tui**: extend Claude statusline freshness TTL to 10 minutes
+
+### Documentation
+- **mcp-pool**: document + record the overlay import action
+
+
+## [1.7.2] - 2026-06-15
+### Added
+- Merge pull request #267 from stevengonsalvez/feat/mcp-socket
+- Merge pull request #279 from stevengonsalvez/feat/gemini-copilot-agent-pills
+- Merge pull request #281 from stevengonsalvez/feat/statusline-slim-quota
+- **cli**: add mcp namespace — daemon / proxy / status / stop
+- **cli**: mcp import and mcp install --codex/--copilot
+- **config**: add [mcp_pool] monitor_refresh_secs
+- **config**: add [mcp_pool] section and per-server shared flag
+- **config**: read project config from .ainb/ (legacy .agents-box/ kept)
+- **mcp-pool**: per-server stop control command
+- **mcp-pool**: runtime server registration over the control socket
+- **mcp-pool**: session identity + uptime in pool status
+- **mcp-pool**: shared MCP server pool — daemon, mux, shim
+- **new-session**: restore Gemini and Copilot as agent options
+- **run**: auto-import stdio servers from project .mcp.json into the pool
+- **run**: wire shared MCP pool into session creation
+- **tui**: MCP Pool config category
+- **tui**: shared MCP pool observability overlay
+- **tui**: slim top bar to a dedicated quota line + abbreviate-then-shed
+
+### Fixed
+- **mcp-pool**: address PR review — name validation, atomic writes, backup guard
+- **mcp-pool**: move overlay shortcut to p — m collides with Memory tile
+- **mcp-pool**: per-server stop is reap-only; chain overlay refresh
+- **mcp-pool**: proxy robustness — status ordering, crash recovery, line cap
+- **new-session**: harden greyed-agent handling and narrow-terminal Agent row
+- **tui**: vanish the unwired-statusline CTA when it can't fit
+- **validate**: trust canonical /private/tmp paths, target active tmux window
+
+### Documentation
+- Merge pull request #280 from stevengonsalvez/docs/new-session-guide
+- **screenshots**: from-scratch MCP pool walkthrough (journey GIF + tape)
+- **screenshots**: mcp-pool vhs tape + animated GIF
+- **screenshots**: slow the MCP pool walkthrough GIF ~1.4x
+- **tui**: add "Starting a new session" guide with wizard walkthrough
+- **tui**: add scannable Enable & Use quickstart to MCP pool page
+- **tui**: document the MCP pool observability overlay
+- **tui**: embed from-scratch walkthrough GIF on the MCP pool page
+- **tui**: port the full rich explainer into the MCP pool page
+- **tui**: shared MCP pool page with embedded proof GIF
+- **tui**: tabbed, per-agent MCP pool guide (mdx)
+- cover mcp import/install and .mcp.json auto-import
+- document shared MCP pool settings and architecture
+- point project config references at .ainb/
+
+### Other
+- fix(mcp-pool): move overlay shortcut to p — m collides with Memory tile
+
+
+## [1.7.1] - 2026-06-15
+### Added
+- Merge pull request #277 from stevengonsalvez/worktree-codex-statusline
+- **bootstrap**: wire caveman hooks and marketplace in settings.json
+- **cli**: add ainb codex statusline to pull Codex OAuth quota
+- **hooks**: add caveman PostToolUse and PreCompact hooks
+- **marketplace**: register caveman-stats plugin in agents-in-a-box marketplace
+- **onboarding**: clearer Welcome screen with CTAs and Esc hint
+- **plugins**: extract caveman-stats as standalone plugin
+- **session-list**: brand-color agent pill, ballot checkbox, drop tmux dot
+- **session-list**: use Nerd Font brand logos for agent icons
+- **statusline**: add caveman mode badge and savings segment
+- **tui**: overlay Codex usage onto the live window reader
+- **tui**: pull Codex usage from the live-window watcher + e2e tripwire
+- **tui**: render Codex quota (cx5h/cxwk) on the top bar next to Claude
+
+### Fixed
+- Merge pull request #276 from stevengonsalvez/onboarding-esc-menu
+- **onboarding**: Esc opens the Setup menu instead of cancelling to Home
+- **tui**: per-process tmp name for codex cache atomic write
+
+### Documentation
+- **readme**: document Homebrew's untrusted-tap gate
+- **release**: use cargo install --git one-liner in release notes
+- **tmux-ui-tripwire**: add gotcha 15 — AppState::new restores persisted UI prefs
+- **tui**: add Codex-on-top-bar proof captures (vhs frames + gif)
+- **tui**: document ainb codex statusline + live status bar
+
+### Other
+- **tui**: compact provider-grouped statusline, keep reset date/time
+
+
 ## [1.7.0] - 2026-06-12
 ### Added
 - Merge pull request #256 from stevengonsalvez/feat/antv-infographic-skill

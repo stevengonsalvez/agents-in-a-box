@@ -114,31 +114,46 @@ impl TmuxPreviewPane {
     /// * `area` - The area to render the component in
     /// * `state` - The application state
     pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
+        use crate::app::state::FocusedPane;
+        // Focused pane gets a green border; unfocused panes a subtle grey one,
+        // consistent with the session list + live logs.
+        let is_focused = matches!(state.focused_pane, FocusedPane::Preview);
         // First check for regular Claude sessions
         if let Some(session) = state.selected_session() {
             if session.is_attached {
                 self.render_attached_notice(frame, area);
             } else {
-                self.render_preview(frame, area, session);
+                self.render_preview(frame, area, session, is_focused);
             }
         // Then check for shell sessions
         } else if let Some(shell_session) = state.selected_shell_session() {
-            self.render_shell_preview(frame, area, shell_session);
+            self.render_shell_preview(frame, area, shell_session, is_focused);
         } else {
             self.render_empty_state(frame, area);
         }
     }
 
     /// Render the preview content for a session
-    fn render_preview(&mut self, frame: &mut Frame, area: Rect, session: &Session) {
+    fn render_preview(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &Session,
+        is_focused: bool,
+    ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Session Preview: {}", session.name),
             PreviewMode::Scroll => format!("Session Preview: {} [SCROLL MODE]", session.name),
         };
 
-        let border_color = match self.preview_mode {
-            PreviewMode::Normal => Color::Cyan,
-            PreviewMode::Scroll => Color::Yellow,
+        // Grey when unfocused; green when focused (gold while in scroll mode).
+        let border_color = if !is_focused {
+            SUBDUED_BORDER
+        } else {
+            match self.preview_mode {
+                PreviewMode::Normal => SELECTION_GREEN,
+                PreviewMode::Scroll => GOLD,
+            }
         };
 
         // Split area for content and footer
@@ -171,16 +186,21 @@ impl TmuxPreviewPane {
         frame: &mut Frame,
         area: Rect,
         shell_session: &ShellSession,
+        is_focused: bool,
     ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Shell: {}", shell_session.name),
             PreviewMode::Scroll => format!("Shell: {} [SCROLL MODE]", shell_session.name),
         };
 
-        // Shell sessions get a distinct green border to differentiate from Claude sessions
-        let border_color = match self.preview_mode {
-            PreviewMode::Normal => SELECTION_GREEN,
-            PreviewMode::Scroll => Color::Yellow,
+        // Grey when unfocused; green when focused (gold while in scroll mode).
+        let border_color = if !is_focused {
+            SUBDUED_BORDER
+        } else {
+            match self.preview_mode {
+                PreviewMode::Normal => SELECTION_GREEN,
+                PreviewMode::Scroll => GOLD,
+            }
         };
 
         // Split area for content and footer
@@ -289,7 +309,7 @@ impl TmuxPreviewPane {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
+                    .border_style(Style::default().fg(SUBDUED_BORDER)),
             )
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
@@ -305,7 +325,7 @@ impl TmuxPreviewPane {
                 Block::default()
                     .title("Session Preview")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
+                    .border_style(Style::default().fg(SUBDUED_BORDER)),
             )
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
