@@ -267,6 +267,15 @@ pub fn parse_source(path: &str, session_uuid: &str, content: &str) -> Vec<Provid
                         branch: branch.clone(),
                     });
                 }
+                // `session.shutdown` is terminal, and its `modelMetrics` is
+                // a cumulative per-session aggregate. Stop after the first
+                // shutdown that yields rows so a restarted / concatenated /
+                // corrupt log carrying a second shutdown can't double-count
+                // the session's tokens (the two would get distinct ids and
+                // both survive the fold).
+                if !calls.is_empty() {
+                    break;
+                }
             }
             _ => {}
         }
@@ -370,6 +379,18 @@ mod tests {
         let content = [start_line(), user_line(), tool_line()].join("\n") + "\n";
         let calls = parse_source("/p/u-1/events.jsonl", "u-1", &content);
         assert!(calls.is_empty(), "no shutdown → no real tokens → no rows");
+    }
+
+    #[test]
+    fn duplicate_shutdown_does_not_double_count() {
+        // A restarted / concatenated / corrupt log can carry two
+        // session.shutdown events. modelMetrics is cumulative, so each
+        // would mint a full set of rows (distinct ids → both survive the
+        // fold). We must emit only the first shutdown's rows.
+        let content = [start_line(), shutdown_line(), shutdown_line()].join("\n") + "\n";
+        let calls = parse_source("/p/u-1/events.jsonl", "u-1", &content);
+        assert_eq!(calls.len(), 1, "second shutdown must not double-count");
+        assert_eq!(calls[0].input_tokens, 1_278_715);
     }
 
     #[test]

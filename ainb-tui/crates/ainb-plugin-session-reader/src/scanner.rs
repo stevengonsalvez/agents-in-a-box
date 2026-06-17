@@ -391,10 +391,10 @@ pub fn scan_with_cache_and_progress(
     // root is None or unreadable — same semantics as the parse path.
     let claude_files = roots.claude_projects.as_deref().map_or(0, count_jsonl_in_two_level_tree);
     let codex_files = roots.codex_sessions.as_deref().map_or(0, count_jsonl_recursive);
-    // Copilot: `<root>/<uuid>/events.jsonl` — every `.jsonl` under the
-    // tree is exactly one session file, so the recursive count matches
-    // the parser's per-session `note_file` cadence.
-    let copilot_files = roots.copilot_sessions.as_deref().map_or(0, count_jsonl_recursive);
+    // Copilot: count exactly `<root>/<uuid>/events.jsonl` so the bar
+    // matches the parser's per-session `note_file` cadence and can't
+    // over-count on stray `.jsonl` elsewhere under the tree.
+    let copilot_files = roots.copilot_sessions.as_deref().map_or(0, count_copilot_events);
     let total = claude_files.saturating_add(codex_files).saturating_add(copilot_files);
     if total > 0 {
         // Saturate at u32::MAX — unlikely in practice (would require
@@ -640,6 +640,25 @@ fn count_jsonl_recursive(root: &Path) -> usize {
             } else if ft.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
+        }
+    }
+    count
+}
+
+/// Count Copilot session files: `<root>/<uuid>/events.jsonl`. One-level
+/// walk that counts exactly the files
+/// `copilot::parse_dir_cached_with_progress` will `note_file`, so the
+/// progress total stays honest (stray `.jsonl` elsewhere don't inflate it).
+#[cfg(not(target_arch = "wasm32"))]
+fn count_copilot_events(root: &Path) -> usize {
+    let mut count = 0usize;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if dir.is_dir() && dir.join("events.jsonl").is_file() {
+            count = count.saturating_add(1);
         }
     }
     count
@@ -1574,6 +1593,28 @@ mod tests {
         let missing = std::path::PathBuf::from("/nonexistent/path/to/nowhere");
         assert_eq!(count_jsonl_in_two_level_tree(&missing), 0);
         assert_eq!(count_jsonl_recursive(&missing), 0);
+        assert_eq!(count_copilot_events(&missing), 0);
+    }
+
+    #[test]
+    fn count_copilot_events_counts_only_uuid_events_files() {
+        // Copilot layout: <root>/<uuid>/events.jsonl
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for uuid in ["a-1", "b-2"] {
+            let d = root.join(uuid);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("events.jsonl"), b"{}").unwrap();
+            std::fs::write(d.join("workspace.yaml"), b"x").unwrap(); // ignored
+        }
+        // A uuid dir with no events.jsonl, and a stray nested .jsonl that
+        // the parser never visits — neither should be counted.
+        std::fs::create_dir_all(root.join("c-3")).unwrap();
+        std::fs::write(root.join("c-3").join("session.db"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("b-2/checkpoints")).unwrap();
+        std::fs::write(root.join("b-2/checkpoints/note.jsonl"), b"{}").unwrap();
+
+        assert_eq!(count_copilot_events(root), 2);
     }
 
     #[test]
