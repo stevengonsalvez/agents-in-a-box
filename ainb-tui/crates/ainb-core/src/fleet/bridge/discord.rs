@@ -40,6 +40,50 @@ const API_BASE: &str = "https://discord.com/api/v10";
 /// Discord message-content limit (`POST /channels/{id}/messages`). We split below it.
 const DISCORD_MAX_LENGTH: usize = 2000;
 
+/// Reconnect backoff bounds (M1). Discord's spec says wait 1–5s after an
+/// `INVALID_SESSION` before re-`IDENTIFY`ing; we apply the same floor to every
+/// non-clean reconnect and grow it exponentially on *consecutive* reconnects so
+/// a server that immediately drops us doesn't get hammered.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// Exponential reconnect backoff with reset-on-health (M1).
+///
+/// Each consecutive reconnect doubles the delay from [`RECONNECT_BACKOFF_MIN`]
+/// (capped at [`RECONNECT_BACKOFF_MAX`]); a connection that lived long enough to
+/// be considered healthy resets the streak so the next blip starts cheap again.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    consecutive: u32,
+}
+
+impl ReconnectBackoff {
+    const fn new() -> Self {
+        Self { consecutive: 0 }
+    }
+
+    /// The delay to wait before the next reconnect, advancing the streak.
+    fn next_delay(&mut self) -> Duration {
+        let delay = backoff_delay(self.consecutive);
+        self.consecutive = self.consecutive.saturating_add(1);
+        delay
+    }
+
+    /// A connection proved healthy — forget the streak.
+    const fn reset(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
+/// Pure backoff schedule: `min * 2^attempt`, saturating, clamped to `max`.
+fn backoff_delay(attempt: u32) -> Duration {
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    let millis = RECONNECT_BACKOFF_MIN.as_millis().saturating_mul(u128::from(factor));
+    let capped = millis.min(RECONNECT_BACKOFF_MAX.as_millis());
+    // `capped <= RECONNECT_BACKOFF_MAX` (60_000ms) so this never truncates.
+    Duration::from_millis(u64::try_from(capped).unwrap_or(u64::MAX))
+}
+
 /// Gateway opcodes we handle (subset of the documented set).
 mod op {
     pub const DISPATCH: u64 = 0;
@@ -81,19 +125,26 @@ pub async fn run<T: FleetTransport + 'static>(
         "ainb phone bridge: Discord channel online (gateway)"
     );
 
+    let mut backoff = ReconnectBackoff::new();
     loop {
-        match connect_and_serve(&client, &cfg, transport).await {
+        match connect_and_serve(&client, &cfg, transport, &mut backoff).await {
             Ok(()) => tracing::info!("Discord gateway closed; reconnecting"),
             Err(e) => {
                 // Build the diagnostic from the error's text, then scrub any
                 // token-shaped substring so a Bot token can never leak into logs.
                 tracing::warn!(
                     error = %scrub_token(&e.to_string()),
-                    "Discord gateway error; reconnecting in 5s"
+                    "Discord gateway error; reconnecting"
                 );
-                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
+        // M1: never reconnect with zero delay — a server that drops us
+        // immediately (clean op-7/op-9 close OR an error) would otherwise spin a
+        // hot reconnect loop. The streak is reset inside `connect_and_serve` once
+        // a connection proves healthy.
+        let delay = backoff.next_delay();
+        tracing::debug!(?delay, "Discord reconnect backoff");
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -103,6 +154,7 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
     client: &reqwest::Client,
     cfg: &DiscordConfig,
     transport: &'static T,
+    backoff: &mut ReconnectBackoff,
 ) -> Result<()> {
     let (ws, _resp) = tokio_tungstenite::connect_async(GATEWAY_URL)
         .await
@@ -177,7 +229,12 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
                         let beat = json!({ "op": op::HEARTBEAT, "d": d }).to_string();
                         write.send(Message::Text(beat)).await.ok();
                     }
-                    op::HEARTBEAT_ACK => tracing::trace!("Discord heartbeat ack"),
+                    op::HEARTBEAT_ACK => {
+                        tracing::trace!("Discord heartbeat ack");
+                        // M1: a two-way-confirmed connection is healthy — reset
+                        // the reconnect streak so the next blip starts cheap.
+                        backoff.reset();
+                    }
                     op::RECONNECT => {
                         tracing::info!("Discord requested reconnect");
                         break;
@@ -575,6 +632,35 @@ mod tests {
         let t = FakeTransport::new(vec![], Some("x".into()));
         let out = relay(&t, &relay_params(), "hello").await;
         assert_eq!(out, "No running ainb sessions to relay to.");
+    }
+
+    // ── M1: reconnect backoff ────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_delay_grows_exponentially_and_caps() {
+        // min * 2^attempt, clamped to RECONNECT_BACKOFF_MAX (60s).
+        assert_eq!(backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(backoff_delay(5), Duration::from_secs(32));
+        // 2^6 = 64s > cap → clamped to 60s.
+        assert_eq!(backoff_delay(6), RECONNECT_BACKOFF_MAX);
+        // Absurd attempt counts saturate, never panic or wrap.
+        assert_eq!(backoff_delay(64), RECONNECT_BACKOFF_MAX);
+        assert_eq!(backoff_delay(u32::MAX), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn consecutive_reconnects_increase_delay_then_reset_when_healthy() {
+        let mut b = ReconnectBackoff::new();
+        // First reconnect is never zero (fixes the zero-backoff hammer).
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+        assert!(b.next_delay() >= Duration::from_secs(1));
+        let third = b.next_delay();
+        assert_eq!(third, Duration::from_secs(4));
+        // A healthy (ACKed) connection resets the streak → next blip starts cheap.
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
     }
 
     // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
