@@ -1572,13 +1572,65 @@ def record_drain_chunk(prep: Prep, *, transcript_id: str, learning_ids: list[str
     if not chunk_hash:
         return False
     try:
-        from reflect_db import record_chunk_with_learnings
+        from reflect_db import record_chunk_with_learnings, record_transcript
+        record_transcript(transcript_id)
         record_chunk_with_learnings(
             transcript_id, chunk_hash, learning_ids, slice_text=prep.slice_path or ""
         )
         return True
     except Exception:
         return False
+
+
+def record_chunk_for_transcript(transcript: str | Path) -> dict:
+    """S8 drain wiring: populate the (transcript -> chunk -> learnings) grouping
+    for a transcript that was just drained, WITHOUT needing the LLM to hand back
+    the learning ids.
+
+    The drain runs ``claude -p /reflect <transcript>`` headlessly; the shell
+    never gets a structured list of the learnings the skill wrote. But every
+    learning is written with ``content_hash`` == the slice ``signal_hash`` (the
+    S7 dedup contract), so we can recompute that hash deterministically from the
+    transcript (the same ``detect_signals`` + ``_signal_set_hash`` ``prepare``
+    uses, no LLM) and look the learnings up by it. Idempotent and best-effort —
+    the drain calls this after a successful reflect run, guarded so it can never
+    fail the drain.
+
+    Returns a small summary dict (``recorded``, ``chunk_hash``, ``learnings``).
+    """
+    p = Path(transcript)
+    if not p.exists():
+        return {"recorded": False, "reason": "transcript-missing"}
+    if detect_signals is None:
+        return {"recorded": False, "reason": "no-detector"}
+    dialogue = reflect_gate.extract_dialogue(p)
+    if not (dialogue or "").strip():
+        return {"recorded": False, "reason": "empty-dialogue"}
+    signal_hash = _signal_set_hash(detect_signals(dialogue))
+    if not signal_hash:
+        return {"recorded": False, "reason": "no-signal-hash"}
+    try:
+        from reflect_db import (
+            get_learnings_by_content_hash,
+            record_chunk_with_learnings,
+            record_transcript,
+        )
+        ids = [
+            str(lrn.get("id"))
+            for lrn in get_learnings_by_content_hash(signal_hash)
+            if lrn.get("id")
+        ]
+        transcript_id = str(p)
+        record_transcript(transcript_id)
+        record_chunk_with_learnings(transcript_id, signal_hash, ids)
+        return {
+            "recorded": True,
+            "transcript": transcript_id,
+            "chunk_hash": signal_hash,
+            "learnings": len(ids),
+        }
+    except Exception as exc:  # pragma: no cover - best-effort, never raises
+        return {"recorded": False, "reason": f"db-error: {exc}"}
 
 
 def main() -> None:
@@ -1614,7 +1666,18 @@ def main() -> None:
         "--scope", default=_OBSERVATION_SCOPE_DEFAULT,
         help="scope new observations land in when the action omits one",
     )
+    rc = sub.add_parser(
+        "record-chunk",
+        help="S8: persist the (transcript -> chunk -> learnings) grouping for a "
+             "drained transcript (derives learnings via the slice content hash).",
+    )
+    rc.add_argument("--transcript", required=True, help="the drained transcript path")
     args = ap.parse_args()
+
+    if args.cmd == "record-chunk":
+        summary = record_chunk_for_transcript(args.transcript)
+        print(json.dumps(summary))
+        sys.exit(0 if summary.get("recorded") else 1)
 
     if args.cmd == "prepare":
         prep = prepare(args.transcript, context_lines=args.context, out_path=args.out)
