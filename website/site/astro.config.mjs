@@ -84,6 +84,19 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Skill manager',
+          items: [
+            { label: 'Guide', slug: 'skill-manager/guide' },
+            { label: 'Discovery & import', slug: 'skill-manager/discovery' },
+            { label: 'Catalog browse', slug: 'skill-manager/browse' },
+            { label: 'Sync', slug: 'skill-manager/sync' },
+            { label: 'Drift check', slug: 'skill-manager/check' },
+            { label: 'Usage tracking', slug: 'skill-manager/usage' },
+            { label: 'Promote', slug: 'skill-manager/promote' },
+            { label: 'Sandbox testing', slug: 'skill-manager/sandbox-testing' },
+          ],
+        },
+        {
           label: 'Toolkit',
           items: [
             { label: 'Overview', slug: 'toolkit/overview' },

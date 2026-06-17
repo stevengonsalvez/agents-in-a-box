@@ -12,6 +12,13 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-skill-core",
+    "crates/ainb-fetch",
+    "crates/ainb-adapters-source",
+    "crates/ainb-adapters-tool",
+    "crates/ainb-diff",
+    "crates/ainb-cli",
+    "crates/ainb-usage",
     "crates/ainb-plugin-witr",
     "crates/ainb-plugin-abtop",
     "crates/ainb-hangar-core",
@@ -61,6 +68,7 @@ git2 = { version = "0.18", features = ["vendored-openssl"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 toml = "0.8"
 toml_edit = "0.22"
 

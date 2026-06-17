@@ -262,11 +262,32 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      # Publish the curated skill catalog index as a release asset. The
+      # AinbCuratedCatalogBackend fetches `catalog-index.json` from
+      # `releases/<tag>/download/` (or `releases/latest/download/`); the owned
+      # install_uris inside it pin THIS tag, so a browse and its installs
+      # always agree on bytes. Generating it here (from the tagged tree)
+      # writes it into artifacts/, which the `files` glob below attaches.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate curated catalog index
+        working-directory: ${{ env.WORKING_DIR }}
+        # The xtask reads NO env vars — these only feed the shell-quoted flag
+        # values below. Passing the workflow inputs via `env:` (not inline
+        # `${{ }}` in `run:`) is the injection-safe pattern for untrusted input.
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          OUT_DIR: ${{ github.workspace }}/artifacts
+        run: cargo run -p xtask -- gen-catalog-index --release-tag "v${RELEASE_VERSION}" --out "${OUT_DIR}/catalog-index.json"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

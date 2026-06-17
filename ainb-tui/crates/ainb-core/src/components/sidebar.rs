@@ -31,22 +31,23 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    Agents,    // Agent selection
-    Catalog,   // Browse catalog/marketplace
-    Config,    // Settings & presets
-    Sessions,  // Session manager
-    Inbox,     // ainb-hooks notification inbox
-    Recovery,  // Recover orphaned sessions
-    Mcp,       // Shared MCP pool overlay
-    Logs,      // Log history viewer
-    Stats,     // Analytics & usage
-    Witr,      // Process causality (witr plugin)
-    Abtop,     // top-for-agents — live agent monitor (abtop plugin)
-    Skills,    // Browse per-agent skills
-    Memory,    // Knowledge-base browser (learnings plugin)
-    Changelog, // Version history
-    Setup,     // Setup wizard & factory reset
-    Help,      // Docs & guides
+    Agents,       // Agent selection
+    Catalog,      // Browse catalog/marketplace
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Inbox,        // ainb-hooks notification inbox
+    Recovery,     // Recover orphaned sessions
+    Mcp,          // Shared MCP pool overlay
+    Logs,         // Log history viewer
+    Stats,        // Analytics & usage
+    Witr,         // Process causality (witr plugin)
+    Abtop,        // top-for-agents — live agent monitor (abtop plugin)
+    Skills,       // Browse per-agent skills
+    SkillManager, // Skill / unit manager (spec §10.1)
+    Memory,       // Knowledge-base browser (learnings plugin)
+    Changelog,    // Version history
+    Setup,        // Setup wizard & factory reset
+    Help,         // Docs & guides
 }
 
 impl SidebarItem {
@@ -65,6 +66,7 @@ impl SidebarItem {
             Self::Witr => "🌳",
             Self::Abtop => "📡",
             Self::Skills => "🧠",
+            Self::SkillManager => "🧰",
             Self::Memory => "📚",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
@@ -87,6 +89,7 @@ impl SidebarItem {
             Self::Witr => "Witr",
             Self::Abtop => "abtop",
             Self::Skills => "Skills",
+            Self::SkillManager => "Skills (manager)",
             Self::Memory => "Memory",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
@@ -109,6 +112,7 @@ impl SidebarItem {
             Self::Witr => "Process Causality",
             Self::Abtop => "top-for-agents",
             Self::Skills => "Per-Agent Skills",
+            Self::SkillManager => "Install / sync / doctor",
             Self::Memory => "Knowledge & Recall",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
@@ -131,6 +135,8 @@ impl SidebarItem {
             Self::Witr => "w",
             Self::Abtop => "t",
             Self::Skills => "k",
+            // `m` is the Memory browser; SkillManager moved to `z` on merge.
+            Self::SkillManager => "z",
             Self::Memory => "m",
             Self::Changelog => "v",
             Self::Setup => "S",
@@ -153,6 +159,7 @@ impl SidebarItem {
             Self::Witr,
             Self::Abtop,
             Self::Skills,
+            Self::SkillManager,
             Self::Memory,
             Self::Changelog,
             Self::Setup,

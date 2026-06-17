@@ -4,12 +4,13 @@ on:
   push:
     paths:
       - 'toolkit/**'
+      - 'ainb-tui/**'
+      - '.github/workflows/toolkit-validation.yml'
   pull_request:
     paths:
       - 'toolkit/**'
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+      - 'ainb-tui/**'
+      - '.github/workflows/toolkit-validation.yml'
 
 jobs:
   validate-packages:
@@ -18,16 +19,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: |
-          cd toolkit
-          npm install
 
       - name: Validate package structure
         run: |
@@ -60,98 +51,87 @@ jobs:
 
           echo "✓ Package structure validated"
 
-  test-installations:
-    name: Test Tool Installations
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        tool: [claude-code-4.5, codex, gemini]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: |
-          cd toolkit
-          npm install
-
-      - name: Test ${{ matrix.tool }} installation
-        run: |
-          cd toolkit
-          FAKE_HOME="/tmp/test-${{ matrix.tool }}"
-          mkdir -p "$FAKE_HOME"
-
-          echo "Installing ${{ matrix.tool }}..."
-          node bootstrap.js --tool=${{ matrix.tool }} --homeDir="$FAKE_HOME"
-
-          # Verify installation
-          TARGET_DIR="$FAKE_HOME/.${{ matrix.tool == 'claude-code-4.5' && 'claude' || matrix.tool }}"
-
-          if [ ! -d "$TARGET_DIR" ]; then
-            echo "ERROR: Installation directory not created at $TARGET_DIR"
-            exit 1
-          fi
-
-          # Count installed files
-          FILE_COUNT=$(find "$TARGET_DIR" -type f | wc -l)
-          echo "Installed $FILE_COUNT files to $TARGET_DIR"
-
-          # Minimum file count check
-          [ "$FILE_COUNT" -lt 100 ] && echo "ERROR: Too few files installed" && exit 1
-
-          # skills/ is required for every supported tool. Commands have
-          # been consolidated into skills, so no separate commands/ check.
-          [ ! -d "$TARGET_DIR/skills" ] && echo "ERROR: skills/ missing" && exit 1
-
-          # agents/ is only required by claude-code-4.5. Codex, Gemini, and
-          # Copilot represent agents via a top-level AGENTS.md instead.
-          if [ "${{ matrix.tool }}" = "claude-code-4.5" ]; then
-            [ ! -d "$TARGET_DIR/agents" ] && echo "ERROR: agents/ missing" && exit 1
-          fi
-
-          echo "✓ ${{ matrix.tool }} installation validated"
-
-  check-template-substitution:
-    name: Check Template Substitution
+  test-ainb-installations:
+    name: Test ainb installations (replaces bootstrap.js parity tests)
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo state
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: '20'
+          workspaces: ainb-tui
 
-      - name: Install dependencies
+      - name: Install tmux (required by TUI tripwires)
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Run skill-manager unit + integration test suite
         run: |
-          cd toolkit
-          npm install
+          cd ainb-tui
+          cargo test --workspace --no-fail-fast \
+            -p ainb-skill-core \
+            -p ainb-fetch \
+            -p ainb-adapters-source \
+            -p ainb-adapters-tool \
+            -p ainb-diff \
+            -p ainb-cli \
+            -p ainb-usage
 
-      - name: Test template substitution
+      - name: Run live-binary tripwires (Layer 4)
         run: |
-          cd toolkit
-          FAKE_HOME="/tmp/test-templates"
-          mkdir -p "$FAKE_HOME"
+          cd ainb-tui
+          # Release-build the binary so tripwires get a fast spawn time.
+          cargo build --release -p ainb
 
-          # Install claude-code-4.5 into a fake $HOME so we can grep the result.
-          node bootstrap.js --tool=claude-code-4.5 --homeDir="$FAKE_HOME"
+          # CLI tripwires run without tmux; TUI tripwires self-skip when
+          # tmux is missing (sudo-installed step above ensures it's
+          # present on this runner). Both groups must be green.
+          #
+          # Naming convention: `tripwire_<area>_<feature>_*` where area is
+          # one of {cli, core, plugin}. `tripwire_helpers.rs` is the shared
+          # module (not a test) and is excluded by the prefix scheme.
+          cargo test -p ainb --release \
+              --test 'tripwire_cli_*' \
+              --test 'tripwire_core_skill_manager_*' \
+              --test 'tripwire_core_home_tile_lists_skill_manager'
 
-          # Check that {{TOOL_DIR}} and {{HOME_TOOL_DIR}} are replaced
-          UNSUBSTITUTED=$(grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" 2>/dev/null | wc -l)
+      - name: Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME
+        run: |
+          cd ainb-tui
+          BIN="$PWD/target/release/ainb"
 
-          if [ "$UNSUBSTITUTED" -gt 0 ]; then
-            echo "ERROR: Found $UNSUBSTITUTED unsubstituted template variables"
-            grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" | head -10
-            exit 1
-          fi
+          # Pretend HOME is a clean tempdir so the real-home tier
+          # writes into it instead of the runner's actual home.
+          export HOME="$RUNNER_TEMP/fake-home"
+          export AINB_HOME="$RUNNER_TEMP/ainb-home"
+          export AINB_USE_REAL_HOMES=1
+          mkdir -p "$HOME" "$AINB_HOME"
 
-          echo "✓ All template variables substituted correctly"
+          # Build a local fixture source.
+          mkdir -p "$RUNNER_TEMP/fixture/skills/commit"
+          cat > "$RUNNER_TEMP/fixture/skills/commit/SKILL.md" <<'SKILL'
+          ---
+          name: commit
+          description: commit-message skill (CI fixture)
+          ---
+          body
+          SKILL
+
+          "$BIN" source add "local:$RUNNER_TEMP/fixture" --name fixture
+          "$BIN" skill install "local:$RUNNER_TEMP/fixture@main/skills/commit" \
+              --targets claude --yes
+
+          # Verify the file landed in the real-home path.
+          test -f "$HOME/.claude/skills/commit/SKILL.md" \
+              || (echo "ERROR: missing deployed file"; exit 1)
+          echo "✓ ainb skill install reaches HOME/.claude when AINB_USE_REAL_HOMES=1"
+
+          # Doctor against the just-installed state.
+          "$BIN" doctor --offline
 
   check-claude-code-thin-layer:
     name: Verify claude-code-4.5 is thin layer

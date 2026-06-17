@@ -572,6 +572,17 @@ impl Screen for SkillsScreen {
 }
 
 #[derive(Default)]
+pub struct SkillManagerScreen;
+impl Screen for SkillManagerScreen {
+    fn id(&self) -> &str {
+        ids::SKILL_MANAGER
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
+    }
+}
+
+#[derive(Default)]
 pub struct ChangelogScreen;
 impl Screen for ChangelogScreen {
     fn id(&self) -> &str {
@@ -905,6 +916,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(PluginScreen::new(ids::ABTOP)));
     registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
+    registry.register(Box::new(SkillManagerScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
     registry.register(Box::new(SessionRecoveryScreen::default()));
     registry.register(Box::new(OnboardingScreen::new()));
@@ -968,6 +980,7 @@ mod tests {
             ids::ABTOP,
             ids::HANGAR,
             ids::SKILLS,
+            ids::SKILL_MANAGER,
             ids::GIT_VIEW,
             ids::SESSION_RECOVERY,
             ids::ONBOARDING,

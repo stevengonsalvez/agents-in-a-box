@@ -993,14 +993,15 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Agents,   // Agent selection
-    Catalog,  // Browse catalog/marketplace
-    Config,   // Settings & presets
-    Sessions, // Session manager
-    Recovery, // Recover orphaned sessions
-    Mcp,      // Shared MCP pool overlay
-    Stats,    // Analytics & usage
-    Help,     // Docs & guides
+    Agents,       // Agent selection
+    Catalog,      // Browse catalog/marketplace
+    SkillManager, // Install / sync / doctor (spec §10.1)
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Recovery,     // Recover orphaned sessions
+    Mcp,          // Shared MCP pool overlay
+    Stats,        // Analytics & usage
+    Help,         // Docs & guides
 }
 
 impl HomeTile {
@@ -1008,6 +1009,7 @@ impl HomeTile {
         vec![
             HomeTile::Agents,
             HomeTile::Catalog,
+            HomeTile::SkillManager,
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
@@ -1021,6 +1023,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "Agents",
             HomeTile::Catalog => "Catalog",
+            HomeTile::SkillManager => "Skills (manager)",
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
@@ -1034,6 +1037,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "Select & Configure",
             HomeTile::Catalog => "Browse & Bootstrap",
+            HomeTile::SkillManager => "Install / sync / doctor (Z)",
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
@@ -1047,6 +1051,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "🤖",
             HomeTile::Catalog => "📦",
+            HomeTile::SkillManager => "🧰",
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
@@ -3060,6 +3065,16 @@ pub struct AppState {
     /// Present only while a scan is in flight; `tick()` drains it.
     pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
 
+    // Skill-manager screen state (spec §10.1)
+    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
+    /// Background drift-poll receiver. Present only while a drift scan
+    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
+    /// drains it into `skill_manager_state.drift_cache`.
+    pub drift_load_receiver: Option<
+        mpsc::UnboundedReceiver<
+            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
+        >,
+    >,
     /// Background base-branch refresh for the Configure picker. The fetch +
     /// re-list runs on `spawn_blocking`; the result lands here and is applied
     /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
@@ -3510,6 +3525,10 @@ impl Default for AppState {
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
 
+            // Skill-manager screen state (spec §10.1)
+            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
+            ),
+            drift_load_receiver: None,
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
@@ -4545,6 +4564,72 @@ impl AppState {
                     self.add_warning_notification(
                         "Failed to parse skills; keeping cached data".to_string(),
                     );
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Kick off a background drift scan against `home` (the ainb data
+    /// dir holding `manifest.yaml` + `lock.yaml`), using `backend` as
+    /// the DriftBackend. Skipped if a scan is already in flight
+    /// (`drift_load_receiver` is `Some`). Returns true if a new scan
+    /// was spawned, false if coalesced.
+    ///
+    /// Called by the `GoToSkillManager` handler on every screen-open
+    /// so out-of-band edits to the manifest / lockfile show up the
+    /// next tick. Tests inject a `MockBackend`; the production
+    /// dispatch uses `GitLsRemoteBackend`.
+    pub fn start_background_drift_load(
+        &mut self,
+        home: &std::path::Path,
+        backend: std::sync::Arc<dyn ainb_skill_core::drift::DriftBackend + Send + Sync>,
+    ) -> bool {
+        if self.drift_load_receiver.is_some() {
+            return false;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.drift_load_receiver = Some(rx);
+        let home = home.to_path_buf();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                use ainb_skill_core::lockfile::Lockfile;
+                use ainb_skill_core::manifest::Manifest;
+                use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
+                let manifest = Manifest::load_from(&manifest_path_in(&home)).unwrap_or_default();
+                let lockfile = Lockfile::load_from(&lockfile_path_in(&home)).unwrap_or_default();
+                ainb_skill_core::drift::detect_all(&manifest, &lockfile, backend.as_ref())
+            })
+            .await;
+            match result {
+                Ok(map) => {
+                    let _ = tx.send(map);
+                }
+                Err(e) => {
+                    warn!("Drift detect task failed: {e}");
+                }
+            }
+        });
+        true
+    }
+
+    /// Poll the background drift scan. Returns true if results were
+    /// applied this tick. Drains a single message — backend returns
+    /// the whole map in one go so a single drain is enough.
+    pub fn check_drift_load_complete(&mut self) -> bool {
+        if let Some(ref mut receiver) = self.drift_load_receiver {
+            match receiver.try_recv() {
+                Ok(map) => {
+                    self.skill_manager_state.drift_cache = map;
+                    self.drift_load_receiver = None;
+                    true
+                }
+                Err(mpsc::error::TryRecvError::Empty) => false,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.drift_load_receiver = None;
+                    warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
             }
@@ -10555,6 +10640,11 @@ impl App {
             self.state.ui_needs_refresh = true;
         }
 
+        // Check for completed background drift scan
+        // (skill-manager v1.2 bead v12.E.4).
+        if self.state.check_drift_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;

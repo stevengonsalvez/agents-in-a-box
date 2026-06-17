@@ -34,6 +34,7 @@ pub mod session_list;
 pub mod session_recovery;
 pub mod setup_menu;
 pub mod sidebar;
+pub mod skill_manager_screen;
 pub mod skills;
 pub mod slash;
 pub mod tmux_preview;

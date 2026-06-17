@@ -90,6 +90,9 @@ jobs:
       - name: Tripwire — Inbox screen open + render
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
+      - name: Sandbox script safety guards (rm -rf belts)
+        run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
   # Hangar control-plane end-to-end tripwires (P0-P9)

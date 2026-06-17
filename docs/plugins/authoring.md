@@ -297,7 +297,9 @@ The CTS runs your built binary through 14 host-impersonation axes. Tests sit in 
 
 Tripwire tests in `crates/ainb-core/tests/tripwire_*.rs` drive the real `ainb tui` binary in detached tmux, send keystrokes, capture the pane, and assert on rendered output. They're the only tests that catch "plugin compiled but doesn't render". See `.claude/skills/tmux-ui-tripwire/SKILL.md` for the pattern.
 
-Minimum coverage: one tripwire that proves your plugin's screen renders something specific after a keystroke. See `tripwire_burndown_keys.rs` for a copy-paste template.
+Naming convention is `tripwire_<area>_<feature>_*.rs` where area is one of `{cli, core, plugin}`. Plugin tripwires further qualify by plugin name (`tripwire_plugin_burndown_*`, `tripwire_plugin_runtime_*`). `tripwire_helpers.rs` is the shared module (not a test).
+
+Minimum coverage: one tripwire that proves your plugin's screen renders something specific after a keystroke. See `tripwire_plugin_burndown_keys.rs` for a copy-paste template.
 
 ## Distribution
 
