@@ -21,9 +21,8 @@ use ratatui::{
 use std::collections::BTreeMap;
 
 use ainb_cli::discovery::{
-    class_a,
-    class_c,
-    provenance::{parse_external_dependencies, parse_installed_plugins, ProvenanceSources},
+    class_a, class_c,
+    provenance::{ProvenanceSources, parse_external_dependencies, parse_installed_plugins},
     reconcile::{self, WalkerOutput},
 };
 use ainb_skill_core::drift::DriftStatus;
@@ -362,7 +361,9 @@ impl BrowseViewState {
     /// and that a second Enter runs it. ainb only ever runs commands from the
     /// vetted curated index, and never without this explicit confirm.
     pub fn set_status_confirm(&mut self, cmd: &str) {
-        self.status = Some(format!("⚠ runs a shell command — Enter again to run: {cmd}"));
+        self.status = Some(format!(
+            "⚠ runs a shell command — Enter again to run: {cmd}"
+        ));
     }
 }
 
@@ -397,7 +398,7 @@ impl LibraryViewState {
     /// `ainb_home`. Missing / malformed file yields an empty view (the
     /// overlay renders its empty-state hint).
     pub fn load_from_disk(ainb_home: &Path) -> Self {
-        use ainb_skill_core::library::{library_path_in, Library};
+        use ainb_skill_core::library::{Library, library_path_in};
         let lib = Library::load_from(&library_path_in(ainb_home)).unwrap_or_default();
         let rows = lib
             .owned
@@ -468,7 +469,10 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(kind: InputKind) -> Self {
-        Self { kind, buffer: String::new() }
+        Self {
+            kind,
+            buffer: String::new(),
+        }
     }
     /// Prompt label shown in the overlay border.
     pub fn title(&self) -> &'static str {
@@ -588,9 +592,7 @@ fn render_library_view(frame: &mut Frame, area: Rect, library: &LibraryViewState
     // bounded by the available height.
     let detail_lines: u16 = if library.show_detail { 7 } else { 0 };
     let list_lines = (library.rows.len() as u16).max(1);
-    let height = (list_lines + detail_lines + 4)
-        .min(area.height.saturating_sub(2))
-        .max(8);
+    let height = (list_lines + detail_lines + 4).min(area.height.saturating_sub(2)).max(8);
     let rect = centered_rect(area, width, height);
 
     let block = Block::default()
@@ -680,9 +682,7 @@ fn render_library_view(frame: &mut Frame, area: Rect, library: &LibraryViewState
 fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
     let width = area.width.saturating_sub(6).clamp(50, 110);
     let list_lines = (browse.results.len() as u16).max(1);
-    let height = (list_lines + 8)
-        .min(area.height.saturating_sub(2))
-        .max(10);
+    let height = (list_lines + 8).min(area.height.saturating_sub(2)).max(10);
     let rect = centered_rect(area, width, height);
 
     let block = Block::default()
@@ -697,9 +697,16 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Query input line. A caret marks Query mode.
-    let caret = if browse.mode == BrowseMode::Query { "_" } else { "" };
+    let caret = if browse.mode == BrowseMode::Query {
+        "_"
+    } else {
+        ""
+    };
     lines.push(Line::from(vec![
-        Span::styled(" Query: ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " Query: ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("{}{caret}", browse.query),
             Style::default().fg(SOFT_WHITE),
@@ -872,9 +879,7 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
         let all_active = data.source_filter.is_none();
         let all_marker = if all_active { "● " } else { "  " };
         let all_style = if all_active {
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(MUTED_GRAY)
         };
@@ -917,9 +922,7 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
             lines.push(Line::from(vec![
                 Span::styled(
                     marker,
-                    Style::default()
-                        .fg(SELECTION_GREEN)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(glyph, glyph_style),
                 name,
@@ -1055,10 +1058,7 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     // Map the absolute `selected` index to its position within the
     // visible (filtered) slice so the highlight tracks the cursor.
     let mut table_state = TableState::default();
-    let highlight_pos = visible
-        .iter()
-        .position(|&i| i == data.selected)
-        .unwrap_or(0);
+    let highlight_pos = visible.iter().position(|&i| i == data.selected).unwrap_or(0);
     table_state.select(Some(highlight_pos));
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -1226,10 +1226,7 @@ fn render_discovery_banner(
     body_lines.push(banner_row("Orphan units:", counts.orphan_units_total));
     if detailed {
         for (tool, n) in &counts.orphan_units_per_tool {
-            body_lines.push(banner_row_indent(
-                &format!("~/.{tool}/skills/"),
-                *n,
-            ));
+            body_lines.push(banner_row_indent(&format!("~/.{tool}/skills/"), *n));
         }
     }
     body_lines.push(Line::from(""));
@@ -1262,10 +1259,7 @@ fn render_discovery_banner(
 
 fn banner_row(label: &str, n: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!(" {label:<36}"),
-            Style::default().fg(SOFT_WHITE),
-        ),
+        Span::styled(format!(" {label:<36}"), Style::default().fg(SOFT_WHITE)),
         Span::styled(
             format!("{n:>3} "),
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
@@ -1275,14 +1269,8 @@ fn banner_row(label: &str, n: usize) -> Line<'static> {
 
 fn banner_row_indent(label: &str, n: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("   {label:<34}"),
-            Style::default().fg(MUTED_GRAY),
-        ),
-        Span::styled(
-            format!("{n:>3} "),
-            Style::default().fg(SOFT_WHITE),
-        ),
+        Span::styled(format!("   {label:<34}"), Style::default().fg(MUTED_GRAY)),
+        Span::styled(format!("{n:>3} "), Style::default().fg(SOFT_WHITE)),
     ])
 }
 
@@ -1303,7 +1291,12 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let h = height.min(area.height);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1509,9 +1502,7 @@ pub fn apply_discovery_import(
     if let Err(e) = manifest.save_to(&manifest_path) {
         // Re-stash the walker output so the user can retry.
         data.walker_cache = Some(walker);
-        return Err(std::io::Error::other(format!(
-            "manifest save failed: {e}"
-        )));
+        return Err(std::io::Error::other(format!("manifest save failed: {e}")));
     }
 
     refresh_view_model_from_manifest(data, &manifest);
@@ -1522,10 +1513,7 @@ pub fn apply_discovery_import(
 /// Apply `[s] skip` — writes a marker file under `ainb_home` so
 /// subsequent SkillManager opens do not re-show the banner, and
 /// flips the in-memory state to `Hidden`.
-pub fn apply_discovery_skip(
-    data: &mut SkillsScreenData,
-    ainb_home: &Path,
-) -> std::io::Result<()> {
+pub fn apply_discovery_skip(data: &mut SkillsScreenData, ainb_home: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(ainb_home)?;
     std::fs::write(ainb_home.join(SKIP_MARKER_FILE), b"")?;
     data.banner = DiscoveryBannerState::Hidden;
@@ -1549,10 +1537,7 @@ pub fn apply_discovery_skip(
 /// Persists immediately to `<ainb_home>/manifest.yaml` and refreshes
 /// the view-model so subsequent renders show the flipped state. Pure
 /// w.r.t. disk except for that one manifest write.
-pub fn apply_conflict_flip(
-    data: &mut SkillsScreenData,
-    ainb_home: &Path,
-) -> std::io::Result<()> {
+pub fn apply_conflict_flip(data: &mut SkillsScreenData, ainb_home: &Path) -> std::io::Result<()> {
     let manifest_path = ainb_home.join("manifest.yaml");
     let mut manifest = match Manifest::load_from(&manifest_path) {
         Ok(m) => m,
@@ -1572,19 +1557,13 @@ pub fn apply_conflict_flip(
     let other_idx: Option<usize> = if manifest.units[sel].shadowed_by.is_some() {
         // Case A: selected is shadowed → peer is the unit pointed at
         // by selected.shadowed_by.
-        let target = manifest.units[sel]
-            .shadowed_by
-            .as_ref()
-            .map(|u| u.to_string());
+        let target = manifest.units[sel].shadowed_by.as_ref().map(|u| u.to_string());
         target.and_then(|t| manifest.units.iter().position(|u| u.uri == t))
     } else {
         // Case B: selected is active → peer is whichever unit has
         // shadowed_by pointing back at selected.uri.
         manifest.units.iter().enumerate().find_map(|(i, u)| {
-            u.shadowed_by
-                .as_ref()
-                .filter(|x| x.to_string() == sel_uri_str)
-                .map(|_| i)
+            u.shadowed_by.as_ref().filter(|x| x.to_string() == sel_uri_str).map(|_| i)
         })
     };
 
@@ -1833,14 +1812,12 @@ impl SkillsScreenData {
     /// Grow the Sources panel by `delta` columns, clamped to the legal
     /// range for `term_w`. Used by the `]` keybind.
     pub fn grow_sources(&mut self, delta: u16, term_w: u16) {
-        self.sources_width =
-            clamp_sources_width(self.sources_width.saturating_add(delta), term_w);
+        self.sources_width = clamp_sources_width(self.sources_width.saturating_add(delta), term_w);
     }
 
     /// Shrink the Sources panel by `delta` columns, clamped. Used by `[`.
     pub fn shrink_sources(&mut self, delta: u16, term_w: u16) {
-        self.sources_width =
-            clamp_sources_width(self.sources_width.saturating_sub(delta), term_w);
+        self.sources_width = clamp_sources_width(self.sources_width.saturating_sub(delta), term_w);
     }
 }
 
@@ -1865,10 +1842,7 @@ pub fn move_selection(data: &mut SkillsScreenData, home: &Path, dir: SelectionMo
     let vlast = visible.len() - 1;
     // Current cursor position within the visible slice (default to the
     // first visible row when the absolute `selected` is filtered out).
-    let cur_pos = visible
-        .iter()
-        .position(|&i| i == data.selected)
-        .unwrap_or(0);
+    let cur_pos = visible.iter().position(|&i| i == data.selected).unwrap_or(0);
     let new_pos = match dir {
         SelectionMove::Prev => {
             if cur_pos == 0 {
@@ -1905,20 +1879,14 @@ pub fn recompute_detail(data: &mut SkillsScreenData, home: &Path) {
 /// joining the manifest's URI with the lockfile's deployment record.
 /// Returns `None` when the units list is empty (the render path
 /// shows its "(select a unit to see details)" placeholder).
-fn compute_detail_for_selected(
-    data: &SkillsScreenData,
-    lockfile: &Lockfile,
-) -> Option<UnitDetail> {
+fn compute_detail_for_selected(data: &SkillsScreenData, lockfile: &Lockfile) -> Option<UnitDetail> {
     if data.units.is_empty() {
         return None;
     }
     let idx = data.selected.min(data.units.len().saturating_sub(1));
     let row = data.units.get(idx)?;
     let manifest_uri = manifest_uri_for_row(row);
-    let locked = lockfile
-        .units
-        .iter()
-        .find(|u| u.declared_uri == manifest_uri);
+    let locked = lockfile.units.iter().find(|u| u.declared_uri == manifest_uri);
     let deployed_paths = locked
         .map(|u| {
             u.deployed
@@ -2067,7 +2035,11 @@ mod tests {
         }
     }
 
-    fn mk_plugin(plugin: &str, marketplace: &str, unit_names: &[&str]) -> DiscoveredMarketplaceUnit {
+    fn mk_plugin(
+        plugin: &str,
+        marketplace: &str,
+        unit_names: &[&str],
+    ) -> DiscoveredMarketplaceUnit {
         DiscoveredMarketplaceUnit {
             plugin: plugin.to_string(),
             marketplace: marketplace.to_string(),
@@ -2119,8 +2091,8 @@ mod tests {
         let w = WalkerOutput {
             class_a: vec![mk_plugin("reflect", "official", &["commit"])],
             class_c: vec![
-                mk_orphan("claude", "commit"),  // collides → conflict
-                mk_orphan("codex", "commit"),   // different tool → not a conflict
+                mk_orphan("claude", "commit"), // collides → conflict
+                mk_orphan("codex", "commit"),  // different tool → not a conflict
             ],
         };
         let c = compute_counts(&w);
@@ -2313,9 +2285,7 @@ mod tests {
             orphan_units_per_tool: vec![("claude".to_string(), 6), ("codex".to_string(), 3)],
             conflicts: 0,
         });
-        terminal
-            .draw(|f| render(f, f.size(), &data))
-            .expect("render did not panic");
+        terminal.draw(|f| render(f, f.size(), &data)).expect("render did not panic");
     }
 
     #[test]
@@ -2350,8 +2320,14 @@ mod tests {
             joined.contains("Marketplace plugins:"),
             "mp row missing: {joined}"
         );
-        assert!(joined.contains("Orphan units:"), "orphan row missing: {joined}");
-        assert!(joined.contains("Conflicts"), "conflicts row missing: {joined}");
+        assert!(
+            joined.contains("Orphan units:"),
+            "orphan row missing: {joined}"
+        );
+        assert!(
+            joined.contains("Conflicts"),
+            "conflicts row missing: {joined}"
+        );
         assert!(joined.contains("[Enter]"), "help: Enter missing: {joined}");
         assert!(joined.contains("[d]"), "help: d missing: {joined}");
         assert!(joined.contains("[s]"), "help: s missing: {joined}");
@@ -2437,7 +2413,10 @@ mod tests {
         };
         let mut data = SkillsScreenData {
             sources: vec![
-                src("marketplace-beads-marketplace", "marketplace:beads-marketplace"),
+                src(
+                    "marketplace-beads-marketplace",
+                    "marketplace:beads-marketplace",
+                ),
                 src("local-claude-skills", "local:~/.claude/skills"),
             ],
             units: vec![
@@ -2563,7 +2542,10 @@ mod tests {
             "All sources affordance missing: {joined}"
         );
         // Both acme units visible; the beta unit is filtered out.
-        assert!(joined.contains("alpha"), "alpha (acme) should show: {joined}");
+        assert!(
+            joined.contains("alpha"),
+            "alpha (acme) should show: {joined}"
+        );
         assert!(
             joined.contains("charlie"),
             "charlie (acme) should show: {joined}"

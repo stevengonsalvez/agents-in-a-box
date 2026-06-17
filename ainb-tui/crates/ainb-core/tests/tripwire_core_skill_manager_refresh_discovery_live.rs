@@ -33,7 +33,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 /// Discovery skip-marker filename. MUST match
 /// `skill_manager_screen::SKIP_MARKER_FILE` — that constant is private
@@ -101,9 +101,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Quote a path for shell so spaces / special chars in the tempdir
@@ -139,8 +137,8 @@ fn pressing_m_clears_skip_marker_and_reshows_discovery_banner() {
     // skills / one marketplace plugin under the tool homes (walkers
     // find candidates). Full tier would write a non-empty manifest,
     // which `force_show_discovery_banner` rightly refuses to override.
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal)
-        .expect("sandbox minimal");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal).expect("sandbox minimal");
     seed_onboarding(&layout);
 
     // Plant the skip-marker so the banner is suppressed on first open
@@ -159,7 +157,13 @@ fn pressing_m_clears_skip_marker_and_reshows_discovery_banner() {
     assert!(status.success(), "tmux new-session failed");
 
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("tmux send-keys launch");
 

@@ -29,7 +29,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -90,9 +90,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Quote a path for shell so spaces / special chars in the tempdir
@@ -133,11 +131,7 @@ const SOURCES_PANEL_COLS: usize = 32;
 fn units_region(full: &str) -> String {
     full.lines()
         .take(22)
-        .map(|line| {
-            line.chars()
-                .skip(SOURCES_PANEL_COLS)
-                .collect::<String>()
-        })
+        .map(|line| line.chars().skip(SOURCES_PANEL_COLS).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -154,16 +148,12 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
     // external-dependencies.yaml that names it. It also seeds a
     // non-empty manifest, so the banner is suppressed on open — we
     // force discovery with a second [m] below.
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full)
-        .expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
 
     // Sanity: the fixture really seeded the inputs the matcher needs.
     assert!(
-        layout
-            .claude_home
-            .join("skills/fireworks-tech-graph/SKILL.md")
-            .is_file(),
+        layout.claude_home.join("skills/fireworks-tech-graph/SKILL.md").is_file(),
         "fixture drift: fireworks-tech-graph orphan not seeded"
     );
     assert!(
@@ -181,7 +171,13 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
     assert!(status.success(), "tmux new-session failed");
 
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("tmux send-keys launch");
 
@@ -224,9 +220,7 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
     {
         let dump = capture_pane(&session);
         kill_session(&session);
-        panic!(
-            "discovery banner did not appear after forced [m] refresh.\nlast capture:\n{dump}"
-        );
+        panic!("discovery banner did not appear after forced [m] refresh.\nlast capture:\n{dump}");
     }
 
     // [Enter] → import all (provenance-aware reconcile writes the
@@ -266,9 +260,8 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
     // that would mean the provenance matcher failed to resolve the
     // external clone to its upstream. Check no Units line carries BOTH
     // `fireworks` and `local:`.
-    let local_fireworks_line = region
-        .lines()
-        .any(|line| line.contains("fireworks") && line.contains("local:"));
+    let local_fireworks_line =
+        region.lines().any(|line| line.contains("fireworks") && line.contains("local:"));
     assert!(
         !local_fireworks_line,
         "fireworks unit still shows a local: source in the Units table — \

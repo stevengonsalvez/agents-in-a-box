@@ -25,20 +25,21 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_source::pick_adapter;
 use ainb_adapters_tool::{
-    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters,
-    install_root_for, plan::{InstallPlan, PlanOp}, read_root_for,
+    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, install_root_for,
+    plan::{InstallPlan, PlanOp},
+    read_root_for,
 };
-use ainb_skill_core::catalog::{rank_by_stars, CatalogBackend};
+use ainb_skill_core::catalog::{CatalogBackend, rank_by_stars};
 use ainb_skill_core::drift::{
-    detect_all as drift_detect_all, DriftBackend, DriftStatus, GitLsRemoteBackend,
+    DriftBackend, DriftStatus, GitLsRemoteBackend, detect_all as drift_detect_all,
 };
 use ainb_skill_core::lockfile::{LockedSource, LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::mapping::{resolve_pair, strip_tool_dotdir};
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::sync::{
-    apply_to_home, apply_to_repo, ApplyToRepoOpts, ContentFetcher, FetchError as SyncFetchError,
-    SyncAction, SyncDirection,
+    ApplyToRepoOpts, ContentFetcher, FetchError as SyncFetchError, SyncAction, SyncDirection,
+    apply_to_home, apply_to_repo,
 };
 use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, SourceType, UnitKind};
@@ -127,9 +128,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         Some(p) => p,
         None => {
             let source_uri_full = Uri::parse(&format!("{}@{}", source.uri, source.r#ref))
-                .with_context(|| {
-                    format!("parsing source URI `{}@{}`", source.uri, source.r#ref)
-                })?;
+                .with_context(|| format!("parsing source URI `{}@{}`", source.uri, source.r#ref))?;
             let cache_root = cache_dir_in(home);
             let fetched = run_fetcher(&source_uri_full, &source.name, &cache_root)
                 .with_context(|| format!("fetching source `{}`", source.name))?;
@@ -756,7 +755,9 @@ fn bidirectional_content_sync(
         if let Some(filter) = args.source_or_unit.as_deref() {
             // Match by declared_uri or by source-name.
             if filter != unit.declared_uri {
-                let Ok(uri) = Uri::parse(&unit.declared_uri) else { continue };
+                let Ok(uri) = Uri::parse(&unit.declared_uri) else {
+                    continue;
+                };
                 let source_uri = format!("{}:{}", uri.source_type, uri.locator);
                 let matches_source = manifest
                     .sources
@@ -800,8 +801,8 @@ fn bidirectional_content_sync(
             for rel_str in file_hashes.keys() {
                 let unit_path = PathBuf::from(rel_str);
                 let home_file = install_root.join(&unit_path);
-                let short_name =
-                    unit_short_name(&unit.declared_uri).unwrap_or_else(|| unit.declared_uri.clone());
+                let short_name = unit_short_name(&unit.declared_uri)
+                    .unwrap_or_else(|| unit.declared_uri.clone());
                 let action = match plan_file_action_via_clone(
                     home,
                     &source,
@@ -852,9 +853,9 @@ fn bidirectional_content_sync(
                             &unit_path,
                             &fetcher,
                         )
-                            .with_context(|| {
-                                format!("apply_to_home {}/{rel_str}", unit.declared_uri)
-                            })?;
+                        .with_context(|| {
+                            format!("apply_to_home {}/{rel_str}", unit.declared_uri)
+                        })?;
                         applied += 1;
                     }
                     SyncDirection::ToRepo => {
@@ -870,9 +871,9 @@ fn bidirectional_content_sync(
                             &unit_path,
                             &opts,
                         )
-                            .with_context(|| {
-                                format!("apply_to_repo {}/{rel_str}", unit.declared_uri)
-                            })?;
+                        .with_context(|| {
+                            format!("apply_to_repo {}/{rel_str}", unit.declared_uri)
+                        })?;
                         applied += 1;
                     }
                 }
@@ -991,13 +992,14 @@ fn plan_file_action_via_clone(
                 (Some(h), Some(r)) if h >= r => {
                     act(SyncDirection::ToRepo, "home newer than repo by mtime")
                 }
-                (Some(_), Some(_)) => {
-                    act(SyncDirection::ToHome, "repo newer than home by mtime")
-                }
+                (Some(_), Some(_)) => act(SyncDirection::ToHome, "repo newer than home by mtime"),
                 // Indeterminate: prefer publishing local edits over
                 // overwriting them. Mirrors `plan_sync`'s conservative
                 // home-wins default.
-                _ => act(SyncDirection::ToRepo, "mtime indeterminate; defaulting to home->repo"),
+                _ => act(
+                    SyncDirection::ToRepo,
+                    "mtime indeterminate; defaulting to home->repo",
+                ),
             }
         }
     })
@@ -1030,9 +1032,8 @@ impl ContentFetcher for GitClonedFetcher {
         let cache = ensure_repo_clone(&self.home, &self.source)
             .map_err(|e| SyncFetchError::Other(format!("clone-or-pull: {e}")))?;
         let target = cache.join(repo_path);
-        std::fs::read(&target).map_err(|e| {
-            SyncFetchError::Other(format!("read `{}`: {e}", target.display()))
-        })
+        std::fs::read(&target)
+            .map_err(|e| SyncFetchError::Other(format!("read `{}`: {e}", target.display())))
     }
 }
 
@@ -1081,15 +1082,18 @@ fn ensure_repo_clone(home: &Path, source: &SourceEntry) -> Result<PathBuf> {
 /// Mirrors `git_remote_url` in `ainb-fetch::git` but works from a
 /// `SourceEntry` (which is what the sync flow has on hand).
 fn git_remote_url(source: &SourceEntry) -> Result<String> {
-    let uri = Uri::parse(&source.uri)
-        .with_context(|| format!("parsing source URI `{}`", source.uri))?;
+    let uri =
+        Uri::parse(&source.uri).with_context(|| format!("parsing source URI `{}`", source.uri))?;
     match uri.source_type {
         SourceType::Gh | SourceType::Marketplace => {
             Ok(format!("https://github.com/{}.git", uri.locator))
         }
         SourceType::Gist => Ok(format!("https://gist.github.com/{}.git", uri.locator)),
         SourceType::Git => Ok(uri.locator.clone()),
-        other => bail!("source `{}` is unsupported for content sync", other.as_str()),
+        other => bail!(
+            "source `{}` is unsupported for content sync",
+            other.as_str()
+        ),
     }
 }
 
@@ -1155,7 +1159,10 @@ fn usage(home: &Path, args: UsageArgs, out: &mut dyn io::Write) -> Result<()> {
     for idx in target_indices {
         let (maybe_name, tools): (Option<String>, Vec<String>) = {
             let unit = &lockfile.units[idx];
-            (unit_short_name(&unit.declared_uri), unit.deployed.keys().cloned().collect())
+            (
+                unit_short_name(&unit.declared_uri),
+                unit.deployed.keys().cloned().collect(),
+            )
         };
         // A unit URI with no path yields no detectable name — querying
         // logs with a bogus name would silently record 0. Skip it
@@ -1184,7 +1191,11 @@ fn usage(home: &Path, args: UsageArgs, out: &mut dyn io::Write) -> Result<()> {
         total += agg.invocations;
         if args.verbose {
             match &agg.last_used_at {
-                Some(ts) => writeln!(out, "{name}: {} invocation(s), last used {ts}", agg.invocations)?,
+                Some(ts) => writeln!(
+                    out,
+                    "{name}: {} invocation(s), last used {ts}",
+                    agg.invocations
+                )?,
                 None => writeln!(out, "{name}: {} invocation(s)", agg.invocations)?,
             }
         }
@@ -1193,7 +1204,10 @@ fn usage(home: &Path, args: UsageArgs, out: &mut dyn io::Write) -> Result<()> {
     }
 
     lockfile.save_to(&lockfile_path_in(home))?;
-    writeln!(out, "# usage refreshed for {refreshed} unit(s), {total} total invocation(s)")?;
+    writeln!(
+        out,
+        "# usage refreshed for {refreshed} unit(s), {total} total invocation(s)"
+    )?;
     Ok(())
 }
 
@@ -1283,9 +1297,7 @@ fn remap_plan_via_target_layout(
     // Remap every op's dst.
     for op in plan.ops.iter_mut() {
         let dst_ptr: &mut PathBuf = match op {
-            PlanOp::Create { dst, .. }
-            | PlanOp::Update { dst, .. }
-            | PlanOp::Delete { dst } => dst,
+            PlanOp::Create { dst, .. } | PlanOp::Update { dst, .. } | PlanOp::Delete { dst } => dst,
         };
         if let Some(new_dst) = remap_dst(source, tool_name, install_root, dst_ptr) {
             *dst_ptr = new_dst;
@@ -1394,9 +1406,7 @@ pub fn run_check(
             let Some(scope) = source_scope.as_deref() else {
                 return true;
             };
-            unit_source_name(unit, &manifest)
-                .map(|n| n == scope)
-                .unwrap_or(false)
+            unit_source_name(unit, &manifest).map(|n| n == scope).unwrap_or(false)
         })
         .collect();
 
@@ -1431,8 +1441,7 @@ pub fn run_check(
     writeln!(out, "{:<60}  status", "unit")?;
     writeln!(out, "{:-<60}  {:-<24}", "", "")?;
     for unit in &scoped_lockfile.units {
-        let status_str =
-            drift_status_to_human(drift_map.get(&unit.declared_uri).copied());
+        let status_str = drift_status_to_human(drift_map.get(&unit.declared_uri).copied());
         writeln!(out, "{:<60}  {}", unit.declared_uri, status_str)?;
     }
     writeln!(out, "# {} unit(s) checked", scoped_lockfile.units.len())?;
@@ -1459,7 +1468,7 @@ pub fn browse(
     out: &mut dyn io::Write,
 ) -> Result<()> {
     let _ = home; // reserved for future per-home catalog config; key
-                  // resolution happens in the backend constructor.
+    // resolution happens in the backend constructor.
 
     // The curated catalog lists its whole shelf on a blank query (it's
     // small + local). skills.sh keeps the no-op hint so a blank query never

@@ -171,12 +171,7 @@ fn config_path_in(ainb_home: &Path) -> PathBuf {
 fn read_config_catalog_release(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
-    let tag = value
-        .get("skills")?
-        .get("catalog_release")?
-        .as_str()?
-        .trim()
-        .to_string();
+    let tag = value.get("skills")?.get("catalog_release")?.as_str()?.trim().to_string();
     (!tag.is_empty()).then_some(tag)
 }
 
@@ -300,6 +295,9 @@ mod tests {
     #[test]
     fn config_catalog_release_absent_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_config_catalog_release(&config_path_in(dir.path())), None);
+        assert_eq!(
+            read_config_catalog_release(&config_path_in(dir.path())),
+            None
+        );
     }
 }

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::error::{CoreError, Result};
-use crate::lockfile::{Lockfile, LockedUnit};
+use crate::lockfile::{LockedUnit, Lockfile};
 use crate::manifest::{Manifest, SourceEntry};
 use crate::uri::Uri;
 
@@ -368,12 +368,18 @@ mod tests {
         mock.expect(
             "acme",
             "deadbeef",
-            DriftStatus::Diverged { ahead: 1, behind: 4 },
+            DriftStatus::Diverged {
+                ahead: 1,
+                behind: 4,
+            },
         );
         let u = unit("gh:org/acme@main/skills/foo", Some("deadbeef"));
         assert_eq!(
             detect_drift(&u, &src, &mock).unwrap(),
-            DriftStatus::Diverged { ahead: 1, behind: 4 }
+            DriftStatus::Diverged {
+                ahead: 1,
+                behind: 4
+            }
         );
     }
 
@@ -425,11 +431,7 @@ mod tests {
         };
         let mut mock = MockBackend::new();
         mock.expect("acme", "deadbeef", DriftStatus::InSync);
-        mock.expect(
-            "acme",
-            "cafebabe",
-            DriftStatus::Outdated { behind: 5 },
-        );
+        mock.expect("acme", "cafebabe", DriftStatus::Outdated { behind: 5 });
         let map = detect_all(&manifest, &lockfile, &mock);
         assert_eq!(map.len(), 2);
         assert_eq!(map["gh:org/acme@main/skills/foo"], DriftStatus::InSync);

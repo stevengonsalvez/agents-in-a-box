@@ -29,10 +29,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
 ];
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-discover-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-discover-").tempdir().expect("tempdir")
 }
 
 fn run_migrate(home: &Path, args: MigrateArgs) -> (String, anyhow::Result<()>) {
@@ -91,9 +88,7 @@ fn seed_marketplace_plugin(
     std::fs::create_dir_all(&cp_dir).unwrap();
     std::fs::write(
         cp_dir.join("plugin.json"),
-        format!(
-            "{{\"name\": \"{plugin}\", \"version\": \"{version}\"}}"
-        ),
+        format!("{{\"name\": \"{plugin}\", \"version\": \"{version}\"}}"),
     )
     .unwrap();
     let skill_dir = plugin_root.join("skills").join(skill_name);
@@ -143,16 +138,16 @@ fn discover_dry_run_does_not_mutate_manifest_or_lockfile() {
 
         assert!(out.contains("# migrate --discover"), "got: {out}");
         assert!(out.contains("orphan units discovered: 1"), "got: {out}");
-        assert!(out.contains("# dry-run: not writing manifest"), "got: {out}");
+        assert!(
+            out.contains("# dry-run: not writing manifest"),
+            "got: {out}"
+        );
 
         assert!(
             !manifest_path.exists(),
             "dry-run must not create the manifest"
         );
-        assert!(
-            !lock_path.exists(),
-            "dry-run must not create the lockfile"
-        );
+        assert!(!lock_path.exists(), "dry-run must not create the lockfile");
     });
 }
 
@@ -168,7 +163,13 @@ fn discover_writes_manifest_with_orphan_and_marketplace() {
     with_tool_homes(base.path(), || {
         let claude = base.path().join("claude");
         seed_orphan_skill(&claude, "my-secret-skill");
-        seed_marketplace_plugin(&claude, "claude-plugins-official", "reflect", "v1.0", "summarize");
+        seed_marketplace_plugin(
+            &claude,
+            "claude-plugins-official",
+            "reflect",
+            "v1.0",
+            "summarize",
+        );
 
         let (out, res) = run_migrate(
             home.path(),
@@ -179,7 +180,10 @@ fn discover_writes_manifest_with_orphan_and_marketplace() {
         );
         res.expect("discover ok");
         assert!(out.contains("# migrate --discover"), "got: {out}");
-        assert!(out.contains("marketplace plugins discovered: 1"), "got: {out}");
+        assert!(
+            out.contains("marketplace plugins discovered: 1"),
+            "got: {out}"
+        );
         assert!(out.contains("orphan units discovered: 1"), "got: {out}");
         assert!(out.contains("new units to add: 2"), "got: {out}");
 
@@ -190,9 +194,7 @@ fn discover_writes_manifest_with_orphan_and_marketplace() {
             "got units: {unit_uris:?}"
         );
         assert!(
-            unit_uris.contains(
-                &"marketplace:reflect@claude-plugins-official/skills/summarize"
-            ),
+            unit_uris.contains(&"marketplace:reflect@claude-plugins-official/skills/summarize"),
             "got units: {unit_uris:?}"
         );
 
@@ -412,11 +414,7 @@ fn v1_migrate_from_bootstrap_smoke_still_green() {
     let toolkit = tempfile::tempdir().unwrap();
     let skill_dir = toolkit.path().join("packages/skills/commit");
     std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: commit\n---\nbody\n",
-    )
-    .unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: commit\n---\nbody\n").unwrap();
     std::fs::write(
         toolkit.path().join("external-dependencies.yaml"),
         r#"
@@ -466,7 +464,10 @@ fn discover_with_no_candidates_yields_empty_patch_and_writes_clean_manifest() {
             },
         );
         res.expect("discover with no candidates ok");
-        assert!(out.contains("marketplace plugins discovered: 0"), "got: {out}");
+        assert!(
+            out.contains("marketplace plugins discovered: 0"),
+            "got: {out}"
+        );
         assert!(out.contains("orphan units discovered: 0"), "got: {out}");
         assert!(out.contains("new units to add: 0"), "got: {out}");
 

@@ -22,7 +22,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier, OWN_SKILL_NAME};
+use ainb_skill_core::{OWN_SKILL_NAME, SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -75,9 +75,7 @@ fn send(session: &str, keys: &str) {
 }
 
 fn kill(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 fn sh_quote(p: &Path) -> String {
@@ -109,8 +107,7 @@ fn library_view_renders_owned_skill_and_enter_shows_detail() {
     let tmp = tempfile::tempdir().expect("home tempdir");
     // Full tier seeds library.yaml with one own-skill (`my-own-skill`)
     // plus its SKILL.md under .claude/skills/.
-    let layout =
-        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
 
     let session = format!("tripwire-sm-library-{}", std::process::id());
@@ -125,7 +122,13 @@ fn library_view_renders_owned_skill_and_enter_shows_detail() {
         "tmux new-session failed"
     );
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("tmux send-keys launch");
 

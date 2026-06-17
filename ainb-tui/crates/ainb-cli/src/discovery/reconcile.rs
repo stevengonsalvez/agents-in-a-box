@@ -136,9 +136,7 @@ pub fn reconcile(walker_out: &WalkerOutput) -> ManifestPatch {
             // duplicate name from the same tool home is impossible
             // (filesystem-unique), so first-insert is always the
             // unique entry.
-            active_claude_orphans
-                .entry(orphan.name.clone())
-                .or_insert(unit_uri);
+            active_claude_orphans.entry(orphan.name.clone()).or_insert(unit_uri);
         }
     }
 
@@ -194,13 +192,14 @@ pub fn reconcile(walker_out: &WalkerOutput) -> ManifestPatch {
             // orphan acting as the active winner — that way a third
             // duplicate (A+A+A with C also present) still chains to
             // the C, not to the first A.
-            first_seen_marketplace_unit
-                .entry(unit.name.clone())
-                .or_insert(unit_uri);
+            first_seen_marketplace_unit.entry(unit.name.clone()).or_insert(unit_uri);
         }
     }
 
-    ManifestPatch { new_sources, new_units }
+    ManifestPatch {
+        new_sources,
+        new_units,
+    }
 }
 
 /// Provenance-aware reconcile (skill-manager v1.3, bead `ai-ya9`).
@@ -231,7 +230,12 @@ pub fn reconcile_with_sources(
     let attributed = super::provenance::attribute(&[], &walker_out.class_c, sources);
     let external: HashMap<&str, &super::provenance::AttributedUnit> = attributed
         .iter()
-        .filter(|u| matches!(u.provenance, super::provenance::Provenance::ExternalRepo { .. }))
+        .filter(|u| {
+            matches!(
+                u.provenance,
+                super::provenance::Provenance::ExternalRepo { .. }
+            )
+        })
         .map(|u| (u.name.as_str(), u))
         .collect();
 
@@ -386,8 +390,8 @@ fn local_source_name(tool: &str, subdir: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::class_a::DiscoveredUnit;
+    use super::*;
 
     use std::path::PathBuf;
 
@@ -500,18 +504,9 @@ mod tests {
         };
         let patch = reconcile(&walker);
         assert_eq!(patch.new_sources.len(), 3);
-        assert!(patch
-            .new_sources
-            .iter()
-            .any(|s| s.uri == "local:~/.claude/skills"));
-        assert!(patch
-            .new_sources
-            .iter()
-            .any(|s| s.uri == "local:~/.claude/agents"));
-        assert!(patch
-            .new_sources
-            .iter()
-            .any(|s| s.uri == "local:~/.claude/hooks"));
+        assert!(patch.new_sources.iter().any(|s| s.uri == "local:~/.claude/skills"));
+        assert!(patch.new_sources.iter().any(|s| s.uri == "local:~/.claude/agents"));
+        assert!(patch.new_sources.iter().any(|s| s.uri == "local:~/.claude/hooks"));
     }
 
     #[test]
@@ -601,14 +596,8 @@ mod tests {
         };
         let patch = reconcile(&walker);
         assert_eq!(patch.new_sources.len(), 2);
-        assert!(patch
-            .new_sources
-            .iter()
-            .any(|s| s.uri == "marketplace:claude-plugins-official"));
-        assert!(patch
-            .new_sources
-            .iter()
-            .any(|s| s.uri == "marketplace:third-party"));
+        assert!(patch.new_sources.iter().any(|s| s.uri == "marketplace:claude-plugins-official"));
+        assert!(patch.new_sources.iter().any(|s| s.uri == "marketplace:third-party"));
     }
 
     // ---- A + C conflict matrix ----------------------------------
@@ -730,14 +719,8 @@ mod tests {
         for unit in &patch.new_units {
             assert!(unit.shadowed_by.is_none(), "{unit:#?}");
         }
-        assert!(patch
-            .new_units
-            .iter()
-            .any(|u| u.uri == "local:~/.claude/skills@head/commit"));
-        assert!(patch
-            .new_units
-            .iter()
-            .any(|u| u.uri == "local:~/.codex/skills@head/commit"));
+        assert!(patch.new_units.iter().any(|u| u.uri == "local:~/.claude/skills@head/commit"));
+        assert!(patch.new_units.iter().any(|u| u.uri == "local:~/.codex/skills@head/commit"));
     }
 
     // ---- A + A across marketplaces (first-seen wins) ------------
@@ -766,13 +749,14 @@ mod tests {
             ..Default::default()
         };
         let patch = reconcile(&walker);
-        let first =
-            find_unit(&patch, "marketplace:reflect@mp-first/skills/commit");
+        let first = find_unit(&patch, "marketplace:reflect@mp-first/skills/commit");
         assert!(first.shadowed_by.is_none(), "first-seen marketplace wins");
-        let second =
-            find_unit(&patch, "marketplace:alt-reflect@mp-second/skills/commit");
+        let second = find_unit(&patch, "marketplace:alt-reflect@mp-second/skills/commit");
         let shadow = second.shadowed_by.as_ref().unwrap();
-        assert_eq!(shadow.display(), "marketplace:reflect@mp-first/skills/commit");
+        assert_eq!(
+            shadow.display(),
+            "marketplace:reflect@mp-first/skills/commit"
+        );
     }
 
     #[test]

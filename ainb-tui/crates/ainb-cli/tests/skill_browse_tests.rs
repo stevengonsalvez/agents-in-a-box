@@ -71,7 +71,10 @@ fn cli_browse_prints_ranked_table() {
     let top = text.find("top-star").expect("top present");
     let mid = text.find("mid-star").expect("mid present");
     let low = text.find("low-star").expect("low present");
-    assert!(top < mid && mid < low, "rows not ranked by stars desc:\n{text}");
+    assert!(
+        top < mid && mid < low,
+        "rows not ranked by stars desc:\n{text}"
+    );
 }
 
 // ── Test 8: --json shape ──────────────────────────────────────────────
@@ -97,7 +100,10 @@ fn cli_browse_json_shape() {
     // ranked stars-desc (beta first).
     let parsed: Vec<CatalogHit> = serde_json::from_str(&text).expect("valid json array");
     assert_eq!(parsed.len(), 2, "two hits:\n{text}");
-    assert_eq!(parsed[0].name, "beta", "highest stars first in json:\n{text}");
+    assert_eq!(
+        parsed[0].name, "beta",
+        "highest stars first in json:\n{text}"
+    );
     assert_eq!(parsed[1].name, "alpha");
     assert_eq!(parsed[0].stars, 88);
     assert_eq!(parsed[0].install_uri, "gh:org/beta@main/skills/beta");
@@ -124,7 +130,10 @@ fn cli_browse_empty_query_message() {
         text.contains("empty query") || text.contains("no query") || text.contains("type a query"),
         "expected an empty-query hint:\n{text}"
     );
-    assert!(!text.contains("org/x"), "empty query must not return hits:\n{text}");
+    assert!(
+        !text.contains("org/x"),
+        "empty query must not return hits:\n{text}"
+    );
 }
 
 // ── Curated catalog: blank query lists the WHOLE shelf, offline ───────
@@ -187,12 +196,18 @@ fn cli_browse_curated_blank_lists_full_shelf() {
         text.contains("gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit"),
         "missing owned install_uri:\n{text}"
     );
-    assert!(text.contains("ui-ux-pro-max"), "missing external entry:\n{text}");
+    assert!(
+        text.contains("ui-ux-pro-max"),
+        "missing external entry:\n{text}"
+    );
     assert!(
         text.contains("gh:nextlevelbuilder/ui-ux-pro-max-skill@2.2.1/.claude/skills"),
         "missing external install_uri:\n{text}"
     );
-    assert!(text.contains("curated skill(s)"), "missing curated footer:\n{text}");
+    assert!(
+        text.contains("curated skill(s)"),
+        "missing curated footer:\n{text}"
+    );
 }
 
 // ── Bonus: a backend error surfaces as a CLI error (not a panic) ──────

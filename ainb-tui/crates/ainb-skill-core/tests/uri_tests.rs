@@ -167,7 +167,10 @@ fn marketplace_unit_uri_versioned_roundtrips() {
 #[test]
 fn marketplace_uri_builder_roundtrips_unversioned() {
     let built = Uri::marketplace("reflect", "claude-plugins-official", None);
-    assert_eq!(built.display(), "marketplace:reflect@claude-plugins-official");
+    assert_eq!(
+        built.display(),
+        "marketplace:reflect@claude-plugins-official"
+    );
     let parsed = Uri::parse(&built.display()).unwrap();
     assert_eq!(parsed, built);
 }

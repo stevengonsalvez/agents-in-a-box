@@ -75,8 +75,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 
     // ---- class-A: one marketplace plugin in the Claude cache ----
     let claude = home.join(".claude");
@@ -87,11 +90,8 @@ git_directories = []
         b"{\"tripwire-mp\": {}}\n",
     )
     .unwrap();
-    let plugin_root = plugins
-        .join("cache")
-        .join("tripwire-mp")
-        .join("tripwire-plugin")
-        .join("v0.1.0");
+    let plugin_root =
+        plugins.join("cache").join("tripwire-mp").join("tripwire-plugin").join("v0.1.0");
     fs::create_dir_all(plugin_root.join(".claude-plugin")).unwrap();
     fs::write(
         plugin_root.join(".claude-plugin").join("plugin.json"),
@@ -271,10 +271,7 @@ fn discovery_banner_renders_then_import_populates_units() {
     // Verify the import landed on disk too — the SkillManager
     // tells the user it imported, but the on-disk manifest is the
     // source of truth the next ainb open will read.
-    let manifest_path = home_tmp
-        .path()
-        .join(".agents-in-a-box")
-        .join("manifest.yaml");
+    let manifest_path = home_tmp.path().join(".agents-in-a-box").join("manifest.yaml");
     let manifest_yaml =
         fs::read_to_string(&manifest_path).expect("manifest.yaml was not written by import");
     assert!(

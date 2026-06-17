@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
-use ainb_skill_core::sync::{
-    apply_to_repo, ApplyToRepoOpts, SyncAction, SyncDirection,
-};
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::sync::{ApplyToRepoOpts, SyncAction, SyncDirection, apply_to_repo};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 /// Wraps a `TempDir` + the `SandboxLayout` it backs so callers can
 /// hold one binding (keeping the tempdir alive) and reach the layout
@@ -37,7 +35,10 @@ impl SandboxGuard {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = build_skill_manager_sandbox(tempdir.path(), SandboxTier::Minimal)
             .expect("sandbox fixture");
-        Self { _tempdir: tempdir, layout }
+        Self {
+            _tempdir: tempdir,
+            layout,
+        }
     }
 
     fn claude_home(&self) -> &Path {
@@ -240,12 +241,20 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
     // Clone the bare into a working tree we can commit + push against.
     let repo_dir = tempfile::tempdir().unwrap();
     let clone_out = Command::new("git")
-        .args(["clone", "--", bare.to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+        .args([
+            "clone",
+            "--",
+            bare.to_str().unwrap(),
+            repo_dir.path().to_str().unwrap(),
+        ])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .expect("git clone");
     assert!(clone_out.status.success(), "git clone: {clone_out:?}");
-    git(&["config", "user.email", "ainb-test@example.invalid"], repo_dir.path());
+    git(
+        &["config", "user.email", "ainb-test@example.invalid"],
+        repo_dir.path(),
+    );
     git(&["config", "user.name", "ainb-test"], repo_dir.path());
     let bare_head_before = {
         let out = git(&["rev-parse", "main"], bare);
@@ -352,7 +361,8 @@ fn apply_to_repo_errors_when_home_file_missing() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
     with_skip_push(|| {
-        let err = apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).unwrap_err();
+        let err =
+            apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("home") || msg.contains("not found") || msg.contains("no such file"),

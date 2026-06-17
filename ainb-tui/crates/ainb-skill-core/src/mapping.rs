@@ -94,11 +94,9 @@ pub fn bootstrap_default_mappings() -> Vec<TargetMapping> {
 pub fn resolve_pair(source: &SourceEntry, unit_path: &Path) -> Option<(PathBuf, PathBuf)> {
     let unit = normalise(unit_path);
     if source.target_layout.is_empty() {
-        BOOTSTRAP_DEFAULT_MAPPINGS
-            .iter()
-            .find_map(|(glob, home, repo)| {
-                translate_parts(glob, Path::new(home), Path::new(repo), &unit)
-            })
+        BOOTSTRAP_DEFAULT_MAPPINGS.iter().find_map(|(glob, home, repo)| {
+            translate_parts(glob, Path::new(home), Path::new(repo), &unit)
+        })
     } else {
         source
             .target_layout
@@ -110,12 +108,7 @@ pub fn resolve_pair(source: &SourceEntry, unit_path: &Path) -> Option<(PathBuf, 
 /// Translate an already-normalised `unit` through one `(glob, home, repo)`
 /// mapping, or `None` if the glob does not match. Shared by both the
 /// explicit-`target_layout` and bootstrap-default code paths.
-fn translate_parts(
-    glob: &str,
-    home: &Path,
-    repo: &Path,
-    unit: &str,
-) -> Option<(PathBuf, PathBuf)> {
+fn translate_parts(glob: &str, home: &Path, repo: &Path, unit: &str) -> Option<(PathBuf, PathBuf)> {
     if !glob_matches(glob, unit) {
         return None;
     }
@@ -186,9 +179,7 @@ fn join_tail(base: &Path, tail: &str) -> PathBuf {
 
 /// Whether `glob` matches the whole of `unit` (anchored).
 fn glob_matches(glob: &str, unit: &str) -> bool {
-    Regex::new(&glob_to_regex(glob))
-        .map(|re| re.is_match(unit))
-        .unwrap_or(false)
+    Regex::new(&glob_to_regex(glob)).map(|re| re.is_match(unit)).unwrap_or(false)
 }
 
 /// Compile a glob into an anchored regex source string.
@@ -262,15 +253,9 @@ fn glob_to_regex(glob: &str) -> String {
 /// literal segments are exactly `unit`'s leading segments, so dropping
 /// that many leading unit segments yields the tail.
 fn strip_static_prefix(glob: &str, unit: &str) -> String {
-    let static_segments = glob
-        .split('/')
-        .take_while(|seg| !seg.chars().any(is_glob_meta))
-        .count();
+    let static_segments = glob.split('/').take_while(|seg| !seg.chars().any(is_glob_meta)).count();
 
-    unit.split('/')
-        .skip(static_segments)
-        .collect::<Vec<_>>()
-        .join("/")
+    unit.split('/').skip(static_segments).collect::<Vec<_>>().join("/")
 }
 
 fn is_glob_meta(c: char) -> bool {
@@ -315,8 +300,14 @@ mod tests {
 
     #[test]
     fn static_prefix_strip() {
-        assert_eq!(strip_static_prefix("skills/**", "skills/commit/SKILL.md"), "commit/SKILL.md");
-        assert_eq!(strip_static_prefix("commands/*.md", "commands/prime.md"), "prime.md");
+        assert_eq!(
+            strip_static_prefix("skills/**", "skills/commit/SKILL.md"),
+            "commit/SKILL.md"
+        );
+        assert_eq!(
+            strip_static_prefix("commands/*.md", "commands/prime.md"),
+            "prime.md"
+        );
         // Fully-literal glob → empty tail.
         assert_eq!(strip_static_prefix("a/b.md", "a/b.md"), "");
     }

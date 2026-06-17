@@ -48,8 +48,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 }
 
 /// Seed manifest + lockfile with a single unit that has NO

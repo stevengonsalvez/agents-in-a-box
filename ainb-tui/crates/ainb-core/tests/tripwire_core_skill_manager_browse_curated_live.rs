@@ -27,7 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ainb_skill_core::catalog_index::{CatalogIndex, CatalogIndexEntry, CatalogOrigin};
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -93,9 +93,7 @@ fn send(session: &str, keys: &str) {
 }
 
 fn kill(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 fn sh_quote(s: &str) -> String {
@@ -126,7 +124,10 @@ fn git(args: &[&str], cwd: &Path) {
 /// a local clone, never the network).
 fn seed_catalog_remote(root: &Path) -> String {
     let bare = root.join("curated-catalog-remote.git");
-    git(&["init", "--bare", "-b", "main", bare.to_str().unwrap()], root);
+    git(
+        &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        root,
+    );
 
     let work = root.join(".curated-seed-work");
     std::fs::create_dir_all(&work).expect("work dir");
@@ -144,7 +145,10 @@ fn seed_catalog_remote(root: &Path) -> String {
     git(&["push", "-q", "origin", "main"], &work);
     std::fs::remove_dir_all(&work).ok();
 
-    format!("git:file://{}@main/skills/curated-demo-skill", bare.display())
+    format!(
+        "git:file://{}@main/skills/curated-demo-skill",
+        bare.display()
+    )
 }
 
 /// Write a local curated index with two entries: an OWNED entry whose
@@ -235,12 +239,11 @@ fn launch_line(layout: &SandboxLayout, bin: &Path, index_file: &Path) -> String 
 #[test]
 #[ignore = "journey scaffolding, run on demand for vhs recording"]
 fn materialize_curated_journey_sandbox() {
-    let dir = std::env::var("AINB_JOURNEY_DIR")
-        .expect("set AINB_JOURNEY_DIR to a persistent directory");
+    let dir =
+        std::env::var("AINB_JOURNEY_DIR").expect("set AINB_JOURNEY_DIR to a persistent directory");
     let root = PathBuf::from(&dir);
     std::fs::create_dir_all(&root).expect("create journey dir");
-    let layout =
-        build_skill_manager_sandbox(&root, SandboxTier::Full).expect("sandbox full");
+    let layout = build_skill_manager_sandbox(&root, SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
     seed_notify_dismissed(&layout);
     let install_uri = seed_catalog_remote(layout.root.as_path());
@@ -254,7 +257,10 @@ fn materialize_curated_journey_sandbox() {
         "export AINB_CATALOG_INDEX_FILE={}",
         sh_quote(&index_file.to_string_lossy())
     );
-    println!("export AINB_JOURNEY_HOME={}", sh_quote(&layout.root.to_string_lossy()));
+    println!(
+        "export AINB_JOURNEY_HOME={}",
+        sh_quote(&layout.root.to_string_lossy())
+    );
 }
 
 #[test]
@@ -265,8 +271,7 @@ fn curated_browse_blank_lists_shelf_and_installs_live() {
     }
 
     let tmp = tempfile::tempdir().expect("home tempdir");
-    let layout =
-        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
     seed_notify_dismissed(&layout);
     let install_uri = seed_catalog_remote(layout.root.as_path());
@@ -386,8 +391,7 @@ fn curated_command_kind_install_runs_on_double_enter_live() {
     }
 
     let tmp = tempfile::tempdir().expect("home tempdir");
-    let layout =
-        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
     seed_notify_dismissed(&layout);
     let (index_file, marker) = write_command_index(layout.root.as_path());

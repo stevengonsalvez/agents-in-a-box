@@ -98,7 +98,10 @@ fn with_skip_push_and_homes<R>(base: &Path, body: impl FnOnce() -> R) -> R {
 }
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new().prefix("ainb-skill-sync-rt-").tempdir().expect("tempdir")
+    tempfile::Builder::new()
+        .prefix("ainb-skill-sync-rt-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 #[test]
@@ -179,7 +182,11 @@ fn sync_roundtrip_home_to_repo_and_back() {
         // ── 2. Edit home → sync --to-repo → verify commit lands. ──
         let claude_install_root = tool_homes.path().join("claude");
         let home_file = claude_install_root.join("skills/commit/SKILL.md");
-        assert!(home_file.exists(), "install must place file: {}", home_file.display());
+        assert!(
+            home_file.exists(),
+            "install must place file: {}",
+            home_file.display()
+        );
 
         let edited = b"---\nname: commit\n---\nhome-edited\n";
         std::fs::write(&home_file, edited).unwrap();
@@ -461,7 +468,11 @@ fn sync_to_repo_publishes_local_edit_even_when_repo_reclone_is_newer() {
         // the old fs-mtime logic the clone (now) beats the edit (2021) → ToHome
         // → no publish. Against commit time (2020) the edit (2021) wins → ToRepo.
         let home_file = tool_homes.path().join("claude/skills/commit/SKILL.md");
-        assert!(home_file.exists(), "install must place file: {}", home_file.display());
+        assert!(
+            home_file.exists(),
+            "install must place file: {}",
+            home_file.display()
+        );
         std::fs::write(&home_file, b"---\nname: commit\n---\nhome-edited\n").unwrap();
         let touch = Command::new("touch")
             .args(["-t", "202101010000"])

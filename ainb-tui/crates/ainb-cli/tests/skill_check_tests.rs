@@ -82,11 +82,7 @@ fn check_tabular_renders_one_row_per_unit_with_status_glyph() {
 
     let mut mock = MockBackend::new();
     mock.expect("acme", "deadbeef", DriftStatus::InSync);
-    mock.expect(
-        "acme",
-        "cafebabe",
-        DriftStatus::Outdated { behind: 4 },
-    );
+    mock.expect("acme", "cafebabe", DriftStatus::Outdated { behind: 4 });
 
     let mut out = Vec::new();
     ainb_cli::skill::run_check(
@@ -139,7 +135,10 @@ fn check_json_emits_parseable_status_per_unit() {
     mock.expect(
         "acme",
         "cafebabe",
-        DriftStatus::Diverged { ahead: 1, behind: 2 },
+        DriftStatus::Diverged {
+            ahead: 1,
+            behind: 2,
+        },
     );
 
     let mut out = Vec::new();
@@ -155,15 +154,12 @@ fn check_json_emits_parseable_status_per_unit() {
     .expect("check ok");
     let text = String::from_utf8(out).expect("utf8");
 
-    let value: serde_json::Value =
-        serde_json::from_str(text.trim()).expect("json parse");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).expect("json parse");
     let arr = value.as_array().expect("top-level array");
     assert_eq!(arr.len(), 2, "two rows expected, got: {text}");
 
-    let by_unit: BTreeMap<String, &serde_json::Value> = arr
-        .iter()
-        .map(|v| (v["unit"].as_str().unwrap().to_string(), v))
-        .collect();
+    let by_unit: BTreeMap<String, &serde_json::Value> =
+        arr.iter().map(|v| (v["unit"].as_str().unwrap().to_string(), v)).collect();
 
     let foo = by_unit["gh:org/acme@main/skills/foo"];
     assert_eq!(foo["status"], "in-sync");

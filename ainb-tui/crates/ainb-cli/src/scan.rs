@@ -20,13 +20,13 @@ use ainb_adapters_tool::install_root_for;
 use ainb_skill_core::manifest::Manifest;
 use ainb_skill_core::paths::manifest_path_in;
 
+use crate::ScanArgs;
 use crate::discovery::class_a;
 use crate::discovery::class_c::walk_orphans;
 use crate::discovery::provenance::{
-    attribute, parse_external_dependencies, parse_installed_plugins, AttributedUnit, Provenance,
-    ProvenanceSources,
+    AttributedUnit, Provenance, ProvenanceSources, attribute, parse_external_dependencies,
+    parse_installed_plugins,
 };
-use crate::ScanArgs;
 
 pub fn dispatch(home: &Path, args: ScanArgs, out: &mut dyn io::Write) -> Result<()> {
     let claude_home = install_root_for("claude");
@@ -59,10 +59,9 @@ fn load_sources(
     claude_home: &Path,
     ext_deps_override: Option<&Path>,
 ) -> ProvenanceSources {
-    let installed_plugins_json = std::fs::read_to_string(
-        claude_home.join("plugins").join("installed_plugins.json"),
-    )
-    .unwrap_or_default();
+    let installed_plugins_json =
+        std::fs::read_to_string(claude_home.join("plugins").join("installed_plugins.json"))
+            .unwrap_or_default();
 
     let ext_yaml = ext_deps_override
         .map(PathBuf::from)
@@ -86,9 +85,7 @@ fn load_sources(
 fn default_ext_deps_path() -> Option<PathBuf> {
     let candidates = [
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("external-dependencies.yaml")),
-        std::env::current_dir()
-            .ok()
-            .map(|c| c.join("external-dependencies.yaml")),
+        std::env::current_dir().ok().map(|c| c.join("external-dependencies.yaml")),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file())
 }
@@ -110,10 +107,7 @@ fn provenance_label(p: &Provenance) -> String {
             format!("marketplace: {plugin}@{marketplace} {version}{sha}")
         }
         Provenance::ExternalRepo { repo, version, .. } => {
-            let v = version
-                .as_deref()
-                .map(|v| format!(" {v}"))
-                .unwrap_or_default();
+            let v = version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
             format!("external (gh:): {repo}{v}")
         }
         Provenance::Toolkit { path } => format!("toolkit: {}", path.display()),

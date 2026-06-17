@@ -51,13 +51,19 @@ pub struct InvocationRecord {
 
 impl From<UnitStats> for InvocationRecord {
     fn from(s: UnitStats) -> Self {
-        Self { invocations: s.invocations, last_used_at: s.last_used }
+        Self {
+            invocations: s.invocations,
+            last_used_at: s.last_used,
+        }
     }
 }
 
 impl From<InvocationRecord> for ainb_skill_core::UsageRecord {
     fn from(r: InvocationRecord) -> Self {
-        Self { last_used_at: r.last_used_at, invocations: r.invocations }
+        Self {
+            last_used_at: r.last_used_at,
+            invocations: r.invocations,
+        }
     }
 }
 
@@ -385,10 +391,7 @@ mod tests {
         assert!(s.ends_with('Z'), "must end in Z: {s}");
         let parsed = chrono::DateTime::parse_from_rfc3339(&s)
             .unwrap_or_else(|e| panic!("re-parse failed for {s}: {e}"));
-        let round = parsed
-            .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let round = parsed.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string();
         assert_eq!(round, s, "round-trip shape mismatch");
     }
 

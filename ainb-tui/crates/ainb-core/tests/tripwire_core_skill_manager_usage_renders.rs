@@ -83,11 +83,7 @@ fn detail_pane_renders_usage_invocations_when_lockfile_has_usage_record() {
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();
-    let rendered: String = buffer
-        .content()
-        .iter()
-        .map(ratatui::buffer::Cell::symbol)
-        .collect();
+    let rendered: String = buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect();
 
     assert!(
         rendered.contains("12 invocations"),

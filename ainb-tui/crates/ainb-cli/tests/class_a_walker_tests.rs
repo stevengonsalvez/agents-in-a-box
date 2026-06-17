@@ -14,16 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ainb_cli::discovery::class_a::{walk, DiscoveredMarketplaceUnit, DiscoveredUnitKind};
+use ainb_cli::discovery::class_a::{DiscoveredMarketplaceUnit, DiscoveredUnitKind, walk};
 
 /// Write a minimal plugin.json at `cache/<mp>/<plugin>/<ver>/.claude-plugin/plugin.json`.
 fn seed_plugin(claude_home: &Path, mp: &str, plugin: &str, version: &str) -> PathBuf {
-    let plugin_dir = claude_home
-        .join("plugins")
-        .join("cache")
-        .join(mp)
-        .join(plugin)
-        .join(version);
+    let plugin_dir = claude_home.join("plugins").join("cache").join(mp).join(plugin).join(version);
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
@@ -66,8 +61,10 @@ fn write_known_marketplaces(claude_home: &Path, marketplaces: &[&str]) {
         .map(|m| format!(r#""{m}": {{"url": "https://example.test/{m}.git"}}"#))
         .collect::<Vec<_>>()
         .join(", ");
-    let body = format!(r#"{{"marketplaces": {{{entries}}}}}
-"#);
+    let body = format!(
+        r#"{{"marketplaces": {{{entries}}}}}
+"#
+    );
     fs::write(plugins.join("known_marketplaces.json"), body).unwrap();
 }
 
@@ -103,8 +100,16 @@ fn single_marketplace_single_plugin_discovers_units() {
         .filter(|u| u.kind == DiscoveredUnitKind::Skill)
         .map(|u| u.name.as_str())
         .collect();
-    assert!(skill_names.contains(&"commit"), "missing skill commit: {:?}", entry.units);
-    assert!(skill_names.contains(&"reflect"), "missing skill reflect: {:?}", entry.units);
+    assert!(
+        skill_names.contains(&"commit"),
+        "missing skill commit: {:?}",
+        entry.units
+    );
+    assert!(
+        skill_names.contains(&"reflect"),
+        "missing skill reflect: {:?}",
+        entry.units
+    );
 
     let agent_names: Vec<&str> = entry
         .units
@@ -112,7 +117,11 @@ fn single_marketplace_single_plugin_discovers_units() {
         .filter(|u| u.kind == DiscoveredUnitKind::Agent)
         .map(|u| u.name.as_str())
         .collect();
-    assert!(agent_names.contains(&"code-reviewer"), "missing agent: {:?}", entry.units);
+    assert!(
+        agent_names.contains(&"code-reviewer"),
+        "missing agent: {:?}",
+        entry.units
+    );
 }
 
 #[test]
@@ -128,10 +137,20 @@ fn multiple_marketplaces_enumerates_all_plugins() {
     let p1 = seed_plugin(claude_home, "claude-plugins-official", "reflect", "1.0.0");
     seed_skill(&p1, "commit");
 
-    let p2 = seed_plugin(claude_home, "claude-plugins-official", "session-tools", "0.2.1");
+    let p2 = seed_plugin(
+        claude_home,
+        "claude-plugins-official",
+        "session-tools",
+        "0.2.1",
+    );
     seed_skill(&p2, "session-summary");
 
-    let p3 = seed_plugin(claude_home, "stevengonsalvez-marketplace", "ainb-extras", "2.0.0");
+    let p3 = seed_plugin(
+        claude_home,
+        "stevengonsalvez-marketplace",
+        "ainb-extras",
+        "2.0.0",
+    );
     seed_agent(&p3, "tech-lead");
 
     let units = walk(claude_home);
@@ -150,10 +169,12 @@ fn multiple_marketplaces_enumerates_all_plugins() {
     let ainb_extras = find_entry(&units, "ainb-extras").expect("ainb-extras missing");
     assert_eq!(ainb_extras.marketplace, "stevengonsalvez-marketplace");
     assert_eq!(ainb_extras.version, "2.0.0");
-    assert!(ainb_extras
-        .units
-        .iter()
-        .any(|u| u.kind == DiscoveredUnitKind::Agent && u.name == "tech-lead"));
+    assert!(
+        ainb_extras
+            .units
+            .iter()
+            .any(|u| u.kind == DiscoveredUnitKind::Agent && u.name == "tech-lead")
+    );
 }
 
 #[test]
@@ -175,10 +196,12 @@ fn missing_known_marketplaces_json_marks_marketplace_unknown() {
         "marketplace should be 'unknown' when registry missing"
     );
     assert_eq!(entry.version, "0.1.0");
-    assert!(entry
-        .units
-        .iter()
-        .any(|u| u.name == "secret-skill" && u.kind == DiscoveredUnitKind::Skill));
+    assert!(
+        entry
+            .units
+            .iter()
+            .any(|u| u.name == "secret-skill" && u.kind == DiscoveredUnitKind::Skill)
+    );
 }
 
 #[test]
@@ -211,7 +234,10 @@ fn plugin_missing_manifest_json_is_skipped() {
     .unwrap();
 
     let units = walk(claude_home);
-    assert!(units.is_empty(), "expected no entries for orphan dirs, got: {units:?}");
+    assert!(
+        units.is_empty(),
+        "expected no entries for orphan dirs, got: {units:?}"
+    );
 }
 
 #[test]

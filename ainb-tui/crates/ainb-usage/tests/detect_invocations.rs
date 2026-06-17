@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::Path;
 
-use ainb_usage::{detect_invocations, InvocationRecord};
+use ainb_usage::{InvocationRecord, detect_invocations};
 
 /// Write `contents` to `<tool_home>/<rel>`, creating parent dirs.
 fn seed(tool_home: &Path, rel: &str, contents: &str) {

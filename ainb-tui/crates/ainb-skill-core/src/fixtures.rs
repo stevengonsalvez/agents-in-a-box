@@ -213,11 +213,7 @@ fn seed_minimal(layout: &SandboxLayout) -> std::io::Result<()> {
     )?;
 
     // Codex-side skill — proves multi-tool walker coverage.
-    seed_dir_skill(
-        &layout.codex_home,
-        "deploy",
-        "Codex-side deploy skill.",
-    )?;
+    seed_dir_skill(&layout.codex_home, "deploy", "Codex-side deploy skill.")?;
 
     // One marketplace plugin under plugins/cache — gives Class-A
     // walker something to find.
@@ -282,11 +278,14 @@ fn seed_marketplace_plugin(
 /// Init a bare git repo with one commit on `main` so
 /// `git ls-remote` returns a tip and sync round-trips work.
 fn init_bare_remote_with_seed(bare: &Path) -> std::io::Result<()> {
-    let parent = bare
-        .parent()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bare path has no parent"))?;
+    let parent = bare.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "bare path has no parent")
+    })?;
     fs::create_dir_all(parent)?;
-    git_must_succeed(&["init", "--bare", "-b", "main", bare.to_str().unwrap()], parent)?;
+    git_must_succeed(
+        &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        parent,
+    )?;
 
     let work = parent.join(".sandbox-seed-work");
     if work.exists() {

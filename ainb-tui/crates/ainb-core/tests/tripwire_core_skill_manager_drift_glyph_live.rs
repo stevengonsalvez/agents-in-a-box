@@ -63,8 +63,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 }
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
@@ -87,14 +90,25 @@ fn build_bare_repo_with_one_commit(scratch: &Path) -> (PathBuf, String) {
 
     fs::create_dir_all(&work).unwrap();
     git(&["init", "-b", "main"], &work);
-    git(&["config", "user.email", "ainb-test@example.invalid"], &work);
+    git(
+        &["config", "user.email", "ainb-test@example.invalid"],
+        &work,
+    );
     git(&["config", "user.name", "ainb-test"], &work);
     fs::write(work.join("README.md"), "drift-seed\n").unwrap();
     git(&["add", "README.md"], &work);
     let out = git(&["commit", "-m", "drift-tripwire seed"], &work);
     assert!(out.status.success(), "seed commit failed: {out:?}");
 
-    git(&["clone", "--bare", work.to_str().unwrap(), bare.to_str().unwrap()], scratch);
+    git(
+        &[
+            "clone",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+        scratch,
+    );
 
     let tip = git(&["rev-parse", "HEAD"], &work);
     let tip = String::from_utf8_lossy(&tip.stdout).trim().to_string();

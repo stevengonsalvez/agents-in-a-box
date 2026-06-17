@@ -18,8 +18,8 @@ use std::process::Command;
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
 use ainb_skill_core::sync::{
-    apply_to_home, apply_to_repo, ApplyToRepoOpts, ContentFetcher, FetchError, SyncAction,
-    SyncDirection,
+    ApplyToRepoOpts, ContentFetcher, FetchError, SyncAction, SyncDirection, apply_to_home,
+    apply_to_repo,
 };
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -104,8 +104,15 @@ fn apply_to_home_strips_dot_claude_prefix_from_layout_home() {
         bytes: b"---\nname: commit\nkind: skill\n---\nbody\n".to_vec(),
     };
 
-    apply_to_home(&action, &install_root, "claude", &source, &unit_path, &fetcher)
-        .expect("apply_to_home must succeed when install_root already embeds .claude");
+    apply_to_home(
+        &action,
+        &install_root,
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("apply_to_home must succeed when install_root already embeds .claude");
 
     let expected = install_root.join("skills/commit/SKILL.md");
     let wrong = install_root.join(".claude/skills/commit/SKILL.md");
@@ -147,7 +154,10 @@ fn apply_to_repo_strips_dot_claude_prefix_from_layout_home() {
     // executor reads from there, it would find nothing and surface
     // the original bug's error message.
     let doubled = install_root.join(".claude/skills/commit/SKILL.md");
-    assert!(!doubled.exists(), "test fixture must not pre-create the doubled path");
+    assert!(
+        !doubled.exists(),
+        "test fixture must not pre-create the doubled path"
+    );
 
     let action = SyncAction {
         unit_name: "commit".into(),
@@ -167,7 +177,10 @@ fn apply_to_repo_strips_dot_claude_prefix_from_layout_home() {
 
     // The repo-side file landed under skills/<name>/ in the cache (repo_rel).
     let landed = repo_dir.path().join("skills/commit/SKILL.md");
-    assert!(landed.exists(), "repo-side file must land under cache_dir/skills/commit/SKILL.md");
+    assert!(
+        landed.exists(),
+        "repo-side file must land under cache_dir/skills/commit/SKILL.md"
+    );
     assert_eq!(std::fs::read(&landed).unwrap(), body, "bytes must transit");
 }
 
@@ -197,11 +210,23 @@ fn apply_to_home_does_not_strip_when_layout_home_has_no_dotdir_prefix() {
         reason: "test".into(),
     };
     let unit_path = PathBuf::from("skills/commit/SKILL.md");
-    let fetcher = StubFetcher { bytes: b"body".to_vec() };
+    let fetcher = StubFetcher {
+        bytes: b"body".to_vec(),
+    };
 
-    apply_to_home(&action, install_root.path(), "claude", &source, &unit_path, &fetcher)
-        .expect("apply_to_home must succeed for no-dotdir layout");
+    apply_to_home(
+        &action,
+        install_root.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("apply_to_home must succeed for no-dotdir layout");
 
     let landed = install_root.path().join("skills/commit/SKILL.md");
-    assert!(landed.exists(), "no-strip case lands at the raw layout home");
+    assert!(
+        landed.exists(),
+        "no-strip case lands at the raw layout home"
+    );
 }

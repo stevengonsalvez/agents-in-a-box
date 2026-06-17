@@ -3,8 +3,8 @@
 //! no SQLite. Use explicit tempdir paths so the suite never touches the
 //! real `$AINB_HOME`.
 
-use ainb_skill_core::library::{library_path_in, Library, OwnedUnit};
 use ainb_skill_core::UnitKind;
+use ainb_skill_core::library::{Library, OwnedUnit, library_path_in};
 
 fn tmp_home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -98,7 +98,10 @@ fn library_register_dedups_by_name() {
         promoted_uri: Some("gh:me/my-skill@main/skills/my-skill".into()),
     };
     let inserted = lib.register(updated.clone());
-    assert!(!inserted, "second register on same name reports update, not insert");
+    assert!(
+        !inserted,
+        "second register on same name reports update, not insert"
+    );
     assert_eq!(lib.owned.len(), 1, "dedup by name — no duplicate row");
     assert_eq!(
         lib.owned[0].path, updated.path,

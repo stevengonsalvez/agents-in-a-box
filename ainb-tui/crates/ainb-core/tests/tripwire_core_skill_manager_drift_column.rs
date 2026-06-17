@@ -15,9 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 
-use ainb::components::skill_manager_screen::{
-    SkillsScreenData, SourceRow, UnitRow, render,
-};
+use ainb::components::skill_manager_screen::{SkillsScreenData, SourceRow, UnitRow, render};
 use ainb_skill_core::drift::DriftStatus;
 
 fn row(idx: usize, name: &str, declared_uri: &str) -> UnitRow {
@@ -143,8 +141,13 @@ fn units_table_renders_ahead_glyph_for_ahead_unit() {
 fn units_table_renders_diverged_glyph_for_diverged_unit() {
     let mut drift_cache: BTreeMap<String, DriftStatus> = BTreeMap::new();
     let uri = "gh:org/acme@main/skills/foo";
-    drift_cache
-        .insert(uri.to_string(), DriftStatus::Diverged { ahead: 1, behind: 3 });
+    drift_cache.insert(
+        uri.to_string(),
+        DriftStatus::Diverged {
+            ahead: 1,
+            behind: 3,
+        },
+    );
 
     let data = SkillsScreenData {
         sources: Vec::new(),

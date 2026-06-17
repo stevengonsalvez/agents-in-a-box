@@ -8,16 +8,17 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, UsageArgs, dispatch,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, UsageArgs, dispatch};
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::paths::lockfile_path_in;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new().prefix("ainb-skill-usage-test-").tempdir().expect("tempdir")
+    tempfile::Builder::new()
+        .prefix("ainb-skill-usage-test-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn run(home: &Path, action: SkillCommand) -> (String, anyhow::Result<()>) {
@@ -106,15 +107,27 @@ fn usage_all_refreshes_units_and_writes_lockfile() {
              {\"type\":\"tool_use\",\"name\":\"Skill\",\"input\":{\"skill\":\"commit\"},\"timestamp\":\"2026-05-03T09:00:00Z\"}\n",
         );
 
-        let (out, res) = run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: None, verbose: true }));
+        let (out, res) = run(
+            home.path(),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: None,
+                verbose: true,
+            }),
+        );
         res.expect("usage ok");
-        assert!(out.contains("commit"), "verbose output names the unit: {out}");
+        assert!(
+            out.contains("commit"),
+            "verbose output names the unit: {out}"
+        );
         assert!(out.contains('3'), "verbose output shows the count: {out}");
 
         let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert_eq!(lock.units.len(), 1);
         assert_eq!(lock.units[0].usage.invocations, 3);
-        assert_eq!(lock.units[0].usage.last_used_at.as_deref(), Some("2026-05-03T09:00:00Z"));
+        assert_eq!(
+            lock.units[0].usage.last_used_at.as_deref(),
+            Some("2026-05-03T09:00:00Z")
+        );
     });
 }
 
@@ -132,8 +145,13 @@ fn usage_single_unit_by_name() {
             "{\"timestamp\":\"2026-05-01T10:00:00Z\",\"content\":\"<command-name>commit</command-name>\"}\n",
         );
 
-        let (_out, res) =
-            run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: Some("commit".into()), verbose: false }));
+        let (_out, res) = run(
+            home.path(),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: Some("commit".into()),
+                verbose: false,
+            }),
+        );
         res.expect("usage ok");
 
         let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
@@ -151,7 +169,10 @@ fn usage_unknown_unit_errors() {
         install_then(home.path(), &unit_uri, Some("claude"));
         let (_out, res) = run(
             home.path(),
-            SkillCommand::Usage(UsageArgs { unit_name: Some("does-not-exist".into()), verbose: false }),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: Some("does-not-exist".into()),
+                verbose: false,
+            }),
         );
         let err = res.unwrap_err().to_string();
         assert!(err.contains("does-not-exist"), "got: {err}");
@@ -172,13 +193,32 @@ fn usage_is_idempotent() {
             "{\"timestamp\":\"2026-05-01T10:00:00Z\",\"content\":\"<command-name>commit</command-name>\"}\n",
         );
 
-        run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: None, verbose: false })).1.expect("run 1");
+        run(
+            home.path(),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: None,
+                verbose: false,
+            }),
+        )
+        .1
+        .expect("run 1");
         let after_first = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
 
-        run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: None, verbose: false })).1.expect("run 2");
+        run(
+            home.path(),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: None,
+                verbose: false,
+            }),
+        )
+        .1
+        .expect("run 2");
         let after_second = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
 
-        assert_eq!(after_first, after_second, "second run must produce an identical lockfile");
+        assert_eq!(
+            after_first, after_second,
+            "second run must produce an identical lockfile"
+        );
     });
 }
 
@@ -202,8 +242,13 @@ fn usage_skips_path_less_unit_without_misattributing() {
     };
     lf.save_to(&lock_path).unwrap();
 
-    let (out, res) =
-        run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: None, verbose: true }));
+    let (out, res) = run(
+        home.path(),
+        SkillCommand::Usage(UsageArgs {
+            unit_name: None,
+            verbose: true,
+        }),
+    );
     res.expect("usage ok");
     assert!(out.contains("skip"), "verbose should note the skip: {out}");
     assert!(out.contains("0 unit(s)"), "nothing refreshed: {out}");
@@ -234,10 +279,24 @@ fn usage_aggregates_across_tools() {
             "{\"type\":\"tool_use\",\"name\":\"Skill\",\"input\":{\"skill\":\"commit\"},\"timestamp\":\"2026-06-01T00:00:00Z\"}\n",
         );
 
-        run(home.path(), SkillCommand::Usage(UsageArgs { unit_name: None, verbose: false })).1.expect("usage ok");
+        run(
+            home.path(),
+            SkillCommand::Usage(UsageArgs {
+                unit_name: None,
+                verbose: false,
+            }),
+        )
+        .1
+        .expect("usage ok");
 
         let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
-        assert_eq!(lock.units[0].usage.invocations, 3, "summed across claude + codex");
-        assert_eq!(lock.units[0].usage.last_used_at.as_deref(), Some("2026-06-01T00:00:00Z"));
+        assert_eq!(
+            lock.units[0].usage.invocations, 3,
+            "summed across claude + codex"
+        );
+        assert_eq!(
+            lock.units[0].usage.last_used_at.as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
     });
 }

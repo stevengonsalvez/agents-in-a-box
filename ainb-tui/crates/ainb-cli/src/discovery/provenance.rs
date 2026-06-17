@@ -129,8 +129,7 @@ pub struct InstalledPlugins {
 impl InstalledPlugins {
     /// Look up the install record for a `(plugin, marketplace)` pair.
     pub fn lookup(&self, plugin: &str, marketplace: &str) -> Option<&InstalledRecord> {
-        self.by_plugin_marketplace
-            .get(&format!("{plugin}@{marketplace}"))
+        self.by_plugin_marketplace.get(&format!("{plugin}@{marketplace}"))
     }
 }
 
@@ -211,19 +210,9 @@ pub fn parse_installed_plugins(json: &str) -> InstalledPlugins {
             .find(|r| r.get("scope").and_then(|s| s.as_str()) == Some("user"))
             .or_else(|| records.first());
         let Some(rec) = chosen else { continue };
-        let version = rec
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let git_commit_sha = rec
-            .get("gitCommitSha")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let scope = rec
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let version = rec.get("version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let git_commit_sha = rec.get("gitCommitSha").and_then(|v| v.as_str()).map(str::to_string);
+        let scope = rec.get("scope").and_then(|v| v.as_str()).map(str::to_string);
         out.by_plugin_marketplace.insert(
             key.clone(),
             InstalledRecord {
@@ -261,9 +250,7 @@ pub fn parse_external_dependencies(yaml: &str) -> ExternalDependencies {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(format!("packages/skills/{name}")));
-            out.bundled_skills
-                .entry(name.to_string())
-                .or_insert(BundledEntry { path });
+            out.bundled_skills.entry(name.to_string()).or_insert(BundledEntry { path });
         }
     }
 
@@ -274,25 +261,16 @@ pub fn parse_external_dependencies(yaml: &str) -> ExternalDependencies {
             };
             // `repo` is the canonical field; fall back to `source` for
             // forward-compat with the `external-packages` shape.
-            let Some(repo) = entry
-                .get("repo")
-                .or_else(|| entry.get("source"))
-                .and_then(|v| v.as_str())
+            let Some(repo) =
+                entry.get("repo").or_else(|| entry.get("source")).and_then(|v| v.as_str())
             else {
                 continue;
             };
-            let version = entry
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let version = entry.get("version").and_then(|v| v.as_str()).map(str::to_string);
             let applies_to = entry
                 .get("applies-to")
                 .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
+                .map(|seq| seq.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             out.agent_skills.entry(name.to_string()).or_insert(ExternalEntry {
                 repo: repo.to_string(),
@@ -327,9 +305,7 @@ pub fn attribute(
 
     // Class-A: marketplace plugins.
     for plugin in class_a {
-        let installed = sources
-            .installed_plugins
-            .lookup(&plugin.plugin, &plugin.marketplace);
+        let installed = sources.installed_plugins.lookup(&plugin.plugin, &plugin.marketplace);
         for unit in &plugin.units {
             out.push(AttributedUnit {
                 name: unit.name.clone(),
@@ -446,7 +422,10 @@ mod tests {
 
     #[test]
     fn parse_installed_plugins_garbage_is_empty() {
-        assert_eq!(parse_installed_plugins("not json"), InstalledPlugins::default());
+        assert_eq!(
+            parse_installed_plugins("not json"),
+            InstalledPlugins::default()
+        );
         assert_eq!(parse_installed_plugins(""), InstalledPlugins::default());
     }
 

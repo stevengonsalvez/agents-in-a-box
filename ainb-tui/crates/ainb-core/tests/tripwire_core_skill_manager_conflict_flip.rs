@@ -103,8 +103,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 }
 
 /// Seed marketplace plugin shipping a `commit` skill AND a same-name
@@ -123,11 +126,8 @@ fn seed_conflict_pair(home: &Path) {
     .unwrap();
 
     // class-A: marketplace plugin shipping a skill named `commit`.
-    let plugin_root = plugins
-        .join("cache")
-        .join("tripwire-mp")
-        .join("tripwire-plugin")
-        .join("v0.1.0");
+    let plugin_root =
+        plugins.join("cache").join("tripwire-mp").join("tripwire-plugin").join("v0.1.0");
     fs::create_dir_all(plugin_root.join(".claude-plugin")).unwrap();
     fs::write(
         plugin_root.join(".claude-plugin").join("plugin.json"),
@@ -252,10 +252,7 @@ fn s_flips_marketplace_orphan_conflict_in_manifest() {
     let session = format!("tripwire-sm-flip-pos-{}", std::process::id());
     boot_and_import(home_tmp.path(), &session);
 
-    let manifest_path = home_tmp
-        .path()
-        .join(".agents-in-a-box")
-        .join("manifest.yaml");
+    let manifest_path = home_tmp.path().join(".agents-in-a-box").join("manifest.yaml");
 
     // Baseline: import produced an orphan-wins shadow.
     let baseline = fs::read_to_string(&manifest_path).expect("manifest.yaml must exist");
@@ -281,10 +278,14 @@ fn s_flips_marketplace_orphan_conflict_in_manifest() {
     // Poll the manifest until the shadowed_by line points the OTHER
     // way (orphan now shadowed by marketplace). Bounded so a missing
     // handler can't hang the test.
-    let flipped = poll_file(&manifest_path, Instant::now() + Duration::from_secs(15), |s| {
-        s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit")
-            && !s.contains("shadowed_by: local:~/.claude/skills@head/commit")
-    });
+    let flipped = poll_file(
+        &manifest_path,
+        Instant::now() + Duration::from_secs(15),
+        |s| {
+            s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit")
+                && !s.contains("shadowed_by: local:~/.claude/skills@head/commit")
+        },
+    );
     let flipped = match flipped {
         Some(s) => s,
         None => {
@@ -322,17 +323,16 @@ fn s_twice_roundtrips_to_original_shadowed_by_state() {
     let session = format!("tripwire-sm-flip-rt-{}", std::process::id());
     boot_and_import(home_tmp.path(), &session);
 
-    let manifest_path = home_tmp
-        .path()
-        .join(".agents-in-a-box")
-        .join("manifest.yaml");
+    let manifest_path = home_tmp.path().join(".agents-in-a-box").join("manifest.yaml");
     let baseline = fs::read_to_string(&manifest_path).expect("manifest.yaml must exist");
 
     // Press [s] once → flipped.
     send_key(&session, "s");
-    let flipped_state = poll_file(&manifest_path, Instant::now() + Duration::from_secs(15), |s| {
-        s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit")
-    });
+    let flipped_state = poll_file(
+        &manifest_path,
+        Instant::now() + Duration::from_secs(15),
+        |s| s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit"),
+    );
     if flipped_state.is_none() {
         let on_disk = fs::read_to_string(&manifest_path).unwrap_or_default();
         kill_session(&session);
@@ -341,10 +341,14 @@ fn s_twice_roundtrips_to_original_shadowed_by_state() {
 
     // Press [s] again → must restore the baseline byte-for-byte.
     send_key(&session, "s");
-    let restored = poll_file(&manifest_path, Instant::now() + Duration::from_secs(15), |s| {
-        s.contains("shadowed_by: local:~/.claude/skills@head/commit")
-            && !s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit")
-    });
+    let restored = poll_file(
+        &manifest_path,
+        Instant::now() + Duration::from_secs(15),
+        |s| {
+            s.contains("shadowed_by: local:~/.claude/skills@head/commit")
+                && !s.contains("shadowed_by: marketplace:tripwire-plugin@tripwire-mp/skills/commit")
+        },
+    );
     let restored = match restored {
         Some(s) => s,
         None => {
@@ -378,10 +382,7 @@ fn s_on_unit_without_conflict_is_noop() {
     let session = format!("tripwire-sm-flip-neg-{}", std::process::id());
     boot_and_import(home_tmp.path(), &session);
 
-    let manifest_path = home_tmp
-        .path()
-        .join(".agents-in-a-box")
-        .join("manifest.yaml");
+    let manifest_path = home_tmp.path().join(".agents-in-a-box").join("manifest.yaml");
     let baseline = fs::read_to_string(&manifest_path).expect("manifest.yaml must exist");
 
     // Sanity: the seed has no marketplace pair, so the baseline must

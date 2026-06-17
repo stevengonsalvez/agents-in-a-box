@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 
 use ainb_skill_core::catalog::CatalogEntryKind;
 use ainb_skill_core::catalog_index::{
-    external_install_uri, github_slug, owned_install_uri, parse_skill_frontmatter, CatalogIndex,
-    CatalogIndexEntry, CatalogOrigin, OWNED_REPO,
+    CatalogIndex, CatalogIndexEntry, CatalogOrigin, OWNED_REPO, external_install_uri, github_slug,
+    owned_install_uri, parse_skill_frontmatter,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_yaml_ng::Value;
 
 /// External sections of `external-dependencies.yaml` that carry git-backed
@@ -60,9 +60,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     entries.extend(commands);
     let index = CatalogIndex::new(&opts.release_tag, entries);
 
-    let out = opts
-        .out
-        .unwrap_or_else(|| root.join("toolkit").join("catalog-index.json"));
+    let out = opts.out.unwrap_or_else(|| root.join("toolkit").join("catalog-index.json"));
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -74,7 +72,10 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     eprintln!("  external skills:  {external_count}");
     eprintln!("  command entries:  {command_count} (npx / plugin / mcp)");
     if !skipped.is_empty() {
-        eprintln!("  skipped (no github repo / no subpath / no install cmd): {}", skipped.len());
+        eprintln!(
+            "  skipped (no github repo / no subpath / no install cmd): {}",
+            skipped.len()
+        );
         for s in &skipped {
             eprintln!("    - {s}");
         }
@@ -96,9 +97,8 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--release-tag" => {
-                    release_tag = args
-                        .next()
-                        .ok_or_else(|| anyhow!("--release-tag needs a value"))?;
+                    release_tag =
+                        args.next().ok_or_else(|| anyhow!("--release-tag needs a value"))?;
                 }
                 "--out" => {
                     out = Some(PathBuf::from(
@@ -181,18 +181,11 @@ fn external_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)
             continue;
         };
         for item in seq {
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("<unnamed>")
-                .to_string();
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("<unnamed>").to_string();
 
             // Only github `repo:` URLs map to a `gh:` URI; clawhub `source:`
             // and the rest are deferred.
-            let slug = item
-                .get("repo")
-                .and_then(Value::as_str)
-                .and_then(github_slug);
+            let slug = item.get("repo").and_then(Value::as_str).and_then(github_slug);
             let Some(slug) = slug else {
                 skipped.push(format!("{section}/{name}"));
                 continue;
@@ -211,12 +204,8 @@ fn external_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)
                 continue;
             };
 
-            let description = item
-                .get("purpose")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let description =
+                item.get("purpose").and_then(Value::as_str).unwrap_or("").trim().to_string();
 
             entries.push(CatalogIndexEntry {
                 name,
@@ -251,11 +240,7 @@ fn command_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)>
             continue;
         };
         for item in seq {
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("<unnamed>")
-                .to_string();
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("<unnamed>").to_string();
 
             // The documented install command is mandatory — without it there
             // is nothing to run, so drop (and report) the entry.
@@ -274,12 +259,8 @@ fn command_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)>
                 .and_then(Value::as_str)
                 .map(|s| github_slug(s).unwrap_or_else(|| s.trim().to_string()))
                 .unwrap_or_default();
-            let description = item
-                .get("purpose")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let description =
+                item.get("purpose").and_then(Value::as_str).unwrap_or("").trim().to_string();
 
             entries.push(CatalogIndexEntry {
                 name,

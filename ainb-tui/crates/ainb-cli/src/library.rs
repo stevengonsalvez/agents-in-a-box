@@ -12,11 +12,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_tool::read_root_for;
-use ainb_skill_core::library::{library_path_in, Library, OwnedUnit};
 use ainb_skill_core::UnitKind;
+use ainb_skill_core::library::{Library, OwnedUnit, library_path_in};
 
 use crate::LibraryCmd;
 
@@ -54,7 +54,10 @@ fn list(home: &Path, json: bool, out: &mut dyn io::Write) -> Result<()> {
     }
 
     if lib.owned.is_empty() {
-        writeln!(out, "# no owned skills — `ainb skill library new <name>` to author one")?;
+        writeln!(
+            out,
+            "# no owned skills — `ainb skill library new <name>` to author one"
+        )?;
         return Ok(());
     }
 
@@ -66,7 +69,14 @@ fn list(home: &Path, json: bool, out: &mut dyn io::Write) -> Result<()> {
         } else {
             "local"
         };
-        writeln!(out, "{:<28}  {:<8}  {:<32}  {}", u.name, u.kind.as_str(), u.path, deploy)?;
+        writeln!(
+            out,
+            "{:<28}  {:<8}  {:<32}  {}",
+            u.name,
+            u.kind.as_str(),
+            u.path,
+            deploy
+        )?;
     }
     writeln!(out, "# {} owned skill(s)", lib.owned.len())?;
     Ok(())
@@ -94,7 +104,10 @@ fn add(home: &Path, path: &Path, tool: Option<&str>, out: &mut dyn io::Write) ->
     }
 
     if !abs.is_dir() {
-        bail!("`{}` is not a directory — point at a skill folder", path.display());
+        bail!(
+            "`{}` is not a directory — point at a skill folder",
+            path.display()
+        );
     }
 
     let name = abs
@@ -119,7 +132,10 @@ fn new(home: &Path, name: &str, tool: Option<&str>, out: &mut dyn io::Write) -> 
     let tool_root = read_root_for(tool);
     let dir = tool_root.join("skills").join(name);
     if dir.exists() {
-        bail!("`{}` already exists — pick a fresh name or use `library add`", dir.display());
+        bail!(
+            "`{}` already exists — pick a fresh name or use `library add`",
+            dir.display()
+        );
     }
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating skill folder `{}`", dir.display()))?;
@@ -203,10 +219,7 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 /// `chrono` at the CLI layer.
 fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // Minimal RFC 3339 rendering from a Unix timestamp (UTC). Avoids a
     // chrono dependency for a single timestamp; the value is only used
     // for display + round-trip, not parsed back by ainb.

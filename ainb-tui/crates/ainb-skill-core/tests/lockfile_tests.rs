@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use ainb_skill_core::lockfile::{
-    DeployedRef, LockedSource, LockedUnit, Lockfile, UsageRecord, LOCKFILE_SCHEMA_VERSION,
+    DeployedRef, LOCKFILE_SCHEMA_VERSION, LockedSource, LockedUnit, Lockfile, UsageRecord,
 };
 use ainb_skill_core::paths::lockfile_path_in;
 
@@ -238,7 +238,10 @@ fn empty_usage_is_omitted_from_serialized_yaml() {
     };
     l.save_to(&path).unwrap();
     let yaml = std::fs::read_to_string(&path).unwrap();
-    assert!(!yaml.contains("usage"), "empty usage should be omitted, got:\n{yaml}");
+    assert!(
+        !yaml.contains("usage"),
+        "empty usage should be omitted, got:\n{yaml}"
+    );
 }
 
 #[test]

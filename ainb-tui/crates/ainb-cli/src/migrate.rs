@@ -139,18 +139,11 @@ fn migrate_upgrade_schema(home: &Path, out: &mut dyn io::Write) -> Result<()> {
         }
         source.target_layout = defaults.clone();
         updated += 1;
-        writeln!(
-            out,
-            "  {}: {added_per_source} mappings added",
-            source.name
-        )?;
+        writeln!(out, "  {}: {added_per_source} mappings added", source.name)?;
     }
 
     if updated == 0 {
-        writeln!(
-            out,
-            "# 0 sources updated; manifest already up to date"
-        )?;
+        writeln!(out, "# 0 sources updated; manifest already up to date")?;
         return Ok(());
     }
 
@@ -520,10 +513,9 @@ fn apply_legacy_yaml_match(patch: &mut ManifestPatch, path: &Path) -> Result<usi
             path.display()
         );
     }
-    let body = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let parsed: YamlValue = serde_yaml_ng::from_str(&body)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let body = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let parsed: YamlValue =
+        serde_yaml_ng::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
 
     // name → (repo, ref, path_in_repo) — first hit wins per section,
     // sections checked in declaration order so a name in
@@ -540,11 +532,7 @@ fn apply_legacy_yaml_match(patch: &mut ManifestPatch, path: &Path) -> Result<usi
             let Some(repo) = entry.get("repo").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let r#ref = entry
-                .get("ref")
-                .and_then(|v| v.as_str())
-                .unwrap_or("main")
-                .to_string();
+            let r#ref = entry.get("ref").and_then(|v| v.as_str()).unwrap_or("main").to_string();
             let path_in_repo = entry
                 .get("path")
                 .and_then(|v| v.as_str())

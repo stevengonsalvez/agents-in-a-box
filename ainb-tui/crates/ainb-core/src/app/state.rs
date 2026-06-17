@@ -3052,10 +3052,7 @@ pub struct AppState {
     /// drains it into `skill_manager_state.drift_cache`.
     pub drift_load_receiver: Option<
         mpsc::UnboundedReceiver<
-            std::collections::BTreeMap<
-                String,
-                ainb_skill_core::drift::DriftStatus,
-            >,
+            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
         >,
     >,
     /// Background base-branch refresh for the Configure picker. The fetch +
@@ -4581,10 +4578,8 @@ impl AppState {
                 use ainb_skill_core::lockfile::Lockfile;
                 use ainb_skill_core::manifest::Manifest;
                 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
-                let manifest =
-                    Manifest::load_from(&manifest_path_in(&home)).unwrap_or_default();
-                let lockfile =
-                    Lockfile::load_from(&lockfile_path_in(&home)).unwrap_or_default();
+                let manifest = Manifest::load_from(&manifest_path_in(&home)).unwrap_or_default();
+                let lockfile = Lockfile::load_from(&lockfile_path_in(&home)).unwrap_or_default();
                 ainb_skill_core::drift::detect_all(&manifest, &lockfile, backend.as_ref())
             })
             .await;

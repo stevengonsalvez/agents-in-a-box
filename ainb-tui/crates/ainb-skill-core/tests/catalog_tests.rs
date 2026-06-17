@@ -6,8 +6,7 @@
 //! skills.sh) lives in `ainb-cli` and is never exercised here.
 
 use ainb_skill_core::catalog::{
-    rank_by_stars, CatalogBackend, CatalogError, CatalogHit, MockCatalogBackend,
-    SkillsShUrlBuilder,
+    CatalogBackend, CatalogError, CatalogHit, MockCatalogBackend, SkillsShUrlBuilder, rank_by_stars,
 };
 
 fn hit(name: &str, repo: &str, stars: u64) -> CatalogHit {
@@ -29,7 +28,10 @@ fn catalog_hit_serde_roundtrips() {
     let json = serde_json::to_string(&h).expect("serialize");
     // Field names are the wire contract for `--json` output.
     assert!(json.contains("\"name\":\"commit\""), "name field: {json}");
-    assert!(json.contains("\"repo\":\"stevengonsalvez/agents-in-a-box\""), "repo: {json}");
+    assert!(
+        json.contains("\"repo\":\"stevengonsalvez/agents-in-a-box\""),
+        "repo: {json}"
+    );
     assert!(json.contains("\"stars\":1234"), "stars: {json}");
     assert!(json.contains("\"install_uri\""), "install_uri: {json}");
     assert!(json.contains("\"description\""), "description: {json}");
@@ -98,16 +100,21 @@ fn empty_query_returns_empty_not_error() {
 
 #[test]
 fn api_error_surfaces_typed_error() {
-    let mock = MockCatalogBackend::failing(CatalogError::Backend(
-        "skills.sh returned 500".to_string(),
-    ));
+    let mock =
+        MockCatalogBackend::failing(CatalogError::Backend("skills.sh returned 500".to_string()));
     let err = mock.search("anything").expect_err("backend error surfaces");
-    assert!(matches!(err, CatalogError::Backend(_)), "typed Backend error: {err:?}");
+    assert!(
+        matches!(err, CatalogError::Backend(_)),
+        "typed Backend error: {err:?}"
+    );
 
     // An auth-gated mock surfaces the dedicated AuthRequired variant.
     let auth_mock = MockCatalogBackend::failing(CatalogError::AuthRequired);
     let auth_err = auth_mock.search("q").expect_err("auth error surfaces");
-    assert!(matches!(auth_err, CatalogError::AuthRequired), "AuthRequired: {auth_err:?}");
+    assert!(
+        matches!(auth_err, CatalogError::AuthRequired),
+        "AuthRequired: {auth_err:?}"
+    );
     // The error message must point the user at the env / config knob.
     let msg = auth_err.to_string();
     assert!(
@@ -123,7 +130,10 @@ fn skills_sh_url_builds_with_api_key() {
     // Default base is the public skills.sh API.
     let builder = SkillsShUrlBuilder::new(None);
     let url = builder.search_url("graph layout");
-    assert!(url.starts_with("https://skills.sh/api/search"), "base url: {url}");
+    assert!(
+        url.starts_with("https://skills.sh/api/search"),
+        "base url: {url}"
+    );
     assert!(url.contains("q=graph"), "query encoded: {url}");
     // Spaces are percent-encoded, not left raw.
     assert!(!url.contains("graph layout"), "spaces encoded: {url}");
@@ -138,7 +148,10 @@ fn skills_sh_url_builds_with_api_key() {
         "bearer header built from the key"
     );
     let url = builder.search_url("x");
-    assert!(!url.contains("sk-test-123"), "key never appears in the url: {url}");
+    assert!(
+        !url.contains("sk-test-123"),
+        "key never appears in the url: {url}"
+    );
 
     // No key → no auth header.
     let builder = SkillsShUrlBuilder::new(None);
@@ -151,5 +164,8 @@ fn url_builder_honours_custom_base() {
     // local stub) reroutes the base host.
     let builder = SkillsShUrlBuilder::with_base("http://127.0.0.1:9999", None);
     let url = builder.search_url("q");
-    assert!(url.starts_with("http://127.0.0.1:9999/api/search"), "custom base: {url}");
+    assert!(
+        url.starts_with("http://127.0.0.1:9999/api/search"),
+        "custom base: {url}"
+    );
 }

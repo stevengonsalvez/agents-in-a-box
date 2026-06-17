@@ -9,10 +9,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, Command as CliCommand, LibraryCmd, SkillCommand,
-};
-use ainb_skill_core::library::{library_path_in, Library};
+use ainb_cli::{Command as CliCommand, LibraryCmd, SkillCommand, dispatch};
+use ainb_skill_core::library::{Library, library_path_in};
 
 /// Serialises `AINB_TOOL_HOME_CLAUDE` mutation across these tests so a
 /// parallel run doesn't trample another test's tool home.
@@ -28,10 +26,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        let tmp = tempfile::Builder::new()
-            .prefix("ainb-library-cli-")
-            .tempdir()
-            .expect("tempdir");
+        let tmp = tempfile::Builder::new().prefix("ainb-library-cli-").tempdir().expect("tempdir");
         let home = tmp.path().join("ainb");
         fs::create_dir_all(&home).unwrap();
         let claude_home = tmp.path().join("claude-home");
@@ -94,15 +89,14 @@ fn library_new_scaffolds_valid_skill_md() {
     assert!(out.contains("my-new-skill"), "out names the skill: {out}");
 
     // The scaffolded SKILL.md exists, has frontmatter, and is parseable.
-    let skill_md = sb
-        .claude_home
-        .join("skills")
-        .join("my-new-skill")
-        .join("SKILL.md");
+    let skill_md = sb.claude_home.join("skills").join("my-new-skill").join("SKILL.md");
     assert!(skill_md.is_file(), "SKILL.md scaffolded at {skill_md:?}");
     let text = fs::read_to_string(&skill_md).unwrap();
     assert!(text.starts_with("---"), "has frontmatter open: {text}");
-    assert!(text.contains("name: my-new-skill"), "frontmatter name: {text}");
+    assert!(
+        text.contains("name: my-new-skill"),
+        "frontmatter name: {text}"
+    );
     assert!(
         text.contains("kind: skill"),
         "frontmatter declares kind: {text}"
@@ -179,11 +173,12 @@ fn library_list_shows_owned() {
     let parsed: serde_json::Value = serde_json::from_str(json.trim()).expect("valid json");
     let arr = parsed.as_array().expect("json array");
     assert_eq!(arr.len(), 2, "two owned units: {json}");
-    let names: Vec<&str> = arr
-        .iter()
-        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
-        .collect();
-    assert!(names.contains(&"alpha") && names.contains(&"beta"), "names: {names:?}");
+    let names: Vec<&str> =
+        arr.iter().filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+    assert!(
+        names.contains(&"alpha") && names.contains(&"beta"),
+        "names: {names:?}"
+    );
 }
 
 #[test]
@@ -211,12 +206,14 @@ fn library_add_rejects_outside_tool_home() {
     );
     let msg = format!("{}", res.unwrap_err());
     assert!(
-        msg.to_lowercase().contains("outside")
-            || msg.to_lowercase().contains("tool home"),
+        msg.to_lowercase().contains("outside") || msg.to_lowercase().contains("tool home"),
         "error names the safety reason: {msg}"
     );
 
     // Nothing was registered.
     let lib = sb.library();
-    assert!(lib.get("rogue").is_none(), "rejected path is not registered");
+    assert!(
+        lib.get("rogue").is_none(),
+        "rejected path is not registered"
+    );
 }

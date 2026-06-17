@@ -10,15 +10,13 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::discovery::class_a::{
-    DiscoveredMarketplaceUnit, DiscoveredUnit, DiscoveredUnitKind,
-};
+use ainb_cli::discovery::class_a::{DiscoveredMarketplaceUnit, DiscoveredUnit, DiscoveredUnitKind};
 use ainb_cli::discovery::class_c::DiscoveredOrphanUnit;
 use ainb_cli::discovery::provenance::{
-    attribute, parse_external_dependencies, parse_installed_plugins, AttributedUnit,
-    Provenance, ProvenanceSources,
+    AttributedUnit, Provenance, ProvenanceSources, attribute, parse_external_dependencies,
+    parse_installed_plugins,
 };
-use ainb_cli::discovery::reconcile::{reconcile_with_sources, WalkerOutput};
+use ainb_cli::discovery::reconcile::{WalkerOutput, reconcile_with_sources};
 
 use ainb_skill_core::{UnitEntry, UnitKind};
 
@@ -171,13 +169,14 @@ fn attribute_external_repo_from_deps_yaml() {
             version,
             applies_to,
         } => {
-            assert_eq!(repo, "https://github.com/yizhiyanhua-ai/fireworks-tech-graph");
+            assert_eq!(
+                repo,
+                "https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
+            );
             assert_eq!(version.as_deref(), None);
             assert_eq!(
                 applies_to,
-                &["claude", "codex", "copilot", "gemini"]
-                    .map(String::from)
-                    .to_vec()
+                &["claude", "codex", "copilot", "gemini"].map(String::from).to_vec()
             );
         }
         other => panic!("expected ExternalRepo, got {other:?}"),
@@ -283,25 +282,24 @@ fn synth_uri_is_provenance_aware() {
 
     // External clone → gh: upstream, NOT local:.
     assert!(
-        uris.iter().any(|u| u.starts_with("gh:")
-            && u.contains("fireworks-tech-graph")),
+        uris.iter().any(|u| u.starts_with("gh:") && u.contains("fireworks-tech-graph")),
         "fireworks-tech-graph should reconcile to a gh: URI, got: {uris:?}"
     );
     assert!(
-        !uris.iter().any(|u| u.starts_with("local:")
-            && u.contains("fireworks-tech-graph")),
+        !uris
+            .iter()
+            .any(|u| u.starts_with("local:") && u.contains("fireworks-tech-graph")),
         "fireworks-tech-graph must NOT stay local: — {uris:?}"
     );
     // Hand-authored orphan stays local:.
     assert!(
-        uris.iter().any(|u| u.starts_with("local:")
-            && u.contains("my-hand-rolled-skill")),
+        uris.iter()
+            .any(|u| u.starts_with("local:") && u.contains("my-hand-rolled-skill")),
         "hand-authored orphan should stay local:, got: {uris:?}"
     );
     // Marketplace unit stays marketplace:.
     assert!(
-        uris.iter()
-            .any(|u| u.starts_with("marketplace:") && u.contains("access")),
+        uris.iter().any(|u| u.starts_with("marketplace:") && u.contains("access")),
         "marketplace unit should stay marketplace:, got: {uris:?}"
     );
 }
@@ -333,7 +331,7 @@ fn reconcile_without_sources_is_byte_identical_to_legacy() {
 // Test ladder #7: `ainb skill scan` CLI
 // ==================================================================
 
-use ainb_cli::{dispatch, Command, ScanArgs, SkillCommand};
+use ainb_cli::{Command, ScanArgs, SkillCommand, dispatch};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -366,8 +364,14 @@ fn with_tool_homes<R>(base: &Path, body: impl FnOnce() -> R) -> R {
 
 fn run_scan(home: &Path, args: ScanArgs) -> String {
     let mut buf = Vec::new();
-    dispatch(home, Command::Skill { action: SkillCommand::Scan(args) }, &mut buf)
-        .expect("scan dispatch");
+    dispatch(
+        home,
+        Command::Skill {
+            action: SkillCommand::Scan(args),
+        },
+        &mut buf,
+    )
+    .expect("scan dispatch");
     String::from_utf8(buf).expect("utf8")
 }
 
@@ -475,10 +479,8 @@ fn cli_scan_tree_and_filters() {
             serde_json::from_str(&as_json).expect("scan --json must be valid JSON");
         let arr = parsed.as_array().expect("scan --json is a JSON array");
         assert!(
-            arr.iter().any(|v| v
-                .get("name")
-                .and_then(|n| n.as_str())
-                == Some("fireworks-tech-graph")),
+            arr.iter()
+                .any(|v| v.get("name").and_then(|n| n.as_str()) == Some("fireworks-tech-graph")),
             "scan --json missing fireworks-tech-graph: {as_json}"
         );
     });

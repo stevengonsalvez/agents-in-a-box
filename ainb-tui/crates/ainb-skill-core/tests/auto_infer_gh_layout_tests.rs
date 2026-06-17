@@ -67,7 +67,10 @@ fn gh_top_level_agent_file_uses_bootstrap_default_mapping() {
     let source = gh_source("gh:owner/repo");
     let unit = PathBuf::from("agents/distinguished-engineer.md");
     let (home, repo) = resolve_pair(&source, &unit).expect("default mapping must match");
-    assert_eq!(home, PathBuf::from(".claude/agents/distinguished-engineer.md"));
+    assert_eq!(
+        home,
+        PathBuf::from(".claude/agents/distinguished-engineer.md")
+    );
     assert_eq!(repo, PathBuf::from("agents/distinguished-engineer.md"));
 }
 

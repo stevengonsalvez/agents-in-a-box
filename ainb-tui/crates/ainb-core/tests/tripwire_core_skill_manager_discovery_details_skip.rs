@@ -48,7 +48,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 /// Discovery skip-marker filename. MUST match
 /// `skill_manager_screen::SKIP_MARKER_FILE` — that constant is private
@@ -116,9 +116,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Quote a path for shell so spaces / special chars in the tempdir
@@ -153,8 +151,8 @@ fn open_with_visible_banner(session_suffix: &str) -> (String, SandboxLayout, tem
     // under ~/.claude/skills (commit, fireworks-tech-graph) and
     // ~/.codex/skills (deploy) + one marketplace plugin, so the
     // Class-A + Class-C walkers both find candidates.
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal)
-        .expect("sandbox minimal");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal).expect("sandbox minimal");
     seed_onboarding(&layout);
 
     // Belt-and-braces: there must be NO skip-marker on disk, else the
@@ -171,7 +169,13 @@ fn open_with_visible_banner(session_suffix: &str) -> (String, SandboxLayout, tem
     assert!(status.success(), "tmux new-session failed");
 
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("tmux send-keys launch");
 

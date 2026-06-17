@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use ainb_skill_core::{
-    build_skill_manager_sandbox, SandboxLayout, SandboxTier, SANDBOX_MARKER_FILE,
+    SANDBOX_MARKER_FILE, SandboxLayout, SandboxTier, build_skill_manager_sandbox,
 };
 
 fn assert_has_skill(home: &Path, name: &str) {
@@ -46,9 +46,7 @@ fn assert_minimal_layout(layout: &SandboxLayout) {
     // codex side: one skill
     assert_has_skill(&layout.codex_home, "deploy");
     // marketplace plugin under plugins/cache
-    let plugin_root = layout
-        .claude_home
-        .join("plugins/cache/sandbox-marketplace/discord/0.1.0");
+    let plugin_root = layout.claude_home.join("plugins/cache/sandbox-marketplace/discord/0.1.0");
     assert!(
         plugin_root.join(".claude-plugin/plugin.json").is_file(),
         "missing plugin.json"
@@ -64,7 +62,10 @@ fn assert_minimal_layout(layout: &SandboxLayout) {
     // bare remote initialised + reachable via the helper URI
     assert!(layout.bare_remote.is_dir(), "bare remote dir missing");
     let head_path = layout.bare_remote.join("HEAD");
-    assert!(head_path.is_file(), "bare HEAD missing (git init didn't run?)");
+    assert!(
+        head_path.is_file(),
+        "bare HEAD missing (git init didn't run?)"
+    );
     assert!(layout.bare_remote_uri().starts_with("git:file://"));
     assert!(layout.seed_unit_uri().contains("@main/skills/initial-skill"));
 }
@@ -87,8 +88,8 @@ fn minimal_tier_seeds_every_claimed_artifact() {
 #[test]
 fn full_tier_adds_every_extra_artifact() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full)
-        .expect("build sandbox full");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("build sandbox full");
     assert_eq!(layout.tier, SandboxTier::Full);
     // Minimal-tier content still present.
     assert_minimal_layout(&layout);
@@ -144,12 +145,20 @@ fn full_tier_adds_every_extra_artifact() {
     );
 
     // external-dependencies.yaml at sandbox root, real schema.
-    let deps_yaml =
-        std::fs::read_to_string(layout.root.join("external-dependencies.yaml"))
-            .expect("external-dependencies.yaml");
-    assert!(deps_yaml.contains("external-packages:"), "missing external-packages section");
-    assert!(deps_yaml.contains("bundled-skills:"), "missing bundled-skills section");
-    assert!(deps_yaml.contains("agent-skills:"), "missing agent-skills section");
+    let deps_yaml = std::fs::read_to_string(layout.root.join("external-dependencies.yaml"))
+        .expect("external-dependencies.yaml");
+    assert!(
+        deps_yaml.contains("external-packages:"),
+        "missing external-packages section"
+    );
+    assert!(
+        deps_yaml.contains("bundled-skills:"),
+        "missing bundled-skills section"
+    );
+    assert!(
+        deps_yaml.contains("agent-skills:"),
+        "missing agent-skills section"
+    );
     // Must parse cleanly — load via serde_yaml_ng to catch malformed YAML
     let _: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&deps_yaml).expect("external-dependencies.yaml must parse");
@@ -195,8 +204,8 @@ fn refuses_to_seed_into_real_home() {
 #[test]
 fn env_vars_round_trip_paths() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal)
-        .expect("build minimal");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal).expect("build minimal");
     let vars = layout.env_vars();
     let keys: Vec<&str> = vars.iter().map(|(k, _)| *k).collect();
     for required in [

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
 use ainb_skill_core::{
-    build_skill_manager_sandbox, DriftBackend, DriftStatus, GitLsRemoteBackend, SandboxTier,
+    DriftBackend, DriftStatus, GitLsRemoteBackend, SandboxTier, build_skill_manager_sandbox,
 };
 
 fn git_available() -> bool {
@@ -79,8 +79,8 @@ fn git_ls_remote_backend_reports_in_sync_when_deployed_sha_equals_tip() {
     }
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
-    let layout = build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal)
-        .expect("sandbox fixture");
+    let layout =
+        build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal).expect("sandbox fixture");
     let bare = layout.bare_remote.clone();
     let tip = bare_remote_tip(&bare);
     let source = source_with_uri(format!("git:file://{}", bare.display()));
@@ -98,8 +98,8 @@ fn git_ls_remote_backend_reports_outdated_when_deployed_sha_differs() {
     }
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
-    let layout = build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal)
-        .expect("sandbox fixture");
+    let layout =
+        build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal).expect("sandbox fixture");
     let bare = layout.bare_remote.clone();
     let tip = bare_remote_tip(&bare);
     let stale = "0000000000000000000000000000000000000000";
@@ -162,8 +162,7 @@ fn git_ls_remote_backend_does_not_hang_on_bad_url_with_terminal_prompt_disabled(
         return;
     }
 
-    let source =
-        source_with_uri("git:file:///nonexistent/path/to/bogus-repo.git".to_string());
+    let source = source_with_uri("git:file:///nonexistent/path/to/bogus-repo.git".to_string());
     let backend = GitLsRemoteBackend::new();
 
     let started = Instant::now();

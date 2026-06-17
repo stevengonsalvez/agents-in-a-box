@@ -45,8 +45,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 }
 
 /// Seed `$HOME/.agents-in-a-box/manifest.yaml` + `lock.yaml` so the
@@ -224,7 +227,9 @@ fn pressing_m_on_home_opens_skill_manager_screen() {
         None => {
             let dump = capture_pane(&session);
             kill_session(&session);
-            panic!("SkillManager screen never rendered live data after pressing M. last capture:\n{dump}");
+            panic!(
+                "SkillManager screen never rendered live data after pressing M. last capture:\n{dump}"
+            );
         }
     };
     kill_session(&session);

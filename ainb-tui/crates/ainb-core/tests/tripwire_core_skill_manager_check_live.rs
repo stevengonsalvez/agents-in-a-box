@@ -24,7 +24,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -77,9 +77,7 @@ fn send(session: &str, keys: &str) {
 }
 
 fn kill(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 fn launch_line(layout: &SandboxLayout, bin: &Path) -> String {
@@ -108,8 +106,7 @@ fn check_key_surfaces_drift_notification_in_live_binary() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Full tier pre-seeds a manifest with units, so the Units table has
     // rows and no discovery banner intercepts our `c` keystroke.
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full)
-        .expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
 
     let session = format!("tripwire-sm-check-{}", std::process::id());
@@ -122,7 +119,13 @@ fn check_key_surfaces_drift_notification_in_live_binary() {
             .success()
     );
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("launch");
 

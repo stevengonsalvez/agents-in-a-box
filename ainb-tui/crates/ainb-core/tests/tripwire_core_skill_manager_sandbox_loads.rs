@@ -18,7 +18,7 @@ use ratatui::layout::Rect;
 use tempfile::TempDir;
 
 use ainb::components::skill_manager_screen::{SkillsScreenData, render};
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxTier};
+use ainb_skill_core::{SandboxTier, build_skill_manager_sandbox};
 
 fn buffer_as_string(terminal: &Terminal<TestBackend>) -> String {
     let buffer = terminal.backend().buffer();
@@ -35,8 +35,7 @@ fn buffer_as_string(terminal: &Terminal<TestBackend>) -> String {
 #[test]
 fn sandbox_full_tier_manifest_renders_into_test_backend() {
     let tmp = TempDir::new().expect("tempdir");
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full)
-        .expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
 
     // Load the screen state from the fixture-seeded ainb_home. Full
     // tier pre-seeds manifest.yaml with one source + two units (one
@@ -90,10 +89,16 @@ fn sandbox_minimal_tier_with_empty_manifest_yields_empty_screen_data() {
     // must handle that gracefully (zero sources, zero units, banner
     // ready to be triggered when walkers run).
     let tmp = TempDir::new().expect("tempdir");
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal)
-        .expect("sandbox minimal");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Minimal).expect("sandbox minimal");
 
     let data = SkillsScreenData::load_from_disk(&layout.ainb_home);
-    assert!(data.sources.is_empty(), "Minimal tier: no manifest → no sources");
-    assert!(data.units.is_empty(), "Minimal tier: no manifest → no units");
+    assert!(
+        data.sources.is_empty(),
+        "Minimal tier: no manifest → no sources"
+    );
+    assert!(
+        data.units.is_empty(),
+        "Minimal tier: no manifest → no units"
+    );
 }

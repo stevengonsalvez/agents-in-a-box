@@ -312,9 +312,7 @@ fn parse_kind_with_alias(raw: &str) -> Option<UnitKind> {
 /// inner text. Supports both `\n` and `\r\n` line endings. A file
 /// without a leading fence yields `None`.
 fn extract_frontmatter(body: &str) -> Option<&str> {
-    let after_open = body
-        .strip_prefix("---\n")
-        .or_else(|| body.strip_prefix("---\r\n"))?;
+    let after_open = body.strip_prefix("---\n").or_else(|| body.strip_prefix("---\r\n"))?;
     // Look for a closing fence — `\n---\n`, `\n---\r\n`, or `\n---`
     // at EOF (no trailing newline).
     if let Some(end) = after_open.find("\n---\n") {
@@ -436,7 +434,11 @@ mod tests {
         fs::write(&path, body).unwrap();
         let (n, k, v) = parse_frontmatter(&path, "dir-name", UnitKind::Agent);
         assert_eq!(n, "x");
-        assert_eq!(k, UnitKind::Agent, "unknown kind falls back to path-inferred");
+        assert_eq!(
+            k,
+            UnitKind::Agent,
+            "unknown kind falls back to path-inferred"
+        );
         assert!(v, "frontmatter still parses; only kind is rejected");
     }
 
@@ -586,8 +588,14 @@ mod tests {
         assert!(names.contains(&"m1"));
         assert!(names.contains(&"a1"));
         assert!(names.contains(&"c1"));
-        assert!(!names.contains(&"p1"), "plugins must not be discovered for codex");
-        assert!(!names.contains(&"h1"), "hooks must not be discovered for codex");
+        assert!(
+            !names.contains(&"p1"),
+            "plugins must not be discovered for codex"
+        );
+        assert!(
+            !names.contains(&"h1"),
+            "hooks must not be discovered for codex"
+        );
     }
 
     #[test]

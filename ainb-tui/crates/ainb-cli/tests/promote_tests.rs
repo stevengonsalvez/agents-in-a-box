@@ -40,10 +40,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        let tmp = tempfile::Builder::new()
-            .prefix("ainb-promote-")
-            .tempdir()
-            .expect("tempdir");
+        let tmp = tempfile::Builder::new().prefix("ainb-promote-").tempdir().expect("tempdir");
         let home = tmp.path().join("ainb");
         fs::create_dir_all(&home).unwrap();
         let upstream = tmp.path().join("upstream.git");
@@ -69,8 +66,7 @@ fn init_bare_upstream_with_main(bare_path: &Path) {
     run_git(bare_path, &["init", "--bare", "--initial-branch=main"]).expect("git init --bare");
 
     // Bootstrap an initial empty commit via a throwaway working clone.
-    let bootstrap_dir =
-        tempfile::tempdir().expect("bootstrap tempdir");
+    let bootstrap_dir = tempfile::tempdir().expect("bootstrap tempdir");
     let work = bootstrap_dir.path();
     run_git(
         work,
@@ -149,7 +145,11 @@ fn seed_orphan(sandbox: &Sandbox, unit_name: &str) {
     )
     .unwrap();
     fs::create_dir_all(unit_dir.join("scripts")).unwrap();
-    fs::write(unit_dir.join("scripts").join("helper.sh"), "#!/bin/sh\necho ok\n").unwrap();
+    fs::write(
+        unit_dir.join("scripts").join("helper.sh"),
+        "#!/bin/sh\necho ok\n",
+    )
+    .unwrap();
 
     let locator = sandbox.claude_skills.to_string_lossy().to_string();
     let uri = format!("local:{locator}@head/{unit_name}");
@@ -211,7 +211,10 @@ fn promote_local_orphan_to_file_remote_full_roundtrip() {
         },
     );
     res.unwrap_or_else(|e| panic!("promote should succeed; err={e}, output: {out}"));
-    assert!(out.contains("promoted my-skill"), "missing summary in: {out}");
+    assert!(
+        out.contains("promoted my-skill"),
+        "missing summary in: {out}"
+    );
 
     // Bare repo receives the unit.
     assert!(
@@ -287,18 +290,12 @@ fn promote_local_orphan_to_file_remote_full_roundtrip() {
                 "file_hashes missing nested entry"
             );
             for v in file_hashes.values() {
-                assert!(
-                    v.starts_with("sha256:"),
-                    "expected sha256: prefix, got {v}"
-                );
+                assert!(v.starts_with("sha256:"), "expected sha256: prefix, got {v}");
             }
         }
         other => panic!("expected Deployed, got {other:?}"),
     }
-    assert!(
-        locked.sha.is_some(),
-        "lockfile entry missing commit sha"
-    );
+    assert!(locked.sha.is_some(), "lockfile entry missing commit sha");
 
     // Original local files preserved (spec requirement: "keep
     // ~/.<tool>/skills/<name>/ files in place").
@@ -353,9 +350,7 @@ fn promote_bails_when_unit_not_in_manifest() {
     let sb = Sandbox::new();
     init_bare_upstream_with_main(&sb.upstream);
     // Empty manifest — no orphan to promote.
-    Manifest::default()
-        .save_to(&manifest_path_in(&sb.home))
-        .unwrap();
+    Manifest::default().save_to(&manifest_path_in(&sb.home)).unwrap();
 
     let (_out, res) = run_promote(
         &sb.home,
@@ -452,9 +447,7 @@ fn promote_bails_when_source_dir_missing() {
 fn promote_bails_on_reserved_chars_in_unit_name() {
     let sb = Sandbox::new();
     init_bare_upstream_with_main(&sb.upstream);
-    Manifest::default()
-        .save_to(&manifest_path_in(&sb.home))
-        .unwrap();
+    Manifest::default().save_to(&manifest_path_in(&sb.home)).unwrap();
 
     let (_out, res) = run_promote(
         &sb.home,
@@ -476,9 +469,7 @@ fn promote_bails_on_reserved_chars_in_unit_name() {
 #[test]
 fn promote_bails_on_bare_traversal_names() {
     let sb = Sandbox::new();
-    Manifest::default()
-        .save_to(&manifest_path_in(&sb.home))
-        .unwrap();
+    Manifest::default().save_to(&manifest_path_in(&sb.home)).unwrap();
     for name in ["", ".", "..", ".hidden", "evil\\name", "a/b"] {
         let (_out, res) = run_promote(
             &sb.home,
@@ -558,8 +549,7 @@ fn promote_bails_when_remote_has_no_head_ref() {
     // later inside `git push`.
     let sb = Sandbox::new();
     fs::create_dir_all(&sb.upstream).unwrap();
-    run_git(&sb.upstream, &["init", "--bare", "--initial-branch=main"])
-        .expect("git init --bare");
+    run_git(&sb.upstream, &["init", "--bare", "--initial-branch=main"]).expect("git init --bare");
     seed_orphan(&sb, "my-skill");
 
     let (_out, res) = run_promote(
@@ -745,15 +735,14 @@ fn promote_uses_lockfile_keys_consistently() {
         lockfile.units.iter().map(|u| &u.declared_uri).collect::<Vec<_>>()
     );
     // Ensure no duplicate (rewriting + adding shouldn't double-count).
-    let count: usize = lockfile
-        .units
-        .iter()
-        .filter(|u| u.declared_uri == unit.uri)
-        .count();
+    let count: usize = lockfile.units.iter().filter(|u| u.declared_uri == unit.uri).count();
     assert_eq!(count, 1, "expected exactly one lockfile row per unit");
 
     // Sanity: file_hashes wasn't dropped along the way.
-    let DeployedRef::Deployed { ref file_hashes, .. } = locked.deployed["claude"] else {
+    let DeployedRef::Deployed {
+        ref file_hashes, ..
+    } = locked.deployed["claude"]
+    else {
         panic!("expected Deployed");
     };
     let _: &BTreeMap<String, String> = file_hashes;

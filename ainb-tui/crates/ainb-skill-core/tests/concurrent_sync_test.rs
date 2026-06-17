@@ -24,8 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
 use ainb_skill_core::sync::{
-    apply_to_repo, ApplyToRepoOpts, SyncAction, SyncDirection, SyncEngineError,
-    SYNC_LOCK_FILENAME,
+    ApplyToRepoOpts, SYNC_LOCK_FILENAME, SyncAction, SyncDirection, SyncEngineError, apply_to_repo,
 };
 use fs2::FileExt;
 
@@ -121,7 +120,14 @@ fn apply_to_repo_returns_sync_in_progress_when_lock_held() {
     };
 
     let result = with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
+        apply_to_repo(
+            &action,
+            tool_home.path(),
+            "claude",
+            &source,
+            &unit_rel,
+            &opts,
+        )
     });
 
     match result {
@@ -139,7 +145,14 @@ fn apply_to_repo_returns_sync_in_progress_when_lock_held() {
     drop(lock_file);
 
     let result_after = with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
+        apply_to_repo(
+            &action,
+            tool_home.path(),
+            "claude",
+            &source,
+            &unit_rel,
+            &opts,
+        )
     });
     assert!(
         result_after.is_ok(),
@@ -168,13 +181,27 @@ fn apply_to_repo_releases_lock_on_return() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
-            .expect("first apply must succeed");
+        apply_to_repo(
+            &action,
+            tool_home.path(),
+            "claude",
+            &source,
+            &unit_rel,
+            &opts,
+        )
+        .expect("first apply must succeed");
         // Second call: same bytes, nothing to commit, but it MUST still
         // acquire + release the lock cleanly. If the lock leaked, this
         // would surface as SyncInProgress.
-        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
-            .expect("second apply must succeed (lock released after first)");
+        apply_to_repo(
+            &action,
+            tool_home.path(),
+            "claude",
+            &source,
+            &unit_rel,
+            &opts,
+        )
+        .expect("second apply must succeed (lock released after first)");
     });
 }
 

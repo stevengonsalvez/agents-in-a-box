@@ -70,11 +70,7 @@ async fn drift_background_poll_populates_cache_on_tick() {
 
     // Mocked detector: any (acme, deadbeef) query returns Outdated{4}.
     let mut mock = MockBackend::new();
-    mock.expect(
-        "acme",
-        "deadbeef",
-        DriftStatus::Outdated { behind: 4 },
-    );
+    mock.expect("acme", "deadbeef", DriftStatus::Outdated { behind: 4 });
 
     let mut state = ainb::app::AppState::new();
     // Pre-condition: cache empty.
@@ -100,10 +96,7 @@ async fn drift_background_poll_populates_cache_on_tick() {
         state.skill_manager_state.drift_cache
     );
     assert_eq!(
-        state
-            .skill_manager_state
-            .drift_cache
-            .get("gh:org/acme@main/skills/foo"),
+        state.skill_manager_state.drift_cache.get("gh:org/acme@main/skills/foo"),
         Some(&DriftStatus::Outdated { behind: 4 })
     );
 }

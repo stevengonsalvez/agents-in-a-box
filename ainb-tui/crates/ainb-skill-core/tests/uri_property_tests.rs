@@ -37,16 +37,14 @@ fn arb_ref() -> impl Strategy<Value = String> {
 /// Strategy: path segments — UNIX-style, alphanumeric + `.`, `_`, `-`,
 /// `/` but no leading `/`, no `@`, no empty segments.
 fn arb_path() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9._-]{1,16}(/[a-zA-Z0-9._-]{1,16}){0,4}"
-        .prop_filter("non-empty", |s| !s.is_empty())
+    "[a-zA-Z0-9._-]{1,16}(/[a-zA-Z0-9._-]{1,16}){0,4}".prop_filter("non-empty", |s| !s.is_empty())
 }
 
 /// Strategy: locator — depends on source type. We use a single generator
 /// that produces locators acceptable to every supported source type
 /// (alphanum + `.`, `/`, `-`, `_`, no `@`, no trailing `/`).
 fn arb_locator() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9_.-]{1,12}(/[a-zA-Z0-9_.-]{1,12}){0,2}"
-        .prop_filter("non-empty", |s| !s.is_empty())
+    "[a-zA-Z0-9_.-]{1,12}(/[a-zA-Z0-9_.-]{1,12}){0,2}".prop_filter("non-empty", |s| !s.is_empty())
 }
 
 /// Strategy: source type — pick one of the supported prefixes.

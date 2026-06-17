@@ -465,9 +465,9 @@ fn acquire_sync_lock(repo_cache_dir: &Path) -> std::result::Result<SyncLockGuard
         .open(&lock_path)?;
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(SyncLockGuard { _file: file }),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            Err(SyncEngineError::SyncInProgress(lock_path.display().to_string()))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(
+            SyncEngineError::SyncInProgress(lock_path.display().to_string()),
+        ),
         Err(e) => Err(SyncEngineError::Io(e)),
     }
 }
@@ -591,7 +591,10 @@ pub fn apply_to_repo(
 /// unreachable / private remote fails fast instead of freezing the
 /// TUI on a terminal credential prompt — mirrors the drift backend's
 /// hardening (commit f34d851).
-fn git_capture(cwd: &Path, args: &[&str]) -> std::result::Result<std::process::Output, SyncEngineError> {
+fn git_capture(
+    cwd: &Path,
+    args: &[&str],
+) -> std::result::Result<std::process::Output, SyncEngineError> {
     std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -624,7 +627,10 @@ fn git_with_env(
 /// Bail with a synthetic I/O error when a git subcommand exited
 /// non-zero. Mirrors the helper in `ainb-cli::promote` so the executor
 /// surfaces the same shape of error message ("git push failed: ...").
-fn require_success(out: &std::process::Output, what: &str) -> std::result::Result<(), SyncEngineError> {
+fn require_success(
+    out: &std::process::Output,
+    what: &str,
+) -> std::result::Result<(), SyncEngineError> {
     if out.status.success() {
         return Ok(());
     }
@@ -661,7 +667,11 @@ fn ensure_committer_identity(cache: &Path) -> std::result::Result<(), SyncEngine
         }
         fallback.to_string()
     };
-    let email = resolve("user.email", "GIT_AUTHOR_EMAIL", "ainb-sync@example.invalid");
+    let email = resolve(
+        "user.email",
+        "GIT_AUTHOR_EMAIL",
+        "ainb-sync@example.invalid",
+    );
     let name = resolve("user.name", "GIT_AUTHOR_NAME", "ainb sync");
     // Refuse argv-smuggled identity values. Without the leading-dash
     // reject, a controlled `GIT_AUTHOR_EMAIL=--file=/tmp/evil` env

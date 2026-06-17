@@ -25,7 +25,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -100,9 +100,7 @@ fn send_literal(session: &str, text: &str) {
 }
 
 fn kill(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 fn sh_quote(s: &str) -> String {
@@ -136,7 +134,10 @@ fn git(args: &[&str], cwd: &Path) {
 /// hits the network.
 fn seed_catalog_remote(root: &Path) -> String {
     let bare = root.join("browse-catalog-remote.git");
-    git(&["init", "--bare", "-b", "main", bare.to_str().unwrap()], root);
+    git(
+        &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        root,
+    );
 
     let work = root.join(".browse-seed-work");
     std::fs::create_dir_all(&work).expect("work dir");
@@ -154,7 +155,10 @@ fn seed_catalog_remote(root: &Path) -> String {
     git(&["push", "-q", "origin", "main"], &work);
     std::fs::remove_dir_all(&work).ok();
 
-    format!("git:file://{}@main/skills/browse-demo-skill", bare.display())
+    format!(
+        "git:file://{}@main/skills/browse-demo-skill",
+        bare.display()
+    )
 }
 
 /// Launch line: the fixture's env_vars + the two catalog-mock env knobs
@@ -190,8 +194,7 @@ fn browse_modal_searches_and_enter_installs_live() {
 
     let tmp = tempfile::tempdir().expect("home tempdir");
     // Full tier seeds a manifest + the bare remote with `initial-skill`.
-    let layout =
-        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
     seed_notify_dismissed(&layout);
     // A SECOND local repo holding a NEW skill — the thing the browse

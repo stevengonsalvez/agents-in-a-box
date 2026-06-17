@@ -243,7 +243,10 @@ fn up_down_round_trip_succeeds_and_is_idempotent() {
     let removed = !root.exists();
     if !removed {
         let _ = std::fs::remove_dir_all(&root);
-        panic!("`down` exited 0 but the sandbox dir still exists: {}", root.display());
+        panic!(
+            "`down` exited 0 but the sandbox dir still exists: {}",
+            root.display()
+        );
     }
 
     // ── idempotent down ──────────────────────────────────────────────
@@ -254,5 +257,8 @@ fn up_down_round_trip_succeeds_and_is_idempotent() {
         "a second `down` on a missing dir must be idempotent (exit 0).\nstderr:\n{}",
         stderr_of(&down_again)
     );
-    assert!(!root.exists(), "idempotent `down` must leave the dir absent");
+    assert!(
+        !root.exists(),
+        "idempotent `down` must leave the dir absent"
+    );
 }

@@ -277,10 +277,14 @@ pub enum AppEvent {
     SkillManagerGrowSources,
     /// A Source row was clicked: focus the Sources panel, move its
     /// cursor to row `index`, and apply that source as the filter.
-    SkillManagerSourceClick { index: usize },
+    SkillManagerSourceClick {
+        index: usize,
+    },
     /// A Unit row was clicked: focus the Units panel and move the unit
     /// cursor to the visible-row `position`.
-    SkillManagerUnitClick { position: usize },
+    SkillManagerUnitClick {
+        position: usize,
+    },
     /// A Sources/Units divider drag finished — persist the resized
     /// Sources-panel width to config.
     SkillManagerPersistSourcesWidth,
@@ -347,20 +351,20 @@ pub enum AppEvent {
     SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
-    GoToRecovery,            // Navigate to session recovery view
-    GoToInbox,               // Navigate to ainb-hooks notification inbox
-    PanelBack,               // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,             // Inbox: move selection up one row
-    InboxMoveDown,           // Inbox: move selection down one row
-    InboxPageUp,             // Inbox: jump 10 rows up
-    InboxPageDown,           // Inbox: jump 10 rows down
-    InboxOpenSelected,       // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,    // Inbox: dismiss selected row (d)
-    InboxDismissVisible,     // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,     // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,         // Inbox: cycle agent filter (p)
-    InboxRefresh,            // Inbox: force-refresh from store (r)
+    GoToRecovery,         // Navigate to session recovery view
+    GoToInbox,            // Navigate to ainb-hooks notification inbox
+    PanelBack,            // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,           // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,          // Inbox: move selection up one row
+    InboxMoveDown,        // Inbox: move selection down one row
+    InboxPageUp,          // Inbox: jump 10 rows up
+    InboxPageDown,        // Inbox: jump 10 rows down
+    InboxOpenSelected,    // Inbox: mark selected row read (Enter)
+    InboxDismissSelected, // Inbox: dismiss selected row (d)
+    InboxDismissVisible,  // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,  // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,      // Inbox: cycle agent filter (p)
+    InboxRefresh,         // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
     AgentSelectionNextProvider, // Navigate to next provider
@@ -836,8 +840,7 @@ impl EventHandler {
                             let data_y = sources_rect.y.saturating_add(2);
                             if y >= data_y {
                                 let position = usize::from(y - data_y);
-                                let visible_len =
-                                    state.skill_manager_state.visible_indices().len();
+                                let visible_len = state.skill_manager_state.visible_indices().len();
                                 if position < visible_len {
                                     return Some(AppEvent::SkillManagerUnitClick { position });
                                 }
@@ -1588,9 +1591,7 @@ impl EventHandler {
                     }
                 }
                 // Tab / Shift-Tab toggle focus between Sources and Units.
-                KeyCode::Tab | KeyCode::BackTab => {
-                    Some(AppEvent::SkillManagerToggleFocus)
-                }
+                KeyCode::Tab | KeyCode::BackTab => Some(AppEvent::SkillManagerToggleFocus),
                 // `[` / `]` resize the Sources panel regardless of focus.
                 KeyCode::Char('[') => Some(AppEvent::SkillManagerShrinkSources),
                 KeyCode::Char(']') => Some(AppEvent::SkillManagerGrowSources),
@@ -1604,9 +1605,7 @@ impl EventHandler {
                 KeyCode::Down | KeyCode::Char('j') if sources_focused => {
                     Some(AppEvent::SkillManagerSourceSelectNext)
                 }
-                KeyCode::Enter if sources_focused => {
-                    Some(AppEvent::SkillManagerApplySourceFilter)
-                }
+                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -4173,18 +4172,15 @@ impl EventHandler {
                         // Also start the drift poll (bead v12.E.4).
                         let backend: std::sync::Arc<
                             dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
-                        > = std::sync::Arc::new(
-                            ainb_skill_core::drift::GitLsRemoteBackend::new(),
-                        );
+                        > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
                         state.start_background_drift_load(&ainb_home, backend);
                         let claude_home = std::env::var_os("HOME")
                             .map(std::path::PathBuf::from)
                             .map(|h| h.join(".claude"))
                             .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
-                        let walker =
-                            crate::components::skill_manager_screen::run_discovery_walkers(
-                                &claude_home,
-                            );
+                        let walker = crate::components::skill_manager_screen::run_discovery_walkers(
+                            &claude_home,
+                        );
                         crate::components::skill_manager_screen::maybe_show_discovery_banner(
                             &mut state.skill_manager_state,
                             &ainb_home,
@@ -4442,9 +4438,7 @@ impl EventHandler {
                 // previous scan is still in flight.
                 let backend: std::sync::Arc<
                     dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
-                > = std::sync::Arc::new(
-                    ainb_skill_core::drift::GitLsRemoteBackend::new(),
-                );
+                > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
                 state.start_background_drift_load(&ainb_home, backend);
                 // Spec §User Flow 1: on screen-enter, when the
                 // manifest is empty AND we have not been told to
@@ -4458,9 +4452,8 @@ impl EventHandler {
                     .map(std::path::PathBuf::from)
                     .map(|h| h.join(".claude"))
                     .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
-                let walker = crate::components::skill_manager_screen::run_discovery_walkers(
-                    &claude_home,
-                );
+                let walker =
+                    crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
                 crate::components::skill_manager_screen::maybe_show_discovery_banner(
                     &mut state.skill_manager_state,
                     &ainb_home,
@@ -4474,12 +4467,10 @@ impl EventHandler {
             AppEvent::SkillManagerDiscoveryImport => {
                 tracing::info!("Discovery banner: import all");
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                if let Err(e) =
-                    crate::components::skill_manager_screen::apply_discovery_import(
-                        &mut state.skill_manager_state,
-                        &ainb_home,
-                    )
-                {
+                if let Err(e) = crate::components::skill_manager_screen::apply_discovery_import(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
                     tracing::warn!(error = %e, "discovery import failed");
                 }
             }
@@ -4491,12 +4482,10 @@ impl EventHandler {
             AppEvent::SkillManagerDiscoverySkip => {
                 tracing::info!("Discovery banner: skip + persist marker");
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                if let Err(e) =
-                    crate::components::skill_manager_screen::apply_discovery_skip(
-                        &mut state.skill_manager_state,
-                        &ainb_home,
-                    )
-                {
+                if let Err(e) = crate::components::skill_manager_screen::apply_discovery_skip(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
                     tracing::warn!(error = %e, "discovery skip failed");
                 }
             }
@@ -4562,18 +4551,15 @@ impl EventHandler {
                     .map(std::path::PathBuf::from)
                     .map(|h| h.join(".claude"))
                     .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
-                let walker = crate::components::skill_manager_screen::run_discovery_walkers(
-                    &claude_home,
-                );
+                let walker =
+                    crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
                 crate::components::skill_manager_screen::force_show_discovery_banner(
                     &mut state.skill_manager_state,
                     &ainb_home,
                     walker,
                 );
                 if !state.skill_manager_state.banner.is_active() {
-                    state.add_info_notification(
-                        "discovery: no un-adopted units found".to_string(),
-                    );
+                    state.add_info_notification("discovery: no un-adopted units found".to_string());
                 }
             }
             AppEvent::SkillManagerCheck => {
@@ -4583,9 +4569,7 @@ impl EventHandler {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let backend: std::sync::Arc<
                     dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
-                > = std::sync::Arc::new(
-                    ainb_skill_core::drift::GitLsRemoteBackend::new(),
-                );
+                > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
                 state.start_background_drift_load(&ainb_home, backend);
                 state.add_info_notification(
                     "drift check running — status column refreshes shortly".to_string(),
@@ -4601,9 +4585,7 @@ impl EventHandler {
                     .map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
-                        state.add_warning_notification(
-                            "update: no unit selected".to_string(),
-                        );
+                        state.add_warning_notification("update: no unit selected".to_string());
                     }
                     Some(uri) => {
                         let cmd = ainb_cli::SkillCommand::Update(ainb_cli::UpdateArgs {
@@ -4633,9 +4615,7 @@ impl EventHandler {
                     .map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
-                        state.add_warning_notification(
-                            "remove: no unit selected".to_string(),
-                        );
+                        state.add_warning_notification("remove: no unit selected".to_string());
                     }
                     Some(uri) => {
                         // Two-step uninstall:
@@ -4656,8 +4636,7 @@ impl EventHandler {
                             dry_run: false,
                         });
                         let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
-                        let manifest_dropped =
-                            drop_unit_from_manifest(&ainb_home, &uri);
+                        let manifest_dropped = drop_unit_from_manifest(&ainb_home, &uri);
                         state.skill_manager_state.reload_from_disk(&ainb_home);
                         if lockfile_ok {
                             state.add_success_notification(format!("removed: {msg}"));
@@ -4670,11 +4649,10 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerOpenAddSource => {
-                state.skill_manager_state.input = Some(
-                    crate::components::skill_manager_screen::InputState::new(
+                state.skill_manager_state.input =
+                    Some(crate::components::skill_manager_screen::InputState::new(
                         crate::components::skill_manager_screen::InputKind::AddSource,
-                    ),
-                );
+                    ));
             }
             AppEvent::SkillManagerOpenSearch => {
                 // Pre-fill the prompt with the current filter so the
@@ -4872,9 +4850,8 @@ impl EventHandler {
                 // lists the shelf, so opening the modal never blocks the
                 // event loop on a network call.
                 tracing::info!("SkillManager: open catalog browse (b)");
-                state.skill_manager_state.browse = Some(
-                    crate::components::skill_manager_screen::BrowseViewState::new(),
-                );
+                state.skill_manager_state.browse =
+                    Some(crate::components::skill_manager_screen::BrowseViewState::new());
             }
             AppEvent::SkillManagerBrowseInputChar(c) => {
                 if let Some(b) = state.skill_manager_state.browse.as_mut() {
@@ -4978,9 +4955,7 @@ impl EventHandler {
                 });
                 match selected {
                     None => {
-                        state.add_warning_notification(
-                            "browse: no result selected".to_string(),
-                        );
+                        state.add_warning_notification("browse: no result selected".to_string());
                     }
                     Some((uri, kind, pending)) if kind.is_command() && !pending => {
                         // First Enter on a command-kind — arm the confirm.
@@ -6446,8 +6421,8 @@ fn run_catalog_search(
     query: &str,
     kind: crate::components::skill_manager_screen::CatalogKind,
 ) -> Result<Vec<crate::components::skill_manager_screen::BrowseRow>, String> {
-    use ainb_skill_core::catalog::CatalogBackend;
     use crate::components::skill_manager_screen::CatalogKind;
+    use ainb_skill_core::catalog::CatalogBackend;
     // Both backends use `reqwest::blocking`, which builds its own runtime and
     // PANICS when constructed on a thread that is already inside a tokio
     // runtime. The TUI event loop runs under `#[tokio::main]`, so run the
@@ -6625,10 +6600,7 @@ mod catalog_command_install {
 /// active HOME). Returns `(success, last_non_blank_output_line)`. The caller
 /// must have obtained an explicit user confirm first — this shells out.
 fn run_install_command(cmd: &str) -> (bool, String) {
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output();
+    let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
     match output {
         Ok(out) => {
             let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -6697,10 +6669,7 @@ fn last_meaningful_line(buf: &[u8]) -> String {
         .unwrap_or_else(|| "done".to_string())
 }
 
-fn selected_unit_has_conflict_peer(
-    state: &AppState,
-    ainb_home: &std::path::Path,
-) -> bool {
+fn selected_unit_has_conflict_peer(state: &AppState, ainb_home: &std::path::Path) -> bool {
     use ainb_skill_core::manifest::Manifest;
     let manifest_path = ainb_home.join("manifest.yaml");
     let Ok(manifest) = Manifest::load_from(&manifest_path) else {
@@ -7498,8 +7467,8 @@ mod text_input_guard_tests {
 mod skill_manager_sync_keybind_tests {
     use super::*;
     use crate::app::screens::ids as screen_ids;
-    use ainb_skill_core::manifest::{Manifest, UnitEntry};
     use ainb_skill_core::Uri;
+    use ainb_skill_core::manifest::{Manifest, UnitEntry};
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn press_s(state: &mut AppState) -> Option<AppEvent> {
@@ -7534,9 +7503,7 @@ mod skill_manager_sync_keybind_tests {
         let tmp = tempfile::tempdir().unwrap();
         with_ainb_home(tmp.path(), || {
             // Empty manifest on disk — no conflict pair possible.
-            Manifest::default()
-                .save_to(&tmp.path().join("manifest.yaml"))
-                .unwrap();
+            Manifest::default().save_to(&tmp.path().join("manifest.yaml")).unwrap();
 
             let mut state = AppState::default();
             switch_to_skill_manager(&mut state);
@@ -7557,18 +7524,14 @@ mod skill_manager_sync_keybind_tests {
                 uri: "gh:owner/repo@main/skills/commit".into(),
                 targets: None,
                 // Selected unit IS shadowed → conflict pair present.
-                shadowed_by: Some(
-                    Uri::parse("local:/tmp/orphan@head/commit").unwrap(),
-                ),
+                shadowed_by: Some(Uri::parse("local:/tmp/orphan@head/commit").unwrap()),
             });
             manifest.units.push(UnitEntry {
                 uri: "local:/tmp/orphan@head/commit".into(),
                 targets: None,
                 shadowed_by: None,
             });
-            manifest
-                .save_to(&tmp.path().join("manifest.yaml"))
-                .unwrap();
+            manifest.save_to(&tmp.path().join("manifest.yaml")).unwrap();
 
             let mut state = AppState::default();
             switch_to_skill_manager(&mut state);
@@ -7595,13 +7558,9 @@ mod skill_manager_sync_keybind_tests {
             manifest.units.push(UnitEntry {
                 uri: "local:/tmp/orphan@head/commit".into(),
                 targets: None,
-                shadowed_by: Some(
-                    Uri::parse("gh:owner/repo@main/skills/commit").unwrap(),
-                ),
+                shadowed_by: Some(Uri::parse("gh:owner/repo@main/skills/commit").unwrap()),
             });
-            manifest
-                .save_to(&tmp.path().join("manifest.yaml"))
-                .unwrap();
+            manifest.save_to(&tmp.path().join("manifest.yaml")).unwrap();
 
             let mut state = AppState::default();
             switch_to_skill_manager(&mut state);

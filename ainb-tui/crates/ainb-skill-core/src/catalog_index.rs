@@ -207,12 +207,13 @@ pub fn owned_install_uri(tag: &str, name: &str) -> String {
 /// the unit within the repo and is REQUIRED — without it the URI has no
 /// `/path` and `ainb skill install` rejects it. Returns `None` when no
 /// subpath is known, signalling the generator to omit the entry.
-pub fn external_install_uri(repo: &str, git_ref: Option<&str>, subpath: Option<&str>) -> Option<String> {
+pub fn external_install_uri(
+    repo: &str,
+    git_ref: Option<&str>,
+    subpath: Option<&str>,
+) -> Option<String> {
     let subpath = subpath.map(str::trim).filter(|s| !s.is_empty())?;
-    let git_ref = git_ref
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("main");
+    let git_ref = git_ref.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("main");
     let subpath = subpath.trim_start_matches('/');
     Some(format!("gh:{repo}@{git_ref}/{subpath}"))
 }
@@ -346,7 +347,12 @@ mod tests {
     fn new_sorts_owned_before_external_then_by_name() {
         let index = CatalogIndex::new(
             "v1.0.0",
-            vec![external("zeta", 10), owned("beta"), external("alpha", 5), owned("alpha")],
+            vec![
+                external("zeta", 10),
+                owned("beta"),
+                external("alpha", 5),
+                owned("alpha"),
+            ],
         );
         let order: Vec<(&str, CatalogOrigin)> =
             index.entries.iter().map(|e| (e.name.as_str(), e.origin)).collect();

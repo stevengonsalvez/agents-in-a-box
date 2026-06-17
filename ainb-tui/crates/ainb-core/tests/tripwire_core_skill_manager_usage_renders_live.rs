@@ -51,8 +51,11 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     // Suppress the first-run ainb-hooks install nudge (intercepts the
     // first key on the home screen). See build_skill_manager_sandbox.
-    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
-        .expect("seed install.json");
+    fs::write(
+        cfg.parent().unwrap().join("install.json"),
+        "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )
+    .expect("seed install.json");
 }
 
 /// Seed manifest + lock with a single unit carrying
@@ -78,8 +81,8 @@ units:
 
     // 3h-ago RFC 3339 timestamp. chrono is already on the workspace
     // (used by ainb-core); test-only use is free.
-    let three_hours_ago = chrono::Utc::now()
-        - chrono::Duration::try_hours(3).expect("3h fits in Duration");
+    let three_hours_ago =
+        chrono::Utc::now() - chrono::Duration::try_hours(3).expect("3h fits in Duration");
     let last_used = three_hours_ago.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let lock_yaml = format!(

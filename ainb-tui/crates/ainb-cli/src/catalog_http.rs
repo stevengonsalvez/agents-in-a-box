@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use ainb_skill_core::catalog::{
-    is_blank_query, rank_by_stars, CatalogBackend, CatalogError, CatalogHit, SkillsShUrlBuilder,
+    CatalogBackend, CatalogError, CatalogHit, SkillsShUrlBuilder, is_blank_query, rank_by_stars,
 };
 
 /// Env var carrying the catalog API key (takes precedence over config).
@@ -63,9 +63,7 @@ impl SkillsShHttpBackend {
     pub fn from_env(ainb_home: &Path) -> Self {
         let api_key = resolve_api_key(ainb_home);
         let builder = match std::env::var(ENV_API_BASE) {
-            Ok(base) if !base.trim().is_empty() => {
-                SkillsShUrlBuilder::with_base(base, api_key)
-            }
+            Ok(base) if !base.trim().is_empty() => SkillsShUrlBuilder::with_base(base, api_key),
             _ => SkillsShUrlBuilder::new(api_key),
         };
         let mock_mode = std::env::var(ENV_MOCK).as_deref() == Ok("1");
@@ -98,13 +96,9 @@ impl CatalogBackend for SkillsShHttpBackend {
         if let Some(header) = self.builder.auth_header() {
             req = req.header(reqwest::header::AUTHORIZATION, header);
         }
-        let resp = req
-            .send()
-            .map_err(|e| CatalogError::Backend(format!("GET {url}: {e}")))?;
+        let resp = req.send().map_err(|e| CatalogError::Backend(format!("GET {url}: {e}")))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(CatalogError::AuthRequired);
         }
         if !status.is_success() {
@@ -163,12 +157,7 @@ fn config_path_in(ainb_home: &Path) -> PathBuf {
 fn read_config_api_key(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
-    let key = value
-        .get("skills")?
-        .get("api_key")?
-        .as_str()?
-        .trim()
-        .to_string();
+    let key = value.get("skills")?.get("api_key")?.as_str()?.trim().to_string();
     (!key.is_empty()).then_some(key)
 }
 

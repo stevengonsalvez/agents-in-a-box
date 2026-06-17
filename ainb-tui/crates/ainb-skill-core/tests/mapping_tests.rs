@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
-use ainb_skill_core::mapping::{resolve_pair, BOOTSTRAP_DEFAULT_MAPPINGS};
+use ainb_skill_core::mapping::{BOOTSTRAP_DEFAULT_MAPPINGS, resolve_pair};
 
 /// Build a `SourceEntry` carrying just the `target_layout` under test —
 /// every other field is irrelevant to `resolve_pair`.
@@ -147,11 +147,7 @@ fn first_listed_glob_that_matches_wins_over_later_nonoverlapping() {
 fn globstar_matches_top_level_file_zero_segments() {
     // `**/*.md` must catch a root-level file (the globstar matches zero
     // segments), translating with the full unit path as the tail.
-    let src = source_with(vec![mapping(
-        "**/*.md",
-        ".claude/docs",
-        "toolkit/docs",
-    )]);
+    let src = source_with(vec![mapping("**/*.md", ".claude/docs", "toolkit/docs")]);
 
     assert_eq!(
         resolve_pair(&src, Path::new("readme.md")),
@@ -214,10 +210,7 @@ const AGENT_SUBDIRS: [&str; 6] = [
 
 #[test]
 fn default_mappings_cover_all_canonical_kinds() {
-    let globs: Vec<&str> = BOOTSTRAP_DEFAULT_MAPPINGS
-        .iter()
-        .map(|(g, _, _)| *g)
-        .collect();
+    let globs: Vec<&str> = BOOTSTRAP_DEFAULT_MAPPINGS.iter().map(|(g, _, _)| *g).collect();
 
     assert!(
         globs.iter().any(|g| g.starts_with("agents/")),
@@ -233,10 +226,7 @@ fn default_mappings_cover_all_canonical_kinds() {
     );
 
     // The agents glob must enumerate every canonical subdir.
-    let agents_glob = globs
-        .iter()
-        .find(|g| g.starts_with("agents/"))
-        .expect("agents glob present");
+    let agents_glob = globs.iter().find(|g| g.starts_with("agents/")).expect("agents glob present");
     for sub in AGENT_SUBDIRS {
         assert!(
             agents_glob.contains(sub),

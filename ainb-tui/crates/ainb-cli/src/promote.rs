@@ -116,7 +116,10 @@ pub fn dispatch(home: &Path, args: PromoteArgs, out: &mut dyn io::Write) -> Resu
     writeln!(out, "  tool: {tool}")?;
 
     if args.dry_run {
-        writeln!(out, "# dry-run: not cloning, committing, pushing, or rewriting")?;
+        writeln!(
+            out,
+            "# dry-run: not cloning, committing, pushing, or rewriting"
+        )?;
         return Ok(());
     }
     if !args.yes {
@@ -139,8 +142,9 @@ pub fn dispatch(home: &Path, args: PromoteArgs, out: &mut dyn io::Write) -> Resu
     git_add_and_commit(&cache, &args.unit_name, &message)?;
 
     // ── 11. Push (failure leaves commit local, no manifest write). ──
-    git_push(&cache, &branch)
-        .with_context(|| "push failed — manifest NOT rewritten; cd into the cache and retry `git push`")?;
+    git_push(&cache, &branch).with_context(
+        || "push failed — manifest NOT rewritten; cd into the cache and retry `git push`",
+    )?;
 
     // ── 12. Capture new sha + compute file hashes. ───────────────────
     let new_sha = git_rev_parse_head(&cache)?;
@@ -238,11 +242,7 @@ impl RemoteTarget {
             // the scheme stripper so a `/tmp/foo@bar` locator parses
             // cleanly.
             let (path_str, branch) = match rest.rsplit_once('@') {
-                Some((p, b))
-                    if !b.is_empty()
-                        && !b.contains('/')
-                        && !p.is_empty() =>
-                {
+                Some((p, b)) if !b.is_empty() && !b.contains('/') && !p.is_empty() => {
                     (p, Some(b.to_string()))
                 }
                 _ => (rest, None),
@@ -330,7 +330,10 @@ fn find_unit(manifest: &Manifest, unit_name: &str) -> Result<(usize, Uri)> {
 fn resolve_source_dir(uri: &Uri, unit_name: &str) -> Result<PathBuf> {
     let locator_raw = expand_home(&uri.locator)?;
     let locator = locator_raw.canonicalize().with_context(|| {
-        format!("locator `{}` cannot be canonicalised", locator_raw.display())
+        format!(
+            "locator `{}` cannot be canonicalised",
+            locator_raw.display()
+        )
     })?;
 
     let candidate = locator.join(unit_name);
@@ -372,9 +375,7 @@ fn validate_unit_name(unit_name: &str) -> Result<()> {
     for ch in unit_name.chars() {
         let ok = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.');
         if !ok {
-            bail!(
-                "`{unit_name}` contains reserved character `{ch}` (only [A-Za-z0-9._-] allowed)"
-            );
+            bail!("`{unit_name}` contains reserved character `{ch}` (only [A-Za-z0-9._-] allowed)");
         }
     }
     if unit_name.starts_with('.') {
@@ -460,8 +461,8 @@ fn resolve_default_branch(target: &RemoteTarget) -> Result<String> {
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
             }
-            let body: serde_json::Value = serde_json::from_slice(&out.stdout)
-                .context("parsing `gh repo view` JSON")?;
+            let body: serde_json::Value =
+                serde_json::from_slice(&out.stdout).context("parsing `gh repo view` JSON")?;
             body.get("defaultBranchRef")
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str())
@@ -610,7 +611,11 @@ fn ensure_committer_identity(cache: &Path) -> Result<()> {
         }
         fallback.to_string()
     };
-    let email = resolve("user.email", "GIT_AUTHOR_EMAIL", "ainb-promote@example.invalid");
+    let email = resolve(
+        "user.email",
+        "GIT_AUTHOR_EMAIL",
+        "ainb-promote@example.invalid",
+    );
     let name = resolve("user.name", "GIT_AUTHOR_NAME", "ainb promote");
     // Refuse argv-smuggled identity values from GIT_AUTHOR_EMAIL /
     // GIT_AUTHOR_NAME — `--file=/tmp/evil` would otherwise let `git
@@ -749,7 +754,12 @@ fn walk_files(root: &Path, cur: &Path, into: &mut BTreeMap<String, String>) -> R
 // Manifest helpers
 // ─────────────────────────────────────────────────────────────────────
 
-fn add_source_if_absent(manifest: &mut Manifest, source_uri: &str, target: &RemoteTarget, branch: &str) {
+fn add_source_if_absent(
+    manifest: &mut Manifest,
+    source_uri: &str,
+    target: &RemoteTarget,
+    branch: &str,
+) {
     if manifest.sources.iter().any(|s| s.uri == source_uri) {
         return;
     }
@@ -833,7 +843,9 @@ mod tests {
     #[test]
     fn parse_gh_uri() {
         let t = RemoteTarget::parse("gh:steven/my-skills").unwrap();
-        assert!(matches!(t.kind, TargetKind::Gh { ref user, ref repo } if user == "steven" && repo == "my-skills"));
+        assert!(
+            matches!(t.kind, TargetKind::Gh { ref user, ref repo } if user == "steven" && repo == "my-skills")
+        );
         assert_eq!(t.git_url, "https://github.com/steven/my-skills.git");
         assert!(t.explicit_branch.is_none());
     }

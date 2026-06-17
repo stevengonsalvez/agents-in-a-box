@@ -8,9 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
-use ainb_skill_core::sync::{
-    apply_to_home, ContentFetcher, FetchError, SyncAction, SyncDirection,
-};
+use ainb_skill_core::sync::{ContentFetcher, FetchError, SyncAction, SyncDirection, apply_to_home};
 
 /// Mock that hands back fixed bytes for a single (ref, repo-rel-path)
 /// pair and counts calls so the idempotency test can assert that
@@ -74,7 +72,15 @@ fn apply_to_home_writes_fetched_bytes_to_mapped_path() {
     let source = fake_source();
     let unit_path = PathBuf::from("skills/commit/SKILL.md");
 
-    apply_to_home(&action, tool_home.path(), "claude", &source, &unit_path, &fetcher).expect("apply");
+    apply_to_home(
+        &action,
+        tool_home.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("apply");
 
     let landed = tool_home.path().join("skills/commit/SKILL.md");
     assert!(landed.exists(), "file must land at mapped home path");
@@ -97,8 +103,24 @@ fn apply_to_home_is_idempotent_on_unchanged_bytes() {
     let source = fake_source();
     let unit_path = PathBuf::from("skills/commit/SKILL.md");
 
-    apply_to_home(&action, tool_home.path(), "claude", &source, &unit_path, &fetcher).expect("first apply");
-    apply_to_home(&action, tool_home.path(), "claude", &source, &unit_path, &fetcher).expect("second apply");
+    apply_to_home(
+        &action,
+        tool_home.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("first apply");
+    apply_to_home(
+        &action,
+        tool_home.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("second apply");
 
     let landed = tool_home.path().join("skills/commit/SKILL.md");
     let on_disk = std::fs::read(&landed).expect("read landed");
@@ -118,7 +140,15 @@ fn apply_to_home_skips_non_to_home_directions() {
     let source = fake_source();
     let unit_path = PathBuf::from("skills/commit/SKILL.md");
 
-    apply_to_home(&action, tool_home.path(), "claude", &source, &unit_path, &fetcher).expect("noop");
+    apply_to_home(
+        &action,
+        tool_home.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .expect("noop");
 
     let landed = tool_home.path().join("skills/commit/SKILL.md");
     assert!(!landed.exists(), "NoOp must not write anything");
@@ -138,7 +168,15 @@ fn apply_to_home_errors_when_unit_path_not_in_layout() {
     let source = fake_source();
     let unit_path = PathBuf::from("rogue/path.md"); // not covered by `skills/*/SKILL.md`
 
-    let err = apply_to_home(&action, tool_home.path(), "claude", &source, &unit_path, &fetcher).unwrap_err();
+    let err = apply_to_home(
+        &action,
+        tool_home.path(),
+        "claude",
+        &source,
+        &unit_path,
+        &fetcher,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("layout") || err.to_string().contains("mapping"),
         "got: {err}"

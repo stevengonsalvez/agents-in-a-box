@@ -3,11 +3,11 @@
 
 use std::path::PathBuf;
 
+use ainb_skill_core::Uri;
 use ainb_skill_core::manifest::{
     Defaults, Manifest, SourceEntry, SourceKind, TargetMapping, UnitEntry,
 };
 use ainb_skill_core::paths::manifest_path_in;
-use ainb_skill_core::Uri;
 
 fn tmp_home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -197,9 +197,7 @@ fn unit_entry_shadowed_by_roundtrips() {
     m.units.push(UnitEntry {
         uri: "local:~/.claude/skills@head/commit".into(),
         targets: Some(vec!["claude".into()]),
-        shadowed_by: Some(
-            Uri::parse("marketplace:reflect@claude-plugins-official").unwrap(),
-        ),
+        shadowed_by: Some(Uri::parse("marketplace:reflect@claude-plugins-official").unwrap()),
     });
 
     m.save_to(&path).unwrap();

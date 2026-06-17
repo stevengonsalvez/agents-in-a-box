@@ -25,7 +25,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+use ainb_skill_core::{SandboxLayout, SandboxTier, build_skill_manager_sandbox};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -78,9 +78,7 @@ fn send(session: &str, keys: &str) {
 }
 
 fn kill(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 fn launch_line(layout: &SandboxLayout, bin: &Path) -> String {
@@ -118,8 +116,7 @@ fn remove_key_uninstalls_unit_and_surfaces_notification_in_live_binary() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Full tier pre-seeds a manifest with the `initial-skill` unit, so the
     // Units table has a row to remove and no discovery banner intercepts.
-    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full)
-        .expect("sandbox full");
+    let layout = build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
 
     let session = format!("tripwire-sm-remove-{}", std::process::id());
@@ -132,7 +129,13 @@ fn remove_key_uninstalls_unit_and_surfaces_notification_in_live_binary() {
             .success()
     );
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &launch_line(&layout, &bin), "Enter"])
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin),
+            "Enter",
+        ])
         .status()
         .expect("launch");
 
