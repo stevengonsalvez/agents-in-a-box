@@ -139,9 +139,18 @@ fn describe_get_updates_error(err: &GetUpdatesError) -> String {
 }
 
 /// Render a reqwest error as a single diagnosable line: the kind flags
-/// (`timeout`/`connect`/`request`/`body`/`decode`), the HTTP status if any, the
-/// Display string, and the underlying source chain (e.g. hyper's "connection
-/// closed before message completed" on a stale keep-alive socket).
+/// (`timeout`/`connect`/`request`/`body`/`decode`), the HTTP status if any, and
+/// the underlying source chain (e.g. hyper's "connection closed before message
+/// completed" on a stale keep-alive socket).
+///
+/// SECURITY (M1): the error's own `Display` is deliberately NOT included. A
+/// `reqwest::Error` Display carries the request URL, and the Telegram Bot API
+/// embeds the bot token in the URL path
+/// (`https://api.telegram.org/bot<TOKEN>/…`) — so emitting it would leak the
+/// token into `last_error` (persisted to `bridge.json`, shown in CLI/TUI). The
+/// kind flags + status + source chain give the same diagnosability without the
+/// URL, and the whole line is additionally run through `scrub_secrets` at the
+/// heartbeat sink as defense-in-depth.
 fn describe_reqwest_error(err: &reqwest::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_timeout() {
@@ -166,19 +175,19 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
     let status = err.status().map(|s| s.as_u16());
 
     // Walk the std::error::Error source chain (the real cause, e.g. hyper's
-    // "connection closed before message completed" on a stale keep-alive).
+    // "connection closed before message completed" on a stale keep-alive). The
+    // chain is scrubbed too — a source could in principle echo the URL.
     let mut sources = Vec::new();
     let mut src: Option<&dyn std::error::Error> = std::error::Error::source(err);
     while let Some(s) = src {
-        sources.push(s.to_string());
+        sources.push(super::redact::scrub_secrets(&s.to_string()));
         src = s.source();
     }
 
     format!(
-        "kind={} status={:?} display=\"{}\" source=[{}]",
+        "kind={} status={:?} source=[{}]",
         kinds.join("|"),
         status,
-        err,
         sources.join(" -> ")
     )
 }

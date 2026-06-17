@@ -20,6 +20,7 @@
 pub mod config;
 pub mod format;
 pub mod heartbeat;
+pub mod redact;
 pub mod relay;
 pub mod routing;
 pub mod secrets;

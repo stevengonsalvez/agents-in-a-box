@@ -93,8 +93,14 @@ impl BridgeHeartbeat {
     }
 
     /// Record an error string (a failed getUpdates poll, a send failure, …).
+    ///
+    /// The message is scrubbed of any known secret shape (Telegram bot tokens,
+    /// Slack `xox*` tokens) BEFORE it is stored — `last_error` is persisted to
+    /// `bridge.json` and shown in the CLI/TUI, and a `reqwest::Error` Display can
+    /// carry the token in the request URL. This is the defense-in-depth sink:
+    /// even a caller that forgot to redact can't leak a token to disk (M1).
     pub fn record_error(&self, message: impl Into<String>) {
-        let message = message.into();
+        let message = super::redact::scrub_secrets(&message.into());
         self.mutate(|hb| hb.record_error(message));
     }
 
@@ -167,6 +173,37 @@ mod tests {
         let on_disk = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
         assert_eq!(on_disk.error_count, 2);
         assert_eq!(on_disk.last_error.as_deref(), Some("send failed"));
+    }
+
+    #[test]
+    fn record_error_scrubs_telegram_and_slack_tokens_on_disk() {
+        // M1 regression: a diagnostic carrying a bot token (as it appears in the
+        // Telegram API URL) and a Slack token must NEVER reach the persisted
+        // `last_error` — it is written to bridge.json and shown in the CLI/TUI.
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        hb.record_error(
+            "getUpdates: phase=request kind=connect status=None source=[error sending request \
+             for url (https://api.telegram.org/bot123456789:ABC-tok_ghiJKLmnopqrstuvwxyz012345/getUpdates)]",
+        );
+        hb.record_error("socket error: auth failed for xoxb-9999-8888-supersecretslacktoken");
+        let on_disk = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        let last = on_disk.last_error.expect("last_error recorded");
+        assert!(last.contains("<redacted>"), "expected redaction: {last}");
+        assert!(
+            !last.contains("ABC-tok_ghiJKLmnopqrstuvwxyz012345"),
+            "telegram token body leaked to disk: {last}"
+        );
+        assert!(
+            !last.contains("bot123456789:"),
+            "telegram token prefix leaked to disk: {last}"
+        );
+        assert!(
+            !last.contains("xoxb-9999-8888-supersecretslacktoken"),
+            "slack token leaked to disk: {last}"
+        );
+        // The error count still increments — scrubbing must not drop the signal.
+        assert_eq!(on_disk.error_count, 2);
     }
 
     #[test]
