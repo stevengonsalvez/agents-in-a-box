@@ -1,10 +1,10 @@
 # vhs tape: importing MCP servers from the pool overlay in the ainb TUI.
 #
-# Drives scripts/mcp-import-journey.sh — isolated $HOME, an empty pool daemon,
-# and a project whose .mcp.json declares one stdio server. Launches the TUI in
-# that project, opens the overlay with `p` (empty), then presses `i` to import.
-# Proves: the import writes the global user config AND the server appears live
-# in the table, with a "▸ imported …" result line.
+# Drives scripts/mcp-import-journey.sh — isolated $HOME (no pool daemon) and a
+# project whose .mcp.json declares one stdio server. Launches the TUI in that
+# project, opens the overlay with `p` ("Pool daemon not running"), then presses
+# `i` to import. Proves: the import writes the global user config AND auto-starts
+# the pool, so the server appears live with a "▸ imported … · started pool" line.
 #
 # Run from the ainb-tui/ workspace root:
 #   cargo build --release
@@ -31,13 +31,13 @@ Sleep 13s
 Escape
 Sleep 1s
 
-# Open the pool overlay — empty, "No servers pooled yet" (with the `i` hint).
+# Open the pool overlay — "Pool daemon not running".
 Type "p"
 Sleep 3s
 
 # Import: reads the launch dir's .mcp.json + Claude user scope, writes the
-# global user config, registers
-# the server with the live daemon. The table gains the row + a result line.
+# global user config, and auto-starts the pool (daemon loads it on boot).
+# The table gains the row + a "started pool" result line.
 Type "i"
 Sleep 4s
 

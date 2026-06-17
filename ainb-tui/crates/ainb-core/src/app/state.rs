@@ -920,24 +920,39 @@ pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
 }
 
 /// Blocking `import` action for the overlay — runs `ainb mcp import` (project
-/// scope, or user config when `to_user`), then registers any newly-imported
-/// servers with the live daemon so they appear in the table immediately
-/// (the daemon spawns each lazily on first attach). Always run via
-/// `spawn_blocking`. Returns a fresh status snapshot tagged with a summary.
+/// scope, or user config when `to_user`), then makes the freshly-imported
+/// servers show up in the table immediately: if the pool daemon is already
+/// running they're registered with it; if it isn't, the daemon is started
+/// (it loads every configured server — including the new import — on boot).
+/// Without this an import into a down pool wrote config but left the overlay
+/// empty, which read as a no-op. Always run via `spawn_blocking`. Returns a
+/// fresh status snapshot tagged with a summary.
 pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
     let summary = match crate::mcp_pool::import::execute(to_user) {
         Ok(report) => {
-            // Push the just-imported definitions to a running daemon so the
-            // overlay reflects them without waiting for a new session.
-            if !report.imported.is_empty() && crate::mcp_pool::client::daemon_alive() {
-                if let Ok(config) = crate::config::AppConfig::load() {
-                    let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
-                        .into_iter()
-                        .filter(|s| report.imported.contains(&s.name))
-                        .collect();
-                    if !fresh.is_empty() {
-                        let _ = crate::mcp_pool::client::register_servers(&fresh);
+            let mut extra = String::new();
+            if !report.imported.is_empty() {
+                if crate::mcp_pool::client::daemon_alive() {
+                    // Daemon up: push the new definitions so they appear now,
+                    // without waiting for a new session.
+                    if let Ok(config) = crate::config::AppConfig::load() {
+                        let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
+                            .into_iter()
+                            .filter(|s| report.imported.contains(&s.name))
+                            .collect();
+                        if !fresh.is_empty() {
+                            let _ = crate::mcp_pool::client::register_servers(&fresh);
+                        }
                     }
+                } else {
+                    // Daemon down: start it. ensure_daemon spawns it detached
+                    // and polls until its control socket is up (~3s), and the
+                    // daemon registers every configured server on boot — so the
+                    // just-imported one is live by the time we re-fetch below.
+                    extra = match crate::mcp_pool::client::ensure_daemon() {
+                        Ok(()) => " · started pool".to_string(),
+                        Err(e) => format!(" · pool start failed: {e}"),
+                    };
                 }
             }
             let mut parts = Vec::new();
@@ -958,7 +973,12 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
                     report.skipped_unresolvable.join(", ")
                 ));
             }
-            format!("{} → {}", parts.join(" · "), report.target.display())
+            format!(
+                "{}{} → {}",
+                parts.join(" · "),
+                extra,
+                report.target.display()
+            )
         }
         Err(e) => format!("import failed: {e}"),
     };
