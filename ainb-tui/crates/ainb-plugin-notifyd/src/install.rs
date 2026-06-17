@@ -3,7 +3,7 @@
 //! The bash hook script and Claude plugin manifest are embedded into
 //! the `ainb-notifyd` binary at build time via `include_str!`. The
 //! [`install`] verb extracts them to known on-disk locations and
-//! wires both Claude Code and Codex CLI to call into `notify.sh`.
+//! wires Claude Code, Codex CLI, and GitHub Copilot CLI to call into `notify.sh`.
 //!
 //! For Claude: a plugin directory at `~/.claude/plugins/ainb-hooks/`
 //! holding the manifest + script (so Claude Code's plugin marketplace
@@ -38,6 +38,13 @@ const CLAUDE_PLUGIN_JSON: &str =
 /// placeholder that gets substituted at install time).
 const CODEX_HOOKS_TEMPLATE: &str = include_str!("../../../../plugins/ainb-hooks/codex/hooks.json");
 
+/// The Copilot drop-in template (with the `__AINB_HOOK_SCRIPT__`
+/// placeholder substituted at install time). Unlike Codex, this is
+/// written verbatim as a standalone file — Copilot loads + combines
+/// every `*.json` in `~/.copilot/hooks/`, so ainb owns one file.
+const COPILOT_HOOKS_TEMPLATE: &str =
+    include_str!("../../../../plugins/ainb-hooks/copilot/hooks.json");
+
 /// Sentinels used to delimit our managed block inside the user's
 /// `~/.codex/hooks.json`. Stable strings — never change without a
 /// migration path because uninstall greps for them.
@@ -52,9 +59,8 @@ pub enum Agent {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
-    /// GitHub Copilot CLI. Recognised so an `install.json` written by a
-    /// Copilot-capable build round-trips cleanly; this binary does not
-    /// install Copilot hooks itself (it is intentionally absent from `ALL`).
+    /// GitHub Copilot CLI. Hooks are installed as a standalone drop-in at
+    /// `~/.copilot/hooks/ainb.json`; included in `ALL`.
     Copilot,
     /// Catch-all for any agent written by a newer build that this binary
     /// doesn't know. Keeps `install.json` forward-compatible: an unknown
@@ -67,7 +73,7 @@ pub enum Agent {
 
 impl Agent {
     /// All known agents this binary can install — used to derive `--all`.
-    pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Codex];
+    pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Codex, Agent::Copilot];
 
     /// Lowercase name for logs / status output.
     pub fn name(self) -> &'static str {
@@ -92,9 +98,9 @@ pub struct InstallRecord {
     pub claude_plugin_dir: Option<PathBuf>,
     /// Resolved per-agent config path (Codex only).
     pub codex_hooks_json: Option<PathBuf>,
-    /// Resolved per-agent config path (Copilot only). Modelled so a record
-    /// written by a Copilot-capable build round-trips without dropping the
-    /// field; this binary never sets it.
+    /// Resolved path to ainb's standalone Copilot hooks drop-in
+    /// (`~/.copilot/hooks/ainb.json`). Set on install; used by uninstall
+    /// to remove only the managed file while leaving sibling drop-ins intact.
     #[serde(default)]
     pub copilot_hooks_json: Option<PathBuf>,
     /// The plugin manifest version that was written to disk at install
@@ -293,10 +299,14 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 record.codex_hooks_json = Some(hooks_json);
                 push_unique(&mut record.agents, Agent::Codex);
             }
-            // Copilot (and any future/unknown agent) is owned by a
-            // Copilot-capable build; this binary never receives them via
-            // `ALL`. Skip without disturbing an existing record entry.
-            Agent::Copilot | Agent::Unknown => {}
+            Agent::Copilot => {
+                let hooks_json = install_copilot(home, &hook_script)?;
+                record.copilot_hooks_json = Some(hooks_json);
+                push_unique(&mut record.agents, Agent::Copilot);
+            }
+            // Unknown agents are owned by a newer build; skip without
+            // disturbing an existing record entry.
+            Agent::Unknown => {}
         }
     }
     record.save(paths)?;
@@ -466,6 +476,44 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
     Ok(hooks_json)
 }
 
+/// Path to the ainb-owned Copilot drop-in file under an explicit home
+/// root. Copilot loads every `*.json` in `~/.copilot/hooks/` and
+/// combines them, so ainb writes one standalone file here rather than
+/// merging into a shared config (the Codex strategy). Parameterised on
+/// `home` — never `dirs::home_dir()` — so the temp-HOME tests can
+/// redirect it.
+fn copilot_dropin(home: &Path) -> PathBuf {
+    home.join(".copilot").join("hooks").join("ainb.json")
+}
+
+/// Install Copilot hooks: write our drop-in verbatim to
+/// `<home>/.copilot/hooks/ainb.json`. Unlike Codex, this is a whole-file
+/// write of a standalone drop-in — we never merge into a shared config,
+/// and uninstall deletes just this one file (sibling drop-ins from the
+/// user or other tools are untouched). Substitutes the
+/// `__AINB_HOOK_SCRIPT__` placeholder with the canonical script path.
+fn install_copilot(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
+    let dropin = copilot_dropin(home);
+    if let Some(parent) = dropin.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    // JSON-encode the path to escape backslashes, quotes, etc., then strip
+    // the surrounding `"…"` to get just the escaped interior for substitution.
+    // Round-trip through serde_json afterwards to normalise formatting and
+    // prove the final JSON is valid before it lands on disk.
+    let path_json = serde_json::to_string(&hook_script_canonical.to_string_lossy())?;
+    let path_escaped = path_json.trim_matches('"');
+    let resolved = COPILOT_HOOKS_TEMPLATE.replace("__AINB_HOOK_SCRIPT__", path_escaped);
+    let value: serde_json::Value = serde_json::from_str(&strip_line_comments(&resolved))
+        .context("parsing embedded copilot hooks template")?;
+    let text = serde_json::to_string_pretty(&value)?;
+    std::fs::write(&dropin, text).with_context(|| format!("writing {}", dropin.display()))?;
+    info!(dropin = %dropin.display(), "installed copilot hooks");
+    Ok(dropin)
+}
+
 fn is_ainb_managed_entry(entry: &serde_json::Value) -> bool {
     entry.get("_ainb_managed").and_then(|v| v.as_bool()).unwrap_or(false)
         || entry
@@ -525,8 +573,22 @@ pub fn uninstall(paths: &Paths, agents: &[Agent]) -> Result<()> {
                 }
                 record.agents.retain(|a| *a != Agent::Codex);
             }
-            // Not managed by this binary — leave any record entry intact.
-            Agent::Copilot | Agent::Unknown => {}
+            Agent::Copilot => {
+                // We own a whole standalone drop-in file, so uninstall
+                // is a single-file delete — never `remove_dir_all`, which
+                // would clobber sibling drop-ins from the user or other
+                // tools in `~/.copilot/hooks/`.
+                if let Some(dropin) = record.copilot_hooks_json.take() {
+                    if dropin.exists() {
+                        std::fs::remove_file(&dropin).with_context(|| {
+                            format!("removing copilot drop-in {}", dropin.display())
+                        })?;
+                    }
+                }
+                record.agents.retain(|a| *a != Agent::Copilot);
+            }
+            // Unknown agents are owned by a newer build; leave record intact.
+            Agent::Unknown => {}
         }
     }
     record.save(paths)?;
@@ -750,6 +812,122 @@ mod tests {
     }
 
     #[test]
+    fn install_copilot_writes_native_dropin_file() {
+        // `--copilot` writes a STANDALONE drop-in at
+        // ~/.copilot/hooks/ainb.json in Copilot's native format: a flat
+        // per-event array (NOT Codex's two-level {matcher, hooks:[]}),
+        // camelCase events, top-level version:1, timeoutSec (not timeout),
+        // and AINB_AGENT=copilot with the placeholder substituted away.
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let record = install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
+
+        let dropin = dir.path().join(".copilot/hooks/ainb.json");
+        assert_eq!(record.copilot_hooks_json.as_deref(), Some(dropin.as_path()));
+        assert!(
+            dropin.exists(),
+            "drop-in file must exist at {}",
+            dropin.display()
+        );
+
+        let raw = std::fs::read_to_string(&dropin).unwrap();
+        assert!(
+            !raw.contains("__AINB_HOOK_SCRIPT__"),
+            "placeholder survived: {raw}"
+        );
+        assert!(
+            raw.contains(&record.hook_script.to_string_lossy().to_string()),
+            "drop-in lacks resolved script path: {raw}"
+        );
+
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v["version"],
+            serde_json::json!(1),
+            "missing version:1: {raw}"
+        );
+        let hooks = v["hooks"].as_object().expect("hooks object");
+
+        for event in ["notification", "agentStop"] {
+            let arr = hooks
+                .get(event)
+                .and_then(|e| e.as_array())
+                .unwrap_or_else(|| panic!("event {event} missing or not an array: {raw}"));
+            assert_eq!(arr.len(), 1, "expected 1 entry for {event}: {raw}");
+            let entry = &arr[0];
+            // FLAT entry: type/command/timeoutSec live directly on the
+            // entry (not nested under a `hooks` array with a `matcher`).
+            assert_eq!(entry["type"], serde_json::json!("command"), "{raw}");
+            assert!(
+                entry.get("hooks").is_none(),
+                "copilot entries must be flat, not nested {{matcher, hooks:[]}}: {raw}"
+            );
+            assert!(
+                entry.get("matcher").is_none(),
+                "copilot entries carry no matcher: {raw}"
+            );
+            assert_eq!(entry["timeoutSec"], serde_json::json!(5), "{raw}");
+            assert!(
+                entry.get("timeout").is_none(),
+                "copilot uses timeoutSec, not timeout: {raw}"
+            );
+            let cmd = entry["command"].as_str().expect("command string");
+            assert!(
+                cmd.contains("AINB_AGENT=copilot"),
+                "command not tagged for copilot: {cmd}"
+            );
+            assert!(cmd.contains("notify.sh"), "command lacks script: {cmd}");
+        }
+        assert!(
+            hooks.get("Notification").is_none(),
+            "leaked Codex event: {raw}"
+        );
+        assert!(hooks.get("Stop").is_none(), "leaked Codex event: {raw}");
+    }
+
+    #[test]
+    fn uninstall_copilot_removes_dropin_only() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let hooks_dir = dir.path().join(".copilot/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let sibling = hooks_dir.join("other.json");
+        std::fs::write(&sibling, r#"{"version":1,"hooks":{}}"#).unwrap();
+
+        install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
+        let dropin = hooks_dir.join("ainb.json");
+        assert!(dropin.exists());
+        assert!(sibling.exists(), "install must not touch sibling drop-ins");
+
+        uninstall(&p, &[Agent::Copilot]).unwrap();
+        assert!(!dropin.exists(), "our drop-in must be removed");
+        assert!(
+            sibling.exists(),
+            "uninstall must not touch sibling drop-ins"
+        );
+        assert!(
+            hooks_dir.exists(),
+            "uninstall must not remove the hooks dir"
+        );
+
+        let record = InstallRecord::load(&p).unwrap();
+        assert!(!record.agents.contains(&Agent::Copilot));
+    }
+
+    #[test]
+    fn install_copilot_overwrites_its_own_dropin_idempotently() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
+        install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
+        let dropin = dir.path().join(".copilot/hooks/ainb.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dropin).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["notification"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["agentStop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn install_record_roundtrip() {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
@@ -772,6 +950,7 @@ mod tests {
         let names: Vec<_> = rows.iter().map(|r| r.agent.as_str()).collect();
         assert!(names.contains(&"claude"));
         assert!(names.contains(&"codex"));
+        assert!(names.contains(&"copilot"));
         for r in &rows {
             assert!(!r.installed);
             assert!(!r.socket_ok);

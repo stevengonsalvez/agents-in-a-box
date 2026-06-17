@@ -85,6 +85,50 @@ impl UsageProviderFilter {
             Self::Gemini => provider == "gemini",
         }
     }
+
+    /// Display order for the single provider selector (the burndown's
+    /// `◀/▶` / `p` control). The ring `next`/`prev` walk this order.
+    pub(crate) fn all() -> &'static [UsageProviderFilter] {
+        &[
+            Self::All,
+            Self::Claude,
+            Self::Codex,
+            Self::Cursor,
+            Self::Copilot,
+            Self::Gemini,
+        ]
+    }
+
+    /// Step forward through [`Self::all`] (wraps). Drives both `▶` and `p`.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::All => Self::Claude,
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Cursor,
+            Self::Cursor => Self::Copilot,
+            Self::Copilot => Self::Gemini,
+            Self::Gemini => Self::All,
+        }
+    }
+
+    /// Step backward through [`Self::all`] (wraps). Drives `◀`.
+    pub(crate) fn prev(self) -> Self {
+        match self {
+            Self::All => Self::Gemini,
+            Self::Claude => Self::All,
+            Self::Codex => Self::Claude,
+            Self::Cursor => Self::Codex,
+            Self::Copilot => Self::Cursor,
+            Self::Gemini => Self::Copilot,
+        }
+    }
+
+    /// Whether a parser currently feeds this provider. `Cursor` and
+    /// `Gemini` are stubs today; everything else (incl. `All`) has data.
+    /// Gates the "not yet available" empty-state message.
+    pub(crate) fn has_data(self) -> bool {
+        matches!(self, Self::All | Self::Claude | Self::Codex | Self::Copilot)
+    }
 }
 
 /// Deterministic activity categories. Phase 2 fills these from turn classification.

@@ -1,0 +1,15 @@
+document_id: ex-01-tmux-socket-protection
+extracted_at: '2026-03-01T00:00:00'
+entities:
+  - name: "tmux"
+    type: tool
+    description: "terminal multiplexer"
+  - name: "kill-server"
+    type: error
+    description: "destructive bulk kill command"
+relationships:
+  - source: "kill-server"
+    target: "tmux"
+    type: relates_to
+    description: "kill-server destroys all tmux sessions"
+    strength: 8

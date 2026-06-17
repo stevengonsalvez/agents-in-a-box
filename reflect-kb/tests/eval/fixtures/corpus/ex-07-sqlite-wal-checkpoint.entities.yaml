@@ -1,0 +1,15 @@
+document_id: ex-07-sqlite-wal-checkpoint
+extracted_at: '2026-05-01T00:00:00'
+entities:
+  - name: "sqlite"
+    type: technology
+    description: "embedded database"
+  - name: "wal-checkpoint"
+    type: pattern
+    description: "write-ahead-log maintenance"
+relationships:
+  - source: "wal-checkpoint"
+    target: "sqlite"
+    type: configures
+    description: "bounds WAL growth"
+    strength: 7

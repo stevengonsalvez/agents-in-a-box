@@ -13,10 +13,12 @@ use tracing::warn;
 use crate::install::{Agent, ClaudeRegister};
 use crate::{Paths, RunConfig, install_for, run_daemon, status, uninstall};
 
-/// Resolve the agent set from the three CLI flags. Empty selection or
-/// `--all` means every known agent.
-pub fn agents_from_flags(claude: bool, codex: bool, all: bool) -> Vec<Agent> {
-    if all || (!claude && !codex) {
+/// Resolve the agent set from the per-agent CLI flags. Empty selection
+/// or `--all` means every known agent. The empty-selection guard MUST
+/// list every flag — a missing one silently turns a single-agent
+/// install into an install-for-everyone.
+pub fn agents_from_flags(claude: bool, codex: bool, copilot: bool, all: bool) -> Vec<Agent> {
+    if all || (!claude && !codex && !copilot) {
         return Agent::ALL.to_vec();
     }
     let mut out = Vec::new();
@@ -25,6 +27,9 @@ pub fn agents_from_flags(claude: bool, codex: bool, all: bool) -> Vec<Agent> {
     }
     if codex {
         out.push(Agent::Codex);
+    }
+    if copilot {
+        out.push(Agent::Copilot);
     }
     out
 }
@@ -70,6 +75,9 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     println!("hook script:   {}", record.hook_script.display());
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+    }
+    if let Some(p) = &record.copilot_hooks_json {
+        println!("copilot hooks: {}", p.display());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
@@ -135,21 +143,44 @@ mod tests {
 
     #[test]
     fn agents_from_flags_defaults_to_all() {
-        assert_eq!(agents_from_flags(false, false, false), Agent::ALL.to_vec());
-        assert_eq!(agents_from_flags(true, true, true), Agent::ALL.to_vec());
+        // No flags → all; `--all` (with or without per-agent flags) → all.
+        assert_eq!(
+            agents_from_flags(false, false, false, false),
+            Agent::ALL.to_vec()
+        );
+        assert_eq!(
+            agents_from_flags(true, true, true, true),
+            Agent::ALL.to_vec()
+        );
     }
 
     #[test]
     fn agents_from_flags_respects_single_selection() {
-        assert_eq!(agents_from_flags(true, false, false), vec![Agent::Claude]);
-        assert_eq!(agents_from_flags(false, true, false), vec![Agent::Codex]);
+        assert_eq!(
+            agents_from_flags(true, false, false, false),
+            vec![Agent::Claude]
+        );
+        assert_eq!(
+            agents_from_flags(false, true, false, false),
+            vec![Agent::Codex]
+        );
+        // Regression guard: `--copilot` alone must NOT fall through the
+        // empty-selection branch and install for everyone.
+        assert_eq!(
+            agents_from_flags(false, false, true, false),
+            vec![Agent::Copilot]
+        );
     }
 
     #[test]
     fn agents_from_flags_both_explicit() {
         assert_eq!(
-            agents_from_flags(true, true, false),
+            agents_from_flags(true, true, false, false),
             vec![Agent::Claude, Agent::Codex]
+        );
+        assert_eq!(
+            agents_from_flags(true, true, true, false),
+            vec![Agent::Claude, Agent::Codex, Agent::Copilot]
         );
     }
 }

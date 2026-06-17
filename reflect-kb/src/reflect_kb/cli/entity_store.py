@@ -18,8 +18,17 @@ import yaml
 
 ENTITY_TYPES = {"technology", "error", "pattern", "function", "concept", "tool",
                 "artifact", "code", "config", "service", "platform", "framework", "library"}
-RELATIONSHIP_TYPES = {"caused_by", "solves", "requires", "relates_to", "uses",
-                      "implements", "configures", "triggers", "part_of"}
+# S2: typed causal links (Hindsight memory_links shape — causes/caused_by/
+# enables/prevents — extended with contradicts/supersedes/part_of/uses).
+# Must stay in sync with plugins/reflect/scripts/validate_sidecar.py.
+TYPED_CAUSAL_LINK_TYPES = {
+    "caused_by", "causes", "enables", "prevents",
+    "contradicts", "supersedes", "part_of", "uses",
+}
+RELATIONSHIP_TYPES = TYPED_CAUSAL_LINK_TYPES | {
+    "solves", "requires", "relates_to",
+    "implements", "configures", "triggers",
+}
 
 TUPLE_DELIMITER = "<|>"
 RECORD_DELIMITER = "##"
@@ -48,11 +57,28 @@ class Relationship:
     description: str
     strength: int = 5
 
+    def typed_description(self) -> str:
+        """Description with the link type embedded as a ``[type]`` prefix.
+
+        nano-graphrag's relationship tuple has no type slot — only the
+        description survives onto the GraphML edge. Prefixing the type
+        (S2) makes typed causal links recoverable from the stored graph,
+        so the graph-expansion arm can filter edges by link type.
+        Idempotent: an already-prefixed description is returned as-is.
+        """
+        rel_type = (self.type or "").strip().lower()
+        if rel_type not in RELATIONSHIP_TYPES:
+            return self.description
+        prefix = f"[{rel_type}]"
+        if self.description.startswith(prefix):
+            return self.description
+        return f"{prefix} {self.description}" if self.description else prefix
+
     def to_graphrag_tuple(self) -> str:
         return (
             f'("relationship"{TUPLE_DELIMITER}"{self.source}"'
             f'{TUPLE_DELIMITER}"{self.target}"'
-            f'{TUPLE_DELIMITER}"{self.description}"'
+            f'{TUPLE_DELIMITER}"{self.typed_description()}"'
             f"{TUPLE_DELIMITER}{self.strength})"
         )
 

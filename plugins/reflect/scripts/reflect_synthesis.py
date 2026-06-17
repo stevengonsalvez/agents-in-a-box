@@ -18,13 +18,22 @@ Two layers:
   * synthesize  — hand the clusters to one bounded Opus call to propose merges.
                   Optional; --dry-run reports clusters without calling a model.
 
+C2 auto-trigger (Hindsight ``enable_auto_consolidation`` shape): a periodic
+``--check-auto`` tick counts learnings created since the last consolidation
+pass (mirrored into the ``learnings_since_last_consolidation`` metric) and
+runs the synthesis EARLY when the threshold (default 30) is crossed. Quiet
+projects keep the weekly cadence via the --max-age fallback; active projects
+get a fresher KB without waiting a week.
+
 CLI:
     reflect_synthesis.py [--docs-dir DIR] [--since 7d] [--threshold 0.5]
                          [--dry-run] [--model opus]
+                         [--check-auto] [--auto-threshold N] [--max-age 7d]
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -147,6 +156,123 @@ def _since_seconds(s: str) -> float:
         return 7 * 86400
 
 
+# ---------------------------------------------------------------------------
+# C2: auto-trigger consolidation on N learnings.
+#
+# Hindsight gates consolidation on a count of unconsolidated memory units
+# (``enable_auto_consolidation`` + ``submit_async_consolidation``); the port
+# counts learnings rows created since the last synthesis pass. The counter is
+# computed from the learnings table (not writer-side increments) so it can
+# never drift, and is mirrored into the ``learnings_since_last_consolidation``
+# metric — the acceptance-pinned observable surfaced by metrics_updater.
+# ---------------------------------------------------------------------------
+
+AUTO_TRIGGER_THRESHOLD_DEFAULT = 30
+LAST_CONSOLIDATION_KEY = "last_consolidation_at"
+PENDING_LEARNINGS_KEY = "learnings_since_last_consolidation"
+
+
+def _load_reflect_db():
+    """Lazy sibling import so the pure clustering path stays import-free."""
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import reflect_db
+
+    return reflect_db
+
+
+def auto_trigger_threshold() -> int:
+    """Trigger count: $REFLECT_SYNTHESIS_AUTO_THRESHOLD, else 30."""
+    raw = os.environ.get("REFLECT_SYNTHESIS_AUTO_THRESHOLD", "")
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    return AUTO_TRIGGER_THRESHOLD_DEFAULT
+
+
+def _iso_to_epoch(s: str) -> Optional[float]:
+    """ISO-8601 timestamp → epoch seconds; None when unparseable."""
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def learnings_since_last_consolidation(*, conn=None, db=None) -> int:
+    """Count learnings created since the last consolidation pass.
+
+    No baseline yet (fresh install) counts everything — those rows are
+    genuinely unconsolidated, the Hindsight ``consolidated_at IS NULL``
+    shape. The value is mirrored into the metrics table on every read so
+    ``learnings_since_last_consolidation`` is always inspectable.
+    """
+    db = db or _load_reflect_db()
+    conn = conn or db.get_conn()
+    last = db.get_metric(LAST_CONSOLIDATION_KEY, "", conn=conn) or ""
+    if last:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM learnings WHERE created_at > ?", (last,)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) FROM learnings").fetchone()
+    count = int(row[0])
+    db.set_metric(PENDING_LEARNINGS_KEY, count, conn=conn)
+    return count
+
+
+def record_consolidation_run(*, when: Optional[str] = None, conn=None, db=None) -> None:
+    """Mark a completed synthesis pass: stamp the baseline, zero the counter."""
+    db = db or _load_reflect_db()
+    conn = conn or db.get_conn()
+    if when is None:
+        from datetime import datetime, timezone
+
+        when = datetime.now(timezone.utc).isoformat()
+    db.set_metric(LAST_CONSOLIDATION_KEY, when, conn=conn)
+    db.set_metric(PENDING_LEARNINGS_KEY, 0, conn=conn)
+
+
+def should_auto_trigger(
+    threshold: Optional[int] = None,
+    max_age_seconds: float = 7 * 86400,
+    *,
+    conn=None,
+    db=None,
+) -> tuple[bool, str, int]:
+    """Decide whether the periodic tick should run synthesis NOW.
+
+    Returns ``(triggered, reason, pending_count)``. Fires when:
+      * pending learnings >= threshold — the early path (active projects), or
+      * the last pass is older than *max_age_seconds* — the weekly fallback
+        (quiet projects keep the periodic cadence). With no baseline the age
+        anchor is the oldest learning, so a fresh-but-stale KB still gets a
+        first pass within the window.
+    """
+    db = db or _load_reflect_db()
+    conn = conn or db.get_conn()
+    threshold = int(threshold or auto_trigger_threshold())
+    count = learnings_since_last_consolidation(conn=conn, db=db)
+    if count >= threshold:
+        return True, f"threshold crossed ({count} >= {threshold})", count
+
+    anchor = db.get_metric(LAST_CONSOLIDATION_KEY, "", conn=conn) or ""
+    if not anchor:
+        row = conn.execute("SELECT MIN(created_at) FROM learnings").fetchone()
+        anchor = row[0] or ""
+    if anchor:
+        epoch = _iso_to_epoch(anchor)
+        if epoch is not None and _now() - epoch >= max_age_seconds:
+            age_days = (_now() - epoch) / 86400
+            return True, f"age fallback ({age_days:.1f}d since last run)", count
+    return False, f"below threshold ({count} < {threshold})", count
+
+
 def main() -> None:
     import argparse
 
@@ -157,9 +283,39 @@ def main() -> None:
     ap.add_argument("--model", default="opus")
     ap.add_argument("--dry-run", action="store_true",
                     help="report merge-candidate clusters; do not call a model")
+    ap.add_argument("--check-auto", action="store_true",
+                    help="C2: run only when the pending-learnings threshold is "
+                         "crossed or the last run is older than --max-age")
+    ap.add_argument("--auto-threshold", type=int, default=0,
+                    help="pending-learnings trigger count (default: "
+                         "$REFLECT_SYNTHESIS_AUTO_THRESHOLD or 30)")
+    ap.add_argument("--max-age", default="7d",
+                    help="age fallback for --check-auto (weekly cadence floor)")
     args = ap.parse_args()
 
-    docs = load_docs(args.docs_dir, _since_seconds(args.since))
+    since_seconds = _since_seconds(args.since)
+    db = None
+    if args.check_auto:
+        try:
+            db = _load_reflect_db()
+            triggered, reason, count = should_auto_trigger(
+                args.auto_threshold or None, _since_seconds(args.max_age), db=db,
+            )
+        except Exception as exc:  # noqa: BLE001 — silent-fail shaped: a broken
+            # DB must never crash the launchd tick into a respawn loop.
+            print(f"reflect synthesis: auto-check skipped ({exc})", file=sys.stderr)
+            return
+        print(f"reflect synthesis auto-check: {count} learning(s) pending — {reason}")
+        if not triggered:
+            return
+        # Widen the docs window to cover everything since the last pass
+        # (--since stays the floor) so an early run can't miss fresh notes.
+        last = db.get_metric(LAST_CONSOLIDATION_KEY, "") or ""
+        epoch = _iso_to_epoch(last) if last else None
+        if epoch is not None:
+            since_seconds = max(since_seconds, _now() - epoch + 3600)
+
+    docs = load_docs(args.docs_dir, since_seconds)
     clusters = cluster(docs, args.threshold)
     print(f"reflect synthesis: {len(docs)} learnings in window, "
           f"{len(clusters)} merge-candidate cluster(s)")
@@ -167,6 +323,17 @@ def main() -> None:
         print(f"  cluster {i} ({len(group)}):")
         for d in group:
             print(f"    - {d.title}  [{d.path.name}]")
+
+    if not args.dry_run:
+        # C2: a completed (non-dry-run) pass IS a consolidation — stamp the
+        # baseline and zero the counter so the trigger re-arms. Recorded
+        # before the model phase so a hung Opus call can't double-trigger
+        # the next tick. Best-effort: metrics being unavailable must never
+        # fail the synthesis itself.
+        try:
+            record_consolidation_run(db=db)
+        except Exception:  # noqa: BLE001
+            pass
 
     if args.dry_run or not clusters:
         return

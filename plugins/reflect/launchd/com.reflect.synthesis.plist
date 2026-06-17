@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd template (W5): weekly Opus synthesis pass.
+  launchd template (W5 + C2): Opus synthesis pass with auto-trigger.
 
-  Runs reflect_synthesis.py once a week (Sunday 03:00 local) to cluster
-  near-duplicate learnings and propose merges — the one place a big model is
-  justified (bounded + periodic, not per transcript).
+  Hourly check-auto tick (C2, the Hindsight enable_auto_consolidation
+  shape): runs the full synthesis EARLY when 30+ new learnings have landed
+  since the last pass (active projects get a fresher KB), and falls back to
+  the weekly cadence via the 7d age floor when quiet. Below both gates the
+  tick is a single COUNT query and exits — quiet projects cost ~nothing.
+  The synthesis itself clusters near-duplicate learnings and proposes
+  merges — the one place a big model is justified (bounded + periodic,
+  not per transcript).
+
+  Threshold override: set REFLECT_SYNTHESIS_AUTO_THRESHOLD (default 30).
 
   INSTALL (replace {{PLUGIN_ROOT}}):
     sed "s|{{PLUGIN_ROOT}}|$HOME/.claude/.../reflect|g" \
@@ -20,18 +27,16 @@
         <string>/usr/bin/env</string>
         <string>python3</string>
         <string>{{PLUGIN_ROOT}}/scripts/reflect_synthesis.py</string>
+        <string>--check-auto</string>
         <string>--since</string>
         <string>7d</string>
+        <string>--max-age</string>
+        <string>7d</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Weekday</key>
-        <integer>0</integer>
-        <key>Hour</key>
-        <integer>3</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <false/>
     <key>StandardOutPath</key>
     <string>/tmp/reflect-synthesis-launchd.out</string>
     <key>StandardErrorPath</key>
