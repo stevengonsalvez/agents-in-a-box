@@ -3126,7 +3126,7 @@ impl EventHandler {
                                         }
                                         _ => {
                                             state.add_info_notification(
-                                                "Notifications enabled (Claude + Codex). Restart \
+                                                "Notifications enabled (Claude + Codex + Copilot). Restart \
                                                  your agent sessions to load the hooks; the Inbox \
                                                  (b) lights up when a session needs you."
                                                     .to_string(),
