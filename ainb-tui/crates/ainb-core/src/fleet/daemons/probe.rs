@@ -259,7 +259,11 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
 
     let pid = read_pid_file(&pid_path);
     let pid_alive = pid.is_some_and(is_pid_alive);
-    let socket_ok = socket_path.exists();
+    // L1: a bound, ACCEPTING listener — not merely a socket file on disk. A
+    // crashed daemon can leave a stale `notify.sock` behind; `exists()` would
+    // then falsely report "connected". A non-blocking connect proves a listener
+    // is actually serving.
+    let socket_ok = socket_is_listening(&socket_path);
     let db_ok = db_path.exists();
 
     if !pid_alive {
@@ -431,6 +435,18 @@ impl DaemonStatus {
 /// Read a `notify.pid`-style PID file: a single integer, trimmed.
 fn read_pid_file(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Is a Unix-socket listener actually bound and accepting at `path`? (L1.)
+///
+/// `path.exists()` only proves a socket FILE is present — a crashed daemon
+/// leaves a stale one behind. A `connect()` succeeds only when a listener is
+/// bound and accepting; a stale socket file refuses the connection
+/// (`ECONNREFUSED`). The connect is immediately dropped, so this is a cheap,
+/// non-blocking liveness probe of the listener itself, not a duplicate read of
+/// `socket_path.exists()`.
+fn socket_is_listening(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
 /// Best-effort last-write time of a file as epoch ms — used as notifyd's
@@ -692,12 +708,42 @@ mod tests {
             format!("{}\n", std::process::id()),
         )
         .unwrap();
-        std::fs::write(base.path().join("notify.sock"), b"").unwrap();
+        // L1: connected requires an ACTUAL bound listener, not just a socket
+        // file. Bind one and keep it alive for the duration of the probe.
+        let _listener =
+            std::os::unix::net::UnixListener::bind(base.path().join("notify.sock")).unwrap();
         std::fs::write(base.path().join("notifications.db"), b"").unwrap();
         let s = probe_notifyd(base.path(), super::super::heartbeat::now_ms());
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.reason.contains("socket bound"));
+    }
+
+    #[test]
+    fn probe_notifyd_stale_socket_file_without_listener_is_not_connected() {
+        // L1 regression: a crashed daemon left a stale `notify.sock` FILE but no
+        // listener is bound. `exists()` would falsely report connected; a
+        // connect() refuses, so we must report running-but-not-connected.
+        let base = TempDir::new().unwrap();
+        std::fs::write(
+            base.path().join("notify.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        // A plain file at the socket path — present but NOT a listener.
+        std::fs::write(base.path().join("notify.sock"), b"").unwrap();
+        std::fs::write(base.path().join("notifications.db"), b"").unwrap();
+        let s = probe_notifyd(base.path(), super::super::heartbeat::now_ms());
+        assert_eq!(s.state, DaemonState::Running);
+        assert!(
+            !s.connected,
+            "a stale socket file with no listener must not report connected"
+        );
+        assert!(
+            s.reason.contains("socket not bound"),
+            "reason: {}",
+            s.reason
+        );
     }
 
     #[test]
