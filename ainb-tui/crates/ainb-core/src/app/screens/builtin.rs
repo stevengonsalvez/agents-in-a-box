@@ -62,7 +62,13 @@ impl PluginScreen {
 /// authoritative list lives in one place.
 ///
 /// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
-pub const PLUGIN_SCREENS: &[(&str, &str)] = &[(ids::ANALYTICS, "burndown"), (ids::WITR, "witr")];
+pub const PLUGIN_SCREENS: &[(&str, &str)] = &[
+    (ids::ANALYTICS, "burndown"),
+    (ids::WITR, "witr"),
+    (ids::LEARNINGS, "learnings"),
+    (ids::ABTOP, "abtop"),
+    (ids::HANGAR, "hangar-tui"),
+];
 
 /// Resolve the plugin id that owns `screen_id`, if any.
 #[must_use]
@@ -137,21 +143,19 @@ pub fn crossterm_to_protocol_key(
 /// - `?` / `H` → help toggle (already short-circuited above
 ///   `handle_key_event`'s plugin branch, but listed here for parity in
 ///   the `PluginScreen` trait impl path).
-/// - `Esc` → pop screen / return to home. The plugin/handle_key wire
-///   method is a one-way notification (no `consumed` reply), so once
-///   the host forwards a keystroke it has no way to know whether the
-///   plugin had any state to consume it. The user-visible failure is
-///   Esc-from-burndown silently disappearing into the plugin even when
-///   there's no filter chip or zoom to pop. Until the wire protocol is
-///   extended with a `consumed: bool` result for `plugin/handle_key`,
-///   Esc belongs to the host. Plugins re-bind internal pop semantics
-///   to `Backspace` (see burndown's `KeyCode::Backspace` handler).
 ///
-///   UX note: a side-effect of routing Esc straight to the host is
-///   that Esc on a *zoomed* plugin view does NOT first un-zoom — it
-///   navigates straight to home, discarding zoom state. Users who
-///   want a one-level pop press `Backspace` (closes zoom, stays on
-///   the screen). The burndown help bar advertises both keys.
+/// `Esc` is plugin-owned (it used to be host-reserved): it pops one
+/// internal level (detail drawer, search overlay, zoom, filter chip)
+/// and, once the plugin is already at its root view, the plugin
+/// publishes `ui.close_request` on the snapshot bus to ask the host to
+/// close the screen. The host's event loop polls that topic by version
+/// (`AppState::tick_panel_close_requests`) and pops back to the screen
+/// the panel was opened from. This replaces the old behaviour where
+/// Esc on a zoomed plugin view discarded zoom state and jumped
+/// straight home. `Backspace` remains a plugin-internal alias for the
+/// same one-level pop. When the plugin is missing or its runtime is
+/// down, the forwarder returns `NotHandled` and Esc falls through to
+/// the central dispatch, which still closes the placeholder screen.
 ///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
@@ -163,7 +167,6 @@ pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
     match key.code {
         CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
         CtKey::Char('?' | 'H') => true,
-        CtKey::Esc => true,
         _ => false,
     }
 }
@@ -194,8 +197,167 @@ pub fn forward_key_to_focused_plugin(
         return EventOutcome::Handled;
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    if !delivered
+        && matches!(
+            key.code,
+            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
+        )
+    {
+        // Plugin unregistered or its task is gone — the screen is
+        // showing the "plugin unavailable" placeholder and the key
+        // just got dropped on the floor. Esc/q must stay escapable
+        // there (the central dispatch resolves them to PanelBack), or
+        // the user is trapped with only Ctrl+C. Other keys stay
+        // claimed so the session-list fallthrough's destructive
+        // bindings (`d` delete, `n` new session, …) can't fire from a
+        // dead plugin screen.
+        return EventOutcome::NotHandled;
+    }
     EventOutcome::Handled
+}
+
+/// Convert a `crossterm::event::MouseEvent` into the portable wire shape
+/// consumed by `plugin/handle_mouse`. Coordinates are left as the
+/// absolute terminal column/row the caller received — translation into
+/// the plugin's viewport space happens in
+/// [`forward_mouse_to_focused_plugin`], which knows the screen origin.
+#[must_use]
+pub fn crossterm_to_protocol_mouse(
+    event: &crossterm::event::MouseEvent,
+) -> ainb_plugin_runtime::MouseEvent {
+    use ainb_plugin_runtime::{
+        KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, MouseButton as PButton,
+        MouseEvent as PEvent, MouseKind as PKind,
+    };
+    use crossterm::event::{
+        KeyModifiers as CtMods, MouseButton as CtButton, MouseEventKind as CtKind,
+    };
+
+    fn button(b: CtButton) -> PButton {
+        match b {
+            CtButton::Left => PButton::Left,
+            CtButton::Right => PButton::Right,
+            CtButton::Middle => PButton::Middle,
+        }
+    }
+
+    let kind = match event.kind {
+        CtKind::Down(b) => PKind::Down { button: button(b) },
+        CtKind::Up(b) => PKind::Up { button: button(b) },
+        CtKind::Drag(b) => PKind::Drag { button: button(b) },
+        CtKind::Moved => PKind::Moved,
+        CtKind::ScrollDown => PKind::ScrollDown,
+        CtKind::ScrollUp => PKind::ScrollUp,
+        CtKind::ScrollLeft => PKind::ScrollLeft,
+        CtKind::ScrollRight => PKind::ScrollRight,
+    };
+
+    let mut mods: u8 = 0;
+    if event.modifiers.contains(CtMods::SHIFT) {
+        mods |= KEY_MOD_SHIFT;
+    }
+    if event.modifiers.contains(CtMods::CONTROL) {
+        mods |= KEY_MOD_CTRL;
+    }
+    if event.modifiers.contains(CtMods::ALT) {
+        mods |= KEY_MOD_ALT;
+    }
+    if event.modifiers.contains(CtMods::SUPER) {
+        mods |= KEY_MOD_SUPER;
+    }
+
+    PEvent {
+        kind,
+        col: event.column,
+        row: event.row,
+        mods,
+    }
+}
+
+/// Try to forward `event` to the plugin owning `current_screen`.
+///
+/// Mirrors [`forward_key_to_focused_plugin`] for the pointer. Returns
+/// `Handled` whenever a plugin owns the focused screen — even if the
+/// event is dropped (outside the plugin's rect, or a high-frequency
+/// `Moved`) — so the host's own mouse handling never double-acts on a
+/// plugin screen. Returns `NotHandled` when no plugin owns the screen or
+/// the runtime isn't up yet, letting the caller's host-side mouse
+/// dispatch run.
+///
+/// Coordinates are translated from absolute terminal space into the
+/// plugin's viewport (origin subtracted) before forwarding, so the
+/// plugin hit-tests against the same `(0, 0)`-based grid it painted.
+pub fn forward_mouse_to_focused_plugin(
+    state: &mut AppState,
+    event: &crossterm::event::MouseEvent,
+) -> EventOutcome {
+    use ainb_plugin_runtime::MouseKind;
+
+    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+        return EventOutcome::NotHandled;
+    };
+    let Some(runtime) = state.plugin_runtime.as_ref() else {
+        return EventOutcome::NotHandled;
+    };
+
+    let mut mouse = crossterm_to_protocol_mouse(event);
+
+    // Drop pointer-move spam: forwarding every `Moved` would flood the
+    // priority mouse channel for an event the map doesn't need (no hover
+    // semantics in v1). Still report Handled so host move-handling stays
+    // off the plugin screen.
+    if matches!(mouse.kind, MouseKind::Moved) {
+        return EventOutcome::Handled;
+    }
+
+    // Translate absolute terminal coords → plugin-viewport coords. Drop
+    // (still Handled) when the point falls outside the plugin's painted
+    // rect rather than forwarding a click the plugin would mis-hit-test.
+    let origin = state
+        .plugin_render_origins
+        .get(&state.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
+    let area = state.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
+        return EventOutcome::Handled;
+    };
+    mouse.col = col;
+    mouse.row = row;
+
+    let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
+    let _ = runtime.send_mouse(&pid, state.current_screen.clone(), mouse);
+    EventOutcome::Handled
+}
+
+/// Translate an absolute terminal `(col, row)` into a plugin-viewport
+/// coordinate, given the plugin screen's painted `origin` (top-left
+/// `(x, y)`) and `area` size `(width, height)`.
+///
+/// Returns `None` — i.e. the click is outside the plugin and should be
+/// dropped — when the point is left/above the origin (would underflow),
+/// at/beyond the right/bottom edge (a `width`-wide rect owns cols
+/// `0..width`), or the area is zero-sized (the screen has never painted,
+/// so both origin and area default to `(0, 0)`). Kept as a pure free
+/// function so the underflow guard + bounds math are unit-testable
+/// without a live `AppState`/runtime.
+#[must_use]
+fn click_to_viewport(
+    col: u16,
+    row: u16,
+    (origin_x, origin_y): (u16, u16),
+    (width, height): (u16, u16),
+) -> Option<(u16, u16)> {
+    if col < origin_x || row < origin_y {
+        return None;
+    }
+    let vcol = col - origin_x;
+    let vrow = row - origin_y;
+    if width == 0 || height == 0 || vcol >= width || vrow >= height {
+        return None;
+    }
+    Some((vcol, vrow))
 }
 
 /// Build the placeholder paragraph shown when a plugin screen renders
@@ -330,6 +492,9 @@ impl Screen for PluginScreen {
         state
             .plugin_render_areas
             .insert(self.screen_id.to_string(), (area.width, area.height));
+        // Stash the origin too, so the mouse forwarder can translate an
+        // absolute terminal click into this plugin's viewport space.
+        state.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state);
@@ -345,14 +510,15 @@ impl Screen for PluginScreen {
             if coord.x >= area.width || coord.y >= area.height {
                 continue;
             }
-            let target = buf.get_mut(area.x + coord.x, area.y + coord.y);
-            target.set_symbol(&cell.symbol);
-            target.set_fg(rgb_to_color(cell.fg));
-            target.set_bg(rgb_to_color(cell.bg));
-            target.set_style(
-                ratatui::style::Style::default()
-                    .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
-            );
+            if let Some(target) = buf.cell_mut((area.x + coord.x, area.y + coord.y)) {
+                target.set_symbol(&cell.symbol);
+                target.set_fg(rgb_to_color(cell.fg));
+                target.set_bg(rgb_to_color(cell.bg));
+                target.set_style(
+                    ratatui::style::Style::default()
+                        .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
+                );
+            }
         }
     }
 
@@ -746,6 +912,9 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(ChangelogScreen::default()));
     registry.register(Box::new(PluginScreen::new(ids::ANALYTICS)));
     registry.register(Box::new(PluginScreen::new(ids::WITR)));
+    registry.register(Box::new(PluginScreen::new(ids::LEARNINGS)));
+    registry.register(Box::new(PluginScreen::new(ids::ABTOP)));
+    registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
     registry.register(Box::new(SkillManagerScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
@@ -762,6 +931,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn click_to_viewport_translates_in_bounds_click() {
+        // Plugin painted at origin (3, 1), size 20x10. A click at absolute
+        // (10, 4) maps to viewport (7, 3).
+        assert_eq!(click_to_viewport(10, 4, (3, 1), (20, 10)), Some((7, 3)));
+        // Top-left corner of the plugin rect maps to (0, 0).
+        assert_eq!(click_to_viewport(3, 1, (3, 1), (20, 10)), Some((0, 0)));
+        // Bottom-right-most owned cell (origin + size - 1).
+        assert_eq!(click_to_viewport(22, 10, (3, 1), (20, 10)), Some((19, 9)));
+    }
+
+    #[test]
+    fn click_to_viewport_drops_clicks_left_or_above_origin() {
+        // Left of origin (would underflow the u16 subtraction).
+        assert_eq!(click_to_viewport(2, 4, (3, 1), (20, 10)), None);
+        // Above origin.
+        assert_eq!(click_to_viewport(10, 0, (3, 1), (20, 10)), None);
+    }
+
+    #[test]
+    fn click_to_viewport_drops_clicks_at_or_beyond_far_edge() {
+        // Column at the exclusive right edge (origin_x + width).
+        assert_eq!(click_to_viewport(23, 4, (3, 1), (20, 10)), None);
+        // Row at the exclusive bottom edge (origin_y + height).
+        assert_eq!(click_to_viewport(10, 11, (3, 1), (20, 10)), None);
+    }
+
+    #[test]
+    fn click_to_viewport_drops_when_area_never_painted() {
+        // Zero-sized area (screen never rendered) → no destination.
+        assert_eq!(click_to_viewport(0, 0, (0, 0), (0, 0)), None);
+        assert_eq!(click_to_viewport(5, 5, (0, 0), (0, 0)), None);
+    }
+
+    #[test]
     fn register_builtins_populates_registry() {
         let mut r = ScreenRegistry::new();
         register_builtins(&mut r);
@@ -774,6 +977,8 @@ mod tests {
             ids::CHANGELOG,
             ids::ANALYTICS,
             ids::WITR,
+            ids::ABTOP,
+            ids::HANGAR,
             ids::SKILLS,
             ids::SKILL_MANAGER,
             ids::GIT_VIEW,
@@ -889,11 +1094,10 @@ mod tests {
             CtKey::Char('H'),
             KeyModifiers::NONE
         )));
-        // Esc is reserved: it must always bubble to the host so the
-        // screen pops back to home — see the doc on
-        // `is_host_reserved_key`. Plugins use `Backspace` for pop-state
-        // semantics instead.
-        assert!(is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
+        // Esc is plugin-owned (overlay-panels redesign): the plugin pops
+        // one internal level per press and publishes `ui.close_request`
+        // at its root — see the doc on `is_host_reserved_key`.
+        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
@@ -918,8 +1122,64 @@ mod tests {
     fn plugin_id_for_screen_resolves_analytics() {
         assert_eq!(plugin_id_for_screen(ids::ANALYTICS), Some("burndown"));
         assert_eq!(plugin_id_for_screen(ids::WITR), Some("witr"));
+        assert_eq!(plugin_id_for_screen(ids::LEARNINGS), Some("learnings"));
+        assert_eq!(plugin_id_for_screen(ids::ABTOP), Some("abtop"));
+        assert_eq!(plugin_id_for_screen(ids::HANGAR), Some("hangar-tui"));
         // Non-plugin screens return None so the forwarder bails early.
         assert_eq!(plugin_id_for_screen(ids::HOME), None);
         assert_eq!(plugin_id_for_screen("nonsense"), None);
+    }
+
+    /// Regression (PR #249 review HIGH-1): with the runtime up but the
+    /// plugin NOT registered — exactly the "[plugin unavailable]"
+    /// placeholder state — `send_key` drops the keystroke. Esc/q must
+    /// fall through to the central dispatch (→ PanelBack) so the
+    /// placeholder stays escapable; every other key stays claimed so
+    /// session-list bindings (`d` delete, `n` new session, …) can't
+    /// fire from a dead plugin screen.
+    #[test]
+    fn undelivered_esc_and_q_fall_through_on_placeholder_screen() {
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        // Real runtime, zero plugins registered → lifecycle_state(burndown)
+        // is None and send_key returns false.
+        let (runtime, handle) =
+            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
+        let mut state = crate::app::state::AppState::default();
+        state.plugin_runtime = Some(handle);
+        state.current_screen = ids::ANALYTICS.to_string();
+
+        let mk = |code| CtEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Esc)),
+                EventOutcome::NotHandled
+            ),
+            "undelivered Esc must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('q'))),
+                EventOutcome::NotHandled
+            ),
+            "undelivered q must fall through so PanelBack can run"
+        );
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(&mut state, &mk(CtKey::Char('d'))),
+                EventOutcome::Handled
+            ),
+            "undelivered non-nav keys stay claimed — no destructive fallthrough"
+        );
+
+        runtime.shutdown();
     }
 }

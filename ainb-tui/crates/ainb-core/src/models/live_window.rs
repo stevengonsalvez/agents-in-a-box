@@ -22,12 +22,22 @@ use crate::cli::statusline::{LiveCache, cache_path, read_cache};
 use crate::models::usage::ProviderCall;
 
 /// Maximum age of the Tier 1 cache before we consider it stale and fall
-/// back to Tier 2.
-pub const CACHE_MAX_AGE_SECS: u64 = 120;
+/// back to Tier 2. The Claude statusline cache is only rewritten while a
+/// Claude Code session is actively prompting (each render); 10 minutes
+/// keeps the last-known windows visible across a normal "tabbed away"
+/// gap instead of blinking out after a short idle. Matches the Codex
+/// cache TTL ([`CODEX_CACHE_MAX_AGE_SECS`]).
+pub const CACHE_MAX_AGE_SECS: u64 = 600;
 
 /// Default token cap for the Pro 5-hour window when Tier 2 has to
 /// estimate burn percentage. Override via `AINB_TOKEN_LIMIT`.
 pub const DEFAULT_TOKEN_LIMIT: u64 = 220_000;
+
+/// Max age of the Codex usage cache (`codex-live.json`) before we stop
+/// trusting it. Codex has no Tier-2 fallback, so a too-old cache simply
+/// hides the segment. Generous vs the ~60s poller cadence so a freshly
+/// opened TUI shows last-known Codex until the first poll lands.
+pub const CODEX_CACHE_MAX_AGE_SECS: u64 = 600;
 
 /// Where the data came from. Drives the render path's fidelity choices
 /// (Tier1 → bars + cost + reset; Tier2 → 5h bar only; None → CTA).
@@ -60,6 +70,20 @@ pub struct LiveWindow {
     pub context_pct: Option<u8>,
     pub model: Option<String>,
     pub source: Source,
+    /// Codex 5-hour (primary) used percentage, when the Codex usage cache
+    /// (`codex-live.json`, written by `ainb codex statusline`) is present
+    /// and fresh. Independent of [`Self::source`] — Codex is overlaid on
+    /// top of whatever Claude tier produced the rest of this struct, so it
+    /// can render even when the Claude data is Tier2/None.
+    pub codex_five_hour_pct: Option<u8>,
+    /// Absolute instant the Codex 5-hour window resets (the `↻` affordance).
+    pub codex_five_hour_resets_at: Option<DateTime<Utc>>,
+    /// Codex weekly (secondary) used percentage. See [`Self::codex_five_hour_pct`].
+    pub codex_seven_day_pct: Option<u8>,
+    /// Absolute instant the Codex weekly window resets.
+    pub codex_seven_day_resets_at: Option<DateTime<Utc>>,
+    /// Codex plan tier (e.g. `prolite`), display-only, when reported.
+    pub codex_plan_type: Option<String>,
 }
 
 impl LiveWindow {
@@ -84,6 +108,17 @@ impl Default for Source {
 /// runs when Tier 1 is missing/stale and only walks the *most recent*
 /// JSONL files (filtered by mtime).
 pub fn current() -> LiveWindow {
+    // Claude windows come from the three-tier cascade; Codex is overlaid
+    // independently (its own cache file, its own freshness) so it can
+    // render even when the Claude data is Tier2/None.
+    let mut window = current_claude();
+    apply_codex_overlay(&mut window);
+    window
+}
+
+/// The Claude side of the live window: Tier1 cache → Tier2 local JSONL →
+/// empty CTA.
+fn current_claude() -> LiveWindow {
     // Tier1 hit is the steady-state happy path — called on every
     // watcher tick (5s) when the statusline is wired. Log it at
     // trace so it doesn't dominate JSONL output. Tier transitions
@@ -100,6 +135,39 @@ pub fn current() -> LiveWindow {
     }
     debug!("live_window: tier2 miss, returning empty (CTA)");
     LiveWindow::empty()
+}
+
+/// Overlay Codex usage (from `codex-live.json`) onto `window` when the
+/// cache is present, schema-current, and fresh. No-op otherwise — that is
+/// the hide-on-fail path (logged out / pull failed / too old).
+fn apply_codex_overlay(window: &mut LiveWindow) {
+    use crate::cli::codex_statusline::{codex_cache_path, is_stale, read_codex_cache};
+    let Some(path) = codex_cache_path() else {
+        return;
+    };
+    let Some(cache) = read_codex_cache(&path) else {
+        return;
+    };
+    if is_stale(&cache.updated_at, CODEX_CACHE_MAX_AGE_SECS, Utc::now()) {
+        debug!("live_window: codex cache too old, hiding segment");
+        return;
+    }
+    overlay_codex(window, &cache);
+}
+
+/// Pure overlay: copy the Codex windows from `cache` onto `window`. Split
+/// from [`apply_codex_overlay`] so it can be unit-tested without touching
+/// the filesystem.
+fn overlay_codex(window: &mut LiveWindow, cache: &crate::cli::codex_statusline::CodexLiveCache) {
+    if let Some(w) = &cache.five_hour {
+        window.codex_five_hour_pct = Some(w.pct);
+        window.codex_five_hour_resets_at = w.resets_at.as_deref().and_then(instant_from_iso8601);
+    }
+    if let Some(w) = &cache.seven_day {
+        window.codex_seven_day_pct = Some(w.pct);
+        window.codex_seven_day_resets_at = w.resets_at.as_deref().and_then(instant_from_iso8601);
+    }
+    window.codex_plan_type = cache.plan_type.clone();
 }
 
 /// Tier 1: read the statusline cache if fresh.
@@ -158,13 +226,14 @@ fn window_from_cache(cache: LiveCache) -> LiveWindow {
         context_pct: cache.context_pct,
         model: cache.model,
         source: Source::Tier1Cache,
+        ..Default::default()
     }
 }
 
 /// Parse an ISO8601 `resets_at` into an absolute UTC instant. Returns
 /// `None` when the timestamp is unparseable. Unlike
 /// [`duration_until_iso8601`], a past instant is preserved so callers can
-/// decide how to render it — though the Tier 1 freshness gate (≤120s)
+/// decide how to render it — though the Tier 1 freshness gate (≤600s)
 /// means the cache's reset instants are effectively always in the future.
 pub fn instant_from_iso8601(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
@@ -207,6 +276,7 @@ fn current_tier2() -> Option<LiveWindow> {
         context_pct: None,
         model: None,
         source: Source::Tier2Local,
+        ..Default::default()
     })
 }
 
@@ -444,6 +514,27 @@ mod tests {
     }
 
     #[test]
+    fn cache_stays_fresh_for_ten_minutes() {
+        // A 5-minute-old cache is fresh — keeps the Claude windows visible
+        // across a normal "tabbed away" gap (would have been stale under the
+        // old 120s window). Guards the 10-minute TTL against accidental revert.
+        assert!(CACHE_MAX_AGE_SECS >= 600, "TTL kept at >= 10 minutes");
+        let cache = LiveCache {
+            version: crate::cli::statusline::CACHE_SCHEMA_VERSION,
+            updated_at: (Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            five_hour: None,
+            seven_day: None,
+            today_cost_usd: None,
+            context_pct: None,
+            model: None,
+        };
+        assert!(
+            cache_is_fresh(&cache),
+            "5-minute-old cache must still be fresh"
+        );
+    }
+
+    #[test]
     fn cache_is_stale_after_window() {
         let old =
             (Utc::now() - chrono::Duration::seconds(CACHE_MAX_AGE_SECS as i64 + 30)).to_rfc3339();
@@ -540,5 +631,91 @@ mod tests {
         // must not panic its block-end check either.
         let call = call_at(start, 1000);
         let _ = current_active_block(&[call], Utc::now());
+    }
+
+    // ---- Codex overlay (P1) ----
+
+    use crate::cli::codex_statusline::CodexLiveCache;
+    use crate::cli::statusline::RateWindow;
+
+    fn codex_cache_with(
+        five: Option<(u8, Option<&str>)>,
+        seven: Option<(u8, Option<&str>)>,
+        plan: Option<&str>,
+    ) -> CodexLiveCache {
+        let mk = |p: (u8, Option<&str>)| RateWindow {
+            pct: p.0,
+            resets_at: p.1.map(str::to_string),
+        };
+        CodexLiveCache {
+            version: 1,
+            updated_at: "2026-06-14T00:00:00Z".to_string(),
+            five_hour: five.map(mk),
+            seven_day: seven.map(mk),
+            plan_type: plan.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn overlay_codex_populates_both_windows() {
+        let mut w = LiveWindow::empty();
+        let cache = codex_cache_with(
+            Some((10, Some("2026-06-15T00:21:14Z"))),
+            Some((44, Some("2026-06-18T13:00:12Z"))),
+            Some("prolite"),
+        );
+        overlay_codex(&mut w, &cache);
+        assert_eq!(w.codex_five_hour_pct, Some(10));
+        assert_eq!(w.codex_seven_day_pct, Some(44));
+        assert_eq!(
+            w.codex_five_hour_resets_at.unwrap().timestamp(),
+            DateTime::parse_from_rfc3339("2026-06-15T00:21:14Z").unwrap().timestamp()
+        );
+        assert_eq!(
+            w.codex_seven_day_resets_at.unwrap().timestamp(),
+            DateTime::parse_from_rfc3339("2026-06-18T13:00:12Z").unwrap().timestamp()
+        );
+        assert_eq!(w.codex_plan_type.as_deref(), Some("prolite"));
+        // Claude side is untouched by the overlay.
+        assert!(w.five_hour_pct.is_none());
+        assert_eq!(w.source, Source::None);
+    }
+
+    #[test]
+    fn overlay_codex_pct_without_reset_omits_instant() {
+        let mut w = LiveWindow::empty();
+        overlay_codex(&mut w, &codex_cache_with(Some((5, None)), None, None));
+        assert_eq!(w.codex_five_hour_pct, Some(5));
+        assert!(w.codex_five_hour_resets_at.is_none());
+        assert!(w.codex_seven_day_pct.is_none());
+    }
+
+    #[test]
+    fn overlay_codex_empty_cache_leaves_window_clear() {
+        // Hide-on-fail cache (no windows) → no codex fields set.
+        let mut w = LiveWindow::empty();
+        overlay_codex(&mut w, &codex_cache_with(None, None, None));
+        assert!(w.codex_five_hour_pct.is_none());
+        assert!(w.codex_seven_day_pct.is_none());
+        assert!(w.codex_plan_type.is_none());
+    }
+
+    #[test]
+    fn overlay_codex_preserves_existing_claude_window() {
+        // Codex overlaid on a populated Claude Tier1 window — both coexist.
+        let mut w = LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            source: Source::Tier1Cache,
+            ..Default::default()
+        };
+        overlay_codex(
+            &mut w,
+            &codex_cache_with(Some((10, None)), Some((44, None)), None),
+        );
+        assert_eq!(w.five_hour_pct, Some(40));
+        assert_eq!(w.seven_day_pct, Some(8));
+        assert_eq!(w.codex_five_hour_pct, Some(10));
+        assert_eq!(w.codex_seven_day_pct, Some(44));
     }
 }

@@ -424,6 +424,7 @@ impl Notification {
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
+    Preview,  // Right pane - interactive embedded tmux attach (in-place)
 }
 
 pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
@@ -431,6 +432,137 @@ pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+
+impl AppState {
+    /// Enter interactive mode: attach a live embed client to the selected
+    /// session's tmux session and focus the preview pane. Returns false (no-op)
+    /// if the selection has no tmux session or the attach fails — the pane stays
+    /// on the read-only preview.
+    pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
+        if self.embed.is_some() {
+            if self.selected_tmux_name() == self.embed_session {
+                // Self-healing re-entry on the SAME row: a live embed with
+                // focus drifted off the preview pane is a leaked state —
+                // restore the mode invariant instead of silently no-opping.
+                self.focused_pane = FocusedPane::Preview;
+                return true;
+            }
+            // Different row: the user means "attach HERE" — release the stale
+            // client and fall through to a fresh attach, instead of
+            // refocusing an embed that renders some other session.
+            self.release_interactive_pane();
+        }
+        let Some(name) = self.selected_tmux_name() else {
+            self.add_warning_notification("No tmux session on this row".to_string());
+            return false;
+        };
+        // tmux mirrors a session to every attached client, but all clients
+        // fight over its size — attaching alongside an existing client is the
+        // user's call, so allow it and warn (never block).
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
+        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
+            Ok(client) => {
+                self.embed = Some(client);
+                self.embed_session = Some(name);
+                self.focused_pane = FocusedPane::Preview;
+                if attached_elsewhere {
+                    self.add_warning_notification(
+                        "Note: session attached elsewhere — screen sizes may fight".to_string(),
+                    );
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("failed to attach interactive embed to {name}: {e}");
+                self.add_error_notification(format!("Live attach to '{name}' failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Whether the current selection's tmux session already has another client
+    /// attached. Every kind that tracks attachment reports it (Claude and SSH
+    /// rows via `is_attached`, other-tmux rows via tmux's attached flag);
+    /// shell selections have no liveness flag and report false.
+    fn selected_session_attached_elsewhere(&self) -> bool {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().map(|s| s.is_attached).unwrap_or(false)
+        } else if self.shell_selected {
+            false
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
+        } else {
+            self.get_selected_session().map(|s| s.is_attached).unwrap_or(false)
+        }
+    }
+
+    /// Release interactive mode: kill the ephemeral embed client (NEVER the tmux
+    /// session) and return focus to the session list.
+    pub fn release_interactive_pane(&mut self) {
+        if let Some(mut client) = self.embed.take() {
+            client.shutdown();
+        }
+        self.embed_session = None;
+        self.embed_pane_area = None;
+        if self.focused_pane == FocusedPane::Preview {
+            self.focused_pane = FocusedPane::Sessions;
+        }
+    }
+
+    /// Resolve the tmux session name for whatever is currently selected, across
+    /// session kinds (Claude session, other-tmux, SSH, workspace shell). Mirrors
+    /// the resolution in the `a` (AttachTmuxSession) handler so `l` attaches the
+    /// same target `a` would.
+    pub fn selected_tmux_name(&self) -> Option<String> {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().and_then(|s| s.tmux_session_name.clone())
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.name.clone())
+        } else if self.shell_selected {
+            self.selected_workspace_index
+                .and_then(|i| self.workspaces.get(i))
+                .and_then(|w| w.shell_session.as_ref())
+                .map(|sh| sh.tmux_session_name.clone())
+        } else {
+            self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
+        }
+    }
+
+    /// True while an interactive embed is focused.
+    pub fn is_interactive_pane(&self) -> bool {
+        self.embed.is_some() && self.focused_pane == FocusedPane::Preview
+    }
+
+    /// If the embed has ended (detach / session gone / EOF), auto-release so the
+    /// pane reverts to the read-only preview rather than a dead screen. Also
+    /// releases defensively when the current screen is no longer the session
+    /// list — keys must never be forwarded to an invisible PTY.
+    ///
+    /// Returns true when it released (the layout changed → repaint needed).
+    pub fn poll_embed_exit(&mut self) -> bool {
+        if self.embed.is_none() {
+            return false;
+        }
+        let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
+        let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        if exited || invisible {
+            self.release_interactive_pane();
+            if exited {
+                self.add_info_notification("Live session ended — released".to_string());
+            }
+            return true;
+        }
+        false
+    }
+
+    /// New embed output since the last call? Clears the embed's dirty flag.
+    /// The render loop polls this as a repaint trigger: live PTY output
+    /// arrives without host input, so the dirty-gate (perf bead `wai`) would
+    /// otherwise hold the pane at the 250ms animation floor.
+    pub fn embed_take_dirty(&self) -> bool {
+        self.embed.as_ref().is_some_and(|e| e.take_dirty())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
@@ -682,7 +814,157 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    McpStopServer(String), // Stop one pooled MCP server (reaps its child)
+    McpStopDaemon,     // Stop the whole MCP pool daemon
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
+    OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
+    DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+// ============================================================================
+// MCP Pool observability overlay
+// ============================================================================
+
+/// Result of one off-thread fetch of the daemon's control-socket `status`.
+#[derive(Debug, Clone)]
+pub struct McpFetchResult {
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub error: Option<String>,
+    /// One-shot status line for an action that produced this result (e.g.
+    /// `import`). `None` for plain refreshes — the overlay keeps its prior
+    /// `last_action` so a refresh doesn't wipe the import summary.
+    pub action_msg: Option<String>,
+}
+
+/// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
+/// the overlay is open; dropping it (on close) stops all refresh activity —
+/// nothing polls the daemon when the overlay isn't showing.
+pub struct McpOverlayState {
+    pub pool_enabled: bool,
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub selected: usize,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Auto-refresh cadence while open; 0 = on-open + manual (`r`) only.
+    pub refresh_secs: u64,
+    /// Receiver for the in-flight fetch (None when no fetch is pending — the
+    /// one-outstanding-request guard).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
+    /// Status line from the last in-overlay action (e.g. `import`). Sticky
+    /// across plain refreshes; cleared only when the overlay closes.
+    pub last_action: Option<String>,
+}
+
+impl std::fmt::Debug for McpOverlayState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOverlayState")
+            .field("pool_enabled", &self.pool_enabled)
+            .field("daemon_running", &self.daemon_running)
+            .field("servers", &self.servers.len())
+            .field("selected", &self.selected)
+            .field("loading", &self.loading)
+            .field("fetch_pending", &self.fetch_rx.is_some())
+            .field("last_action", &self.last_action)
+            .finish()
+    }
+}
+
+impl McpOverlayState {
+    pub fn selected_server_name(&self) -> Option<String> {
+        self.servers.get(self.selected).map(|s| s.name.clone())
+    }
+}
+
+/// Blocking control-socket fetch — always run via `spawn_blocking`. Probes the
+/// daemon and parses its `status` JSON into the snapshot.
+pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
+    if !crate::mcp_pool::client::daemon_alive() {
+        return McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: None,
+            action_msg: None,
+        };
+    }
+    match crate::mcp_pool::client::daemon_status() {
+        Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => {
+                let servers = v
+                    .get("servers")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or_default();
+                McpFetchResult {
+                    daemon_running: true,
+                    servers,
+                    error: None,
+                    action_msg: None,
+                }
+            }
+            Err(e) => McpFetchResult {
+                daemon_running: true,
+                servers: Vec::new(),
+                error: Some(format!("parse status: {e}")),
+                action_msg: None,
+            },
+        },
+        Err(e) => McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: Some(e.to_string()),
+            action_msg: None,
+        },
+    }
+}
+
+/// Blocking `import` action for the overlay — runs `ainb mcp import` (project
+/// scope, or user config when `to_user`), then registers any newly-imported
+/// servers with the live daemon so they appear in the table immediately
+/// (the daemon spawns each lazily on first attach). Always run via
+/// `spawn_blocking`. Returns a fresh status snapshot tagged with a summary.
+pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
+    let summary = match crate::mcp_pool::import::execute(to_user) {
+        Ok(report) => {
+            // Push the just-imported definitions to a running daemon so the
+            // overlay reflects them without waiting for a new session.
+            if !report.imported.is_empty() && crate::mcp_pool::client::daemon_alive() {
+                if let Ok(config) = crate::config::AppConfig::load() {
+                    let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
+                        .into_iter()
+                        .filter(|s| report.imported.contains(&s.name))
+                        .collect();
+                    if !fresh.is_empty() {
+                        let _ = crate::mcp_pool::client::register_servers(&fresh);
+                    }
+                }
+            }
+            let mut parts = Vec::new();
+            if report.imported.is_empty() {
+                parts.push("nothing new to import".to_string());
+            } else {
+                parts.push(format!("imported {}", report.imported.join(", ")));
+            }
+            if !report.skipped_existing.is_empty() {
+                parts.push(format!(
+                    "already configured: {}",
+                    report.skipped_existing.join(", ")
+                ));
+            }
+            if !report.skipped_unresolvable.is_empty() {
+                parts.push(format!(
+                    "skipped (not on host): {}",
+                    report.skipped_unresolvable.join(", ")
+                ));
+            }
+            format!("{} → {}", parts.join(" · "), report.target.display())
+        }
+        Err(e) => format!("import failed: {e}"),
+    };
+    let mut result = mcp_fetch_blocking();
+    result.action_msg = Some(summary);
+    result
 }
 
 // ============================================================================
@@ -697,6 +979,7 @@ pub enum HomeTile {
     Config,       // Settings & presets
     Sessions,     // Session manager
     Recovery,     // Recover orphaned sessions
+    Mcp,          // Shared MCP pool overlay
     Stats,        // Analytics & usage
     Help,         // Docs & guides
 }
@@ -710,6 +993,7 @@ impl HomeTile {
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
+            HomeTile::Mcp,
             HomeTile::Stats,
             HomeTile::Help,
         ]
@@ -723,6 +1007,7 @@ impl HomeTile {
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
+            HomeTile::Mcp => "MCP",
             HomeTile::Stats => "Stats",
             HomeTile::Help => "Help",
         }
@@ -732,10 +1017,11 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "Select & Configure",
             HomeTile::Catalog => "Browse & Bootstrap",
-            HomeTile::SkillManager => "Install / sync / doctor (M)",
+            HomeTile::SkillManager => "Install / sync / doctor (Z)",
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
+            HomeTile::Mcp => "Shared Pool",
             HomeTile::Stats => "Usage & Analytics",
             HomeTile::Help => "Docs & Guides",
         }
@@ -749,6 +1035,7 @@ impl HomeTile {
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
+            HomeTile::Mcp => "🧬",
             HomeTile::Stats => "📊",
             HomeTile::Help => "❓",
         }
@@ -1011,7 +1298,10 @@ impl AgentProvider {
                     false,
                 ),
             ],
-            status: ProviderStatus::Available,
+            // Greyed-out / non-launchable in the Agents picker for now —
+            // `is_current_available()` blocks selection of non-Available
+            // providers (kept consistent with the new-session Configure wizard).
+            status: ProviderStatus::Disabled,
         }
     }
 
@@ -1181,6 +1471,7 @@ pub enum ConfigCategory {
     AgentDefaults,
     Editor,
     Plugins,
+    McpPool,
     Permissions,
     Appearance,
     Analytics,
@@ -1195,6 +1486,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults,
             ConfigCategory::Editor,
             ConfigCategory::Plugins,
+            ConfigCategory::McpPool,
             ConfigCategory::Permissions,
             ConfigCategory::Appearance,
             ConfigCategory::Analytics,
@@ -1209,6 +1501,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Agent Defaults",
             ConfigCategory::Editor => "Editor",
             ConfigCategory::Plugins => "Plugins",
+            ConfigCategory::McpPool => "MCP Pool",
             ConfigCategory::Permissions => "Permissions",
             ConfigCategory::Appearance => "Appearance",
             ConfigCategory::Analytics => "Analytics",
@@ -1223,6 +1516,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "🤖",
             ConfigCategory::Editor => "📝",
             ConfigCategory::Plugins => "🔌",
+            ConfigCategory::McpPool => "🧬",
             ConfigCategory::Permissions => "🛡️",
             ConfigCategory::Appearance => "🎨",
             ConfigCategory::Analytics => "📊",
@@ -1237,6 +1531,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Model, temperature, max tokens",
             ConfigCategory::Editor => "Preferred code editor for sessions",
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
+            ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
             ConfigCategory::Permissions => "File write, shell, git approval",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
             ConfigCategory::Analytics => "Usage tracking, cost alerts",
@@ -1275,6 +1570,82 @@ impl ConfigValue {
             ConfigValue::Bool(b) => if *b { "✓ Enabled" } else { "✗ Disabled" }.to_string(),
             ConfigValue::Choice(options, idx) => options.get(*idx).cloned().unwrap_or_default(),
             ConfigValue::Number(n) => n.to_string(),
+        }
+    }
+}
+
+/// Render a TOML scalar from a `[plugins.<name>]` value table as the plain
+/// string the Settings widgets edit. Non-scalar values (tables/arrays) can't
+/// appear under the flat-scalars-only plugin config schema, so they fall back
+/// to their TOML debug form rather than panicking.
+fn toml_scalar_to_string(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Map a plugin's [`ConfigField`](ainb_plugin_protocol::manifest::ConfigField)
+/// to the [`ConfigValue`] widget the Settings screen renders, seeding it from
+/// `saved` (the persisted `[plugins.<name>].<key>` value) when present, else
+/// the schema `default`. The kind drives the widget:
+/// `path`/`string` → [`ConfigValue::Text`], `bool` → [`ConfigValue::Bool`],
+/// `enum` → [`ConfigValue::Choice`], `int` → [`ConfigValue::Number`].
+fn config_value_for_field(
+    field: &ainb_plugin_protocol::manifest::ConfigField,
+    saved: Option<&str>,
+) -> ConfigValue {
+    use ainb_plugin_protocol::manifest::ConfigKind;
+
+    let raw = saved.unwrap_or(field.default.as_str());
+    match field.kind {
+        ConfigKind::Path | ConfigKind::String => ConfigValue::Text(raw.to_string()),
+        ConfigKind::Bool => ConfigValue::Bool(raw.eq_ignore_ascii_case("true")),
+        ConfigKind::Int => {
+            // A non-numeric stored value (corrupt config.toml) would otherwise be
+            // silently coerced to 0; warn so the bad value surfaces in the logs
+            // rather than vanishing on reset.
+            let n = raw.trim().parse().unwrap_or_else(|_| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "non-integer value for int config field; falling back to 0"
+                );
+                0
+            });
+            ConfigValue::Number(n)
+        }
+        ConfigKind::Enum => {
+            // An unknown stored choice (corrupt config.toml or a renamed enum
+            // variant) would otherwise be silently coerced to the first choice;
+            // warn so the bad value surfaces in the logs.
+            let idx = field.choices.iter().position(|c| c == raw).unwrap_or_else(|| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "unknown choice for enum config field; falling back to first option"
+                );
+                0
+            });
+            ConfigValue::Choice(field.choices.clone(), idx)
+        }
+    }
+}
+
+/// Convert an edited [`ConfigValue`] back into the TOML scalar persisted under
+/// `[plugins.<name>].<key>`. Bool/enum/int keep their native TOML type;
+/// `Text`/`Secret` serialize as strings. (`Secret` never appears in a plugin
+/// `[[config]]` schema today, but is handled for totality.)
+fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
+    match value {
+        ConfigValue::Text(s) | ConfigValue::Secret(s) => toml::Value::String(s.clone()),
+        ConfigValue::Bool(b) => toml::Value::Boolean(*b),
+        ConfigValue::Number(n) => toml::Value::Integer(*n),
+        ConfigValue::Choice(options, idx) => {
+            toml::Value::String(options.get(*idx).cloned().unwrap_or_default())
         }
     }
 }
@@ -1501,6 +1872,27 @@ impl Default for ConfigScreenState {
                 value: ConfigValue::Text("None installed".to_string()),
                 description: "Manage installed plugins from the Catalog".to_string(),
             }],
+        );
+
+        // MCP Pool (per-server `shared.*` toggles appended in from_app_config)
+        settings.insert(
+            ConfigCategory::McpPool,
+            vec![
+                ConfigSetting {
+                    key: "pool_enabled".to_string(),
+                    label: "Shared MCP Pool".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "One MCP server process shared across all host sessions"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "idle_grace_secs".to_string(),
+                    label: "Idle Grace (seconds)".to_string(),
+                    value: ConfigValue::Number(300),
+                    description: "Reap a pooled server this long after its last session detaches"
+                        .to_string(),
+                },
+            ],
         );
 
         // Analytics
@@ -1769,6 +2161,34 @@ impl ConfigScreenState {
             }
         }
 
+        // Update MCP Pool from config + append one shared-toggle per server
+        if let Some(settings) = state.settings.get_mut(&ConfigCategory::McpPool) {
+            for setting in settings.iter_mut() {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        setting.value = ConfigValue::Bool(config.mcp_pool.enabled);
+                    }
+                    "idle_grace_secs" => {
+                        setting.value = ConfigValue::Number(config.mcp_pool.idle_grace_secs as i64);
+                    }
+                    _ => {}
+                }
+            }
+            let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+            names.sort();
+            for name in names {
+                let server = &config.mcp_servers[name];
+                settings.push(ConfigSetting {
+                    key: format!("shared.{name}"),
+                    label: format!("Share: {name}"),
+                    value: ConfigValue::Bool(server.shared),
+                    description: format!(
+                        "Pool '{name}' across sessions (disable for stateful servers)"
+                    ),
+                });
+            }
+        }
+
         // Update Analytics from config
         if let Some(settings) = state.settings.get_mut(&ConfigCategory::Analytics) {
             for setting in settings.iter_mut() {
@@ -1787,64 +2207,77 @@ impl ConfigScreenState {
         state
     }
 
-    /// Convert ConfigScreenState back to AppConfig for saving
-    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
-        // Apply Workspace settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Workspace) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "default_workspace" => {
-                        if let ConfigValue::Text(path) = &setting.value {
-                            let expanded = if path.starts_with("~/") {
-                                dirs::home_dir()
-                                    .map(|h| h.join(&path[2..]))
-                                    .unwrap_or_else(|| std::path::PathBuf::from(path))
-                            } else {
-                                std::path::PathBuf::from(path)
-                            };
-                            // "Default Workspace" is surfaced as
-                            // `workspace_scan_paths.first()` in `from_app_config`,
-                            // so it must be written back as the *primary* entry.
-                            // The old code pushed to the end, leaving `first()`
-                            // pointing at the stale path — editing the field then
-                            // appeared to do nothing on reopen.
-                            //
-                            // Rebuild as: edited path first, then every other
-                            // distinct scan dir. This replaces the old primary
-                            // (index 0), de-dups the edited path, and — crucially
-                            // — preserves the remaining scan dirs even on a no-op
-                            // confirm (drop the old primary, never the tail).
-                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
-                            let tail: Vec<std::path::PathBuf> =
-                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
-                            paths.clear();
-                            paths.push(expanded);
-                            paths.extend(tail);
-                        }
-                    }
-                    "branch_prefix" => {
-                        if let ConfigValue::Text(prefix) = &setting.value {
-                            config.workspace_defaults.branch_prefix = prefix.clone();
-                        }
-                    }
-                    "exclude_paths" => {
-                        if let ConfigValue::Text(paths) = &setting.value {
-                            config.workspace_defaults.exclude_paths = paths
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                    }
-                    "max_repositories" => {
-                        if let ConfigValue::Number(max) = &setting.value {
-                            config.workspace_defaults.max_repositories = *max as usize;
-                        }
-                    }
-                    _ => {}
-                }
+    /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin
+    /// `[[config]]` field (vs. the static enable/disable placeholder rows).
+    /// The row key is `plugin:<plugin_name>:<field_key>` — unique across
+    /// plugins that share a field name, and reversible in
+    /// [`apply_to_app_config`](Self::apply_to_app_config) so the edit lands
+    /// under `plugins.values[plugin_name][field_key]`.
+    const PLUGIN_ROW_PREFIX: &'static str = "plugin:";
+
+    /// Compose the Plugins-category row key for a plugin's config field.
+    fn plugin_row_key(plugin: &str, field_key: &str) -> String {
+        format!("{}{plugin}:{field_key}", Self::PLUGIN_ROW_PREFIX)
+    }
+
+    /// Split a Plugins-category row key back into `(plugin_name, field_key)`,
+    /// or `None` for the static placeholder rows. The plugin name and the
+    /// field key are joined by the *first* `:` after the prefix, so plugin
+    /// names never contain `:` but field keys may.
+    fn parse_plugin_row_key(key: &str) -> Option<(&str, &str)> {
+        let rest = key.strip_prefix(Self::PLUGIN_ROW_PREFIX)?;
+        rest.split_once(':')
+    }
+
+    /// Append per-plugin `[[config]]` rows to the Plugins category from the
+    /// loaded plugin manifests, keeping the existing enable/disable rows.
+    ///
+    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the
+    /// field `kind` to the matching [`ConfigValue`] widget
+    /// (`path`/`string` → `Text`, `bool` → `Bool`, `enum` → `Choice`,
+    /// `int` → `Number`). The displayed value defaults from
+    /// `plugins.values[plugin][key]` when present, else the schema `default`.
+    ///
+    /// Idempotent: re-invoking it (e.g. after the plugin runtime finishes
+    /// discovery) rebuilds the per-plugin rows from scratch rather than
+    /// duplicating them — only the static placeholder rows are retained.
+    pub fn apply_plugin_manifests(
+        &mut self,
+        manifests: &[ainb_plugin_protocol::manifest::Manifest],
+        plugins_cfg: &crate::config::PluginsConfig,
+    ) {
+        let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
+        // Drop any previously-appended plugin rows so repeated calls are
+        // idempotent; keep the static enable/disable placeholders.
+        rows.retain(|s| Self::parse_plugin_row_key(&s.key).is_none());
+
+        for manifest in manifests {
+            let plugin = manifest.plugin.name.as_str();
+            // The resolved [plugins.<name>] value table, if the user has set
+            // any keys — drives the displayed default ahead of the schema's.
+            let saved = plugins_cfg.values.get(plugin).and_then(toml::Value::as_table);
+
+            for field in &manifest.config {
+                // Saved string value (config.toml only stores TOML scalars; we
+                // render every kind from its string form for the widget).
+                let saved_str = saved.and_then(|t| t.get(&field.key)).map(toml_scalar_to_string);
+                let value = config_value_for_field(field, saved_str.as_deref());
+
+                rows.push(ConfigSetting {
+                    key: Self::plugin_row_key(plugin, &field.key),
+                    label: field.label.clone(),
+                    value,
+                    description: format!("{} · plugin: {}", field.label, plugin),
+                });
             }
         }
+    }
+
+    /// Convert ConfigScreenState back to AppConfig for saving
+    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
+        // Apply Workspace settings (extracted to keep this method under the
+        // clippy `too_many_lines` threshold).
+        self.apply_workspace_rows(config);
 
         // Apply Docker settings
         if let Some(settings) = self.settings.get(&ConfigCategory::Docker) {
@@ -1865,6 +2298,33 @@ impl ConfigScreenState {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Apply MCP Pool settings
+        if let Some(settings) = self.settings.get(&ConfigCategory::McpPool) {
+            for setting in settings {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        if let ConfigValue::Bool(enabled) = &setting.value {
+                            config.mcp_pool.enabled = *enabled;
+                        }
+                    }
+                    "idle_grace_secs" => {
+                        if let ConfigValue::Number(secs) = &setting.value {
+                            config.mcp_pool.idle_grace_secs = (*secs).max(0) as u64;
+                        }
+                    }
+                    key => {
+                        if let (Some(name), ConfigValue::Bool(shared)) =
+                            (key.strip_prefix("shared."), &setting.value)
+                        {
+                            if let Some(server) = config.mcp_servers.get_mut(name) {
+                                server.shared = *shared;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1920,6 +2380,102 @@ impl ConfigScreenState {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Apply per-plugin [[config]] edits (extracted to keep this method under
+        // the clippy `too_many_lines` threshold).
+        self.apply_plugin_rows(config);
+    }
+
+    /// Route the Workspace-category rows (`default_workspace`, `branch_prefix`,
+    /// `exclude_paths`, `max_repositories`) back into `config.workspace_defaults`.
+    fn apply_workspace_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Workspace) else {
+            return;
+        };
+        for setting in settings {
+            match setting.key.as_str() {
+                "default_workspace" => {
+                    if let ConfigValue::Text(path) = &setting.value {
+                        let expanded = if path.starts_with("~/") {
+                            dirs::home_dir()
+                                .map(|h| h.join(&path[2..]))
+                                .unwrap_or_else(|| std::path::PathBuf::from(path))
+                        } else {
+                            std::path::PathBuf::from(path)
+                        };
+                        // "Default Workspace" is surfaced as
+                        // `workspace_scan_paths.first()` in `from_app_config`, so
+                        // it must be written back as the *primary* entry. The old
+                        // code pushed to the end, leaving `first()` pointing at the
+                        // stale path — editing the field then appeared to do
+                        // nothing on reopen.
+                        //
+                        // Rebuild as: edited path first, then every other distinct
+                        // scan dir. This replaces the old primary (index 0),
+                        // de-dups the edited path, and — crucially — preserves the
+                        // remaining scan dirs even on a no-op confirm (drop the old
+                        // primary, never the tail).
+                        let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                        let tail: Vec<std::path::PathBuf> =
+                            paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                        paths.clear();
+                        paths.push(expanded);
+                        paths.extend(tail);
+                    }
+                }
+                "branch_prefix" => {
+                    if let ConfigValue::Text(prefix) = &setting.value {
+                        config.workspace_defaults.branch_prefix = prefix.clone();
+                    }
+                }
+                "exclude_paths" => {
+                    if let ConfigValue::Text(paths) = &setting.value {
+                        config.workspace_defaults.exclude_paths = paths
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                "max_repositories" => {
+                    if let ConfigValue::Number(max) = &setting.value {
+                        config.workspace_defaults.max_repositories = *max as usize;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Route every Plugins-category row whose key is `plugin:<name>:<field_key>`
+    /// (see [`Self::plugin_row_key`]) into `config.plugins.values[<name>]
+    /// [<field_key>]` — NOT a top-level field. The static enable/disable
+    /// placeholder rows have no such prefix and are skipped. The serialized
+    /// `[plugins.<name>]` table round-trips through the existing
+    /// `AppConfig::save()` pipeline.
+    fn apply_plugin_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
+            return;
+        };
+        for setting in settings {
+            let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
+                continue;
+            };
+            let toml_value = config_value_to_toml(&setting.value);
+            let entry = config
+                .plugins
+                .values
+                .entry(plugin.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+            // Coerce a non-table entry (shouldn't happen for a well-formed
+            // config) into a table so the write always lands somewhere sane.
+            if !entry.is_table() {
+                *entry = toml::Value::Table(toml::value::Table::new());
+            }
+            if let Some(table) = entry.as_table_mut() {
+                table.insert(field_key.to_string(), toml_value);
             }
         }
     }
@@ -2270,6 +2826,8 @@ pub struct AppState {
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
+    // Shared MCP pool observability overlay (None = closed; no refresh runs).
+    pub mcp_overlay: Option<McpOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -2278,6 +2836,26 @@ pub struct AppState {
 
     // Focus management for panes
     pub focused_pane: FocusedPane,
+    // Live interactive embedded tmux-attach client for the preview pane.
+    // Enforced invariants (focus can drift, so none of these are assumed):
+    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
+    //    (embed Some AND focused_pane == Preview).
+    //  - Ctrl+Q releases whenever the embed exists, regardless of focus/mode.
+    //  - `poll_embed_exit` (run before every draw) releases on client death
+    //    or when the session-list screen is no longer current, so keys are
+    //    never forwarded to an invisible PTY.
+    // Dropping it kills the ephemeral tmux client (never the session).
+    pub embed: Option<crate::tmux::EmbedClient>,
+    // The tmux session name the live embed is attached to. Some iff `embed`
+    // is Some. Re-entering on a DIFFERENT row releases the old client and
+    // attaches to the new target instead of silently refocusing the stale
+    // one (see `enter_interactive_pane`).
+    pub embed_session: Option<String>,
+    // Interior screen rect (inside the border) the embed's PseudoTerminal
+    // occupies, published by the interactive render branch each frame. Drives
+    // mouse-coordinate translation into 1-based pane-local SGR sequences.
+    // None whenever the embed is not rendering.
+    pub embed_pane_area: Option<Rect>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -2308,6 +2886,13 @@ pub struct AppState {
     pub git_view_state: Option<crate::components::GitViewState>,
     // Previous view for navigation (e.g., to return from GitView)
     pub previous_screen: Option<ScreenId>,
+    /// Last `ui.close_request` snapshot version consumed by
+    /// `tick_panel_close_requests`. The poll acts at most once per
+    /// plugin publish: a version is consumed (recorded here) on first
+    /// sight whether or not it triggered a navigation, so a close
+    /// request that arrives while the user is on a different screen is
+    /// absorbed instead of firing later.
+    pub last_panel_close_version: Option<u64>,
     // Notification system
     pub notifications: Vec<Notification>,
     // Pending event to be processed in next loop iteration
@@ -2383,6 +2968,13 @@ pub struct AppState {
     pub pending_plugin_renders:
         std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
 
+    /// Cache of workspace paths that are currently favorited (starred).
+    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
+    /// list or the favorites store changes — NOT in the render path. The
+    /// session-list render reads this set with an O(1) lookup, so it never
+    /// re-parses `favorites.yaml` or opens a git repo per frame.
+    pub favorite_workspace_paths: HashSet<PathBuf>,
+
     /// Last `(width, height)` `PluginScreen::render` was handed for each
     /// screen id. `tick_plugin_renders` reads this and forwards it to
     /// `handle.render(..)` so the plugin paints at the actual allocated
@@ -2390,6 +2982,15 @@ pub struct AppState {
     /// stale is fine — the first frame still uses the plugin's fallback,
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
+    /// Top-left `(x, y)` origin `PluginScreen::render` painted each screen
+    /// id at, stashed alongside `plugin_render_areas`. The mouse forwarder
+    /// (`forward_mouse_to_focused_plugin`) subtracts this from the absolute
+    /// terminal click coordinates so the plugin receives a click in its own
+    /// viewport space (`(0, 0)` = top-left of its buffer). Separate from
+    /// `plugin_render_areas` to keep that tuple's `(width, height)` meaning
+    /// unchanged for the render-tick loop.
+    pub plugin_render_origins: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
     /// Viewport `(width, height)` the last `plugin/render` kick used for
     /// each screen id. `tick_plugin_renders` forces a fresh render kick
@@ -2475,6 +3076,13 @@ pub struct AppState {
 
     // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
     pub last_preview_update: Option<Instant>,
+
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview — one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
 
     // Background workspace loading state
     pub is_loading_workspaces: bool,
@@ -2738,22 +3346,27 @@ pub enum AsyncAction {
     /// the dispatcher so the async path doesn't re-derive it from
     /// `configure_state` (finding #7).
     CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
-    DeleteSession(Uuid),           // New - delete session with container cleanup
-    StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
+    /// Pre-check GitHub auth via `gh auth status` before allowing remote clone.
+    CheckGitAuth,
+    DeleteSession(Uuid),         // New - delete session with container cleanup
+    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
-    BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,           // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),    // Fetch container logs for a session
-    AttachToContainer(Uuid),     // Attach to a container session
-    AttachToTmuxSession(Uuid),   // Attach to a tmux session
-    KillContainer(Uuid),         // Kill container for a session
-    AuthSetupOAuth,              // Run OAuth authentication setup
-    AuthSetupApiKey,             // Save API key authentication
-    ReauthenticateCredentials,   // Re-authenticate Claude credentials
-    RestartSession(Uuid),        // Restart a stopped session with new container
-    CleanupOrphaned,             // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
+    BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
+    BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    RefreshWorkspaces,                     // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),              // Fetch container logs for a session
+    AttachToContainer(Uuid),               // Attach to a container session
+    AttachToTmuxSession(Uuid),             // Attach to a tmux session
+    KillContainer(Uuid),                   // Kill container for a session
+    AuthSetupOAuth,                        // Run OAuth authentication setup
+    AuthSetupApiKey,                       // Save API key authentication
+    ReauthenticateCredentials,             // Re-authenticate Claude credentials
+    RestartSession(Uuid),                  // Restart a stopped session with new container
+    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
+    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -2801,9 +3414,13 @@ impl Default for AppState {
             pending_async_action: None,
             async_operation_cancelled: false,
             confirmation_dialog: None,
+            mcp_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
+            embed: None,
+            embed_session: None,
+            embed_pane_area: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
@@ -2819,6 +3436,7 @@ impl Default for AppState {
             log_sender: None,
             git_view_state: None,
             previous_screen: None,
+            last_panel_close_version: None,
             notifications: Vec::new(),
             pending_event: None,
 
@@ -2876,7 +3494,9 @@ impl Default for AppState {
             inbox_state: crate::components::inbox::InboxState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
+            favorite_workspace_paths: HashSet::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 
@@ -2901,6 +3521,7 @@ impl Default for AppState {
 
             // Throttled tmux preview updates
             last_preview_update: None,
+            last_status_check: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -3382,6 +4003,20 @@ impl AppState {
         self.current_screen = screen_ids::HOME.to_string();
     }
 
+    /// Leave the onboarding wizard and drop into the Setup menu.
+    ///
+    /// This is the wizard's `Esc` behaviour: rather than abandoning setup all
+    /// the way back to Home, the user lands on the Setup menu where they can
+    /// pick a specific step (re-run wizard, check deps, configure paths, …) or
+    /// back out to Home from there. The menu state is reset so the landing is
+    /// always clean (selection at the top, no stale confirmation open).
+    pub fn onboarding_to_menu(&mut self) {
+        use crate::components::setup_menu::SetupMenuState;
+        self.onboarding_state = None;
+        self.setup_menu_state = SetupMenuState::new();
+        self.current_screen = screen_ids::SETUP_MENU.to_string();
+    }
+
     /// Refresh OAuth tokens using the refresh token
     pub async fn refresh_oauth_tokens(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Attempting to refresh OAuth tokens");
@@ -3687,6 +4322,12 @@ impl AppState {
                             self.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
+                            // Resolve favorite status once per workspace now
+                            // that the list changed, so the session-list render
+                            // never opens a git repo or parses favorites.yaml
+                            // per frame (perf: bead 9ov + 8rn).
+                            self.recompute_favorite_workspaces();
+
                             // Populate tmux_sessions HashMap for Interactive mode sessions
                             // This is needed for update_tmux_previews() to capture pane content
                             for workspace in &self.workspaces {
@@ -3737,6 +4378,26 @@ impl AppState {
                             }
 
                             self.add_success_notification("Workspaces loaded".to_string());
+
+                            // The fast startup loader (`load_workspaces_async`)
+                            // only surfaces LIVE boss/interactive sessions — it
+                            // skips the stopped-session second-pass that
+                            // `load_real_workspaces` runs (reading sessions.json
+                            // for dead-tmux entries whose worktree still exists).
+                            // Without this, stopped sessions stay hidden until
+                            // the user happens to trigger a full refresh (stop a
+                            // session, delete one, press `f`). Enqueue exactly one
+                            // full refresh so the complete picture (stopped
+                            // sessions included) appears right after first paint.
+                            // Fires once per launch: this branch runs a single
+                            // time (the receiver is cleared above), and
+                            // `load_real_workspaces` doesn't re-arm it — no loop.
+                            // Guard on `None` so a user-queued action is never
+                            // clobbered.
+                            if self.pending_async_action.is_none() {
+                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            }
+
                             return true;
                         }
                         WorkspaceLoadResult::Error(err) => {
@@ -3785,6 +4446,59 @@ impl AppState {
             }
         }
         false
+    }
+
+    /// Recompute which workspaces are favorited and cache the result in
+    /// `favorite_workspace_paths`. Loads `favorites.yaml` ONCE and resolves
+    /// each workspace's favorite status (by local path or git remote) here,
+    /// off the render path. Call after the workspace list changes or a
+    /// favorite is toggled — never per frame. (perf: beads 9ov + 8rn)
+    pub fn recompute_favorite_workspaces(&mut self) {
+        let favorites = crate::config::FavoritesStore::load();
+        let mut starred: HashSet<PathBuf> = HashSet::new();
+        for workspace in &self.workspaces {
+            if Self::workspace_is_favorite(&workspace.path, &favorites) {
+                starred.insert(workspace.path.clone());
+            }
+        }
+        self.favorite_workspace_paths = starred;
+    }
+
+    /// True if `path` is favorited, by local-path match or by the repo's git
+    /// remote (owner/repo shorthand or full URL). The git remote lookup is the
+    /// expensive part (libgit2 open + config read), so this MUST stay out of
+    /// the render path — it runs only from `recompute_favorite_workspaces`.
+    fn workspace_is_favorite(
+        path: &std::path::Path,
+        favorites: &crate::config::FavoritesStore,
+    ) -> bool {
+        let path_str = path.display().to_string();
+        if favorites.favorites.iter().any(|f| f.source == path_str) {
+            return true;
+        }
+        // Fall back to the repo's `origin` remote. `from_input` is deprecated
+        // for free-form input, but the URL comes from `get_remote_url()` so the
+        // legacy contract holds.
+        crate::perf::record_git_resolve();
+        let Ok(git_repo) = crate::git::RepositoryManager::open(path) else {
+            return false;
+        };
+        let Ok(Some(remote_url)) = git_repo.get_remote_url() else {
+            return false;
+        };
+        #[allow(deprecated)]
+        let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url) else {
+            return false;
+        };
+        if let Ok(parsed) = repo_source.parse_components() {
+            let shorthand = format!("{}/{}", parsed.owner, parsed.repo_name);
+            favorites
+                .favorites
+                .iter()
+                .any(|f| f.source == shorthand || f.source == remote_url)
+        } else {
+            favorites.favorites.iter().any(|f| f.source == remote_url)
+        }
     }
 
     /// Kick off a background scan of ~/.claude/skills and ~/.claude/agents.
@@ -3909,6 +4623,180 @@ impl AppState {
         }
     }
 
+    // ── Shared MCP pool overlay ────────────────────────────────────────────
+    // The overlay is opened on demand and refreshed lazily. All daemon I/O
+    // runs off-thread (spawn_blocking); the render loop only reads the cached
+    // snapshot. Nothing polls while the overlay is closed.
+
+    /// Toggle the MCP pool overlay. Opening seeds config + fires the first
+    /// fetch; closing drops the snapshot (and thus all refresh activity).
+    pub fn toggle_mcp_overlay(&mut self) {
+        if self.mcp_overlay.is_some() {
+            self.mcp_overlay = None;
+            return;
+        }
+        let config = crate::config::AppConfig::load().unwrap_or_default();
+        self.mcp_overlay = Some(McpOverlayState {
+            pool_enabled: config.mcp_pool.enabled,
+            daemon_running: false,
+            servers: Vec::new(),
+            selected: 0,
+            loading: true,
+            last_refreshed: None,
+            refresh_secs: config.mcp_pool.monitor_refresh_secs,
+            fetch_rx: None,
+            last_action: None,
+        });
+        self.spawn_mcp_fetch();
+    }
+
+    pub fn close_mcp_overlay(&mut self) {
+        self.mcp_overlay = None;
+    }
+
+    pub fn mcp_overlay_move(&mut self, delta: i32) {
+        if let Some(o) = self.mcp_overlay.as_mut() {
+            if o.servers.is_empty() {
+                return;
+            }
+            let n = o.servers.len() as i32;
+            o.selected = ((o.selected as i32 + delta).rem_euclid(n)) as usize;
+        }
+    }
+
+    /// Spawn one off-thread fetch of the daemon status, unless one is already
+    /// in flight (the one-outstanding-request guard). The blocking control
+    /// socket call runs on the blocking pool so the executor never stalls.
+    pub fn spawn_mcp_fetch(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return; // a fetch is already pending
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed fetch and, while the overlay is open, fire the next
+    /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
+    /// `try_recv` never waits, and no fetch is spawned when one is pending or
+    /// the cadence is disabled. Called from the 250ms app tick.
+    pub fn check_mcp_overlay(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.daemon_running = result.daemon_running;
+                o.servers = result.servers;
+                // Sticky: only an action (import) sets a message; plain
+                // refreshes carry None and leave the prior summary in place.
+                if result.action_msg.is_some() {
+                    o.last_action = result.action_msg;
+                }
+                o.last_refreshed = Some(std::time::Instant::now());
+                if o.selected >= o.servers.len() {
+                    o.selected = o.servers.len().saturating_sub(1);
+                }
+            }
+        }
+
+        // Lazy auto-refresh: only while open, only when nothing is pending,
+        // only if a cadence is configured and it has elapsed.
+        let due = o.refresh_secs > 0
+            && o.fetch_rx.is_none()
+            && o.last_refreshed
+                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
+                .unwrap_or(false);
+        if due {
+            self.spawn_mcp_fetch();
+        }
+    }
+
+    /// Stop the selected pooled server (off-thread), then refresh.
+    pub fn mcp_stop_server(&mut self, name: &str) {
+        let name = name.to_string();
+        self.mcp_stop_then_refresh(move || {
+            let _ = crate::mcp_pool::client::stop_server(&name);
+        });
+    }
+
+    /// Import MCP servers into ainb config (off-thread), register the new
+    /// ones with the live daemon, then refresh the table. `to_user` targets
+    /// the user config (`~/.agents-in-a-box/config/config.toml`) instead of
+    /// the project's `./.ainb/config.toml`. Never blocks the TUI — the
+    /// import + control-socket calls run on the blocking pool and the result
+    /// (summary + fresh snapshot) is delivered through the overlay channel.
+    pub fn mcp_import(&mut self, to_user: bool) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch
+        o.loading = true;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || mcp_import_blocking(to_user))
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("import task failed: {e}")),
+                    action_msg: Some(format!("import failed: {e}")),
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Stop the whole pool daemon (off-thread), then refresh.
+    pub fn mcp_stop_daemon(&mut self) {
+        self.mcp_stop_then_refresh(|| {
+            let _ = crate::mcp_pool::client::daemon_stop();
+        });
+    }
+
+    /// Run a blocking stop action off-thread, then fetch fresh status and
+    /// deliver it through the overlay's channel — so the table reflects the
+    /// change as soon as the stop completes (no immediate-fetch race that
+    /// reads pre-stop state).
+    fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch (its result is discarded)
+        o.loading = true;
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(stop).await;
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
+    }
+
     /// Open the Configure screen's base-branch popup: seed entries from
     /// cached refs (disk-only — instant, offline-safe), then kick a
     /// background fetch + re-list whose result is applied by
@@ -3931,19 +4819,11 @@ impl AppState {
         let source = cfg.repo_source.clone();
         let list_path: Option<std::path::PathBuf> = match &source {
             RepoSource::LocalPath(p) => Some(p.clone()),
-            RepoSource::HttpsUrl(_)
-            | RepoSource::SshUrl(_)
-            | RepoSource::GithubShorthand { .. } => {
-                crate::git::RemoteRepoManager::new().ok().and_then(|m| {
-                    source
-                        .parse_components()
-                        .ok()
-                        .filter(|parsed| m.is_cached(parsed))
-                        .map(|parsed| m.get_cache_path(&parsed))
-                })
-            }
-            // SshSession / Filter never show the Branch row.
-            _ => None,
+            // Remote sources resolve to their clone cache when already cloned;
+            // SshSession / Filter never show the Branch row (resolver → None).
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
         };
 
         let existing = cfg.existing_branches.clone();
@@ -3958,6 +4838,12 @@ impl AppState {
         };
 
         let cached = list_path.as_deref().map(branch_list::list_repo_branches).unwrap_or_default();
+        // Feed the base-off "⚠ exists" guard: every branch the picker knows
+        // about (empty for a not-yet-cached remote — the refresh below fills
+        // it via ls-remote).
+        if !cached.is_empty() {
+            cfg.repo_branch_names = cached.iter().map(|e| e.short_name.clone()).collect();
+        }
         cfg.branch_picker = Some(BranchPickerState::new(mark_in_use(cached), true));
 
         // Background refresh — generation-guarded so a stale result can't
@@ -4026,6 +4912,13 @@ impl AppState {
             self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
         {
             let existing = cfg.existing_branches.clone();
+            // Capture the fresh branch names for the base-off "⚠ exists" guard
+            // before `result` is consumed below. Only on success — a failed
+            // refresh keeps whatever the guard already had.
+            let refreshed_names: Option<Vec<String>> = match &result {
+                Ok(entries) => Some(entries.iter().map(|e| e.short_name.clone()).collect()),
+                Err(_) => None,
+            };
             if let Some(picker) = cfg.branch_picker.as_mut() {
                 picker.loading = false;
                 match result {
@@ -4044,6 +4937,9 @@ impl AppState {
                         warn_msg = Some(msg);
                     }
                 }
+            }
+            if let Some(names) = refreshed_names {
+                cfg.repo_branch_names = names;
             }
         }
         if let Some(msg) = warn_msg {
@@ -4624,6 +5520,33 @@ impl AppState {
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
         }
+    }
+
+    /// Of the multi-selected managed sessions, return the IDs that can actually
+    /// be resumed: interactive agent sessions that are currently Stopped.
+    /// Running sessions are excluded so a bulk resume never kills+recreates a
+    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
+        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+        self.selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.find_session(*id)
+                    .map(|s| {
+                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
+                            && matches!(
+                                s.agent_type,
+                                SessionAgentType::Claude
+                                    | SessionAgentType::Codex
+                                    | SessionAgentType::Gemini
+                                    | SessionAgentType::Copilot
+                            );
+                        is_interactive && matches!(s.status, SessionStatus::Stopped)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -5546,6 +6469,62 @@ impl AppState {
         }
     }
 
+    /// `true` if ainb should offer to run `abtop --setup` (the Claude
+    /// rate-limit StatusLine hook) before opening abtop for the first time.
+    /// Offered until the hook has run (its `~/.claude/abtop-rate-limits.json`
+    /// exists) or the user chose "don't ask again".
+    #[must_use]
+    pub fn should_offer_abtop_setup(&self) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let already_done = home.join(".claude").join("abtop-rate-limits.json").exists();
+        let dismissed = home.join(".agents-in-a-box").join("abtop-setup-dismissed").exists();
+        !already_done && !dismissed
+    }
+
+    /// Persist the user's "don't ask again" choice for the abtop setup offer.
+    pub fn dismiss_abtop_setup(&self) {
+        if let Some(home) = dirs::home_dir() {
+            let dir = home.join(".agents-in-a-box");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("abtop-setup-dismissed"), b"1");
+        }
+    }
+
+    /// One-time consent dialog offering `abtop --setup` (Claude rate-limit
+    /// tracking) the first time the user opens abtop. Every option proceeds to
+    /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
+    /// suppresses the offer permanently.
+    pub fn show_abtop_setup_prompt(&mut self) {
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Enable abtop rate-limit tracking?".to_string(),
+            message: "abtop can show Claude rate-limit usage (5-hour + weekly \
+                      windows). This installs a StatusLine hook into \
+                      ~/.claude/settings.json via `abtop --setup`. abtop works \
+                      without it — the rate-limit panel just stays empty."
+                .to_string(),
+            confirm_action: ConfirmAction::SetupAbtopRateLimits,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: "Enable".to_string(),
+                    action: ConfirmAction::SetupAbtopRateLimits,
+                },
+                DialogOption {
+                    label: "Just open abtop".to_string(),
+                    action: ConfirmAction::OpenAbtopSkipSetup,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissAbtopSetup,
+                },
+            ]),
+            selected_index: 0,
+        });
+    }
+
     /// Show confirmation dialog for killing an "other" tmux session
     pub fn show_kill_other_tmux_confirmation(&mut self, session_name: String) {
         info!(
@@ -5953,6 +6932,11 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
+        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // toast immediately before cancelling (e.g. the worktree-create failure
+        // arm in `create_session_from_configure`) and rely on it surviving the
+        // teardown — clearing here would re-introduce the silent-flash bug
+        // (Stevie 2026-06-06).
         self.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
@@ -6192,6 +7176,13 @@ impl AppState {
             }
             Err(e) => {
                 error!("Failed to create session via configure flow: {}", e);
+                // Surface the real failure (e.g. "branch already used by
+                // worktree", "worktree already exists", invalid name) BEFORE
+                // tearing down the modal. Without this the error only hit the
+                // log and the modal closed silently — the user saw a flash and
+                // never learned why (Stevie 2026-06-06). cancel_new_session()
+                // leaves self.notifications intact, so the 5s toast survives.
+                self.add_error_notification(format!("Could not create session: {e}"));
                 self.cancel_new_session();
             }
         }
@@ -6302,6 +7293,131 @@ impl AppState {
     /// terminal errors. On failure: notifies the user, calls
     /// `cancel_new_session()` so the picker reopens, returns `Err(())`.
     ///
+    /// Transition from PickRepo → Configure for a given source. Extracted so
+    /// both the events.rs dispatcher and the async auth-check handler can call it.
+    pub fn advance_pick_repo_to_configure(&mut self, source: crate::git::repo_source::RepoSource) {
+        use crate::components::new_session::configure::ConfigureState;
+        use crate::config::session_defaults::SessionDefaults;
+        use crate::git::repo_source::head_branch;
+
+        if let Some(pick) =
+            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+        {
+            let path = SessionDefaults::default_path();
+            if let Err(err) = pick.defaults.save_to(&path) {
+                tracing::warn!(error = %err, "advance_pick_repo_to_configure: persist session-defaults failed");
+            }
+        }
+        let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
+        let label = crate::app::events::derive_repo_label(&source);
+        let branch_source = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
+            _ => None,
+        };
+        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        // Every branch already checked out in any worktree (ainb's by-session
+        // worktrees + the repo's own checkout + manual worktrees). Single
+        // source of truth so the collision guard matches what `git worktree
+        // add` will accept — the legacy `list_worktrees()` alone missed by-name
+        // worktrees (Stevie 2026-05-27: feat/blog re-launch slipped through;
+        // review P1, PR #211 added the repo's own checkout; deduped in #232).
+        let repo_path: Option<std::path::PathBuf> = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.clone()),
+            // Remote/star picks: when the clone cache already exists, its refs
+            // ARE the repo — seed both guards from it so typing an existing
+            // branch warns inline BEFORE launch instead of dying at
+            // `git worktree add -b` (Stevie 2026-06-09: feat/ota on the cached
+            // shotclubhouse pick slipped through and failed only after Launch).
+            // A not-yet-cached remote still starts empty; the base-picker
+            // ls-remote refresh backfills `repo_branch_names` later.
+            _ => crate::git::RemoteRepoManager::new()
+                .ok()
+                .and_then(|m| m.cached_source_path(&source)),
+        };
+        let repo_path = repo_path.as_deref();
+        let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
+        // All existing branch names (local heads + remote-tracking) for the
+        // base-off "⚠ exists" guard. Cheap for a local repo or a cached
+        // remote; a not-yet-cached remote pick fills this in later when the
+        // base picker lists/fetches branches.
+        let repo_branch_names: Vec<String> = repo_path
+            .map(|p| {
+                crate::git::branch_list::list_repo_branches(p)
+                    .into_iter()
+                    .map(|e| e.short_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = ConfigureState::from_pick_repo(
+            source.clone(),
+            label,
+            &defaults,
+            branch_source,
+            &branch_prefix,
+            existing_branches,
+            repo_branch_names,
+        );
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.configure_state = Some(cfg);
+            ns.step = NewSessionStep::Configure;
+        }
+        tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+        self.ui_needs_refresh = true;
+    }
+
+    /// Pre-check GitHub authentication via `gh auth status`. Updates the
+    /// `git_auth_status` field on PickRepoState. If authenticated and a
+    /// `pending_clone_source` is waiting, automatically advances to Configure.
+    async fn check_git_auth(&mut self) {
+        use crate::components::new_session::pick_repo::GitAuthStatus;
+
+        // Bound the probe: a hung `gh` (network stall, credential helper
+        // wedged) must not leave the picker stuck in `Checking` forever.
+        // Timeout and task-panic both fail closed → NotAuthenticated, with a
+        // warning so the cause is visible in the logs.
+        let auth_check = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "status", "--hostname", "github.com"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(join_err)) => {
+                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("GitHub auth check timed out after 5s");
+                false
+            }
+        };
+
+        if let Some(pick) =
+            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
+        {
+            if auth_ok {
+                tracing::info!("GitHub auth check passed");
+                pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                // Auto-advance: take the pending source and emit StartClone
+                // via the advance-to-configure path. We replicate the
+                // AdvanceTo → Configure transition inline here.
+                if let Some(source) = pick.pending_clone_source.take() {
+                    pick.git_auth_status = None;
+                    self.advance_pick_repo_to_configure(source);
+                }
+            } else {
+                tracing::warn!("GitHub auth check failed");
+                pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+            }
+        }
+        self.ui_needs_refresh = true;
+    }
+
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
     /// are synchronous and would otherwise block the async runtime.
     async fn clone_remote_for_configure(
@@ -7679,6 +8795,9 @@ impl AppState {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
                 }
+                AsyncAction::CheckGitAuth => {
+                    self.check_git_auth().await;
+                }
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {
                         error!("Failed to delete session {}: {}", session_id, e);
@@ -7695,6 +8814,31 @@ impl AppState {
                         error!("Failed to resume session {}: {}", session_id, e);
                         self.add_error_notification(format!("Resume failed: {}", e));
                     }
+                }
+                AsyncAction::BulkResumeSessions(session_ids, trigger) => {
+                    let total = session_ids.len();
+                    let mut resumed = 0;
+                    let mut failed = 0;
+                    for id in session_ids {
+                        if let Err(e) = self.resume_interactive_session(id, trigger.clone()).await {
+                            error!("Failed to resume session {}: {}", id, e);
+                            failed += 1;
+                        } else {
+                            resumed += 1;
+                        }
+                    }
+                    // resume_interactive_session refreshes per-session on success;
+                    // refresh once more so a final all-failed batch still repaints.
+                    self.load_real_workspaces().await;
+                    if failed > 0 {
+                        self.add_warning_notification(format!(
+                            "Resumed {}/{} sessions ({} failed)",
+                            resumed, total, failed
+                        ));
+                    } else {
+                        self.add_success_notification(format!("Resumed {} session(s)", resumed));
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
@@ -7810,6 +8954,14 @@ impl AppState {
                 }
                 action @ AsyncAction::AttachWitr => {
                     debug!("AttachWitr action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::AttachAbtop => {
+                    debug!("AttachAbtop action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::SetupAbtopRateLimits => {
+                    debug!("SetupAbtopRateLimits action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
@@ -8284,12 +9436,21 @@ impl AppState {
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
                     let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
-                    let existing_branches: Vec<String> =
-                        crate::git::worktree_manager::WorktreeManager::new()
-                            .ok()
-                            .and_then(|m| m.list_worktrees().ok())
-                            .map(|infos| infos.into_iter().map(|i| i.branch_name).collect())
-                            .unwrap_or_default();
+                    // Same complete in-use list the repo-picker path uses. The
+                    // legacy `list_worktrees()` here only saw legacy UUID dirs
+                    // and missed every by-name worktree, so a re-launch onto an
+                    // already-checked-out branch slipped the collision guard and
+                    // died at `git worktree add` (Stevie 2026-06-06: feat/ota).
+                    let existing_branches = crate::git::branch_list::in_use_branch_names(Some(
+                        workspace.path.as_path(),
+                    ));
+                    // All existing branch names for the base-off "⚠ exists"
+                    // guard (restart is always a local repo path).
+                    let repo_branch_names =
+                        crate::git::branch_list::list_repo_branches(&workspace.path)
+                            .into_iter()
+                            .map(|e| e.short_name)
+                            .collect();
                     let configure_state = ConfigureState::from_pick_repo(
                         repo_source,
                         repo_label,
@@ -8297,6 +9458,7 @@ impl AppState {
                         branch_source,
                         &branch_prefix,
                         existing_branches,
+                        repo_branch_names,
                     );
 
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
@@ -8741,6 +9903,19 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
+        // Non-selected sessions only need a status (running/idle) refresh, which
+        // is not time-critical — sweep them on a longer cadence so we don't
+        // spawn one `capture-pane` per non-selected session on every 5s preview
+        // refresh. (perf: bead 9pb)
+        const STATUS_INTERVAL_SECS: u64 = 20;
+        let do_status_check = match self.last_status_check {
+            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
+            None => true,
+        };
+        if do_status_check {
+            self.last_status_check = Some(now);
+        }
+
         // updates: (session_id, content, claude_running) for the selected session.
         // Attention markers are derived separately from hook events in
         // `refresh_attention_markers`, not from live pane state.
@@ -8768,7 +9943,12 @@ impl AppState {
 
             let is_selected = selected_session_id == Some(*session_id);
 
-            if is_selected {
+            // While the interactive embed is live, the selected session's
+            // pane renders straight from the embed's vt100 screen — the full
+            // capture would be pure subprocess waste. Fall through to the
+            // cheap status-dot check instead (the collapsed rail still needs
+            // those for every session).
+            if is_selected && !self.is_interactive_pane() {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
@@ -8786,9 +9966,10 @@ impl AppState {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
                     }
                 }
-            } else {
-                // Non-selected sessions: only capture visible area for status detection
-                // Much cheaper — just the last screenful (~50 lines)
+            } else if do_status_check {
+                // Non-selected sessions: only capture visible area for status
+                // detection, and only on the longer status cadence. Much
+                // cheaper — just the last screenful (~50 lines). (perf: 9pb)
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
@@ -8981,6 +10162,76 @@ impl AppState {
         }
         None
     }
+
+    /// Consume pending `ui.close_request` publishes from plugins.
+    ///
+    /// A plugin publishes this topic when it receives an `Esc` with no
+    /// internal state left to pop (its root view — see the burndown
+    /// plugin's Esc handler). The snapshot store stamps every publish
+    /// with a monotonic version, so polling by version honours each
+    /// request at most once; the version is consumed on sight whether
+    /// or not it triggers navigation, so a request observed while the
+    /// user is on a different screen is absorbed instead of firing
+    /// later. A matching request navigates back to the screen the
+    /// panel was opened from (same pop as `AppEvent::PanelBack`).
+    ///
+    /// Called from `App::tick_plugin_renders`, which already holds a
+    /// cloned runtime `handle`, so it's passed in rather than re-cloned
+    /// per render tick.
+    pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
+        let Some((payload, version, publisher)) =
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
+        else {
+            return;
+        };
+        if self.last_panel_close_version == Some(version) {
+            return;
+        }
+        self.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
+            return;
+        }
+        let target = self
+            .previous_screen
+            .take()
+            .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
+        tracing::info!(
+            from = %self.current_screen,
+            to = %target,
+            "ui.close_request: closing plugin panel"
+        );
+        self.current_screen = target;
+        self.ui_needs_refresh = true;
+    }
+}
+
+/// `true` when a `ui.close_request` payload names the currently-focused
+/// plugin screen AND was published by the plugin that owns it. Rejects:
+/// requests while a non-plugin screen is focused (a plugin can't close
+/// the session list out from under the user), publishes from any plugin
+/// other than the focused screen's owner (the publisher stamp comes
+/// from the wire connection, not the payload, so it can't be forged),
+/// and malformed payloads.
+fn panel_close_matches(current_screen: &str, payload: &[u8], publisher: &str) -> bool {
+    let Some(owner) = crate::app::screens::builtin::plugin_id_for_screen(current_screen) else {
+        return false;
+    };
+    if publisher != owner {
+        tracing::warn!(
+            publisher,
+            owner,
+            screen = %current_screen,
+            "ui.close_request: publisher does not own the focused screen — ignoring"
+        );
+        return false;
+    }
+    match serde_json::from_slice::<ainb_plugin_runtime::topics::UiCloseRequest>(payload) {
+        Ok(req) => req.screen_id == current_screen,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui.close_request: malformed payload — ignoring");
+            false
+        }
+    }
 }
 
 pub struct App {
@@ -9032,13 +10283,21 @@ impl App {
     /// burndown + session-reader as Rust subprocess binaries). Loop is
     /// no-op when discovery returned empty; once 7c lands, the screen
     /// routing table below populates again.
-    pub fn tick_plugin_renders(&mut self) {
+    /// Drive plugin-owned screens. Returns `true` if a fresh plugin frame was
+    /// drained into `pending_plugin_renders` this tick, so the render loop can
+    /// treat that as a reason to repaint (perf: bead `wai` dirty-gate).
+    pub fn tick_plugin_renders(&mut self) -> bool {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
         let Some(handle) = self.state.plugin_runtime.clone() else {
-            return;
+            return false;
         };
+        let mut drained = false;
+
+        // Honour any pending plugin close request (root-view Esc) before
+        // kicking renders — a closed screen shouldn't get another paint.
+        self.state.tick_panel_close_requests(&handle);
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -9046,6 +10305,9 @@ impl App {
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
+            (crate::app::screens::ids::LEARNINGS, "learnings"),
+            (crate::app::screens::ids::ABTOP, "abtop"),
+            (crate::app::screens::ids::HANGAR, "hangar-tui"),
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
@@ -9060,9 +10322,37 @@ impl App {
             // Drain the cached frame (if any) into the screen map. The
             // plugin task pushes a fresh frame each time it returns from
             // `plugin/render`; `try_recv_render` is the non-blocking
-            // hand-off the render thread relies on.
+            // hand-off the render thread relies on. Unconditional (no
+            // visibility gate): a frame that completed just before the
+            // user navigated away must still land in the cache so the
+            // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+                drained = true;
+            }
+
+            // Visibility gate: only the plugin owning the focused screen
+            // gets render kicks. `LayoutComponent::render` dispatches
+            // exactly `state.current_screen` through the screen registry,
+            // so a hidden screen's buffer is never painted — kicking its
+            // renders only burns CPU. Concretely this stops (a) a
+            // self-animating plugin (search spinner returning
+            // `redraw=true`, which re-marks the dirty flag each frame)
+            // from re-rendering an invisible screen at tick cadence, and
+            // (b) the startup storm where the registration-seeded dirty
+            // flag kicked all five screen plugins on the first tick —
+            // `Command::Render` lazy-spawns the subprocess via
+            // `ensure_running`, so that defeated `spawn = "lazy"`. Eager
+            // plugins are unaffected: registration pokes them with
+            // `EnsureSpawned` (see `register_kept` in the runtime), not
+            // this loop.
+            //
+            // MUST stay above `take_render_dirty`: the gate skips the
+            // consume, so a hidden plugin's dirty flag survives until the
+            // user opens the screen and the first tick after the switch
+            // kicks the deferred paint.
+            if self.state.current_screen != *screen_id {
+                continue;
             }
 
             // Viewport comes from the previous frame's allocated area
@@ -9113,6 +10403,7 @@ impl App {
             // pickup happens via `try_recv_render` next tick.
             let _ = handle.render(&pid, viewport, 0);
         }
+        drained
     }
 
     pub async fn init(&mut self) {
@@ -9129,6 +10420,27 @@ impl App {
                 }
                 self.plugin_runtime_owner = Some(runtime);
                 self.state.plugin_runtime = Some(handle.clone());
+
+                // Surface each loaded plugin's `[[config]]` schema in the
+                // Settings ▸ Plugins category. `from_app_config` built the
+                // config screen before discovery ran (the handle is `None` at
+                // `AppState` construction), so we backfill the per-plugin rows
+                // here now that the manifests are known. Defaults resolve from
+                // the persisted `[plugins.<name>]` table first, else the
+                // schema default. Idempotent — only the plugin rows are
+                // rebuilt; the static enable/disable rows are kept.
+                let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
+                    handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
+                self.state
+                    .config_screen_state
+                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+
+                // A fresh runtime means a fresh snapshot store whose
+                // version counter restarts at 0 — drop any version
+                // watermark from a previous runtime so an equal-valued
+                // version can't mask a new close request. Init runs once
+                // today; this keeps any future runtime-restart path safe.
+                self.state.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -9323,6 +10635,9 @@ impl App {
             self.state.ui_needs_refresh = true;
         }
 
+        // Drain + lazily refresh the MCP pool overlay (no-op when closed).
+        self.state.check_mcp_overlay();
+
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();
         let should_check_token = self
@@ -9516,3 +10831,207 @@ impl Default for App {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+mod plugin_render_gate_tests {
+    //! Visibility gate on the render-tick loop: only the plugin owning
+    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
+    //! only after the screen check) so the deferred first paint happens
+    //! on the first tick after the user opens the screen.
+
+    use std::path::PathBuf;
+
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    };
+    use ainb_plugin_runtime::{PluginId, RegisteredPlugin, Runtime};
+
+    use super::App;
+    use crate::app::screens::ids;
+
+    fn lazy_manifest(name: &str) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities::default(),
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: Vec::new(),
+        }
+    }
+
+    /// Real runtime + an `App` wired to it, with the named lazy plugins
+    /// registered. The binary path is deliberately nonexistent — these
+    /// tests assert host-side kick bookkeeping only; an actual spawn
+    /// attempt would fail harmlessly on the runtime's executor.
+    fn app_with_plugins(names: &[&str]) -> (Runtime, App) {
+        let (runtime, handle) = Runtime::new().expect("runtime constructs without plugins");
+        for name in names {
+            runtime.register(RegisteredPlugin::new(
+                lazy_manifest(name),
+                PathBuf::from("/nonexistent/plugin-binary"),
+                PathBuf::from("/nonexistent/manifest.toml"),
+            ));
+        }
+        let mut app = App::new();
+        app.state.plugin_runtime = Some(handle);
+        (runtime, app)
+    }
+
+    #[test]
+    fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+        app.tick_plugin_renders();
+
+        // No kick: `plugin_last_render_viewport` is only written when a
+        // render is dispatched.
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "hidden screen must not receive a render kick"
+        );
+        // The registration-seeded dirty flag survived both ticks, so the
+        // deferred first paint still happens when the screen opens.
+        assert!(
+            handle.take_render_dirty(&pid),
+            "hidden plugin's dirty flag must survive the gated ticks"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn dirty_plugin_kicks_on_first_tick_after_screen_switch() {
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let pid = PluginId::from("learnings");
+
+        // Ticks while hidden: gated, dirty preserved (proved above).
+        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.tick_plugin_renders();
+
+        // User opens the learnings screen → first tick kicks the render.
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert_eq!(
+            app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
+            Some(&(0, 0)),
+            "first tick after the switch must kick a render at the seed viewport"
+        );
+        assert!(
+            !handle.take_render_dirty(&pid),
+            "the kick must consume the dirty flag"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn only_the_focused_plugin_screen_is_kicked() {
+        let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
+        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.tick_plugin_renders();
+
+        assert!(
+            app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "focused plugin screen must be kicked"
+        );
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            "unfocused plugin screen must not be kicked"
+        );
+        assert!(
+            handle.take_render_dirty(&PluginId::from("burndown")),
+            "unfocused plugin must stay dirty for its deferred first paint"
+        );
+
+        runtime.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod panel_close_tests {
+    use super::panel_close_matches;
+    use crate::app::screens::ids;
+
+    /// Plugin id owning the analytics screen (see `PLUGIN_SCREENS`).
+    const BURNDOWN: &str = "burndown";
+
+    fn payload(screen: &str) -> Vec<u8> {
+        serde_json::to_vec(&ainb_plugin_runtime::topics::UiCloseRequest {
+            screen_id: screen.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn matches_when_owning_plugin_names_focused_screen() {
+        assert!(panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_request_for_a_different_screen() {
+        // A stale close request for analytics must not close the witr
+        // screen the user has since navigated to.
+        assert!(!panel_close_matches(
+            ids::WITR,
+            &payload(ids::ANALYTICS),
+            "witr"
+        ));
+    }
+
+    #[test]
+    fn rejects_when_focused_screen_is_not_plugin_owned() {
+        // A plugin can't close the session list (or any host screen)
+        // out from under the user, even if it names it.
+        assert!(!panel_close_matches(
+            ids::SESSION_LIST,
+            &payload(ids::SESSION_LIST),
+            BURNDOWN
+        ));
+    }
+
+    #[test]
+    fn rejects_publish_from_plugin_that_does_not_own_screen() {
+        // The payload alone is forgeable — any plugin can serialize
+        // {"screen_id":"analytics"}. The publisher stamp (taken from
+        // the wire connection, not the payload) is not: a publish from
+        // session-reader naming burndown's screen must be ignored.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "session-reader"
+        ));
+        // The reserved host id doesn't own plugin screens either.
+        assert!(!panel_close_matches(
+            ids::ANALYTICS,
+            &payload(ids::ANALYTICS),
+            "host"
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_payload() {
+        assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}

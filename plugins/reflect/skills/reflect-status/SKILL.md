@@ -136,6 +136,72 @@ else
 fi
 ```
 
+### 7. Knowledge Gaps (negative recall)
+
+Every 0-result recall is appended to `~/.reflect/knowledge-gaps.jsonl` by
+`recall.py` (normalized query + session id). Queries that came up empty in
+**>=2 distinct sessions** are knowledge gaps — users keep asking about them
+with no learnings in the KB. This is the curation backlog.
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect-status/scripts/knowledge_gaps.py
+```
+
+Shows:
+- Repeat gaps (normalized-query dedup'd, distinct-session counted)
+- Ask counts and last-seen dates
+- Total distinct 0-result queries on file
+
+Options: `--min-sessions 1` to include one-off gaps, `--format json` for
+programmatic use.
+
+**If repeat gaps exist**: Suggest capturing learnings for those topics via
+`/reflect` or `/reflect:ingest` — once indexed, the gap stops recurring.
+
+### 8. Learning Update History
+
+Every UPDATE to a learning snapshots its old form into the `learning_history`
+table in `~/.reflect/reflect.db` (and, for knowledge notes, an append-only
+`{slug}.history.yaml` sidecar next to the note). Show the update count per
+learning:
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_db.py history
+```
+
+Shows, per learning (most-updated first):
+- Learning id
+- Update count (history snapshots recorded)
+- Last-updated timestamp
+- Title
+
+**If a learning has an unusually high update count**: its belief keeps getting
+revised — inspect the snapshots (`learning_history.snapshot_json` or the
+`.history.yaml` sidecar) to see why the rule kept changing.
+
+### 9. Contradictions (cross-turn detection)
+
+Every new learning write runs deterministic contradiction detection against
+recent in-scope learnings sharing >= 1 concept tag (negation-stripped token
+Jaccard > 0.9 with a negation marker in exactly one of the two — e.g. saving
+"never use foo" against an existing "use foo"). The OLDER learning is demoted
+(`is_latest = 0`, `superseded_by_learning_id` set) and a
+`contradiction_detected` audit event is written to the events table in
+`~/.reflect/reflect.db`, mirrored to `~/.reflect/events.jsonl`.
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_db.py contradictions
+```
+
+Shows:
+- Total contradiction count
+- Recent contradiction pairs (older id -> newer id, similarity, both titles)
+
+**If contradictions exist**: the demoted side is preserved (history snapshot +
+`is_latest = 0`, never deleted) — review the pairs to confirm the newer rule
+is actually the correct one; if the flip was wrong, re-state the older rule
+so it wins the next round.
+
 ## Review Mode
 
 When invoked as `reflect review` or when there are pending items, enter review mode.
@@ -238,6 +304,25 @@ Present everything in a clean dashboard format:
 - Orphaned dirs: 3
 - Total lines: 127
 - Suggest: /reflect:consolidate
+
+## Knowledge Gaps (negative recall)
+Knowledge gap — users keep asking about these with no learnings:
+- **istio sidecar injection failures** — 3 sessions, 5 asks, last 2026-04-11
+- **bun workspace hoisting** — 2 sessions, 2 asks, last 2026-04-09
+Suggest: capture learnings for these topics, then /reflect:ingest
+
+## Learning Update History
+| Learning | Updates | Last Updated |
+|----------|---------|--------------|
+| never use var in this codebase | 4 | 2026-04-12 |
+| prefer uv over pip | 2 | 2026-04-10 |
+
+## Contradictions
+Contradictions detected: 2
+| Older (demoted) | Newer (kept) | Similarity |
+|-----------------|--------------|------------|
+| use fab deploy | never use fab deploy | 1.00 |
+| commit straight to main | don't commit straight to main | 1.00 |
 
 ## Pending Reviews: 2
 1. [MEDIUM] "Consider cursor-based pagination for large datasets" (5 days)

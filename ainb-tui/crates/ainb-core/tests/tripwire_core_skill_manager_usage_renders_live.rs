@@ -179,7 +179,7 @@ fn pressing_m_renders_usage_invocations_in_live_binary() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // Wait for the SkillManager screen + Detail pane to surface the
     // "12 invocations" literal. The Detail pane auto-binds to the

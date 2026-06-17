@@ -167,7 +167,7 @@ fn pressing_s_routes_to_sync_in_live_binary_when_no_shadow_peer() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // Wait for SkillManager to be fully painted (seeded source +
     // unit name both rendered) before pressing [s], else the

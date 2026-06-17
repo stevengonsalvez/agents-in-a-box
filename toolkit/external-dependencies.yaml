@@ -237,6 +237,30 @@ agent-skills:
       - "rsvg-convert (librsvg) for PNG export — `brew install librsvg`"
     docs: "https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
 
+  - name: antv-infographic
+    repo: https://github.com/antvis/Infographic
+    version: "0.2.19"
+    multi-subpath: skills
+    applies-to: [claude, codex, copilot, gemini]
+    purpose: "AntV's declarative infographic generation + rendering engine — turn words/data into high-quality SVG infographics from ~200 templates, AI-friendly config, hand-drawn + gradient themes"
+    multi-skill: true
+    skills:
+      - infographic-creator: "Primary entry point — generate a complete infographic from a topic/dataset, picking template + structure + items"
+      - infographic-syntax-creator: "Author the declarative infographic syntax (the @antv/infographic config spec)"
+      - infographic-structure-creator: "Design the layout/structure skeleton an infographic hangs off"
+      - infographic-item-creator: "Create individual infographic items/blocks within a structure"
+      - infographic-template-updater: "Update or extend the bundled template library"
+    features:
+      - Declarative @antv/infographic engine with streaming SVG rendering
+      - ~200 built-in templates + built-in editor
+      - AI-friendly configuration syntax (words/data → infographic)
+      - Theme system (hand-drawn + gradient styles)
+      - 5 cross-agent skills under skills/ (SKILL.md standard)
+      - MIT licensed
+    requires:
+      - "node.js (>=18) + npm if rendering locally (`npm install @antv/infographic`)"
+    docs: "https://github.com/antvis/Infographic"
+
   # ---------------------------------------------------------------------------
   # Catalog-only entries below — listed for discoverability / alternatives
   # consideration but NOT installed by bootstrap. Flip `catalog-only: true` to
@@ -259,24 +283,43 @@ agent-skills:
 
   - name: stitch-skills
     repo: https://github.com/google-labs-code/stitch-skills
-    multi-subpath: skills
+    # multi-subpaths replaces the old single multi-subpath: skills entry.
+    # Upstream now uses a plugin layout with three plugin dirs, each containing
+    # a skills/ subdirectory. multi-subpaths iterates all three paths and
+    # flattens each SKILL.md-bearing child dir into the external skills dir.
+    # Legacy multi-subpath: <string> entries still work for backward compat.
+    multi-subpaths:
+      - plugins/stitch-utilities/skills
+      - plugins/stitch-design/skills
+      - plugins/stitch-build/skills
     applies-to: [claude, codex, copilot, gemini]
     purpose: "Google Stitch design-to-code skills for UI generation, React components, and video walkthroughs"
     multi-skill: true
     skills:
-      - design-md: "Synthesize semantic design systems into DESIGN.md"
-      - enhance-prompt: "Transform vague UI ideas into Stitch-optimized prompts"
+      # plugins/stitch-utilities/skills
+      - design-md: "Synthesize semantic design systems into DESIGN.md files for Stitch"
+      - enhance-prompt: "Transform vague UI ideas into polished Stitch-optimized prompts"
+      - stitch-loop: "Autonomous baton-passing loop for iterative website building with Stitch"
+      - taste-design: "Semantic design system skill for Google Stitch — generates agent-friendly DESIGN.md"
+      # plugins/stitch-design/skills
+      - generate-design: "Generate visual designs from natural-language prompts using Stitch MCP"
+      - manage-design-system: "Manage and update the design system stored in Stitch"
+      - extract-design-md: "Extract DESIGN.md semantic design specification from existing visual designs"
+      - extract-static-html: "Extract clean, self-contained static HTML from Stitch design outputs"
+      - upload-to-stitch: "Upload local assets and components to a Stitch project"
+      - code-to-design: "Convert existing code or components to a visual Stitch design"
+      # plugins/stitch-build/skills
       - react-components: "Convert Stitch designs into modular Vite/React components"
-      - remotion: "Generate walkthrough videos from Stitch projects"
-      - shadcn-ui: "shadcn/ui component integration and best practices"
-      - stitch-design: "Unified Stitch design entry point with prompt enhancement"
-      - stitch-loop: "Autonomous baton-passing loop for iterative website building"
+      - react-native: "Generate React Native components from Stitch designs"
+      - remotion: "Generate walkthrough videos from Stitch projects using Remotion"
+      - shadcn-ui: "shadcn/ui component integration, discovery, and best practices for Stitch builds"
     features:
       - Stitch MCP integration for AI-powered UI generation
       - Design system synthesis from visual designs
-      - React component extraction with AST validation
+      - React and React Native component extraction with AST validation
       - Remotion video walkthrough generation
       - shadcn/ui component discovery and customization
+      - Plugin layout: three plugin dirs (stitch-utilities, stitch-design, stitch-build)
 
   - name: mcporter
     repo: https://github.com/openclaw/mcporter

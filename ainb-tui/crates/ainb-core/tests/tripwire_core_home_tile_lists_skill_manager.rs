@@ -94,7 +94,7 @@ fn home_tile_grid_lists_skill_manager() {
 
     // Wait for HomeScreen WITH the new tile visible. The label in
     // app/state.rs:487 is literally "Skills (manager)" and the
-    // description "Install / sync / doctor (M)" — assert both are
+    // description "Install / sync / doctor (Z)" — assert both are
     // present so a label/description regression also fires.
     let post = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
         c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")

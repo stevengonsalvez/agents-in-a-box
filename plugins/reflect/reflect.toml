@@ -1,3 +1,11 @@
+# M4: active reflect mode — picks the references/modes/{id}.json bundle
+# (learning types + concepts + signal patterns + prompts + locale). Single-
+# level parent--override inheritance, e.g. "engineering--zh" inherits
+# "engineering". The per-project persisted choice (`mode_loader.py set <id>`
+# writing .reflect/config.json) and the REFLECT_MODE env var both override
+# this key.
+mode = "engineering"
+
 [storage]
 db_path = "~/.reflect/reflect.db"
 artifacts_dir = "docs/solutions"
@@ -40,6 +48,36 @@ auto_sidecar = true
 auto_approve_threshold = 0.8
 retention_days = 90
 max_memory_lines = 200
+
+[recall.cross_encoder]
+# R2: cross-encoder rerank. recall.py scores fused candidates jointly with
+# the query via `reflect rerank` (engine-side; model auto-downloads to
+# ~/.reflect/models/ on first use, cached thereafter). Slim builds without
+# sentence-transformers silently degrade to the legacy formula. recall.py
+# itself is controlled by the RECALL_CROSS_ENCODER / RECALL_CE_TIMEOUT env
+# vars; these keys are the declarative surface for hooks that set them.
+enabled = true
+model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+candidates = 20
+timeout_s = 60
+
+[recall.boost]
+# R16: project-affinity multiplicative boost (bounded R8 shape). Learnings
+# whose project_id matches the current session's project get 1 + α/2
+# (+10% at the default 0.2); cross-project hits are exactly unchanged —
+# soft affinity, not hard isolation. recall.py itself is controlled by the
+# RECALL_PROJECT_ALPHA env var; this key is the declarative surface for
+# hooks that set it. Set to 0 to disable.
+project_affinity_alpha = 0.2
+
+[cascade]
+# C1: per-ingest semantic-dedup adjudication. A revise CREATE whose text is
+# >= this embedding cosine to an existing learning is held for a focused
+# 1-by-1 merge-or-keep verdict instead of landing as a near-duplicate row.
+# 0.97 matches Hindsight's consolidation dedup default. The
+# REFLECT_DEDUP_THRESHOLD env var overrides this key; >= 1.0 disables the
+# probe entirely.
+dedup_threshold = 0.97
 
 [telemetry]
 enabled = true

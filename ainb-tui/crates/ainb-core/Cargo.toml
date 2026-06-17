@@ -9,6 +9,12 @@ description = "Terminal-based development environment manager for Claude Code co
 keywords = ["claude", "docker", "tui", "development", "containers"]
 categories = ["command-line-utilities", "development-tools"]
 
+# `time` is intentionally unused in code — it exists only to cap the
+# transitive version below the broken 0.3.48 release (see the workspace
+# manifest comment).
+[package.metadata.cargo-machete]
+ignored = ["time"]
+
 [[bin]]
 name = "ainb"
 path = "src/main.rs"
@@ -30,6 +36,8 @@ tar = { workspace = true }
 
 # Tmux/PTY support
 portable-pty = { workspace = true }
+vt100 = { workspace = true }
+tui-term = { workspace = true }
 
 # Git operations
 git2 = { workspace = true }
@@ -72,6 +80,10 @@ ansi-to-tui = { workspace = true }
 # Code Review diff surface
 similar = { workspace = true }
 two-face = { workspace = true }
+# Version cap only (no code uses it directly) — pins the TRANSITIVE time
+# crate below the broken 0.3.48 release. See the workspace manifest comment
+# for the E0119 story + removal condition.
+time = { workspace = true }
 
 # Persistent usage analytics cache
 rusqlite = { workspace = true }
@@ -89,6 +101,21 @@ ainb-cli = { path = "../ainb-cli", version = "0.1.0" }
 ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0" }
 # Notification daemon — used in-process for the Inbox screen reader.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
+# CSPRNG for `ainb hangar auth token create` (the OsRng passed to the store's
+# `mint_pat` / `mint_daemon_token`). All hashing/encoding lives in the store +
+# core; the CLI only supplies the random source.
+rand = "0.8"
+# Hangar control plane — backs the `ainb hangar <verb>` CLI namespace.
+ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
+ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon", version = "0.1.0" }
+# sqlx — the hangar CLI workspace-bootstrap path issues raw SQL against the
+# store's pool (`Store::pool`) for the default-workspace seed and lookups.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
 # Zero-copy byte buffers — required for `RuntimeHandle::publish_snapshot`'s
 # `payload: bytes::Bytes` parameter, used by the Phase 7c CLI dispatcher.
 bytes = "1.6"
@@ -118,7 +145,7 @@ tmux-tests = ["cli-tests"]
 mockall = { workspace = true }
 pretty_assertions = { workspace = true }
 rexpect = { workspace = true }
-vt100 = { workspace = true }
+proptest = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
 bytes = "1.6"
 # Skill-core's sandbox fixture for the SkillManager tripwires that drive

@@ -140,7 +140,7 @@ fn library_view_renders_owned_skill_and_enter_shows_detail() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // SkillManager renders (Full tier → units present, no banner).
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {

@@ -1,0 +1,15 @@
+document_id: gr-04-nginx-keepalive-upstream
+extracted_at: '2026-03-25T00:00:00'
+entities:
+  - name: "nginx"
+    type: technology
+    description: "reverse proxy"
+  - name: "gateway-timeout"
+    type: error
+    description: "504 from edge proxy"
+relationships:
+  - source: "nginx"
+    target: "gateway-timeout"
+    type: relates_to
+    description: "connection churn worsens timeouts"
+    strength: 6

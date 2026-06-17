@@ -54,7 +54,7 @@ fn event_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| {
-            code_review::render::render(frame, frame.size(), &state.review, &state.review_ui);
+            code_review::render::render(frame, frame.area(), &state.review, &state.review_ui);
         })?;
 
         if !event::poll(Duration::from_millis(250))? {

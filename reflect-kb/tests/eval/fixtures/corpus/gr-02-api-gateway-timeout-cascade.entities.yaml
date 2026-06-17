@@ -1,0 +1,15 @@
+document_id: gr-02-api-gateway-timeout-cascade
+extracted_at: '2026-03-12T00:00:00'
+entities:
+  - name: "gateway-timeout"
+    type: error
+    description: "504 from edge proxy"
+  - name: "redis-connection-pool"
+    type: technology
+    description: "client-side connection pool"
+relationships:
+  - source: "gateway-timeout"
+    target: "redis-connection-pool"
+    type: caused_by
+    description: "pool waits surface as 504s"
+    strength: 9

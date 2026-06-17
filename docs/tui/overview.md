@@ -31,7 +31,7 @@ From the home screen, single keys jump to each screen (see [Keyboard shortcuts](
 | Inbox | `I` | ainb-hooks notification inbox |
 | Config | `C` | View configuration |
 
-Git operations, log streaming, and a tmux preview are available from within the session views. Press **`g`** on a session to open the Warp-style **[Code Review](code-review.md)** diff — a file sidebar plus per-file collapsible blocks with syntax highlighting and word-level emphasis (also available standalone as `ainb diff-review`).
+Git operations, log streaming, and a tmux preview are available from within the session views. Press **`g`** on a session to open the Warp-style **[Code Review](code-review.md)** diff — a file sidebar plus per-file collapsible blocks with syntax highlighting and word-level emphasis (also available standalone as `ainb diff-review`). Press **`a`** to [attach](attach.md) full-screen, or **`A`** to turn the preview pane into a live embedded tmux client in-place (`Ctrl+Q` releases it).
 
 ## Multi-provider session model
 

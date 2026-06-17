@@ -175,7 +175,7 @@ fn pressing_m_clears_skip_marker_and_reshows_discovery_banner() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m"); // Home → SkillManager.
+    send_key(&session, "z"); // Home → SkillManager.
 
     // On open the skip-marker SUPPRESSES the banner. We must land on
     // the SkillManager screen with the empty-state Units panel — the

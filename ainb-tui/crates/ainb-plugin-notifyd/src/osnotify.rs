@@ -116,6 +116,7 @@ pub fn render_title(env: &Envelope) -> String {
     let agent = match env.agent.as_str() {
         "claude" => "Claude",
         "codex" => "Codex",
+        "copilot" => "Copilot",
         other => other,
     };
     match head {

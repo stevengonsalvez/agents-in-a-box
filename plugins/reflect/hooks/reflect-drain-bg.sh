@@ -16,6 +16,18 @@
 # - Stale-tolerant: skips queue entries whose transcript no longer exists.
 # - Poison-message-tolerant: per-entry retry counter at ~/.reflect/retry-count.jsonl;
 #                           entries that fail >3 times are archived as "poison".
+# - Skill-refresh aware (R13): entries with trigger=skill_refresh (enqueued by
+#                           reflect_cascade.py belief revision) carry a SKILL.md
+#                           path in transcript_path; the drain bypasses the
+#                           cascade, re-runs the /reflect skill-edit step on the
+#                           stale skill, and clears its staleness flag on success.
+# - Quota-aware (M3): consults quota_store.py before each queue entry; when the
+#                           subscription quota nears a wall (rate_limit telemetry
+#                           ingested from each claude -p run; 429/529 stderr
+#                           fallback) the queue is DEFERRED with
+#                           reason='quota_near_limit' — entries stay queued and
+#                           replay once the gate reopens. No API call is ever
+#                           issued purely to check quota.
 # - Always exits 0 so the calling SessionStart hook never thinks bootstrap broke.
 #
 # Configuration (env)
@@ -33,6 +45,15 @@
 #                             more than this many total tokens.
 # REFLECT_DRAIN_MODEL         Model alias for claude -p (--model).    Default: sonnet
 # REFLECT_DRAIN_DEBOUNCE_SEC  Min seconds between drain runs.         Default: 600
+# REFLECT_DRAIN_INVALID_THRESHOLD  Consecutive non-valid writer       Default: 3
+#                             outputs before the writer-drift breaker
+#                             poisons the transcript (M2).
+# REFLECT_QUOTA_GATE          If "0", skip the subscription-quota     Default: 1
+#                             gate entirely (M3).
+# REFLECT_QUOTA_TTL_SEC       Quota snapshot freshness window (s).    Default: 3600
+# REFLECT_DRAIN_MAINTAIN_EVERY Run the C3 graph-maintenance sweep     Default: 10
+#                             (orphan/stale prune + relink) once per
+#                             N reindexing drains; 0 disables it.
 # REFLECT_DISABLED            If "1", drainer is a hard no-op.        Default: 0
 #
 # Circuit-breaker rationale (2026-05-31 incident: a single drain ran 223 Opus
@@ -59,6 +80,7 @@ RETRY_FILE="${STATE_DIR}/retry-count.jsonl"
 COST_FILE="${STATE_DIR}/drain-cost.jsonl"
 POISON_FILE="${STATE_DIR}/poison-reflections.jsonl"
 DEBOUNCE_FILE="${STATE_DIR}/drain.last-run"   # epoch seconds of last drain start
+WRITER_HEALTH_FILE="${STATE_DIR}/writer-health.jsonl"  # M2: per-transcript invalid streaks
 
 MAX_PER_RUN="${REFLECT_DRAIN_MAX:-3}"
 DAILY_MAX="${REFLECT_DRAIN_DAILY_MAX:-20}"
@@ -73,10 +95,17 @@ DRAIN_MODEL="${REFLECT_DRAIN_MODEL:-sonnet}"
 DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
 CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
 DRAIN_CWD="${REFLECT_DRAIN_CWD:-$HOME}"          # W5: neutral cwd for claude -p
+INVALID_THRESHOLD="${REFLECT_DRAIN_INVALID_THRESHOLD:-3}"  # M2: writer-drift breaker
+QUOTA_GATE_ENABLED="${REFLECT_QUOTA_GATE:-1}"    # M3: subscription-quota gate
+MAINTAIN_EVERY="${REFLECT_DRAIN_MAINTAIN_EVERY:-10}"  # C3: graph maintenance once per N drains
+MAINTAIN_COUNTER_FILE="${STATE_DIR}/drain.maintain-count"  # C3: post-drain counter
 
-# Locate sibling scripts (cascade) relative to this hook, robust to symlinks.
+# Locate sibling scripts (cascade, classifier) relative to this hook, robust to symlinks.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASCADE_SCRIPT="${SCRIPT_DIR}/../scripts/reflect_cascade.py"
+CLASSIFIER_SCRIPT="${SCRIPT_DIR}/../scripts/output_classifier.py"
+QUOTA_SCRIPT="${SCRIPT_DIR}/../scripts/quota_store.py"
+MODE_LOADER_SCRIPT="${SCRIPT_DIR}/../scripts/mode_loader.py"   # M4: pluggable modes
 
 mkdir -p "$STATE_DIR"
 
@@ -228,13 +257,16 @@ PY
 
 record_cost_event() {
     # record_cost_event <entries> <transcript> <outcome> \
-    #   [tokens] [cost_usd] [turns] [model] [cache_read] [cache_creation] [input] [output]
+    #   [tokens] [cost_usd] [turns] [model] [cache_read] [cache_creation] [input] [output] [writer_class]
     # The token/cost fields default to 0 so pre-run outcomes (stale/poison) and
     # the legacy 3-arg call shape still emit valid JSON. `reflect cost` reads
-    # these for the cached-vs-uncached timeline (W3).
+    # these for the cached-vs-uncached timeline (W3). writer_class (M2) is the
+    # output classifier's verdict so `reflect cost --by writer` shows
+    # writer-health; empty for pre-run outcomes that never spawned a writer.
     local entry_count="$1" transcript="$2" outcome="$3"
     local tokens="${4:-0}" cost="${5:-0}" turns="${6:-0}" model="${7:-}"
     local cache_read="${8:-0}" cache_creation="${9:-0}" input_tok="${10:-0}" output_tok="${11:-0}"
+    local writer_class="${12:-}"
     # Coerce anything non-numeric to 0/valid so the JSON line never breaks.
     [[ "$tokens"         =~ ^[0-9]+$        ]] || tokens=0
     [[ "$cost"           =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
@@ -253,10 +285,11 @@ record_cost_event() {
     # are already coerced above so they serialise as bare numbers.
     python3 - "$ts" "$today" "$entry_count" "$transcript" "$outcome" "$model" \
         "$turns" "$tokens" "$cost" "$input_tok" "$output_tok" "$cache_read" "$cache_creation" \
+        "$writer_class" \
         >> "$COST_FILE" <<'PY'
 import json, sys
 (ts, day, entries, transcript, outcome, model,
- turns, tokens, cost, inp, out, cr, cc) = sys.argv[1:14]
+ turns, tokens, cost, inp, out, cr, cc, writer_class) = sys.argv[1:15]
 def _num(x):
     try:
         return int(x)
@@ -271,8 +304,50 @@ print(json.dumps({
     "turns": _num(turns), "tokens": _num(tokens), "cost_usd": _num(cost),
     "input": _num(inp), "output": _num(out),
     "cache_read": _num(cr), "cache_creation": _num(cc),
+    "writer_class": writer_class,
 }))
 PY
+}
+
+# ── Quota gate (M3) ───────────────────────────────────────────────────────────
+# Consults the persisted subscription-quota snapshot (quota_store.py) before
+# each queue entry. Reads ONLY disk state — never issues an API call. The
+# snapshot is fed by `quota_ingest` after every claude -p run (rate_limit
+# telemetry in the result envelope, 429/529 stderr fallback) and expires on a
+# TTL so a stale reading can never wedge the gate shut.
+QUOTA_REASON=""
+quota_gate_closed() {
+    [[ "$QUOTA_GATE_ENABLED" == "1" && -f "$QUOTA_SCRIPT" ]] || return 1
+    local verdict abort
+    verdict=$(python3 "$QUOTA_SCRIPT" check --state-dir "$STATE_DIR" 2>/dev/null || echo '{}')
+    abort=$(printf '%s' "$verdict" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("abort") else "false")' 2>/dev/null || echo "false")
+    if [[ "$abort" == "true" ]]; then
+        QUOTA_REASON=$(printf '%s' "$verdict" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason",""))' 2>/dev/null || echo "")
+        return 0
+    fi
+    return 1
+}
+
+# Defer the whole queue: entries are NOT consumed (they replay on the next
+# drain once the gate reopens); the marker makes the deferral observable via
+# `quota_store.py status` and /reflect:cost. entries=0 so the deferral never
+# burns daily-cap budget.
+defer_queue_for_quota() {
+    log "quota gate CLOSED (${QUOTA_REASON:-unknown}): deferring queue (reason=quota_near_limit); entries stay queued for replay"
+    python3 "$QUOTA_SCRIPT" defer --state-dir "$STATE_DIR" \
+        --reason quota_near_limit --detail "${QUOTA_REASON:-}" >/dev/null 2>&1 || true
+    emit_error warn drain_quota_deferred "quota_near_limit: ${QUOTA_REASON:-}" ""
+    record_cost_event 0 "" "quota_deferred"
+}
+
+# Feed one claude -p run's output (+ captured stderr) into the quota store so
+# the next gate check sees fresh telemetry. Zero extra API calls — this parses
+# output the run already produced. Best-effort, silent-fail.
+quota_ingest() {
+    local out_json="$1" stderr_file="$2"
+    [[ "$QUOTA_GATE_ENABLED" == "1" && -f "$QUOTA_SCRIPT" ]] || return 0
+    printf '%s' "$out_json" | python3 "$QUOTA_SCRIPT" ingest \
+        --state-dir "$STATE_DIR" --stderr-file "$stderr_file" >/dev/null 2>&1 || true
 }
 
 # ── Retry counters (sidecar JSONL keyed by transcript_path) ───────────────────
@@ -373,6 +448,18 @@ process_entry() {
     session_id=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("session_id","unknown"))' 2>/dev/null || echo "unknown")
     trigger=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("trigger","unknown"))' 2>/dev/null || echo "unknown")
 
+    # R13: skill_refresh tasks (enqueued by reflect_cascade.py when belief
+    # revision lands on a learning that backs a skill) carry the SKILL.md
+    # path in transcript_path, so every queue mechanic below (existence
+    # check, retry counter, poison, rewrite) works unchanged; only the
+    # cascade and the prompt branch on the trigger.
+    local skill_name="" refresh_learning_id="" refresh_reason=""
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        skill_name=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("skill_name",""))' 2>/dev/null || echo "")
+        refresh_learning_id=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("learning_id",""))' 2>/dev/null || echo "")
+        refresh_reason=$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason",""))' 2>/dev/null || echo "")
+    fi
+
     if [[ -z "$transcript" ]]; then
         log "  skip: entry has no transcript_path"
         return 2
@@ -401,8 +488,10 @@ process_entry() {
     # Default-on. Skips reflect-on-reflect / no-signal / already-captured for $0,
     # and shrinks the input from the full transcript to just the signal-bearing
     # windows (~10x) so /reflect runs cheap on Sonnet with a low turn budget.
+    # skill_refresh entries (R13) bypass it: a SKILL.md is not a transcript and
+    # the gate would always skip it as no-signal.
     local reflect_target="$transcript" slice_path=""
-    if [[ "$CASCADE_ENABLED" == "1" && -f "$CASCADE_SCRIPT" ]]; then
+    if [[ "$CASCADE_ENABLED" == "1" && -f "$CASCADE_SCRIPT" && "$trigger" != "skill_refresh" ]]; then
         local prep_json prep_action prep_reason prep_slice
         # prepare exits 0=reflect / 1=skip but ALWAYS prints valid JSON to
         # stdout. Capture stdout directly — do NOT `|| echo {}`, which would
@@ -426,33 +515,97 @@ process_entry() {
     fi
 
     if [[ "$DRY_RUN" == "1" ]]; then
-        log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect $reflect_target"
+        if [[ "$trigger" == "skill_refresh" ]]; then
+            log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect skill-refresh ${skill_name:-?} $reflect_target"
+        else
+            log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect $reflect_target"
+        fi
         [[ -n "$slice_path" ]] && rm -f "$slice_path"
         record_cost_event 1 "$transcript" "dry_run"
         return 0
     fi
 
     # Build the prompt. The /reflect skill analyzes whatever path we hand it —
-    # the cascade slice when enabled, else the full transcript.
-    local prompt
-    prompt="/reflect
+    # the cascade slice when enabled, else the full transcript. The belief-
+    # revision paragraph (S5) is intentionally thin: the cascade embeds the
+    # full action contract + exact 'revise' command inside the slice itself,
+    # so the prompt only has to point the writer at it.
+    # skill_refresh entries (R13) get the skill-edit prompt instead: the
+    # writer re-runs the /reflect skill-edit step against the stale SKILL.md
+    # so the skill catches up with the revised learnings corpus.
+    # idle entries (SG3) get a speculative addendum: the session went quiet
+    # rather than ending explicitly, so it may resume and overturn whatever
+    # the writer concludes — tag the learnings 'speculative' (recall
+    # down-ranks that tag) and cap confidence.
+    # M4: pluggable modes — the writer prompt (template + taxonomy + locale)
+    # comes from the active mode (mode_loader.py resolves REFLECT_MODE /
+    # .reflect/config.json / TOML cascade and reads references/modes/*.json
+    # with parent--override inheritance). The default engineering mode renders
+    # the exact inline prompt below, so behaviour is unchanged until a
+    # different mode is selected; loader failure falls back to the inline
+    # prompt so the drain never stalls on a mode problem.
+    local prompt=""
+    if [[ -f "$MODE_LOADER_SCRIPT" ]]; then
+        prompt=$(python3 "$MODE_LOADER_SCRIPT" drain-prompt \
+            --target "$reflect_target" \
+            --trigger "$trigger" \
+            --skill-name "$skill_name" \
+            --transcript "$transcript" \
+            --learning-id "$refresh_learning_id" \
+            --reason "$refresh_reason" \
+            2>>"$LOG_FILE") || prompt=""
+    fi
+    if [[ -z "$prompt" ]]; then
+    # Fallback: inline engineering prompt (pre-M4 behaviour, byte-identical).
+    local speculative_note=""
+    if [[ "$trigger" == "idle" ]]; then
+        speculative_note="
+
+This reflection was triggered by session IDLENESS (no transcript activity for the idle window), NOT an explicit session end — the session may still resume and overturn these conclusions. Treat every finding as provisional: add the tag 'speculative' to the tags list of EVERY learning you write, and cap confidence at MEDIUM (never HIGH)."
+    fi
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        prompt="/reflect
+
+Skill refresh (auto-triggered): the skill '${skill_name:-unknown}' at ${transcript} is marked stale — a learning that backs it was revised (learning: ${refresh_learning_id:-unknown}; reason: ${refresh_reason:-belief revision}).
+
+Re-run the skill-edit step on this skill: read the SKILL.md, check the current learnings covering its domain (reflect search, or the learnings table in reflect.db), and EDIT the SKILL.md in place so its guidance matches the revised corpus — fold in the new rule, and update or remove any guidance the revision contradicts. Keep the edit surgical and additive where possible; do not rewrite unrelated sections.
+
+When done, summarize what you changed. Do NOT touch the queue file — the drain script handles archiving."
+    else
+        prompt="/reflect
 
 Process the transcript at: ${reflect_target}
 
-Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow. When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
+Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow.
 
-    local out_json exit_code
+Belief revision: if the input contains a 'Related existing learnings' section, prefer UPDATE over CREATE — when a finding restates a listed learning, do NOT write a duplicate note; emit the UPDATE action (or DELETE, only for a learning the new evidence directly contradicts or supersedes) and execute it with the exact 'revise' command shown in that section.${speculative_note}
+
+When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
+    fi
+    fi  # M4: end inline-prompt fallback
+
+    local out_json exit_code stderr_tmp
     # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
     # triggered it, so reflect used to run inside a random repo (the incident
     # ran in research-tech while analysing a cochilli transcript). Pin it to a
     # neutral dir so reflect can't accidentally touch a project tree.
+    # stderr goes to a temp capture first (M3: the quota store scans it for
+    # 429/529 markers) and is then appended to the drain log as before.
+    stderr_tmp=$(mktemp)
     out_json=$(cd "$DRAIN_CWD" && _to "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
         -p "$prompt" \
         --model "$DRAIN_MODEL" \
         --output-format json \
         --permission-mode bypassPermissions \
-        --max-turns "$MAX_TURNS" 2>>"$LOG_FILE")
+        --max-turns "$MAX_TURNS" 2>"$stderr_tmp")
     exit_code=$?
+    cat "$stderr_tmp" >> "$LOG_FILE" 2>/dev/null || true
+
+    # M3: refresh the quota store from this run's telemetry (result envelope
+    # rate_limit fields, 429/529 stderr fallback) so the gate check before the
+    # NEXT entry sees the freshest subscription state. No extra API calls.
+    quota_ingest "$out_json" "$stderr_tmp"
+    rm -f "$stderr_tmp"
 
     # Slice is consumed — remove it regardless of how the run turns out.
     [[ -n "$slice_path" ]] && rm -f "$slice_path"
@@ -482,12 +635,42 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
     # Sanitize cost ("?" on parse failure) to a JSON-safe number.
     [[ "$cost" =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
 
+    # ── Writer-output classifier + drift circuit breaker (M2) ─────────────────
+    # Classify the writer's raw stdout into {valid,prose,idle,poisoned,malformed}
+    # and track the per-transcript consecutive-invalid streak. A valid envelope
+    # resets the streak; INVALID_THRESHOLD consecutive invalids (or one poisoned
+    # wedge marker) trip the breaker: kill the (already-exited) writer's entry
+    # and archive it as drain_poison reason=writer_drift — mirroring the
+    # token-budget poison path — so the next entry gets a fresh writer instead
+    # of a silent slow rot of the queue. Best-effort: classifier failure leaves
+    # writer_class empty and the legacy paths below behave exactly as before.
+    local writer_class="" writer_respawn="false" writer_streak=0 writer_cats=""
+    if [[ -f "$CLASSIFIER_SCRIPT" ]]; then
+        writer_class=$(printf '%s' "$out_json" | python3 "$CLASSIFIER_SCRIPT" classify 2>/dev/null || echo "")
+        if [[ -n "$writer_class" ]]; then
+            local writer_track_json
+            writer_track_json=$(python3 "$CLASSIFIER_SCRIPT" track \
+                --state "$WRITER_HEALTH_FILE" --transcript "$transcript" \
+                --category "$writer_class" --threshold "$INVALID_THRESHOLD" 2>/dev/null || echo '{}')
+            writer_respawn=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("respawn") else "false")' 2>/dev/null || echo "false")
+            writer_streak=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("consecutive",0)))' 2>/dev/null || echo 0)
+            writer_cats=$(printf '%s' "$writer_track_json" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("categories",[])))' 2>/dev/null || echo "")
+        fi
+    fi
+    if [[ "$writer_respawn" == "true" ]]; then
+        log "    WRITER RESPAWN (writer_drift): ${writer_streak} consecutive invalid outputs, categories=[${writer_cats}]; killing writer + archiving transcript"
+        emit_error error drain_poison "writer_drift: ${writer_streak} consecutive invalid writer outputs (categories: ${writer_cats})" "$transcript"
+        printf '%s\n' "$entry_json" >> "$POISON_FILE"
+        record_cost_event 1 "$transcript" "poison_writer_drift" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
+        return 2
+    fi
+
     # Fatal subprocess errors (signal, timeout, process couldn't start) — no JSON.
     if [[ -z "$out_json" ]]; then
         log "    claude -p produced no output (exit=$exit_code); likely timeout or auth issue"
         emit_error error drain_no_output "claude -p produced no output (exit=$exit_code)" "$transcript"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}"
+        record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}" 0 0 0 "" 0 0 0 0 "$writer_class"
         return 1
     fi
 
@@ -499,7 +682,7 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
         log "    BUDGET poison: run used ${total_tokens} tokens (> ${TOKEN_MAX}); archiving transcript"
         emit_error error drain_budget_exceeded "run used ${total_tokens} tokens (> ${TOKEN_MAX})" "$transcript"
         printf '%s\n' "$entry_json" >> "$POISON_FILE"
-        record_cost_event 1 "$transcript" "poison_budget" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "poison_budget" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 2
     fi
 
@@ -511,7 +694,7 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
         local retries_after
         retries_after=$(bump_retry_count "$transcript")
         log "    partial: terminal=max_turns turns=${num_turns} cost=\$${cost} tokens=${total_tokens} retries=${retries_after}"
-        record_cost_event 1 "$transcript" "partial_max_turns" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "partial_max_turns" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         # If we've hit max_turns repeatedly, give up and drop from queue.
         if [[ "$retries_after" -ge "$MAX_RETRIES" ]]; then
             emit_error warn drain_max_turns_exhausted "max_turns hit $MAX_RETRIES times" "$transcript"
@@ -523,25 +706,65 @@ print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
     if [[ "$is_error" == "True" || "$is_error" == "true" ]]; then
         log "    claude reported is_error=true terminal=${terminal_reason} result=${result_summary}"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_is_error" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "fail_is_error" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 1
     fi
 
     if [[ $exit_code -ne 0 ]]; then
         log "    claude -p exit=$exit_code (but is_error=false; treating as soft fail)"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_exit_${exit_code}" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+        record_cost_event 1 "$transcript" "fail_exit_${exit_code}" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
         return 1
     fi
 
     log "    OK turns=${num_turns} cost=\$${cost} tokens=${total_tokens} result=${result_summary}"
-    record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
+    record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok" "$writer_class"
+
+    # R13: a completed skill-refresh clears the staleness flag so the skill
+    # re-enters the inject matcher. refresh_if_stale re-parses the (likely
+    # edited) SKILL.md first; the explicit clear covers a refresh run that
+    # concluded no edit was needed. Best-effort — never fails the entry.
+    if [[ "$trigger" == "skill_refresh" ]]; then
+        python3 - "${SCRIPT_DIR}/../scripts" "$transcript" >/dev/null 2>>"$LOG_FILE" <<'PY' || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import reflect_db
+import skill_index
+conn = reflect_db.get_conn()
+skill_index.refresh_if_stale(conn=conn)
+reflect_db.clear_skill_stale(sys.argv[2], conn=conn)
+PY
+        log "    skill-refresh complete: cleared staleness for $transcript"
+    fi
     return 0
+}
+
+# ── Graph maintenance cadence (C3) ────────────────────────────────────────────
+# The post-delete graph sweep (orphan-entity + stale-edge prune, relink) is a
+# structural rewrite, not free I/O, so it runs once per N reindexing drains
+# rather than every drain. A tiny integer counter file, bumped after each
+# reindexing drain, decides when a sweep is due. Returns 0 (run) / 1 (skip).
+maintain_due() {
+    # 0 disables the sweep entirely.
+    [[ "$MAINTAIN_EVERY" =~ ^[0-9]+$ ]] || return 1
+    [[ "$MAINTAIN_EVERY" -eq 0 ]] && return 1
+    local n=0
+    if [[ -f "$MAINTAIN_COUNTER_FILE" ]]; then
+        n=$(cat "$MAINTAIN_COUNTER_FILE" 2>/dev/null || echo 0)
+        [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    fi
+    n=$((n + 1))
+    if [[ "$n" -ge "$MAINTAIN_EVERY" ]]; then
+        echo 0 > "$MAINTAIN_COUNTER_FILE"   # reset the cadence window
+        return 0
+    fi
+    echo "$n" > "$MAINTAIN_COUNTER_FILE"
+    return 1
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
-    log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX dry_run=$DRY_RUN) ────"
+    log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX invalid_threshold=$INVALID_THRESHOLD dry_run=$DRY_RUN) ────"
 
     if [[ ! -s "$QUEUE_FILE" ]]; then
         log "queue empty or missing; nothing to do"
@@ -583,6 +806,16 @@ main() {
         line="${line#"${line%%[![:space:]]*}"}"  # ltrim
         [[ -z "$line" ]] && continue
         if [[ "$count" -ge "$run_max" ]]; then break; fi
+
+        # M3: consult the quota gate before EACH entry — a result envelope
+        # ingested by the previous entry can close the gate mid-run. Closed
+        # gate = defer the rest of the queue (entries stay queued, replay
+        # once quota recovers) instead of burning the daily cap into a wall.
+        if quota_gate_closed; then
+            defer_queue_for_quota
+            break
+        fi
+
         count=$((count + 1))
 
         log "[entry $count/$run_max]"
@@ -635,6 +868,18 @@ main() {
                 else
                     log "graphml corrupt + unrepairable; reindex may need --force rebuild"
                     emit_error warn graphml_corrupt "graphml unrepairable by truncate; full rebuild advised" ""
+                fi
+                # Graph maintenance sweep (C3): once per N reindexing drains,
+                # prune orphan entities + stale cooccurrence edges and relink
+                # nodes that lost neighbours, keeping the graph clean as
+                # learnings are deleted/superseded. Cheap, no LLM; never fatal.
+                if maintain_due; then
+                    log "graph maintenance due (every $MAINTAIN_EVERY drains); running --maintain sweep"
+                    if python3 "$repair_script" --maintain --quiet >>"$LOG_FILE" 2>&1; then
+                        log "graph maintenance OK"
+                    else
+                        log "graph maintenance non-zero (continuing; not fatal)"
+                    fi
                 fi
             fi
             log "running reflect reindex (incremental)"

@@ -217,6 +217,48 @@ individual `.md` file (fields: `id`, `scope`, `confidence`, `learning_type`,
 `source_episodes`, `superseded_by`, `provenance`, plus Problem/Solution/
 Anti-Pattern/Context sections).
 
+#### Structured field extraction (MANDATORY for every knowledge note)
+
+Every learning's frontmatter MUST carry typed, single-purpose fields in
+addition to the prose body — recall returns just one of them
+(`recall.py --field rule`) instead of injecting a paragraph. Schema
+(strict — every key present; use `""` / `[]` when genuinely absent):
+
+```yaml
+problem: ""           # string — what went wrong, ONE sentence
+root_cause: ""        # string — the underlying cause, ONE sentence
+fix: ""               # string — what resolved it, ONE sentence
+rule: ""              # string — imperative do/don't to apply next time
+category: ""          # string — one of the knowledge categories above
+entities: []          # list[string] — specific named tech/tools/errors
+causal_relations: []  # list[{source, target, type: caused_by | causes | enables | prevents}]
+```
+
+Field rules:
+- **Be selective**: keep a signal only when a session 6 months from now
+  would still act on it; anything below that bar should not become a
+  note at all.
+- **Be concise**: prefer a single strong sentence over several weak ones.
+  The prose body is the place for the full rationale; the fields are
+  distillations.
+- **`rule` is the highest-value field**: phrase it as an imperative the
+  next session can follow verbatim ("Always X", "Never Y when Z").
+- **`entities`**: specific named identifiers only (proper nouns, error
+  strings, tool names) — the same entities the Step 5 sidecar expands on.
+- **`causal_relations`**: cause→effect chains between entities
+  (`type: caused_by | causes | enables | prevents`, mirroring the sidecar's
+  typed causal link types). `[]` when the learning has no causal structure.
+- **`forget_after` (A3, optional)**: ISO-timestamp TTL for clearly
+  time-bounded knowledge — incident workarounds ("avoid X service, it's
+  down"), sprint/migration/quarter-scoped rules. The hourly forget sweep
+  archives the learning once the timestamp passes. Leave `null` (the
+  template default) for durable rules; when in doubt, omit — permanent
+  is the safe default.
+
+The prose body (Problem/Solution/Anti-Pattern/Context) stays mandatory —
+fields complement it, never replace it. Older free-form notes without
+these fields remain valid; recall degrades gracefully for them.
+
 The output must include:
 
 1. **Signals table** -- all detected signals with confidence and category
@@ -250,7 +292,7 @@ entities:
 relationships:
   - source: "{entity A}"
     target: "{entity B}"
-    type: caused_by | solves | requires | relates_to
+    type: caused_by | causes | enables | prevents | contradicts | supersedes | part_of | uses | solves | requires | relates_to | implements | configures | triggers
     description: "{how they relate}"
     strength: 1-10
 ```
@@ -258,6 +300,11 @@ relationships:
 **Rules:**
 - Extract 3-8 entities per learning (focused, not exhaustive)
 - Always include at least one `solves` relationship for bug-fix type
+- **Emit typed causal edges (S2)**: when the direction of effect is known,
+  use `caused_by` / `causes` / `enables` / `prevents` / `contradicts` /
+  `supersedes` / `part_of` / `uses` instead of flat `relates_to` — graph
+  queries like "what enabled this fix?" depend on these. `relates_to` is
+  the fallback for genuinely undirected association only.
 - Strength: 9-10 direct/causal, 5-7 moderate, 1-4 weak
 - Entity names normalized to lowercase canonical form
 - Use the most specific entity type available
@@ -326,6 +373,134 @@ After applying changes, automatically create an episode note.
 Episode notes are raw session snapshots for provenance -- they do NOT require approval.
 
 Use template at `assets/episode_template.md`.
+
+## Belief Revision on Ingest (Drain)
+
+When `/reflect` runs headlessly from the drain, the cascade slice may carry a
+`## Related existing learnings (belief revision)` section: existing learnings
+whose titles overlap this session's signals, plus the exact `revise` command
+to execute against them. When that section is present, every finding maps to
+exactly ONE structured action instead of unconditionally creating a new note:
+
+| Action | When | Effect |
+|--------|------|--------|
+| `CREATE` | genuinely new knowledge — no listed learning covers the same rule/facet | new learning row (`proof_count` starts at 1) |
+| `UPDATE` | finding restates a listed learning (same rule, fix, or decision) | merges as evidence: `proof_count`++, transcript appended to `source_memory_ids`, history snapshot recorded |
+| `DELETE` | new evidence directly contradicts or supersedes a listed learning | retires it non-destructively: status → `reverted` + reason; history snapshot kept |
+
+**Revision rules:**
+- **PREFER UPDATE OVER CREATE**: one canonical learning with many proofs beats
+  near-duplicate siblings. Re-observed evidence strengthens; it never duplicates.
+- Match by the specific rule/facet, not by general topic — "never use var"
+  updates only the var learning, not every TypeScript learning.
+- Be very conservative with `DELETE` — only when directly contradicted or
+  superseded, never just because a learning is old.
+- Every action carries a one-sentence `reason` (audited to catch duplicate creates).
+- **Time-bounded CREATEs (A3)**: when the new knowledge is clearly scoped to a
+  window — an incident workaround, a sprint/migration/quarter-specific rule —
+  add an optional `forget_after: "<ISO timestamp>"` so the hourly forget sweep
+  archives it once the window closes. Omit for durable knowledge; permanent is
+  the default.
+
+**Action contract** (JSON array handed to the cascade):
+
+```json
+[{"action": "UPDATE", "target_id": "<id>", "reason": "restates existing rule"},
+ {"action": "DELETE", "target_id": "<id>", "reason": "superseded by new fix"},
+ {"action": "CREATE", "content": "<one-line learning>", "reason": "no existing match"},
+ {"action": "CREATE", "content": "<incident workaround>", "reason": "scoped to incident",
+  "forget_after": "2026-07-01T00:00:00+00:00"}]
+```
+
+Execute via the cascade (stdlib-only, no engine deps):
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_cascade.py revise \
+    --source "<transcript-path>" \
+    --actions '[{"action":"UPDATE","target_id":"<id>","reason":"..."}]'
+```
+
+The interactive `/reflect` flow is unchanged — this section only applies when
+the input explicitly carries the related-learnings block.
+
+### Auto Skill Refresh (R13)
+
+Skills are promoted from learnings once and would otherwise drift as the
+corpus evolves. Belief revision closes that loop automatically — no manual
+step in this skill is required:
+
+1. When a `revise` UPDATE/DELETE lands on a learning whose title tokens or
+   category overlap an indexed skill's `tags` (the R20 `skills` table in
+   `reflect.db`), that skill is flagged `is_stale`.
+2. Stale skills stop matching in the SessionStart inject tier immediately —
+   a skill with possibly-outdated guidance never wins over raw learnings.
+3. A `skill_refresh` task is queued in `~/.reflect/pending_reflections.jsonl`
+   (`transcript_path` = the SKILL.md, `trigger` = `skill_refresh`, at most one
+   pending task per skill). The background drain consumes it by re-running
+   the skill-edit step (Step 2.5 shape: re-read the SKILL.md, check current
+   learnings for its domain, edit in place).
+4. Regenerating the SKILL.md (mtime change) — or a completed refresh run —
+   clears the flag and the skill re-enters the inject matcher.
+
+The `revise` summary reports the back-reaction as `skills_marked_stale` and
+`refreshes_queued`.
+
+## Consolidated Observations (O1, second drain pass)
+
+The drain emits TWO output streams: raw corrections (the belief-revision
+actions above) AND aggregated, persona/convention-shaped **observations**
+that accumulate evidence over time. Without this layer, open-domain queries
+("what conventions does this codebase use?", "what does this team prefer?")
+surface 5 raw corrections and force the agent to aggregate them in-context.
+
+| Layer | Shape | Frontmatter `type` | Example |
+|-------|-------|--------------------|---------|
+| correction (learning) | one specific rule/fix | `learning` | "Never use `var` in TypeScript" |
+| observation | persona/convention aggregate | `observation` | "This team prefers strict typing over `any`" |
+| skill | workflow (how to do X) | — | "How to publish to TestFlight" |
+
+When the cascade slice carries a `## Consolidated observations` section, run
+a SECOND pass after executing the revision actions: for every
+persona/convention-shaped finding, emit exactly one observation action
+against the listed existing observations:
+
+```json
+[{"action": "UPDATE", "target_id": "<obs id>",
+  "source_correction_ids": ["<learning ids>"], "reason": "more evidence"},
+ {"action": "CREATE", "content": "Team prefers conventional commits",
+  "source_correction_ids": ["<learning ids>"], "reason": "no existing aggregate"},
+ {"action": "DELETE", "target_id": "<obs id>", "reason": "convention dropped"}]
+```
+
+Execute via the cascade (stdlib-only, no engine deps):
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/reflect_cascade.py observe \
+    --actions '[{"action":"UPDATE","target_id":"<id>","source_correction_ids":["<lrn-id>"],"reason":"..."}]'
+```
+
+**Observation rules:**
+- **PREFER UPDATE OVER CREATE**: evidence accumulates — 50 "team prefers X"
+  corrections collapse into ONE observation with `proof_count: 50`, never
+  50 sibling aggregates.
+- `UPDATE` appends `source_correction_ids` uniquely and bumps `proof_count`
+  by the number of NEW ids; the pre-update form is snapshotted into
+  `observation_history` first, so history is never lost. Cite the learning
+  ids from the related-learnings block and the `created_ids` field of the
+  `revise` summary.
+- `UPDATE` may rewrite `content` as the aggregate wording evolves — the old
+  wording survives in `observation_history`.
+- `DELETE` retires non-destructively (`status: retired` + reason). Only when
+  the convention demonstrably no longer holds.
+- Observation notes written to disk use `assets/observation_template.md`
+  (frontmatter `type: observation`); raw correction learnings keep
+  `assets/learning_template.md`.
+
+**Retrieval tier**: observations are a separate tier in `reflect.db`
+(`observations` table). Open-domain queries surface the observation tier
+FIRST — proof-ranked aggregates before raw corrections — via
+`recall_observation_tier` / `recall_tiered`; closed-domain lookups ("how do
+I fix X?") skip the tier entirely.
 
 ## Toggle Auto-Reflect
 

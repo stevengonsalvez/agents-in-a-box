@@ -1,12 +1,32 @@
 // @ts-check
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightImageZoom from 'starlight-image-zoom';
 
 // https://astro.build/config
 export default defineConfig({
   site: 'https://stevengonsalvez.github.io',
   base: '/agents-in-a-box',
   trailingSlash: 'never',
+  // Docs live in the repo-root `docs/` tree (outside this site dir), so MDX
+  // there can't resolve `@astrojs/starlight/components` from its own folder.
+  // Alias the bare specifier to the package file in this site's node_modules.
+  vite: {
+    resolve: {
+      // Exact-match (end-anchored) so we don't clobber Starlight's own
+      // `@astrojs/starlight/components/Banner.astro` etc. — only the bare
+      // `@astrojs/starlight/components` specifier used by external docs MDX.
+      alias: [
+        {
+          find: /^@astrojs\/starlight\/components$/,
+          replacement: fileURLToPath(
+            new URL('./node_modules/@astrojs/starlight/components.ts', import.meta.url)
+          ),
+        },
+      ],
+    },
+  },
   integrations: [
     starlight({
       title: 'agents-in-a-box',
@@ -19,6 +39,7 @@ export default defineConfig({
           href: 'https://github.com/stevengonsalvez/agents-in-a-box',
         },
       ],
+      plugins: [starlightImageZoom()],
       customCss: ['./src/styles/tokens.css', './src/styles/crt.css'],
       editLink: {
         baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
@@ -52,7 +73,9 @@ export default defineConfig({
             { label: 'Overview', slug: 'tui/overview' },
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
+            { label: 'Starting a new session', slug: 'tui/start-session' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
+            { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
             { label: 'CLI reference', slug: 'tui/cli' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
@@ -105,6 +128,8 @@ export default defineConfig({
                 { label: 'burndown', slug: 'plugins/burndown' },
                 { label: 'session-reader', slug: 'plugins/session-reader' },
                 { label: 'witr', slug: 'plugins/witr' },
+                { label: 'learnings', slug: 'plugins/learnings' },
+                { label: 'abtop', slug: 'plugins/abtop' },
               ],
             },
             { label: 'Changelog', slug: 'plugins/changelog' },
@@ -114,6 +139,7 @@ export default defineConfig({
           label: 'Knowledge',
           items: [
             { label: 'How reflection works', slug: 'knowledge/overview' },
+            { label: 'How recall works — by example', slug: 'knowledge/recall-by-example' },
             { label: 'Hooks & platform (Claude + Codex)', slug: 'knowledge/hooks-and-platform' },
             { label: 'reflect CLI', slug: 'knowledge/reflect-cli' },
           ],
@@ -124,6 +150,12 @@ export default defineConfig({
             { label: 'Building', slug: 'contributing/building' },
             { label: 'CI / CD', slug: 'contributing/ci-cd' },
             { label: 'Release process', slug: 'contributing/release-process' },
+          ],
+        },
+        {
+          label: 'Hangar',
+          items: [
+            { label: 'Architecture & features', slug: 'hangar/architecture' },
           ],
         },
         {

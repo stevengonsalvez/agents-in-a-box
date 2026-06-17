@@ -39,7 +39,16 @@ pub enum AppEvent {
     NextWorkspace,
     PreviousWorkspace,
     ToggleHelp,
-    RefreshWorkspaces,  // Manual refresh of workspace data
+    // Shared MCP pool overlay
+    McpOverlayOpen,
+    McpOverlayClose,
+    McpOverlayPrev,
+    McpOverlayNext,
+    McpOverlayRefresh,
+    McpOverlayStopServer,
+    McpOverlayStopDaemon,
+    McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
+    RefreshWorkspaces, // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
@@ -51,15 +60,19 @@ pub enum AppEvent {
     RestartSession,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
-    OpenInEditor,          // Open selected session's workspace in preferred editor
-    OpenQuickShell,        // Open shell in selected workspace/session directory
-    CleanupOrphaned,       // Clean up orphaned containers
+    ResumeSelectedSessions(String), // Resume all multi-selected Stopped interactive sessions (carries trigger key)
+    OpenInEditor,                   // Open selected session's workspace in preferred editor
+    OpenQuickShell,                 // Open shell in selected workspace/session directory
+    CleanupOrphaned,                // Clean up orphaned containers
     SwitchToLogs,
     SwitchToTerminal,
     GoToTop,
     GoToBottom,
     // Pane focus management
     SwitchPaneFocus,
+    /// Toggle the sessions sidebar between full width and the thin rail —
+    /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
+    ToggleSessionsSidebar,
     // Log scrolling events
     ScrollLogsUp,
     ScrollLogsDown,
@@ -164,13 +177,14 @@ pub enum AppEvent {
     GitReviewExpandAllFolders, // e — expand all folders
     GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
-    AttachTmuxSession, // Attach to tmux session
-    DetachTmuxSession, // Detach from tmux session
-    EnterScrollMode,   // Enter scroll mode in tmux preview
-    ExitScrollMode,    // Exit scroll mode in tmux preview
-    ScrollPreviewUp,   // Scroll tmux preview up
-    ScrollPreviewDown, // Scroll tmux preview down
-    ToggleExpandAll,   // Toggle expand/collapse all workspaces
+    AttachTmuxSession,    // Attach to tmux session (full-screen)
+    EnterInteractivePane, // Attach in-place: interactive embedded tmux pane
+    DetachTmuxSession,    // Detach from tmux session
+    EnterScrollMode,      // Enter scroll mode in tmux preview
+    ExitScrollMode,       // Exit scroll mode in tmux preview
+    ScrollPreviewUp,      // Scroll tmux preview up
+    ScrollPreviewDown,    // Scroll tmux preview down
+    ToggleExpandAll,      // Toggle expand/collapse all workspaces
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -207,6 +221,8 @@ pub enum AppEvent {
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
     GoToWitr,                // Navigate to the witr (process causality) plugin screen
+    GoToLearnings,           // Navigate to the learnings (knowledge-base) plugin screen
+    GoToAbtop,               // Launch the abtop (top-for-agents) monitor full-screen
     GoToSkills,              // Navigate to skills view
     GoToSkillManager,        // Navigate to skill-manager view (spec §10.1)
     SkillManagerBack,        // Return to home screen from SkillManager (Esc/q)
@@ -333,6 +349,8 @@ pub enum AppEvent {
     SkillManagerBrowseClose,
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
+    PanelBack,               // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
     InboxMoveDown,           // Inbox: move selection down one row
     InboxPageUp,             // Inbox: jump 10 rows up
@@ -415,7 +433,7 @@ pub enum AppEvent {
     // Onboarding wizard events
     OnboardingNext,            // Go to next step (Enter/Right Arrow)
     OnboardingBack,            // Go to previous step (Backspace/Left Arrow)
-    OnboardingCancel,          // Cancel onboarding (Esc)
+    OnboardingToMenu,          // Leave wizard for the Setup menu (Esc)
     OnboardingInputChar(char), // Input character for git directories
     OnboardingBackspace,       // Backspace in git directories input
     OnboardingDelete,          // Delete character in input
@@ -529,7 +547,7 @@ fn source_provenance(
 /// Compute a stable display label for a `RepoSource` — drives the Configure
 /// screen's title bar and the persistence key in `session-defaults.yaml`.
 /// Phase 5 (new-session redesign).
-fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
+pub fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
     use crate::git::repo_source::RepoSource;
     match source {
         RepoSource::LocalPath(p) => p
@@ -722,8 +740,33 @@ impl EventHandler {
             && y < rect.y.saturating_add(rect.height)
     }
 
+    /// Map a slash-command name (leading `/` already stripped by the
+    /// palette) to the host `AppEvent` it dispatches, or `None` if no host
+    /// mapping exists (e.g. a plugin-owned or unknown command — the caller
+    /// falls back to its log-only stub).
+    ///
+    /// P9: the `learnings` plugin advertises `/recall` + `/memory` in its
+    /// manifest `provides.commands`. Both open the learnings screen via the
+    /// SAME path the global `m` shortcut uses — `AppEvent::GoToLearnings`
+    /// (handler at the `GoToLearnings` arm of `process_event`). No open
+    /// logic is duplicated here; this is purely the name→event lookup.
+    pub fn slash_command_event(cmd: &str) -> Option<AppEvent> {
+        match cmd {
+            "recall" | "memory" => Some(AppEvent::GoToLearnings),
+            _ => None,
+        }
+    }
+
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
+        // Mode boundary (defense in depth): while the interactive embed owns
+        // input, host mouse handling must never mutate focus/selection under
+        // the live pane. main.rs already swallows/forwards mouse events before
+        // calling this, but the boundary must hold even if a future call site
+        // forgets the gate. Pinned by the mode-boundary tripwire.
+        if state.is_interactive_pane() {
+            return None;
+        }
         match event {
             AppEvent::MouseClick { x, y } => {
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
@@ -1165,6 +1208,23 @@ impl EventHandler {
                 }
                 _ => return None,
             }
+        }
+
+        // MCP pool overlay captures all keys while open (after the
+        // confirmation dialog, so a stop-confirmation sits on top of it).
+        if state.mcp_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
+                    Some(AppEvent::McpOverlayClose)
+                }
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
+                KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
+                KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
+                KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
+                KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
+                _ => None,
+            };
         }
 
         // Handle "Other tmux" rename mode (high priority)
@@ -1609,8 +1669,21 @@ impl EventHandler {
         use crate::app::state::FocusedPane;
 
         match key_event.code {
-            // Return to home screen (quit only available from HomeScreen)
-            KeyCode::Char('q') | KeyCode::Esc => Some(AppEvent::GoToHomeScreen),
+            // Return to home screen (quit only available from HomeScreen).
+            // Plugin screens normally consume Esc via the forwarder above,
+            // but when the plugin is unavailable (runtime down, plugin
+            // disabled — the placeholder is showing) the key falls through
+            // to here: pop back to wherever the panel was opened from
+            // instead of hardcoding home.
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if crate::app::screens::builtin::plugin_id_for_screen(&state.current_screen)
+                    .is_some()
+                {
+                    Some(AppEvent::PanelBack)
+                } else {
+                    Some(AppEvent::GoToHomeScreen)
+                }
+            }
             KeyCode::Tab => {
                 tracing::debug!(
                     "Tab key pressed, current focused_pane: {:?}",
@@ -1638,6 +1711,15 @@ impl EventHandler {
             KeyCode::Char('a') => {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
+            }
+            KeyCode::Char('A') => {
+                // In-place interactive embed: Shift+A is the in-pane sibling of
+                // 'a' (full-screen attach) — same verb, different surface. Only
+                // meaningful if the selection has a tmux session; the handler in
+                // the loop no-ops otherwise. (Re-auth, which used to live on
+                // 'A', moved to 'u'.)
+                tracing::info!("[ACTION] 'A' key pressed - EnterInteractivePane requested");
+                Some(AppEvent::EnterInteractivePane)
             }
             // The badge-to-position mapping is recomputed on every render —
             // digit N attaches to whatever is at that position *now*, not a
@@ -1670,7 +1752,12 @@ impl EventHandler {
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // Enter starts every selected resumable session, not just the
+                // highlighted one.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -1689,10 +1776,17 @@ impl EventHandler {
                 }
             }
             KeyCode::Char('r') => {
-                // 'r' resumes a Stopped interactive session; otherwise it falls
-                // back to the existing reauthenticate-credentials shortcut.
+                // 'r' resumes a Stopped interactive session only. It no longer
+                // doubles as the reauthenticate-credentials shortcut — that
+                // moved to 'A' so the menu bar's `r resume` hint matches what
+                // the key actually does (one key, one meaning). Pressing 'r'
+                // on a non-resumable selection is a no-op.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // 'r' resumes every selected resumable session.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("r".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -1704,12 +1798,16 @@ impl EventHandler {
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
-                        Some(AppEvent::ReauthenticateCredentials)
+                        None
                     }
                 } else {
-                    Some(AppEvent::ReauthenticateCredentials)
+                    None
                 }
             }
+            // Re-authenticate agent credentials. Lives on 'u' ("re-aUth"; was
+            // 'A' until Shift+A became the in-pane attach, and 'r' before that
+            // so the resume affordance could own 'r'). See restart_affordance.
+            KeyCode::Char('u') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {
@@ -1732,6 +1830,27 @@ impl EventHandler {
             KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
             KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
             KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
+            // Inbox is advertised on the session-list menu bar (`b inbox`), so
+            // the key must work in this view too — not only on the home screen
+            // where `handle_home_screen_keys` also binds it. Without this arm
+            // the menu hint pointed at a dead key.
+            KeyCode::Char('b') => Some(AppEvent::GoToInbox),
+            // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
+            // 'B' is its keyboard twin. Hinted next to the glyph itself.
+            KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
+            // Panel screens mirror their home-menu letters here so every
+            // panel opens from the session list too (i stats, w witr,
+            // k skills, m memory, t abtop — same set
+            // `handle_home_screen_keys` binds). GoToStats/GoToSkills/
+            // GoToLearnings save `previous_screen`, so closing the panel
+            // lands back on the session list, not home. GoToWitr /
+            // GoToAbtop are tmux suspend/attach that never change
+            // `current_screen`, so quitting them resumes here automatically.
+            KeyCode::Char('i') => Some(AppEvent::GoToStats),
+            KeyCode::Char('w') => Some(AppEvent::GoToWitr),
+            KeyCode::Char('k') => Some(AppEvent::GoToSkills),
+            KeyCode::Char('m') => Some(AppEvent::GoToLearnings),
+            KeyCode::Char('t') => Some(AppEvent::GoToAbtop),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1749,7 +1868,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextSession");
                         Some(AppEvent::NextSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsDown");
                         Some(AppEvent::ScrollLogsDown)
                     }
@@ -1762,7 +1881,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousSession");
                         Some(AppEvent::PreviousSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsUp");
                         Some(AppEvent::ScrollLogsUp)
                     }
@@ -1775,7 +1894,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousWorkspace");
                         Some(AppEvent::PreviousWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1788,7 +1907,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextWorkspace");
                         Some(AppEvent::NextWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1796,15 +1915,15 @@ impl EventHandler {
             }
             KeyCode::Home => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToTop),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToTop),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
             },
             KeyCode::End => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToBottom),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToBottom),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToBottom),
             },
             KeyCode::Char(' ') => match state.focused_pane {
                 FocusedPane::Sessions => None, // Space does nothing in sessions pane
-                FocusedPane::LiveLogs => Some(AppEvent::ToggleAutoScroll),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ToggleAutoScroll),
             },
             _ => None,
         }
@@ -1871,7 +1990,21 @@ impl EventHandler {
                 .unwrap_or(PickRepoOutcome::Stay);
 
             return match outcome {
-                PickRepoOutcome::Stay => None,
+                PickRepoOutcome::Stay => {
+                    // Check if the key handler set git_auth_status to
+                    // Checking (user pressed Enter to retry auth).
+                    use crate::components::new_session::pick_repo::GitAuthStatus;
+                    let needs_recheck = state
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                        .and_then(|p| p.git_auth_status.as_ref())
+                        == Some(&GitAuthStatus::Checking);
+                    if needs_recheck {
+                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                    }
+                    None
+                }
                 PickRepoOutcome::Notice { message, is_error } => {
                     // Favorite added/removed or a refusal (e.g. starring a repo
                     // with no remote). Surface it and stay on the picker.
@@ -1929,76 +2062,39 @@ impl EventHandler {
                     state.current_screen = prev;
                     None
                 }
-                PickRepoOutcome::AdvanceTo(source) | PickRepoOutcome::StartClone(source) => {
-                    // Phase 5: transition into Configure. StartClone for now
-                    // skips the real async clone (Phase 6+ wires it) and
-                    // advances straight in — the tripwires don't depend on
-                    // network I/O. Build `configure_state` from `source` +
-                    // session-defaults, set step = Configure.
-                    //
-                    // The dispatcher (not the UI layer) computes:
-                    //   - the HEAD branch via `git::repo_source::head_branch`
-                    //     (finding #9 — keeps git2 out of components/);
-                    //   - the configured `branch_prefix` (finding #5);
-                    //   - the existing-branch list for collision-disamb
-                    //     (finding #16).
-                    // PickRepo persistence (finding #3): write
-                    // session-defaults ONCE here, not on every arrow keypress.
-                    use crate::components::new_session::configure::ConfigureState;
-                    use crate::config::session_defaults::SessionDefaults;
-                    use crate::git::repo_source::head_branch;
-                    use crate::git::worktree_manager::WorktreeManager;
-                    if let Some(pick) =
-                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
-                    {
-                        let path = SessionDefaults::default_path();
-                        if let Err(err) = pick.defaults.save_to(&path) {
-                            tracing::warn!(error = %err, "PickRepo advance: persist session-defaults failed");
+                PickRepoOutcome::AdvanceTo(source) => {
+                    state.advance_pick_repo_to_configure(source);
+                    None
+                }
+                PickRepoOutcome::StartClone(source) => {
+                    // For GitHub HTTPS / shorthand sources, pre-check auth
+                    // before advancing — git credential prompts hang the TUI.
+                    // Non-GitHub HTTPS (GitLab, self-hosted) is left alone: the
+                    // `gh auth status` probe is GitHub-specific and would put an
+                    // irrelevant failure screen in front of those clones.
+                    use crate::components::new_session::pick_repo::GitAuthStatus;
+                    let needs_auth_check = match &source {
+                        crate::git::repo_source::RepoSource::GithubShorthand { .. } => true,
+                        crate::git::repo_source::RepoSource::HttpsUrl(url) => {
+                            crate::git::repo_source::is_github_host(url)
                         }
-                    }
-                    let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
-                    let label = derive_repo_label(&source);
-                    let branch_source = match &source {
-                        crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
-                        _ => None,
+                        _ => false,
                     };
-                    let branch_prefix = state.app_config.workspace_defaults.branch_prefix.clone();
-                    // Use `list_all_worktrees` (scans by-session symlinks →
-                    // real git branch via head.shorthand()), NOT
-                    // `list_worktrees` which only finds legacy UUID-named
-                    // top-level dirs and misses every modern by-name worktree.
-                    // The latter returned empty → collision never detected
-                    // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let mut existing_branches: Vec<String> = WorktreeManager::new()
-                        .ok()
-                        .and_then(|m| m.list_all_worktrees().ok())
-                        .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
-                        .unwrap_or_default();
-                    // The session list alone can't see the repo's OWN checkout
-                    // (or a manually-added worktree) — `git worktree list` can.
-                    // Without this, a checkout-direct pick of the repo's
-                    // current branch passes the picker guard and dies at
-                    // `git worktree add` (review P1, PR #211).
-                    if let crate::git::repo_source::RepoSource::LocalPath(p) = &source {
-                        for b in crate::git::branch_list::checked_out_branches(p) {
-                            if !existing_branches.contains(&b) {
-                                existing_branches.push(b);
-                            }
+                    if needs_auth_check {
+                        if let Some(pick) = state
+                            .new_session_state
+                            .as_mut()
+                            .and_then(|ns| ns.pick_repo_state.as_mut())
+                        {
+                            pick.git_auth_status = Some(GitAuthStatus::Checking);
+                            pick.pending_clone_source = Some(source);
                         }
+                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                    } else {
+                        // SSH (key-based auth), local paths, and non-GitHub
+                        // HTTPS remotes skip the GitHub pre-check.
+                        state.advance_pick_repo_to_configure(source);
                     }
-                    let cfg = ConfigureState::from_pick_repo(
-                        source.clone(),
-                        label,
-                        &defaults,
-                        branch_source,
-                        &branch_prefix,
-                        existing_branches,
-                    );
-                    if let Some(ns) = state.new_session_state.as_mut() {
-                        ns.configure_state = Some(cfg);
-                        ns.step = NewSessionStep::Configure;
-                    }
-                    tracing::debug!(?source, "PickRepo advance → Configure");
                     None
                 }
             };
@@ -2108,7 +2204,7 @@ impl EventHandler {
                     // Note: Left/Backspace used for text editing, use Up arrow to go back
                     match key_event.code {
                         KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Up => Some(AppEvent::OnboardingBack), // Go back (since Left is cursor)
                         KeyCode::Backspace => Some(AppEvent::OnboardingBackspace),
                         KeyCode::Delete => Some(AppEvent::OnboardingDelete),
@@ -2130,7 +2226,7 @@ impl EventHandler {
                                 Some(AppEvent::OnboardingNext)
                             }
                         }
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                             Some(AppEvent::OnboardingBack)
                         }
@@ -2143,7 +2239,7 @@ impl EventHandler {
                 }
                 OnboardingStep::Authentication => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
                     }
@@ -2152,7 +2248,7 @@ impl EventHandler {
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                     KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
                     KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
@@ -2162,7 +2258,7 @@ impl EventHandler {
                 },
                 OnboardingStep::Summary => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
                     }
@@ -2172,7 +2268,7 @@ impl EventHandler {
                     // Welcome and other steps - basic navigation
                     match key_event.code {
                         KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                             Some(AppEvent::OnboardingBack)
                         }
@@ -2470,7 +2566,7 @@ impl EventHandler {
     ///   - q / Esc         back to previous screen (home if none)
     fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::GoToHomeScreen),
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
             KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
             KeyCode::PageUp => Some(AppEvent::InboxPageUp),
@@ -2503,9 +2599,22 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
+            // `m` for "memory" — opens the learnings KB browser. The
+            // plugin also advertises `/recall` + `/memory` slash commands
+            // (wired in P9); this global shortcut is the host's sidebar/
+            // keybinding open path the P3 tripwire drives.
+            KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
+            KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
-            KeyCode::Char('m') => return Some(AppEvent::GoToSkillManager),
+            // `m` is the Memory/Learnings browser (main); SkillManager moved
+            // to `z` to avoid the collision when the two features merged.
+            KeyCode::Char('z') => return Some(AppEvent::GoToSkillManager),
+            KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
+            // `p` for "pool" — opens the shared MCP pool observability
+            // overlay. `m` is taken by the learnings/Memory browser, so the
+            // pool tile + global keybind use `p` instead.
+            KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2716,9 +2825,76 @@ impl EventHandler {
                 tracing::info!("Navigating to HomeScreen");
                 state.current_screen = screen_ids::HOME.to_string();
             }
+            AppEvent::PanelBack => {
+                // Panels (inbox, stats, skills, plugin screens) open from
+                // either the home menu or the session list; closing one
+                // returns to wherever it was opened from rather than
+                // hardcoding HOME. Mirrors GitViewBack's pop semantics.
+                let target =
+                    state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
+                tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
+                state.current_screen = target;
+            }
             AppEvent::ToggleHelp => state.toggle_help(),
+            AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
+            AppEvent::McpOverlayClose => state.close_mcp_overlay(),
+            AppEvent::McpOverlayPrev => state.mcp_overlay_move(-1),
+            AppEvent::McpOverlayNext => state.mcp_overlay_move(1),
+            AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
+            AppEvent::McpOverlayStopServer => {
+                if let Some(name) =
+                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                {
+                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                        title: "Stop MCP server".to_string(),
+                        message: format!(
+                            "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
+                        ),
+                        confirm_action: crate::app::state::ConfirmAction::McpStopServer(name),
+                        selected_option: false,
+                        warning: None,
+                        options: None,
+                        selected_index: 0,
+                    });
+                }
+            }
+            AppEvent::McpOverlayStopDaemon => {
+                let (servers, sessions) = state
+                    .mcp_overlay
+                    .as_ref()
+                    .map(|o| {
+                        let s: usize = o.servers.iter().map(|x| x.clients).sum();
+                        (o.servers.len(), s)
+                    })
+                    .unwrap_or((0, 0));
+                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    title: "Stop the MCP pool".to_string(),
+                    message: format!(
+                        "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
+                    ),
+                    confirm_action: crate::app::state::ConfirmAction::McpStopDaemon,
+                    selected_option: false,
+                    warning: None,
+                    options: None,
+                    selected_index: 0,
+                });
+            }
+            // The overlay is a global pool view (not bound to any worktree),
+            // so import always targets the user config — the only config read
+            // from anywhere. cwd's .mcp.json is still pulled in as a source.
+            // Additive (never overwrites), so it fires without a confirmation.
+            AppEvent::McpOverlayImport => state.mcp_import(true),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            AppEvent::ToggleSessionsSidebar => {
+                // Same path the [-]/[+] mouse glyph takes: flip + persist the
+                // preference so the choice survives restarts.
+                state.sessions_pane_state.toggle_collapsed();
+                Self::persist_sessions_pane_preferences(state);
+            }
+            // Entering the interactive embed is handled in the main loop (it needs
+            // the terminal size and the embed lives in the event loop) — no-op here.
+            AppEvent::EnterInteractivePane => {}
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
             AppEvent::OtherTmuxRenameChar(c) => state.other_tmux_rename_char(c),
@@ -3187,7 +3363,7 @@ impl EventHandler {
                     state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
-                        "{} session(s) selected — Shift+D to delete",
+                        "{} session(s) selected — Enter to start, Shift+D to delete",
                         count
                     ));
                 }
@@ -3227,6 +3403,34 @@ impl EventHandler {
                         Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
+                }
+            }
+            AppEvent::ResumeSelectedSessions(trigger) => {
+                // Checked rows win over cursor resume: when sessions are
+                // multi-selected, start every resumable one, not just the
+                // highlighted row. Running selections are skipped so we never
+                // kill+recreate a live tmux session.
+                let total_selected = state.selected_sessions.len();
+                let ids = state.selected_resumable_session_ids();
+                if ids.is_empty() {
+                    state.add_warning_notification(format!(
+                        "No stopped interactive sessions among {} selected to resume",
+                        total_selected
+                    ));
+                } else {
+                    tracing::info!(
+                        "[ACTION] Bulk-resuming {} of {} selected session(s) (trigger={})",
+                        ids.len(),
+                        total_selected,
+                        trigger
+                    );
+                    state.add_success_notification(format!(
+                        "Resuming {} selected session(s)...",
+                        ids.len()
+                    ));
+                    state.pending_async_action =
+                        Some(AsyncAction::BulkResumeSessions(ids, trigger));
+                    state.selected_sessions.clear();
                 }
             }
             AppEvent::OpenInEditor => {
@@ -3274,7 +3478,10 @@ impl EventHandler {
                 let old_pane = state.focused_pane.clone();
                 state.focused_pane = match state.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
-                    FocusedPane::LiveLogs => FocusedPane::Sessions,
+                    // Preview is entered via 'l' / exited via Ctrl+Q, not Tab —
+                    // Tab while focused is intercepted upstream, so this is only a
+                    // safe fallback.
+                    FocusedPane::LiveLogs | FocusedPane::Preview => FocusedPane::Sessions,
                 };
                 tracing::debug!(
                     "Switched focus from {:?} to {:?}",
@@ -3353,6 +3560,20 @@ impl EventHandler {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
+                            crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
+                                // Run `abtop --setup`, then open abtop.
+                                state.pending_async_action =
+                                    Some(AsyncAction::SetupAbtopRateLimits);
+                            }
+                            crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
+                                // Decline setup this time; open abtop now.
+                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            }
+                            crate::app::state::ConfirmAction::DismissAbtopSetup => {
+                                // Never offer again, then open abtop.
+                                state.dismiss_abtop_setup();
+                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
                                 // Codex + the canonical hook script are written
@@ -3401,6 +3622,12 @@ impl EventHandler {
                                 if let Ok(paths) = ainb_plugin_notifyd::Paths::from_home() {
                                     let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
                                 }
+                            }
+                            crate::app::state::ConfirmAction::McpStopServer(name) => {
+                                state.mcp_stop_server(&name);
+                            }
+                            crate::app::state::ConfirmAction::McpStopDaemon => {
+                                state.mcp_stop_daemon();
                             }
                             crate::app::state::ConfirmAction::Cancel => {
                                 // Explicit Cancel ("Not now"): dialog already
@@ -3811,6 +4038,10 @@ impl EventHandler {
                             state.current_screen = screen_ids::SKILL_MANAGER.to_string();
                             Self::apply_skill_manager_sources_width(state);
                         }
+                        HomeTile::Mcp => {
+                            tracing::info!("Opening MCP pool overlay");
+                            state.toggle_mcp_overlay();
+                        }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
@@ -3868,13 +4099,19 @@ impl EventHandler {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Inbox => {
-                        state.previous_screen = Some(state.current_screen.clone());
-                        state.current_screen = screen_ids::INBOX.to_string();
-                        state.inbox_state.refresh();
+                        // Route through the canonical event so the
+                        // origin-save (and its self-clobber guard) has
+                        // exactly one code path.
+                        Self::process_event(AppEvent::GoToInbox, state);
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                    }
+                    SidebarItem::Mcp => {
+                        // Opens the overlay on top of the current screen (not a
+                        // screen switch) and fires the first lazy fetch.
+                        state.toggle_mcp_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -3886,10 +4123,10 @@ impl EventHandler {
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
-                        state.current_screen = screen_ids::ANALYTICS.to_string();
-                        // Data load lives inside the burndown plugin
-                        // now (Phase 3 cutover); host no longer
-                        // pre-populates state for the analytics screen.
+                        // Canonical event saves `previous_screen` so the
+                        // panel's Esc-close returns here, not to a stale
+                        // origin from an earlier flow.
+                        Self::process_event(AppEvent::GoToStats, state);
                     }
                     SidebarItem::Witr => {
                         tracing::info!(
@@ -3900,10 +4137,27 @@ impl EventHandler {
                         // plugin-rendered screen.
                         state.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
+                    SidebarItem::Abtop => {
+                        tracing::info!("Launching abtop (top-for-agents) from sidebar");
+                        // Hand the terminal to abtop's own interactive TUI
+                        // (see AppEvent::GoToAbtop) rather than a
+                        // plugin-rendered screen. Offer the one-time
+                        // rate-limit setup before the first attach.
+                        if state.should_offer_abtop_setup() {
+                            state.show_abtop_setup_prompt();
+                        } else {
+                            state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                        }
+                    }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
-                        state.current_screen = screen_ids::SKILLS.to_string();
-                        state.start_background_skills_load(false);
+                        Self::process_event(AppEvent::GoToSkills, state);
+                    }
+                    SidebarItem::Memory => {
+                        tracing::info!("Navigating to Memory (knowledge base) from sidebar");
+                        // Canonical event saves `previous_screen` so the
+                        // panel's Esc-close returns here, not to a stale origin.
+                        Self::process_event(AppEvent::GoToLearnings, state);
                     }
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
@@ -4052,6 +4306,11 @@ impl EventHandler {
                                 ));
                             }
                         }
+
+                        // Favorites changed — refresh the precomputed star
+                        // cache so the session list reflects the toggle without
+                        // re-resolving favorites in the render path. (perf 9ov/8rn)
+                        state.recompute_favorite_workspaces();
                     }
                 }
             }
@@ -4099,6 +4358,9 @@ impl EventHandler {
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
+                if state.current_screen != screen_ids::ANALYTICS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
@@ -4115,8 +4377,43 @@ impl EventHandler {
                 // slash; only the screen is the embedded binary.
                 state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
+            AppEvent::GoToLearnings => {
+                tracing::info!("Navigating to Learnings (knowledge-base browser)");
+                // Generic plugin-rendered screen (same plumbing as
+                // analytics). The learnings plugin owns its own data load
+                // + render; the host only routes the screen. Save the
+                // origin like every other panel so Esc/PanelBack (and the
+                // plugin's `ui.close_request`) pops back to where the
+                // panel was opened from instead of falling back to home.
+                if state.current_screen != screen_ids::LEARNINGS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
+                state.current_screen = screen_ids::LEARNINGS.to_string();
+            }
+            AppEvent::GoToAbtop => {
+                tracing::info!("Launching abtop (top-for-agents)");
+                // abtop is a full-screen interactive monitor of running AI
+                // agents with no JSON/WireBuffer equivalent — it lives only
+                // in the `abtop` binary. So instead of a plugin-rendered
+                // screen we hand the terminal to abtop's native TUI
+                // full-screen (suspend/attach, like an agent session) and
+                // resume ainb when the user quits it. Launched with
+                // `--exit-on-jump` so Enter jumps to an agent's pane and
+                // returns control to ainb. The abtop plugin still owns the
+                // `ainb abtop` CLI + the install-hint empty-state.
+                // First open: offer to run `abtop --setup` (rate-limit hook)
+                // before attaching; otherwise attach straight away.
+                if state.should_offer_abtop_setup() {
+                    state.show_abtop_setup_prompt();
+                } else {
+                    state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                }
+            }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
+                if state.current_screen != screen_ids::SKILLS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
@@ -4714,9 +5011,24 @@ impl EventHandler {
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
-                state.previous_screen = Some(state.current_screen.clone());
+                if state.current_screen != screen_ids::INBOX {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
                 state.current_screen = screen_ids::INBOX.to_string();
                 state.inbox_state.refresh();
+            }
+            AppEvent::GoToHangar => {
+                tracing::info!("Navigating to Hangar");
+                // Plugin-owned screen: the `hangar-tui` subprocess renders it and
+                // owns its own data load (snapshot RPCs over the daemon socket).
+                // Save the origin like every other panel so Esc (which on plugin
+                // screens resolves to `PanelBack`, and via `ui.close_request` once
+                // hangar-tui adopts it) pops back to where it was opened from
+                // rather than a stale `previous_screen` left by an earlier panel.
+                if state.current_screen != screen_ids::HANGAR {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
+                state.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
             AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
@@ -5607,7 +5919,7 @@ impl EventHandler {
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
-                state.current_screen = screen_ids::HOME.to_string();
+                Self::process_event(AppEvent::PanelBack, state);
             }
             AppEvent::SkillsNextProvider => {
                 state.skills_state.next_provider();
@@ -5872,9 +6184,9 @@ impl EventHandler {
                     onboarding_state.go_back();
                 }
             }
-            AppEvent::OnboardingCancel => {
-                tracing::debug!("Onboarding cancelled");
-                state.cancel_onboarding();
+            AppEvent::OnboardingToMenu => {
+                tracing::debug!("Leaving onboarding wizard for the Setup menu");
+                state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
@@ -6421,6 +6733,8 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
+            | ids::LEARNINGS
+            | ids::ABTOP
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY
@@ -6439,6 +6753,53 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::SESSION_RECOVERY
             | ids::SKILLS
     )
+}
+
+#[cfg(test)]
+mod session_list_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), state)
+    }
+
+    fn session_list_state() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state
+    }
+
+    /// Locks the attach-key pairing: 'a' = full-screen, Shift+A = in-pane
+    /// embed, and re-auth (which used to hold 'A') now answers to 'u'.
+    #[test]
+    fn attach_pair_and_reauth_mapping() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'a'),
+            Some(AppEvent::AttachTmuxSession)
+        ));
+        assert!(matches!(
+            key(&mut state, 'A'),
+            Some(AppEvent::EnterInteractivePane)
+        ));
+        assert!(matches!(
+            key(&mut state, 'u'),
+            Some(AppEvent::ReauthenticateCredentials)
+        ));
+    }
+
+    /// 'B' is the keyboard twin of the [-]/[+] sidebar glyph (mouse-only
+    /// before). Mapping-level test: no persistence side effects here.
+    #[test]
+    fn shift_b_toggles_sessions_sidebar() {
+        let mut state = session_list_state();
+        assert!(matches!(
+            key(&mut state, 'B'),
+            Some(AppEvent::ToggleSessionsSidebar)
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -6479,6 +6840,7 @@ mod navigate_to_tests {
             ids::CATALOG,
             ids::ANALYTICS,
             ids::WITR,
+            ids::ABTOP,
             ids::SESSION_LIST,
             ids::LOGS,
             ids::LOG_HISTORY,
@@ -6506,6 +6868,238 @@ mod navigate_to_tests {
         assert!(!is_known_screen_id(""));
         assert!(!is_known_screen_id("not-a-screen"));
         assert!(!is_known_screen_id("home2"));
+    }
+}
+
+#[cfg(test)]
+mod panel_back_tests {
+    use super::*;
+    use crate::app::screens::ids;
+
+    /// Panels opened from the session list must return there on close —
+    /// not hardcode home. Covers stats (analytics) end-to-end:
+    /// open saves the origin, PanelBack pops it.
+    #[test]
+    fn go_to_stats_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        assert_eq!(state.current_screen, ids::ANALYTICS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert!(
+            state.previous_screen.is_none(),
+            "pop must consume the origin"
+        );
+    }
+
+    #[test]
+    fn go_to_inbox_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToInbox, &mut state);
+        assert_eq!(state.current_screen, ids::INBOX);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
+    /// it must therefore save its origin on entry like every other panel,
+    /// or it would pop a stale `previous_screen` left by an earlier panel.
+    #[test]
+    fn go_to_hangar_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.current_screen, ids::HANGAR);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Regression for the stale-origin edge the review flagged: open a
+    /// panel from the session list (sets previous_screen=session_list),
+    /// leave it WITHOUT Esc (straight to home), then open Hangar from
+    /// home. Hangar's Esc must return to HOME, not the stale session_list.
+    #[test]
+    fn hangar_does_not_pop_a_stale_origin_from_an_earlier_panel() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        EventHandler::process_event(AppEvent::GoToStats, &mut state); // previous=session_list
+        EventHandler::process_event(AppEvent::GoToHomeScreen, &mut state); // leave without Esc
+        state.current_screen = ids::HOME.to_string();
+
+        EventHandler::process_event(AppEvent::GoToHangar, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(
+            state.current_screen,
+            ids::HOME,
+            "Hangar must not pop the stale session_list origin"
+        );
+    }
+
+    #[test]
+    fn panel_back_falls_back_to_home_when_no_origin() {
+        let mut state = AppState::default();
+        state.current_screen = ids::INBOX.to_string();
+        state.previous_screen = None;
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Learnings (memory) is a plugin screen — Esc on it resolves to
+    /// `PanelBack` (and to the plugin's `ui.close_request` at its root
+    /// view), so it must save its origin on entry like stats/skills/
+    /// hangar, or closing it would fall back to home instead of the
+    /// screen it was opened from.
+    #[test]
+    fn go_to_learnings_saves_origin_and_panel_back_returns_there() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.current_screen, ids::LEARNINGS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// Same self-loop guard as stats: re-firing GoToLearnings while
+    /// already on the learnings screen must not clobber the saved
+    /// origin with the panel's own id.
+    #[test]
+    fn reopening_learnings_does_not_overwrite_origin_with_itself() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+    }
+
+    /// The session list advertises `m memory` on its menu legend — the
+    /// key must actually dispatch there, not only on the home screen.
+    #[test]
+    fn session_list_m_key_dispatches_go_to_learnings() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(key, &mut state)
+            .expect("`m` on the session list must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must map to GoToLearnings, got {evt:?}"
+        );
+    }
+
+    /// Activating the Memory tile on the home sidebar (Enter) must open the
+    /// learnings panel, saving home as the origin so the panel's Esc-close
+    /// returns there. The tile was missing entirely before — every other
+    /// overlay panel had one.
+    #[test]
+    fn home_sidebar_memory_tile_opens_learnings() {
+        use crate::components::sidebar::SidebarItem;
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+        state.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
+
+        EventHandler::process_event(AppEvent::HomeScreenSidebarSelect, &mut state);
+
+        assert_eq!(state.current_screen, ids::LEARNINGS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+    }
+
+    /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
+    /// the learnings/Memory browser. Locking both arms here guards against
+    /// a future refactor re-colliding the two on `m` (which silently made
+    /// the overlay unreachable when the Memory tile landed).
+    #[test]
+    fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(p, &mut state)
+            .expect("`p` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayOpen),
+            "`p` must open the MCP pool overlay, got {evt:?}"
+        );
+
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(m, &mut state)
+            .expect("`m` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must stay the learnings/Memory browser, got {evt:?}"
+        );
+    }
+
+    /// While the MCP overlay is open it captures all keys. `i` imports (into
+    /// the global user config — the overlay isn't bound to a worktree). Lock
+    /// the keybind so the action bar can't drift from it.
+    #[test]
+    fn mcp_overlay_import_key_dispatches() {
+        let mut state = AppState::default();
+        state.mcp_overlay = Some(crate::app::state::McpOverlayState {
+            pool_enabled: true,
+            daemon_running: true,
+            servers: vec![],
+            selected: 0,
+            loading: false,
+            last_refreshed: None,
+            refresh_secs: 0,
+            fetch_rx: None,
+            last_action: None,
+        });
+
+        let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(i, &mut state)
+            .expect("`i` in the overlay must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayImport),
+            "`i` must dispatch McpOverlayImport, got {evt:?}"
+        );
+    }
+
+    /// Re-firing the open event while already on the panel must not
+    /// clobber the saved origin with the panel's own id (which would
+    /// make PanelBack a self-loop).
+    #[test]
+    fn reopening_panel_does_not_overwrite_origin_with_itself() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        EventHandler::process_event(AppEvent::GoToStats, &mut state);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+    }
+
+    /// Skills uses GoToSkills (spawns a background load → needs a
+    /// runtime) and exits via SkillsBack, which shares PanelBack's pop.
+    #[tokio::test]
+    async fn skills_back_returns_to_origin() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToSkills, &mut state);
+        assert_eq!(state.current_screen, ids::SKILLS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        EventHandler::process_event(AppEvent::SkillsBack, &mut state);
+        assert_eq!(state.current_screen, ids::SESSION_LIST);
     }
 }
 
@@ -7018,5 +7612,74 @@ mod skill_manager_sync_keybind_tests {
                 "expected SkillManagerConflictFlip, got {ev:?}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod slash_command_dispatch_tests {
+    //! P9: the learnings plugin advertises `/recall` + `/memory` slash
+    //! commands (manifest `provides.commands`). Both must route to the SAME
+    //! screen-open path the global `m` shortcut uses — i.e. emit
+    //! `AppEvent::GoToLearnings`, whose handler sets
+    //! `current_screen = "learnings"`.
+    //!
+    //! `slash_command_event` is the pure name→event mapping the main loop
+    //! calls when the slash palette emits `SlashAction::Execute(cmd)`. The
+    //! palette already strips the leading `/`, so the input here is the bare
+    //! command name (`"recall"`, not `"/recall"`).
+
+    use super::*;
+    use crate::app::screens::ids as screen_ids;
+
+    #[test]
+    fn slash_recall_opens_learnings_screen() {
+        // `/recall` → GoToLearnings.
+        let evt = EventHandler::slash_command_event("recall")
+            .expect("/recall must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/recall must emit GoToLearnings, got {evt:?}"
+        );
+
+        // …and processing that event actually opens the learnings screen
+        // (same end-state the `m` shortcut produces).
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /recall must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn slash_memory_opens_learnings_screen() {
+        // `/memory` → GoToLearnings (the second manifest alias).
+        let evt = EventHandler::slash_command_event("memory")
+            .expect("/memory must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/memory must emit GoToLearnings, got {evt:?}"
+        );
+
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /memory must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn unknown_slash_command_is_not_routed() {
+        // A command name with no host mapping returns None — the main loop
+        // leaves it to the existing log-only fallback (no panic, no nav).
+        assert!(
+            EventHandler::slash_command_event("definitely-not-a-command").is_none(),
+            "unknown slash commands must not map to an event"
+        );
     }
 }

@@ -233,7 +233,7 @@ fn browse_modal_searches_and_enter_installs_live() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // SkillManager renders (Full tier → units present, no banner).
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {

@@ -137,7 +137,7 @@ fn check_key_surfaces_drift_notification_in_live_binary() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // Wait for the Units table to render (Full tier → `initial-skill`).
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {

@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-monospace, monospace">
+<defs>
+<style>.title{font-size:18px;fill:#e2e8f0;font-weight:bold}.lbl{font-size:13px;fill:#e2e8f0;font-weight:bold}.sub{font-size:11px;fill:#94a3b8}.albl{font-size:11px;fill:#e2e8f0}</style>
+<marker id="aOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker>
+<marker id="aBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#38bdf8"/></marker>
+<marker id="aGray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/></marker>
+<marker id="aTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2dd4bf"/></marker>
+</defs>
+<rect width="1200" height="760" fill="#0a1628"/>
+<text x="40" y="40" class="title">Hangar — Autopilot Cron Scheduler Loop</text>
+<rect x="40" y="80" width="250" height="70" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="165.0" y="102" text-anchor="middle" class="lbl">pick earliest next_tick_at</text>
+<text x="165.0" y="120" text-anchor="middle" class="sub">enabled autopilots</text>
+<rect x="40" y="200" width="250" height="96" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="1.5"/>
+<text x="165.0" y="222" text-anchor="middle" class="lbl">tokio::select!</text>
+<text x="165.0" y="240" text-anchor="middle" class="sub">sleep_until(tick)</text>
+<text x="165.0" y="254" text-anchor="middle" class="sub">OR shutdown</text>
+<text x="165.0" y="268" text-anchor="middle" class="sub">OR wake (clock-advance / notify)</text>
+<path d="M165,150 L165,200" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="40" y="360" width="250" height="56" rx="6" fill="#0f2942" stroke="#94a3b8" stroke-width="1.5"/>
+<text x="165.0" y="382" text-anchor="middle" class="lbl">sleep 60s · re-poll</text>
+<text x="165.0" y="400" text-anchor="middle" class="sub">no enabled autopilots</text>
+<path d="M290,115 L520,115" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<rect x="363.8" y="93" width="82.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="405" y="105" text-anchor="middle" class="albl">none enabled</text>
+<path d="M165,296 L165,360" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<path d="M165,416 L30,388" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)"/>
+<path d="M30,388 L30,115 L40,115" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<polygon points="450,188.0 580.0,248 450,308.0 320.0,248" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="244" text-anchor="middle" class="lbl" style="font-size:12px">concurrency check</text>
+<text x="450" y="232" text-anchor="middle" class="sub">count(autopilot_run</text>
+<text x="450" y="246" text-anchor="middle" class="sub">WHERE completed_at IS NULL)</text>
+<text x="450" y="260" text-anchor="middle" class="sub">&gt;= max_concurrent_runs ?</text>
+<path d="M290,248 L320,248" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="279.3" y="226" width="51.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="305" y="238" text-anchor="middle" class="albl">on tick</text>
+<rect x="660" y="80" width="360" height="76" rx="6" fill="#1f1714" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="840.0" y="102" text-anchor="middle" class="lbl">skip + emit autopilot.tick_skipped</text>
+<text x="840.0" y="120" text-anchor="middle" class="sub">tracing::warn</text>
+<text x="840.0" y="134" text-anchor="middle" class="sub">run NOT created</text>
+<path d="M450,188 L800,156" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="586.4" y="156" width="107.2" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="640" y="168" text-anchor="middle" class="albl">YES (over limit)</text>
+<rect x="660" y="300" width="360" height="90" rx="6" fill="#13243f" stroke="#2dd4bf" stroke-width="1.5"/>
+<text x="840.0" y="322" text-anchor="middle" class="lbl">fire_autopilot_tick  (single tx)</text>
+<text x="840.0" y="340" text-anchor="middle" class="sub">insert autopilot_run 'running'</text>
+<text x="840.0" y="354" text-anchor="middle" class="sub">+ enqueue task</text>
+<path d="M580,248 L660,330" stroke="#2dd4bf" stroke-width="2" fill="none" marker-end="url(#aTeal)"/>
+<rect x="609.8" y="266" width="20.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="620" y="278" text-anchor="middle" class="albl">NO</text>
+<rect x="660" y="460" width="360" height="90" rx="6" fill="#13243f" stroke="#fb923c" stroke-width="1.5"/>
+<text x="840.0" y="482" text-anchor="middle" class="lbl">recompute next_tick</text>
+<text x="840.0" y="500" text-anchor="middle" class="sub">next_tick_after(parse_cron(expr), now)</text>
+<text x="840.0" y="514" text-anchor="middle" class="sub">anchored on now, not stale tick</text>
+<path d="M840,390 L840,460" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M840,156 L840,300" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="823.6" y="216" width="32.8" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="840" y="228" text-anchor="middle" class="albl">then</text>
+<path d="M660,505 L165,640" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M165,640 L165,150" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="350" y="618" width="80" height="17" rx="3" fill="#0a1628" opacity="0.95"/><text x="390" y="631" text-anchor="middle" class="albl">loop</text>
+<rect x="660" y="600" width="360" height="70" rx="6" fill="#0f2942" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="840.0" y="622" text-anchor="middle" class="lbl">cron parser</text>
+<text x="840.0" y="640" text-anchor="middle" class="sub">normalises 5-field POSIX -&gt; 6-field</text>
+<text x="840.0" y="654" text-anchor="middle" class="sub">(prepend &quot;0 &quot;)</text>
+<path d="M840,550 L840,600" stroke="#a78bfa" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="783.3" y="568" width="113.4" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="840" y="580" text-anchor="middle" class="albl">used by recompute</text>
+<rect x="40" y="688" width="980" height="56" rx="6" fill="#0f2942" stroke="#334155" stroke-width="1"/>
+<text x="56" y="708" class="sub">Legend</text>
+<line x1="120" y1="703" x2="156" y2="703" stroke="#fb923c" stroke-width="2"/><text x="166" y="707" class="sub">control / loop</text>
+<line x1="300" y1="703" x2="336" y2="703" stroke="#2dd4bf" stroke-width="2"/><text x="346" y="707" class="sub">persistence (tx)</text>
+<line x1="480" y1="703" x2="516" y2="703" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,2"/><text x="526" y="707" class="sub">idle / no-op</text>
+<polygon points="660,696 676,703 660,710 644,703" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/><text x="690" y="707" class="sub">decision</text>
+</svg>

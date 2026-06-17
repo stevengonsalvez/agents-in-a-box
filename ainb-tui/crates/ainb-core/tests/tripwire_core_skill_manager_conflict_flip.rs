@@ -210,7 +210,7 @@ fn boot_and_import(home: &Path, session: &str) {
     thread::sleep(Duration::from_millis(200));
 
     // Navigate to SkillManager.
-    send_key(session, "m");
+    send_key(session, "z");
 
     // Wait for the discovery banner to paint, then press Enter to import.
     let banner = poll_capture(session, Instant::now() + Duration::from_secs(60), |c| {

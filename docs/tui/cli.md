@@ -36,6 +36,7 @@ Run `ainb` with no arguments to launch the TUI, or use any subcommand below for 
   - [`reflect`](#ainb-reflect) — reflect toolchain bootstrap installer
   - [`presets`](#ainb-presets) — session presets
   - [`claudecode`](#ainb-claudecode) — Claude Code provider-specific commands (statusline)
+  - [`codex`](#ainb-codex) — Codex provider-specific commands (statusline / OAuth quota)
   - [`completion`](#ainb-completion) — shell completions
   - [`plugin`](#ainb-plugin) — manage ainb plugins
   - [`fleet`](#ainb-fleet) — orchestrate the claude session fleet
@@ -96,7 +97,7 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ├── favorites.json                   # Favorite repositories (managed by `favorites`)
 └── presets/<name>.toml              # Custom presets (managed by `presets`)
 
-./.agents-box/
+./.ainb/
 ├── config.toml                      # Project-level config override (takes precedence)
 └── preset.toml                      # Active preset (written by `presets apply`)
 
@@ -106,7 +107,7 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ```
 
 Configuration precedence (highest first):
-1. `./.agents-box/config.toml` (project)
+1. `./.ainb/config.toml` (project; legacy `./.agents-box/config.toml` still read)
 2. `~/.agents-in-a-box/config/config.toml` (user)
 3. `/etc/agents-in-a-box/config.toml` (system)
 
@@ -539,6 +540,36 @@ ainb claudecode <SUBCOMMAND>
 | `--cache-only` | Side-channel mode: write the rate-limit cache only and emit nothing on stdout. |
 
 Wire it into Claude Code's `settings.json` as the `statusLine` command so the TUI can surface live rate-limit windows.
+
+---
+
+### `ainb codex`
+
+Provider-namespaced commands for Codex — the Codex analog of [`ainb claudecode`](#ainb-claudecode). Today only the statusline command lives here.
+
+```bash
+ainb codex <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `statusline` | Pull Codex OAuth quota (5h + weekly) from `chatgpt.com/backend-api/wham/usage` (Bearer + account id read from `~/.codex/auth.json`) and cache it for the TUI top bar. |
+
+**`statusline` flags**
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Bypass the throttle and pull now. |
+
+Unlike Claude Code — which *pushes* its rate-limit windows into `ainb claudecode statusline` on every prompt render — Codex exposes nothing to a render-time process, so its quota must be *pulled* from the usage endpoint (the local rollout JSONL has `rate_limits: null` in exec mode). The command is throttled (~60s), writes a **separate** `codex-live.json` (it never touches the Claude cache), and **hides on failure** — no `~/.codex/auth.json`, a 401, or a parse error leaves the Codex segment off rather than showing stale or zeroed numbers.
+
+You don't normally run it by hand: the TUI's background watcher invokes it (throttled) while open, so the **live status bar** overlays Codex next to Claude:
+
+```
+claude 5h 40% ↻ Jun 15 13:32 · wk 8% ↻ Jun 20 11:32   codex 5h 24% ↻ Jun 15 14:32 · wk 50% ↻ Jun 19 11:32
+```
+
+Each window shows the used percentage and the reset date/time (`↻ <date> <time>`, local timezone). The Codex cluster is absent when Codex isn't logged in; the Claude cluster is absent until you wire the Claude statusline above.
 
 ---
 

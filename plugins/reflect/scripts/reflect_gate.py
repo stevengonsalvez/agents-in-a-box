@@ -25,17 +25,31 @@ Fail-open: any error reading/parsing returns a REFLECT verdict (better to
 spend than to silently drop a real lesson). The drainer's own caps bound the
 cost of a false "reflect".
 
+Idle sweep (SG3): a launchd timer (idle_reflect.sh) calls --idle-sweep to
+walk ~/.claude/projects/*/*.jsonl transcript mtimes. Sessions quiet for
+longer than the idle threshold (but younger than the max age) are enqueued
+with trigger='idle' — the drain tags their learnings 'speculative' since the
+session may still resume. Dedup is layered: a per-(path, mtime) idle-state
+file stops re-evaluation while a session stays idle, and should_enqueue()
+stops re-enqueueing after a resume (already-queued / already-processed).
+
 CLI:
     reflect_gate.py --evaluate <transcript.jsonl>     # JSON verdict
     reflect_gate.py --should-enqueue <transcript.jsonl> \
         [--queue F] [--cost F]                        # exit 0=enqueue 1=skip
+    reflect_gate.py --idle-sweep [--projects-root D] \
+        [--queue F] [--cost F] [--idle-state F] \
+        [--threshold N] [--max-age N] [--max-per-sweep N]  # JSON summary
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -247,6 +261,167 @@ def should_enqueue(
     return (verdict.action == "reflect"), verdict.reason
 
 
+# ── idle sweep (SG3) ────────────────────────────────────────────────────────
+# Sessions that go quiet without a Stop/PreCompact (user stepped away,
+# switched context) are "lost" reflection opportunities. The sweep watches
+# transcript mtimes and enqueues quiet-but-recent sessions with
+# trigger='idle'; the drain prompt tags their learnings 'speculative' so
+# recall ranks them below explicit-session-end learnings.
+
+# Idle window: quiet for at least threshold, but not older than max-age —
+# the max-age stops a fresh install from backfilling months of dead sessions.
+DEFAULT_IDLE_THRESHOLD_SEC = 600
+DEFAULT_IDLE_MAX_AGE_SEC = 86_400
+DEFAULT_IDLE_MAX_PER_SWEEP = 5
+
+
+def _idle_env_int(name: str, default: int) -> int:
+    """Parse a non-negative int from env; fall back on garbage/negative."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def load_idle_state(state_file: str | Path) -> dict[str, float]:
+    """{transcript_path: mtime_last_evaluated}. Missing/corrupt → empty."""
+    try:
+        with open(state_file, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return {str(k): float(v) for k, v in data.items()}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def save_idle_state(state_file: str | Path, state: dict[str, float]) -> None:
+    """Atomic (tmp + rename) so a crashed sweep can't corrupt the state."""
+    sf = Path(state_file)
+    try:
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        tmp = sf.with_suffix(sf.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=0), encoding="utf-8")
+        tmp.replace(sf)
+    except OSError:
+        pass
+
+
+def scan_idle_transcripts(
+    projects_root: str | Path,
+    *,
+    threshold_sec: int = DEFAULT_IDLE_THRESHOLD_SEC,
+    max_age_sec: int = DEFAULT_IDLE_MAX_AGE_SEC,
+    now: float | None = None,
+) -> list[tuple[Path, float]]:
+    """(path, mtime) of transcripts in the idle window, newest first.
+
+    Walks ``<projects_root>/*/*.jsonl`` (the Claude Code transcript layout:
+    one munged-cwd dir per project, one ``<session-id>.jsonl`` per session).
+    A transcript is idle when its mtime is at least *threshold_sec* old but
+    no older than *max_age_sec*.
+    """
+    now = time.time() if now is None else now
+    root = Path(projects_root)
+    out: list[tuple[Path, float]] = []
+    if not root.is_dir():
+        return out
+    try:
+        candidates = sorted(root.glob("*/*.jsonl"))
+    except OSError:
+        return out
+    for path in candidates:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        age = now - mtime
+        if threshold_sec <= age <= max_age_sec:
+            out.append((path, mtime))
+    out.sort(key=lambda pm: pm[1], reverse=True)
+    return out
+
+
+def idle_sweep(
+    projects_root: str | Path,
+    queue_file: str | Path,
+    cost_file: str | Path,
+    idle_state_file: str | Path,
+    *,
+    threshold_sec: int = DEFAULT_IDLE_THRESHOLD_SEC,
+    max_age_sec: int = DEFAULT_IDLE_MAX_AGE_SEC,
+    max_per_sweep: int = DEFAULT_IDLE_MAX_PER_SWEEP,
+    now: float | None = None,
+) -> dict:
+    """One idle sweep: scan → dedup → gate → enqueue with trigger='idle'.
+
+    Double-process protection is layered:
+
+    * idle-state file — a (path, mtime) pair is evaluated at most once, so
+      a still-idle session isn't re-gated every timer tick. A resume bumps
+      the mtime and makes the transcript eligible again.
+    * should_enqueue() — the queue/cost-log dedup then rejects anything
+      already queued (e.g. by PreCompact) or already processed (the idle
+      entry from BEFORE the resume reached a terminal outcome), so a
+      resume-after-idle can never enqueue the same transcript twice.
+
+    Conversely the Stop hook's session_already_queued() skips its own
+    enqueue while an idle entry for the session is still pending — the two
+    producers can't double-queue each other.
+
+    Returns a JSON-able summary: ``{"scanned", "enqueued", "entries"}``.
+    """
+    now = time.time() if now is None else now
+    state = load_idle_state(idle_state_file)
+    candidates = scan_idle_transcripts(
+        projects_root, threshold_sec=threshold_sec, max_age_sec=max_age_sec,
+        now=now,
+    )
+
+    # Prune state entries that fell out of the idle window so the file
+    # stays bounded by the live candidate set.
+    live = {str(p) for p, _ in candidates}
+    state = {k: v for k, v in state.items() if k in live}
+
+    enqueued: list[dict] = []
+    qf = Path(queue_file)
+    for path, mtime in candidates:
+        if len(enqueued) >= max_per_sweep:
+            break
+        key = str(path)
+        if state.get(key) == mtime:
+            continue  # this idle period was already evaluated
+        state[key] = mtime
+        ok, _reason = should_enqueue(path, queue_file, cost_file)
+        if not ok:
+            continue
+        entry = {
+            "ts": datetime.now().isoformat(),
+            "session_id": path.stem,  # Claude names transcripts <session-id>.jsonl
+            "transcript_path": key,
+            "trigger": "idle",
+            "speculative": True,
+            # Neutral cwd: the munged project-dir name is not reliably
+            # reversible to the original path (W5 pins the drain cwd anyway).
+            "cwd": str(Path.home()),
+        }
+        try:
+            qf.parent.mkdir(parents=True, exist_ok=True)
+            with open(qf, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            continue
+        enqueued.append(entry)
+
+    save_idle_state(idle_state_file, state)
+    return {
+        "scanned": len(candidates),
+        "enqueued": len(enqueued),
+        "entries": enqueued,
+    }
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -257,6 +432,12 @@ def main() -> None:
     ap.add_argument("--should-enqueue", metavar="TRANSCRIPT")
     ap.add_argument("--queue", default="")
     ap.add_argument("--cost", default="")
+    ap.add_argument("--idle-sweep", action="store_true")
+    ap.add_argument("--projects-root", default="")
+    ap.add_argument("--idle-state", default="")
+    ap.add_argument("--threshold", type=int, default=-1)
+    ap.add_argument("--max-age", type=int, default=-1)
+    ap.add_argument("--max-per-sweep", type=int, default=-1)
     args = ap.parse_args()
 
     if args.evaluate:
@@ -266,7 +447,33 @@ def main() -> None:
         ok, reason = should_enqueue(args.should_enqueue, args.queue, args.cost)
         print(json.dumps({"enqueue": ok, "reason": reason}))
         sys.exit(0 if ok else 1)
-    ap.error("one of --evaluate / --should-enqueue is required")
+    if args.idle_sweep:
+        # Flags win; env (REFLECT_IDLE_*) next; module defaults last — so
+        # both the shell hook and a bare launchd invocation are configurable.
+        state_dir = Path(
+            os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect"))
+        )
+        projects_root = args.projects_root or os.environ.get(
+            "REFLECT_IDLE_PROJECTS_ROOT",
+            str(Path.home() / ".claude" / "projects"),
+        )
+        queue = args.queue or str(state_dir / "pending_reflections.jsonl")
+        cost = args.cost or str(state_dir / "drain-cost.jsonl")
+        idle_state = args.idle_state or str(state_dir / "idle-state.json")
+        threshold = args.threshold if args.threshold >= 0 else _idle_env_int(
+            "REFLECT_IDLE_THRESHOLD_SEC", DEFAULT_IDLE_THRESHOLD_SEC)
+        max_age = args.max_age if args.max_age >= 0 else _idle_env_int(
+            "REFLECT_IDLE_MAX_AGE_SEC", DEFAULT_IDLE_MAX_AGE_SEC)
+        max_per = args.max_per_sweep if args.max_per_sweep >= 0 else _idle_env_int(
+            "REFLECT_IDLE_MAX_PER_SWEEP", DEFAULT_IDLE_MAX_PER_SWEEP)
+        summary = idle_sweep(
+            projects_root, queue, cost, idle_state,
+            threshold_sec=threshold, max_age_sec=max_age,
+            max_per_sweep=max_per,
+        )
+        print(json.dumps(summary))
+        return
+    ap.error("one of --evaluate / --should-enqueue / --idle-sweep is required")
 
 
 if __name__ == "__main__":

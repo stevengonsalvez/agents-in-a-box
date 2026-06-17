@@ -27,7 +27,9 @@ fn test_session_branch_name_formatting() {
 #[test]
 fn test_session_status_indicator() {
     assert_eq!(SessionStatus::Running.indicator(), "●");
-    assert_eq!(SessionStatus::Stopped.indicator(), "⏸");
+    // cod-debug-pause (1-cell Nerd Font) replaced the 2-cell ⏸ emoji that
+    // broke paused-row column alignment in the session list.
+    assert_eq!(SessionStatus::Stopped.indicator(), "\u{ead1}");
     assert_eq!(SessionStatus::Error("test".to_string()).indicator(), "✗");
 }
 

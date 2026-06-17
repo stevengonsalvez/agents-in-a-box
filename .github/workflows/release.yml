@@ -221,16 +221,28 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # Bundle the first-party plugins (session-reader / burndown / witr)
+      # into the archive. Without them a brew-installed ainb has no
+      # analytics: `ainb plugin install` is still a stub and the runtime
+      # only discovers plugins via AINB_PLUGIN_ROOT / exe-relative /
+      # cwd-relative dist/ — none of which exist on a bare binary
+      # install. The script stages target/<triple>/release binaries into
+      # dist/plugins/<id>/{<id>,manifest.toml} and ad-hoc re-signs on
+      # macOS (AMFI kills moved linker-signed binaries otherwise).
+      - name: Build + stage plugins
+        run: ./scripts/build-plugins.sh --release --target=${{ matrix.target }}
+
       - name: Package
         shell: bash
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           ARCHIVE="${BINARY_NAME}-${VERSION}-${{ matrix.target }}"
 
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} dist/
-          cd dist
-          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}"
+          mkdir -p out
+          cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} out/
+          cp -R dist/plugins out/plugins
+          cd out
+          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}" plugins
           shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
 
       - name: Upload artifacts
@@ -238,8 +250,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            ${{ env.WORKING_DIR }}/dist/*.tar.gz
-            ${{ env.WORKING_DIR }}/dist/*.sha256
+            ${{ env.WORKING_DIR }}/out/*.tar.gz
+            ${{ env.WORKING_DIR }}/out/*.sha256
 
   release:
     name: Create Release
@@ -306,13 +318,14 @@ jobs:
             2. Extract: `tar -xzf ainb-*.tar.gz`
             3. Move to PATH: `sudo mv ainb /usr/local/bin/`
 
-            ### From Source (requires Rust)
-            The `ainb` package lives in the `ainb-tui/` workspace (no manifest at
-            the repo root), so install it by path from a clone:
+            ### Cargo (any platform with Rust)
+            `cargo` resolves the `ainb` package by name even though the workspace
+            lives in `ainb-tui/`, so a single command works — no clone needed:
             ```bash
-            git clone https://github.com/stevengonsalvez/agents-in-a-box
-            cargo install --path agents-in-a-box/ainb-tui/crates/ainb-core
+            cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main ainb
             ```
+            > Source builds omit the bundled analytics plugins. For the prebuilt,
+            > plugin-bundled binary use Homebrew or the install script above.
 
             ## Supported Platforms
             - macOS Apple Silicon (M1/M2/M3)
@@ -382,7 +395,19 @@ jobs:
             end
 
             def install
-              bin.install "ainb"
+              # Real binary + bundled first-party plugins live in libexec;
+              # bin gets a thin env wrapper pointing the plugin runtime at
+              # them. `ainb plugin install` is not shipped yet, so without
+              # this a brew install has no analytics plugins at all. A
+              # user-set AINB_PLUGIN_ROOT still wins.
+              libexec.install "ainb"
+              libexec.install "plugins" if File.directory?("plugins")
+              (bin/"ainb").write <<~WRAPPER
+                #!/bin/bash
+                export AINB_PLUGIN_ROOT="${AINB_PLUGIN_ROOT:-#{libexec}/plugins}"
+                exec "#{libexec}/ainb" "$@"
+              WRAPPER
+              (bin/"ainb").chmod 0755
             end
 
             test do

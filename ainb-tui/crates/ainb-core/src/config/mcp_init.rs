@@ -383,6 +383,7 @@ mod tests {
             },
             required_env: vec!["TEST_REQUIRED_VAR".to_string()],
             enabled_by_default: true, // This is enabled by default
+            shared: true,
         };
 
         servers.insert(test_server.name.clone(), test_server);

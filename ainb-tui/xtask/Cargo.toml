@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 ainb-skill-core = { path = "../crates/ainb-skill-core" }
+serde_yaml = { workspace = true }
 serde_yaml_ng = { workspace = true }
 
 [lints]

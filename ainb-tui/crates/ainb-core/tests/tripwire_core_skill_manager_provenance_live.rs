@@ -197,7 +197,7 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m"); // Home → SkillManager.
+    send_key(&session, "z"); // Home → SkillManager.
 
     // SkillManager opens with the Full-tier pre-seeded units (banner
     // suppressed by the non-empty manifest).

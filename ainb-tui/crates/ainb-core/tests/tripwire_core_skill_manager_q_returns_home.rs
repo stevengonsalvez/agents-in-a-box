@@ -120,7 +120,7 @@ fn q_on_skill_manager_returns_to_home_screen() {
     // to a binary still finishing its boot paint.
     thread::sleep(Duration::from_millis(200));
 
-    send_key(&session, "m");
+    send_key(&session, "z");
     if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Sources") && c.contains("Units")
     })

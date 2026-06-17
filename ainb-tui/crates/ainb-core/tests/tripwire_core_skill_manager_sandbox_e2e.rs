@@ -1,5 +1,5 @@
 //! Tripwire: spawn the real `ainb` binary against the sandbox
-//! fixture, press `m`, capture the pane, assert the SkillManager
+//! fixture, press `z`, capture the pane, assert the SkillManager
 //! screen shows the seeded source name + Sources/Units/Detail panel
 //! chrome.
 //!
@@ -145,7 +145,7 @@ fn pressing_m_in_real_binary_against_sandbox_renders_skill_manager() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // After [m] we expect SkillManager chrome + the seeded `sandbox`
     // source name (from Full tier's pre-seeded manifest.yaml). All

@@ -147,7 +147,7 @@ fn remove_key_uninstalls_unit_and_surfaces_notification_in_live_binary() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // Wait for the Units table to render with the seeded unit. The row is
     // selected by default (cursor on the first/only unit), so `[r]` will

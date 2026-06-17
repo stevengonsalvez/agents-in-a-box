@@ -10,6 +10,7 @@ use crate::cli::OutputFormat;
 
 pub mod broadcast;
 pub mod daemon;
+pub mod enrich_cache;
 pub mod needs;
 pub mod sequence;
 pub mod standup;
@@ -21,6 +22,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("sequence", sub)) => sequence::execute(sub, format).await,
         Some(("needs", sub)) => needs::execute(sub, format).await,
         Some(("daemon", sub)) => daemon::execute(sub, format).await,
+        Some(("enrich-cache", sub)) => enrich_cache::execute(sub, format).await,
         _ => bail!("unknown `ainb fleet` subcommand — try `ainb fleet --help`"),
     }
 }

@@ -707,6 +707,209 @@ mod tests {
     }
 
     // ========================================================================
+    // P2 — Settings ▸ Plugins renders manifest [config] schema; edits persist
+    // ========================================================================
+    //
+    // The Plugins-category settings builder turns each loaded plugin's
+    // `[[config]]` schema into editable rows, and `apply_to_app_config` routes
+    // those edits into `plugins.values[plugin][key]` (NOT a top-level field).
+    // The composite row key `plugin:<name>:<field_key>` keeps rows unique across
+    // plugins that share a field name and lets `apply` recover (plugin, key).
+
+    use crate::config::PluginsConfig;
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, ConfigField, ConfigKind, Lifecycle, Manifest, PluginMeta, Provides,
+        SpawnMode, Subscribes,
+    };
+
+    /// Build a manifest with a `[config]` schema covering every `ConfigKind`
+    /// so the kind→ConfigValue mapping is exercised in one fixture.
+    fn manifest_with_config(name: &str, fields: Vec<ConfigField>) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: name.into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities: Capabilities::default(),
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle {
+                spawn: SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: fields,
+        }
+    }
+
+    fn field(key: &str, kind: ConfigKind, default: &str, choices: &[&str]) -> ConfigField {
+        ConfigField {
+            key: key.into(),
+            kind,
+            label: format!("{key} label"),
+            default: default.into(),
+            choices: choices.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    /// The composite row key the builder uses for a plugin config field.
+    fn plugin_row_key(plugin: &str, key: &str) -> String {
+        format!("plugin:{plugin}:{key}")
+    }
+
+    fn plugins_values(name: &str, pairs: &[(&str, &str)]) -> PluginsConfig {
+        let mut table = toml::value::Table::new();
+        for (k, v) in pairs {
+            table.insert((*k).into(), toml::Value::String((*v).into()));
+        }
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(name.to_string(), toml::Value::Table(table));
+        PluginsConfig {
+            enabled: Vec::new(),
+            disabled: Vec::new(),
+            values,
+        }
+    }
+
+    #[test]
+    fn test_plugins_category_settings_from_manifest() {
+        // Given a loaded plugin with a [config] schema, the Plugins-category
+        // builder appends one ConfigSetting per ConfigField, mapping each
+        // kind → the matching ConfigValue variant, and defaulting the value
+        // from plugins.values first, then the schema default.
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![
+                field("learnings_dir", ConfigKind::Path, "~/.learnings", &[]),
+                field("qmd_collection", ConfigKind::String, "learnings", &[]),
+                field("enabled", ConfigKind::Bool, "true", &[]),
+                field("mode", ConfigKind::Enum, "local", &["local", "global"]),
+                field("limit", ConfigKind::Int, "20", &[]),
+            ],
+        );
+        // plugins.values overrides one path; the rest fall back to schema default.
+        let cfg = plugins_values("learnings", &[("learnings_dir", "/tmp/kb")]);
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        let rows = screen.settings.get(&ConfigCategory::Plugins).expect("Plugins category present");
+
+        // The original enable/disable placeholder row is preserved.
+        assert!(
+            rows.iter().any(|s| s.key == "installed_plugins"),
+            "existing enable/disable placeholder row must be kept"
+        );
+
+        // learnings_dir: path → Text, value from plugins.values (override wins).
+        let dir = rows
+            .iter()
+            .find(|s| s.key == plugin_row_key("learnings", "learnings_dir"))
+            .expect("learnings_dir row present");
+        assert!(matches!(dir.value, ConfigValue::Text(ref t) if t == "/tmp/kb"));
+        assert_eq!(dir.label, "learnings_dir label");
+
+        // qmd_collection: string → Text, value from schema default (no override).
+        let coll = rows
+            .iter()
+            .find(|s| s.key == plugin_row_key("learnings", "qmd_collection"))
+            .expect("qmd_collection row present");
+        assert!(matches!(coll.value, ConfigValue::Text(ref t) if t == "learnings"));
+
+        // bool → Bool, parsed from the schema default "true".
+        let en = rows
+            .iter()
+            .find(|s| s.key == plugin_row_key("learnings", "enabled"))
+            .expect("enabled row present");
+        assert!(matches!(en.value, ConfigValue::Bool(true)));
+
+        // enum → Choice(choices, selected_idx) with the default selected.
+        let mode = rows
+            .iter()
+            .find(|s| s.key == plugin_row_key("learnings", "mode"))
+            .expect("mode row present");
+        match &mode.value {
+            ConfigValue::Choice(opts, idx) => {
+                assert_eq!(opts, &vec!["local".to_string(), "global".to_string()]);
+                assert_eq!(*idx, 0, "default 'local' selected");
+            }
+            other => panic!("enum kind must map to Choice, got {other:?}"),
+        }
+
+        // int → Number, parsed from the schema default "20".
+        let limit = rows
+            .iter()
+            .find(|s| s.key == plugin_row_key("learnings", "limit"))
+            .expect("limit row present");
+        assert!(matches!(limit.value, ConfigValue::Number(20)));
+    }
+
+    #[test]
+    fn test_apply_routes_plugin_edit_to_values() {
+        // Editing a Plugins-category row then apply_to_app_config writes into
+        // app_config.plugins.values[plugin][key] — NOT a top-level config field
+        // — and a save()→reload (toml round-trip) preserves it.
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        // Simulate the popup-confirm edit: mutate the row value in place,
+        // exactly as ConfigPopupConfirm does (matched by key).
+        let row_key = plugin_row_key("learnings", "learnings_dir");
+        {
+            let rows = screen.settings.get_mut(&ConfigCategory::Plugins).unwrap();
+            let row = rows.iter_mut().find(|s| s.key == row_key).expect("row present");
+            row.value = ConfigValue::Text("/tmp/edited-kb".to_string());
+        }
+
+        let mut app = AppConfig::default();
+        screen.apply_to_app_config(&mut app);
+
+        // The edit landed under plugins.values[learnings][learnings_dir],
+        // not at any top-level config field.
+        let learnings = app
+            .plugins
+            .values
+            .get("learnings")
+            .and_then(toml::Value::as_table)
+            .expect("learnings value table created");
+        assert_eq!(
+            learnings.get("learnings_dir").and_then(toml::Value::as_str),
+            Some("/tmp/edited-kb")
+        );
+
+        // save()→reload round trip (the toml pipeline AppConfig::save uses).
+        let serialized = toml::to_string_pretty(&app).expect("serialize app config");
+        assert!(
+            serialized.contains("[plugins.learnings]"),
+            "serialized config must carry the [plugins.learnings] table; got:\n{serialized}"
+        );
+        let reloaded: AppConfig = toml::from_str(&serialized).expect("reparse app config");
+        assert_eq!(
+            reloaded
+                .plugins
+                .values
+                .get("learnings")
+                .and_then(toml::Value::as_table)
+                .and_then(|t| t.get("learnings_dir"))
+                .and_then(toml::Value::as_str),
+            Some("/tmp/edited-kb"),
+            "plugin config edit must survive a save()→reload round trip"
+        );
+    }
+
+    // ========================================================================
     // Per-session attention marker — derived from real ainb-hooks events
     // (NeedsPermission `[!]` / WaitingOnUser `[?]` / Finished `[✓]`), not
     // from "is the pane generating right now".
@@ -867,5 +1070,198 @@ mod tests {
         );
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
+    }
+
+    // ---- bulk-resume selection (Enter/r on multi-selected sessions) ----
+
+    fn resumable_session(
+        name: &str,
+        mode: SessionMode,
+        agent: SessionAgentType,
+        status: crate::models::SessionStatus,
+    ) -> crate::models::Session {
+        let mut s = crate::models::Session::new(name.to_string(), "/tmp/ws".to_string());
+        s.mode = mode;
+        s.agent_type = agent;
+        s.status = status;
+        s
+    }
+
+    /// Bulk resume must start every selected *stopped interactive* session and
+    /// exclude everything else — Running interactive (would kill+recreate a live
+    /// tmux), Boss-mode, and non-agent (Shell) sessions. Regression for the bug
+    /// where Enter only resumed the highlighted row.
+    #[test]
+    fn selected_resumable_session_ids_keeps_only_stopped_interactive() {
+        use crate::models::SessionStatus;
+
+        let stopped_claude = resumable_session(
+            "stopped-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let stopped_codex = resumable_session(
+            "stopped-codex",
+            SessionMode::Interactive,
+            SessionAgentType::Codex,
+            SessionStatus::Stopped,
+        );
+        let running_claude = resumable_session(
+            "running-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Running,
+        );
+        let boss_stopped = resumable_session(
+            "boss-stopped",
+            SessionMode::Boss,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let shell_stopped = resumable_session(
+            "shell-stopped",
+            SessionMode::Interactive,
+            SessionAgentType::Shell,
+            SessionStatus::Stopped,
+        );
+
+        let resumable_ids = [stopped_claude.id, stopped_codex.id];
+        let all_ids = [
+            stopped_claude.id,
+            stopped_codex.id,
+            running_claude.id,
+            boss_stopped.id,
+            shell_stopped.id,
+        ];
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        ws.add_session(stopped_claude);
+        ws.add_session(stopped_codex);
+        ws.add_session(running_claude);
+        ws.add_session(boss_stopped);
+        ws.add_session(shell_stopped);
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        // Mark all five as multi-selected.
+        for id in all_ids {
+            state.selected_sessions.insert(id);
+        }
+
+        let mut got = state.selected_resumable_session_ids();
+        got.sort();
+        let mut want = resumable_ids.to_vec();
+        want.sort();
+        assert_eq!(got, want, "only stopped interactive agent sessions resume");
+    }
+
+    #[test]
+    fn selected_resumable_session_ids_empty_when_nothing_selected() {
+        let state = AppState::new();
+        assert!(state.selected_resumable_session_ids().is_empty());
+    }
+
+    // ========================================================================
+    // Startup discovery: the fast loader must hand off to a full refresh so
+    // stopped sessions (which `load_workspaces_async` does not surface) appear
+    // without the user having to manually refresh.
+    // ========================================================================
+
+    #[test]
+    fn initial_background_load_enqueues_full_refresh_for_stopped_sessions() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        state.pending_async_action = None;
+
+        // Simulate the startup background load completing.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+
+        let updated = state.check_workspace_loading_complete();
+
+        assert!(updated, "applying the background result reports an update");
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::RefreshWorkspaces),
+            "fast startup load must enqueue a full refresh so stopped sessions surface"
+        );
+    }
+
+    #[test]
+    fn initial_background_load_does_not_clobber_a_queued_action() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A user-queued action is already pending when the load completes.
+        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        state.check_workspace_loading_complete();
+
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::CleanupOrphaned),
+            "an already-queued action must not be overwritten by the refresh hand-off"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcp_pool_config_screen_tests {
+    use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
+    use crate::config::AppConfig;
+
+    fn set_bool(screen: &mut ConfigScreenState, key: &str, value: bool) {
+        let setting = screen
+            .settings
+            .get_mut(&ConfigCategory::McpPool)
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("missing setting {key}"));
+        setting.value = ConfigValue::Bool(value);
+    }
+
+    #[test]
+    fn mcp_pool_settings_round_trip() {
+        let mut config = AppConfig::default();
+        config.mcp_servers = crate::config::McpServerConfig::defaults();
+        config.mcp_pool.idle_grace_secs = 120;
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+
+        // Loaded values reflect config.
+        let settings = screen.settings.get(&ConfigCategory::McpPool).unwrap();
+        let grace = settings.iter().find(|s| s.key == "idle_grace_secs").unwrap();
+        assert_eq!(grace.value.display(), "120");
+        // Per-server toggles exist for the built-in defaults.
+        assert!(
+            settings.iter().any(|s| s.key == "shared.context7"),
+            "expected per-server toggle, got: {:?}",
+            settings.iter().map(|s| &s.key).collect::<Vec<_>>()
+        );
+
+        // Edit: disable pool + opt context7 out of sharing.
+        set_bool(&mut screen, "pool_enabled", false);
+        set_bool(&mut screen, "shared.context7", false);
+        screen.apply_to_app_config(&mut config);
+
+        assert!(!config.mcp_pool.enabled);
+        assert!(!config.mcp_servers["context7"].shared);
+        assert!(
+            config.mcp_servers["serena"].shared,
+            "untouched server keeps default"
+        );
+
+        // Reopen → edited values shown.
+        let reopened = ConfigScreenState::from_app_config(&config);
+        let settings = reopened.settings.get(&ConfigCategory::McpPool).unwrap();
+        let enabled = settings.iter().find(|s| s.key == "pool_enabled").unwrap();
+        assert_eq!(enabled.value.display(), "✗ Disabled");
+        let ctx = settings.iter().find(|s| s.key == "shared.context7").unwrap();
+        assert_eq!(ctx.value.display(), "✗ Disabled");
     }
 }

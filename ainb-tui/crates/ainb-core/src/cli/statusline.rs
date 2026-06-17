@@ -31,7 +31,9 @@ pub const CACHE_SCHEMA_VERSION: u32 = 1;
 pub struct RateWindow {
     /// Used percentage, 0..=100.
     pub pct: u8,
-    /// ISO8601 reset timestamp as reported by Claude Code (passed through).
+    /// Reset instant as an RFC3339 string. Claude Code reports `resets_at`
+    /// as a Unix epoch integer (or, historically, an ISO8601 string);
+    /// [`parse_resets_at`] normalises both forms to RFC3339 for the cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
 }
@@ -107,11 +109,35 @@ fn rate_window_from_value(value: &serde_json::Value) -> Option<RateWindow> {
         .get("used_percentage")
         .and_then(serde_json::Value::as_f64)
         .map(round_pct)?;
-    let resets_at = value.get("resets_at").and_then(serde_json::Value::as_str).map(str::to_string);
+    let resets_at = value.get("resets_at").and_then(parse_resets_at);
     Some(RateWindow { pct, resets_at })
 }
 
-fn round_pct(p: f64) -> u8 {
+/// Normalise a `resets_at` value from a Claude Code statusline payload into
+/// an RFC3339 string (the cache's on-disk shape, which the TUI parses via
+/// `live_window::instant_from_iso8601`).
+///
+/// The real payload sends `resets_at` as a **Unix epoch integer** (seconds),
+/// e.g. `1780791600`; earlier/synthetic payloads used an ISO8601 string.
+/// Reading it with `as_str()` alone (the historical behaviour) silently
+/// dropped the integer form, so the reset instant never reached the cache
+/// and the TUI's per-window "↻ <reset>" affordance had nothing to render.
+/// Accept both forms here.
+pub(crate) fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        // Already a timestamp string — trust it as-is.
+        return Some(s.to_string());
+    }
+    // Unix epoch seconds, sent as an integer (or, defensively, a float —
+    // filtered to finite values so a stray NaN/∞ can't cast to a bogus
+    // epoch rather than failing cleanly).
+    let epoch = value
+        .as_i64()
+        .or_else(|| value.as_f64().filter(|f| f.is_finite()).map(|f| f as i64))?;
+    chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339())
+}
+
+pub(crate) fn round_pct(p: f64) -> u8 {
     p.clamp(0.0, 100.0).round() as u8
 }
 
@@ -332,6 +358,61 @@ mod tests {
         );
         assert_eq!(cache.seven_day.as_ref().unwrap().pct, 3);
         assert_eq!(cache.today_cost_usd, Some(4.21));
+    }
+
+    #[test]
+    fn parse_payload_accepts_epoch_integer_resets_at() {
+        // The real Claude Code statusline payload sends `resets_at` as a Unix
+        // epoch integer, not an ISO8601 string. Regression guard for the bug
+        // where `as_str()` silently dropped the integer form, leaving the
+        // TUI's per-window "↻ <reset>" affordance with no data to render.
+        let raw = br#"{
+            "rate_limits": {
+                "five_hour": {"used_percentage": 11, "resets_at": 1780791600},
+                "seven_day": {"used_percentage": 7.0, "resets_at": 1781283600}
+            }
+        }"#;
+        let cache = parse_payload(raw).expect("should parse");
+        let fh = cache.five_hour.expect("five_hour present");
+        assert_eq!(fh.pct, 11);
+        let resets = fh.resets_at.expect("resets_at must populate from epoch int");
+        // Stored as RFC3339 and round-trips to the original instant.
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&resets).unwrap().timestamp(),
+            1780791600
+        );
+        let wk = cache.seven_day.expect("seven_day present");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(wk.resets_at.as_ref().unwrap())
+                .unwrap()
+                .timestamp(),
+            1781283600
+        );
+    }
+
+    #[test]
+    fn parse_resets_at_handles_int_float_string_and_garbage() {
+        use serde_json::json;
+        // Integer epoch → RFC3339 round-tripping to the same instant.
+        let s = parse_resets_at(&json!(1780791600i64)).expect("int epoch");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&s).unwrap().timestamp(),
+            1780791600
+        );
+        // Float epoch (defensive) → truncated to whole seconds.
+        let s = parse_resets_at(&json!(1780791600.9)).expect("float epoch");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&s).unwrap().timestamp(),
+            1780791600
+        );
+        // ISO8601 string → passthrough unchanged.
+        assert_eq!(
+            parse_resets_at(&json!("2026-06-07T00:20:00Z")).as_deref(),
+            Some("2026-06-07T00:20:00Z")
+        );
+        // Non-timestamp values → None.
+        assert!(parse_resets_at(&json!(true)).is_none());
+        assert!(parse_resets_at(&json!(null)).is_none());
     }
 
     #[test]

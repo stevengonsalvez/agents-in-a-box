@@ -11,6 +11,9 @@
 //! - [`error`]     — [`RuntimeError`] crate-wide error enum
 //! - [`types`]     — [`PluginId`], [`Topic`], `RegisteredPlugin`, outcome enums
 //! - [`snapshot`]  — versioned snapshot store keyed by topic
+//! - [`event_stream`] — host-side cap-gated event-stream registry
+//! - [`managed_subprocess`] — host-side cap-gated managed-subprocess registry
+//! - [`unix_socket`] — host-side cap-gated unix-socket dial registry
 //! - [`registry`]  — action → plugin registry
 //! - [`rpc`]       — JSON-RPC 2.0 envelope helpers
 //! - [`framing`]   — async Content-Length frame I/O over tokio pipes
@@ -22,15 +25,21 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod error;
+pub mod event_stream;
 pub mod framing;
 pub mod handle;
+pub mod managed_subprocess;
 pub mod plugin_task;
 pub mod process;
 pub mod registry;
 pub mod rpc;
 pub mod runtime;
+pub mod secret_store;
 pub mod snapshot;
 pub mod types;
+pub mod unix_socket;
+pub mod warnings;
+pub mod workspace_store;
 
 pub use error::RuntimeError;
 pub use handle::RuntimeHandle;
@@ -44,7 +53,8 @@ pub use types::{
 // crate directly. Single source of truth still lives in the protocol
 // crate — these are passthrough only.
 pub use ainb_plugin_protocol::params::{
-    HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent,
-    KeyKind, Viewport,
+    HandleKeyParams, HandleMouseParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER,
+    KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Viewport,
 };
+pub use ainb_plugin_protocol::topics;
 pub use ainb_plugin_protocol::wire_buffer::WireBuffer;

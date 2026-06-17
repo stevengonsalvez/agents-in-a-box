@@ -179,7 +179,7 @@ fn arrow_jk_gg_navigation_moves_selection_and_detail_in_live_binary() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // SkillManager up with both seeded units present. The Detail pane
     // starts on row 0 → `initial-skill`.

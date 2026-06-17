@@ -1,0 +1,20 @@
+document_id: tp-04-deploy-fly-process
+extracted_at: '2026-04-01T00:00:00'
+entities:
+  - name: "fly-deploy"
+    type: platform
+    description: "current deploy target"
+  - name: "deploy-process"
+    type: concept
+    description: "team deploy standard"
+relationships:
+  - source: "fly-deploy"
+    target: "deploy-process"
+    type: part_of
+    description: "the current process"
+    strength: 9
+  - source: "fly-deploy"
+    target: "heroku-deploy"
+    type: supersedes
+    description: "replaces Heroku pipelines"
+    strength: 9

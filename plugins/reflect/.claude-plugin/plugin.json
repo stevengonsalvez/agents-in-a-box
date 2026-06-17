@@ -33,6 +33,17 @@
         ]
       }
     ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${CLAUDE_PLUGIN_ROOT}/hooks/notification_reflect.py"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",

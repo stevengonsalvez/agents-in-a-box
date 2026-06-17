@@ -236,7 +236,7 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // Wait for the SkillManager screen to surface + the async drift
     // poll to update the Units panel with the ⚠ glyph. The async

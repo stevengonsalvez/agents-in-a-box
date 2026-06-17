@@ -1,0 +1,48 @@
+{
+  "1": {
+    "report_string": "# Rebase discipline\n\nEntities about auditing after a large rebase.\n",
+    "report_json": {
+      "title": "Rebase discipline",
+      "summary": "Entities about auditing after a large rebase.",
+      "findings": [
+        {
+          "summary": "Audit prevents stale plans",
+          "explanation": "Stopping the plan after a large pull avoids redundant work."
+        }
+      ],
+      "rating": 6.5,
+      "rating_explanation": "Moderate impact process knowledge."
+    },
+    "level": 0,
+    "title": "Cluster 1",
+    "edges": [
+      ["\"AUDIT-AFTER-REBASE\"", "\"STALE-PLAN-EXECUTION\""],
+      ["\"STALE-PLAN-EXECUTION\"", "\"GIT-PULL-REBASE\""]
+    ],
+    "nodes": [
+      "\"AUDIT-AFTER-REBASE\"",
+      "\"STALE-PLAN-EXECUTION\"",
+      "\"GIT-PULL-REBASE\""
+    ],
+    "chunk_ids": ["chunk-aaa111", "chunk-bbb222"],
+    "occurrence": 0.5,
+    "sub_communities": []
+  },
+  "2": {
+    "report_string": "# Tokio runtime traps\n\nDropping a runtime inside tokio::main panics.\n",
+    "report_json": {
+      "title": "Tokio runtime traps",
+      "summary": "Dropping a runtime inside tokio::main panics.",
+      "findings": [],
+      "rating": 8.0,
+      "rating_explanation": "High impact technical knowledge."
+    },
+    "level": 0,
+    "title": "Cluster 2",
+    "edges": [],
+    "nodes": ["\"TOKIO-RUNTIME\"", "\"RUNTIME-DROP-PANIC\""],
+    "chunk_ids": ["chunk-ddd444"],
+    "occurrence": 0.25,
+    "sub_communities": []
+  }
+}

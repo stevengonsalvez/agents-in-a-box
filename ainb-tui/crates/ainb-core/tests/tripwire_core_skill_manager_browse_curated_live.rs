@@ -306,7 +306,7 @@ fn curated_browse_blank_lists_shelf_and_installs_live() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(300));
-    send(&session, "m");
+    send(&session, "z");
 
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Units") && c.contains("Detail")
@@ -424,7 +424,7 @@ fn curated_command_kind_install_runs_on_double_enter_live() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Units") && c.contains("Detail")
     })

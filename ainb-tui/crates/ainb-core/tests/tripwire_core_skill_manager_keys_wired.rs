@@ -16,7 +16,7 @@
 //!   * `[c] check`  → `tripwire_core_skill_manager_check_live.rs`
 //!     (asserts the "drift check running" info toast surfaces).
 //!   * `[m] refresh` → `tripwire_core_skill_manager_sandbox_e2e.rs`
-//!     (presses `m` and asserts the SkillManager screen renders).
+//!     (presses `z` and asserts the SkillManager screen renders).
 //!
 //! Bead: skill-manager key wiring (follow-up to ai-e7t). Skips when
 //! tmux is unavailable.
@@ -142,7 +142,7 @@ fn add_source_key_writes_manifest_in_live_binary() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
 
     // Minimal tier → empty manifest → discovery banner pops. Skip it
     // so we're on the units screen with the empty-state help.
@@ -238,7 +238,7 @@ fn search_key_filters_units_in_live_binary() {
         panic!("home never rendered:\n{d}");
     }
     thread::sleep(Duration::from_millis(200));
-    send(&session, "m");
+    send(&session, "z");
     if poll(&session, Instant::now() + Duration::from_secs(60), |c| {
         c.contains("initial-skill")
     })

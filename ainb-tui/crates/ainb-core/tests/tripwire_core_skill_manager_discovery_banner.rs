@@ -207,7 +207,7 @@ fn discovery_banner_renders_then_import_populates_units() {
     thread::sleep(Duration::from_millis(200));
 
     // Press m (lowercase, per the HomeScreen V2 nav arm).
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // Banner-on assertions (substring-AND, all required). Each
     // marker proves a distinct banner element painted; substring-

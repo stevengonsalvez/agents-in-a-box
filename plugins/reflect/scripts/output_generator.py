@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -112,8 +113,101 @@ def ensure_directories(*dirs: Path):
 
 
 # ---------------------------------------------------------------------------
+# History sidecars (S6: non-destructive note updates)
+# ---------------------------------------------------------------------------
+
+
+def get_history_sidecar_path(note_path: Path) -> Path:
+    """`docs/solutions/{cat}/{slug}.md` -> `{slug}.history.yaml` sibling."""
+    return note_path.with_name(f"{note_path.stem}.history.yaml")
+
+
+def append_history_sidecar(
+    note_path: Path,
+    previous_content: str,
+    reason: str = "update",
+) -> Optional[Path]:
+    """S6: archive the previous form of a knowledge note before overwrite.
+
+    Appends one YAML list item to ``{slug}.history.yaml`` next to the note.
+    The sidecar is append-only and hand-emitted (deterministic literal block
+    scalars, no yaml-lib reflow), so a git diff of an UPDATE shows exactly
+    one added entry — the audit trail is reviewable in the PR itself.
+
+    Returns the sidecar path, or None on failure (silent-fail shaped:
+    a broken snapshot must never block the note write itself).
+    """
+    try:
+        sidecar = get_history_sidecar_path(note_path)
+        content_hash = hashlib.sha256(
+            previous_content.encode("utf-8")
+        ).hexdigest()[:16]
+        # Literal block scalar: every content line indented 4 spaces;
+        # whitespace-only lines emitted empty to keep the block unambiguous.
+        indented = "\n".join(
+            f"    {line}" if line.strip() else ""
+            for line in previous_content.splitlines()
+        )
+        entry = (
+            f'- snapshot_at: "{datetime.now().isoformat()}"\n'
+            f'  reason: "{reason}"\n'
+            f'  content_hash: "{content_hash}"\n'
+            f"  previous: |\n"
+            f"{indented}\n"
+        )
+        with open(sidecar, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+        return sidecar
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Knowledge notes
 # ---------------------------------------------------------------------------
+
+
+# S3: display tier → numeric confidence midpoint (the reflect.db backfill
+# mapping). The float is what recall ranks by; tiers are display buckets.
+_CONFIDENCE_TIER_NUMS = {"HIGH": 0.9, "MEDIUM": 0.6, "MED": 0.6, "LOW": 0.3}
+_DEFAULT_CONFIDENCE_NUM = 0.6
+
+
+def _confidence_num(confidence: str, confidence_num: Optional[float]) -> float:
+    """S3: resolve the numeric confidence for a new note.
+
+    An explicit caller value wins (clamped to [0, 1]); otherwise the tier
+    is mapped to its bucket midpoint so every new note carries BOTH fields.
+    """
+    if confidence_num is not None and not isinstance(confidence_num, bool):
+        try:
+            num = float(confidence_num)
+            if num == num:  # NaN guard
+                return min(1.0, max(0.0, num))
+        except (TypeError, ValueError):
+            pass
+    return _CONFIDENCE_TIER_NUMS.get(
+        str(confidence or "").strip().upper(), _DEFAULT_CONFIDENCE_NUM
+    )
+
+
+def _one_liner(text: str, cap: int = 200) -> str:
+    """S1: distil prose to a single-line summary for structured frontmatter.
+
+    First non-empty line, then first sentence of it, capped. The full prose
+    stays in the body — this is the context-cheap projection recall returns
+    when asked for `--field problem`.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # First sentence boundary (". " keeps versions like "v1.2" intact).
+        idx = line.find(". ")
+        if idx != -1:
+            line = line[: idx + 1]
+        return line[:cap].strip()
+    return ""
 
 
 def create_knowledge_note(
@@ -127,15 +221,28 @@ def create_knowledge_note(
     solution: str,
     context: str = "",
     confidence: str = "high",
+    confidence_num: Optional[float] = None,
     language: str = "",
     framework: str = "",
     source_tool: str = "",
     source_path: str = "",
     session_id: str = "",
     content_hash: str = "",
+    fix: str = "",
+    rule: str = "",
+    entities: Optional[list] = None,
+    causal_relations: Optional[list] = None,
 ) -> tuple[Path, str]:
     """
     Create a knowledge note in docs/solutions/{category}/.
+
+    S1 (Hindsight fact_extraction shape): typed fields — ``problem`` (one-liner
+    derived from the prose), ``root_cause``, ``fix``, ``rule``, ``category``,
+    ``entities``, ``causal_relations`` — land in structured frontmatter so
+    recall can return just one field instead of the whole note. The prose body
+    remains the human-readable rationale. ``problem`` is auto-derived from the
+    prose; the other new fields are optional and omitted from frontmatter when
+    empty, so notes from legacy callers gain only the derived ``problem`` line.
 
     Returns:
         Tuple of (file_path, filename_stem) for sidecar generation
@@ -161,7 +268,23 @@ def create_knowledge_note(
         'key_insight': key_insight,
         'created': datetime.now().strftime('%Y-%m-%d'),
         'confidence': confidence,
+        # S3: continuous 0–1 confidence beside the display tier — recall
+        # ranks by this float; omitted callers get the tier midpoint.
+        'confidence_num': _confidence_num(confidence, confidence_num),
     }
+    # S1: structured extraction fields — only written when populated so legacy
+    # callers keep producing the exact same frontmatter as before.
+    problem_line = _one_liner(problem)
+    if problem_line:
+        frontmatter['problem'] = problem_line
+    if fix:
+        frontmatter['fix'] = fix
+    if rule:
+        frontmatter['rule'] = rule
+    if entities:
+        frontmatter['entities'] = entities
+    if causal_relations:
+        frontmatter['causal_relations'] = causal_relations
     if language:
         frontmatter['language'] = language
     if framework:
@@ -182,7 +305,12 @@ def create_knowledge_note(
         fm_lines = []
         for k, v in frontmatter.items():
             if isinstance(v, list):
-                fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
+                if any(isinstance(i, (dict, list)) for i in v):
+                    # S1: causal_relations is a list of dicts — JSON is valid
+                    # YAML, unlike str() of a python dict.
+                    fm_lines.append(f"{k}: {json.dumps(v)}")
+                else:
+                    fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
             elif isinstance(v, dict):
                 fm_lines.append(f"{k}:")
                 for dk, dv in v.items():
@@ -194,6 +322,45 @@ def create_knowledge_note(
     content = f"---\n{fm_str}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
     if context:
         content += f"\n## Context\n\n{context}\n"
+
+    # M5: verify commit-like refs in the LLM-authored body against the local
+    # repo before persistence. Hallucinated refs get recorded in frontmatter
+    # (so recall can downrank / warn); a note where EVERY ref is fabricated is
+    # rejected outright.
+    try:
+        from commit_verifier import verify_refs
+        # Verify against the PROJECT repo (CLAUDE_PROJECT_DIR / nearest .git),
+        # not Path.cwd() — the drain runs with a neutral $HOME cwd.
+        # S1: rule/fix are LLM-authored too — a fabricated SHA there must not
+        # bypass the hallucination check.
+        report = verify_refs(
+            f"{problem}\n{solution}\n{context}\n{fix}\n{rule}",
+            repo_dir=get_project_dir(),
+        )
+        if report.all_unverified:
+            raise ValueError(
+                "all_refs_hallucinated: every commit ref in this note "
+                f"({', '.join(report.unverified)}) is absent from the repo"
+            )
+        if report.checked and report.unverified:
+            frontmatter["unverified_refs"] = report.unverified
+            if yaml:
+                fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
+                content = f"---\n{fm_str}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
+                if context:
+                    content += f"\n## Context\n\n{context}\n"
+    except ImportError:  # pragma: no cover — verifier is best-effort
+        pass
+
+    # S6: UPDATE (note already on disk, new form differs) → snapshot the old
+    # form into the git-readable `.history.yaml` sidecar before overwriting.
+    if filepath.exists():
+        try:
+            previous = filepath.read_text()
+        except OSError:
+            previous = ""
+        if previous and previous != content:
+            append_history_sidecar(filepath, previous, reason="update")
 
     filepath.write_text(content)
     return filepath, slug

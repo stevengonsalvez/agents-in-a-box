@@ -120,3 +120,27 @@ dir may stay around (Rust's panic unwinding may or may not run the
 drop). If tripwires leave `/var/folders/.../tmp.*` orphans, that's why.
 Periodic `rm -rf /var/folders/*/T/tmp.*` is fine (or `mktemp -d` from
 shell wrappers — manual cleanup).
+
+## 15. `AppState::new()` restores the developer's persisted UI prefs
+
+`AppState::new()` loads the real user config (`~/.agents-in-a-box/...`),
+so any UI preference that lives there — sidebar width, collapsed flag,
+session filter — comes back as whatever the machine running the test has
+saved, NOT a fixed default. A width tripwire that asserts exact cell
+counts (e.g. "embed gets 78 cols beside a 40-col sidebar") will pass on
+CI and on a fresh checkout but FAIL on the developer's box if they once
+dragged the sidebar to 58 cols — and the failure looks like a real
+regression while the feature is working perfectly.
+
+Fix: pin every persisted UI field the test's math depends on, right
+after `AppState::new()`, before asserting:
+
+```rust
+let mut state = AppState::new();
+state.sessions_pane_state.restore(Some(40), false); // width=40, not collapsed
+```
+
+Field-discovered on the embed width tripwire: first run read a 58-col
+saved sidebar and asserted 60 != 78. The same trap applies to any
+config-backed state — snapshot/pin it, don't trust the constructor's
+"default" to be the documented default on every machine.

@@ -31,11 +31,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
+import subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from domain.enums import (
     ArtifactStatus,
@@ -71,11 +74,36 @@ INDEX_BACKEND_VALUES = tuple(backend.value for backend in IndexBackend)
 ARTIFACT_TYPE_VALUES = tuple(artifact_type.value for artifact_type in ArtifactType)
 ARTIFACT_STATUS_VALUES = tuple(status.value for status in ArtifactStatus)
 
+# S9: maturity tiers for the learning_signals sidecar (ByteRover
+# MaturityTierSchema shape — draft/validated/core; new rows start as draft).
+MATURITY_TIERS: tuple[str, ...] = ("draft", "validated", "core")
+DEFAULT_MATURITY = "draft"
+# S9: importance is a 0–100 ranking weight (ByteRover RuntimeSignals
+# importance shape); new rows start at the neutral midpoint.
+DEFAULT_IMPORTANCE = 50.0
+
+# S9: ranking signals that may NEVER appear in note frontmatter — they change
+# per query and would dirty git-tracked markdown. Their only home is the
+# ``learning_signals`` sidecar table; note writers strip them via
+# :func:`strip_volatile_signal_fields`.
+VOLATILE_SIGNAL_FIELDS: frozenset[str] = frozenset(
+    {
+        "importance",
+        "maturity",
+        "recall_count",
+        "helpful_count",
+        "ignored_count",
+        "stale_count",
+        "last_recalled_at",
+    }
+)
+
 _LEARNING_COLUMNS = (
     "id",
     "title",
     "category",
     "confidence",
+    "confidence_num",
     "status",
     "scope",
     "source_tool",
@@ -85,6 +113,8 @@ _LEARNING_COLUMNS = (
     "source_quote",
     "source_quote_hash",
     "content_hash",
+    "source_memory_ids",
+    "proof_count",
     "session_id",
     "thread_id",
     "privacy_level",
@@ -93,6 +123,7 @@ _LEARNING_COLUMNS = (
     "commit_hash",
     "supersedes_learning_id",
     "superseded_by_learning_id",
+    "forget_after",
     "created_at",
     "approved_at",
     "indexed_at",
@@ -103,6 +134,7 @@ _LEARNING_COLUMNS = (
     "helpful_count",
     "ignored_count",
     "stale_count",
+    "is_latest",
 )
 
 _PROPOSAL_COLUMNS = (
@@ -132,6 +164,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     title                   TEXT NOT NULL,
     category                TEXT NOT NULL DEFAULT 'Unknown',
     confidence              TEXT NOT NULL DEFAULT 'LOW',
+    confidence_num          REAL NOT NULL DEFAULT 0.3,
     status                  TEXT NOT NULL DEFAULT '{LearningStatus.PENDING.value}'
                             CHECK (status IN ({_quoted_csv(LEARNING_STATUS_VALUES)})),
     scope                   TEXT NOT NULL DEFAULT 'project',
@@ -142,6 +175,8 @@ CREATE TABLE IF NOT EXISTS learnings (
     source_quote            TEXT NOT NULL DEFAULT '',
     source_quote_hash       TEXT NOT NULL DEFAULT '',
     content_hash            TEXT NOT NULL DEFAULT '',
+    source_memory_ids       TEXT NOT NULL DEFAULT '[]',
+    proof_count             INTEGER NOT NULL DEFAULT 1,
     session_id              TEXT NOT NULL DEFAULT '',
     thread_id               TEXT NOT NULL DEFAULT '',
     privacy_level           TEXT NOT NULL DEFAULT '{PrivacyLevel.INTERNAL.value}'
@@ -151,6 +186,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     commit_hash             TEXT,
     supersedes_learning_id  TEXT,
     superseded_by_learning_id TEXT,
+    forget_after            TEXT,
     created_at              TEXT NOT NULL,
     approved_at             TEXT,
     indexed_at              TEXT,
@@ -161,6 +197,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     helpful_count           INTEGER NOT NULL DEFAULT 0,
     ignored_count           INTEGER NOT NULL DEFAULT 0,
     stale_count             INTEGER NOT NULL DEFAULT 0,
+    is_latest               INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (supersedes_learning_id) REFERENCES learnings(id),
     FOREIGN KEY (superseded_by_learning_id) REFERENCES learnings(id)
 );
@@ -252,7 +289,25 @@ CREATE TABLE IF NOT EXISTS recall_events (
     source_context  TEXT NOT NULL DEFAULT '',
     rank            INTEGER,
     feedback        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    followup        INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL
+);
+"""
+
+_LEARNING_SIGNALS_DDL = f"""
+CREATE TABLE IF NOT EXISTS learning_signals (
+    learning_id      TEXT PRIMARY KEY REFERENCES learnings(id),
+    importance       REAL NOT NULL DEFAULT {DEFAULT_IMPORTANCE},
+    maturity         TEXT NOT NULL DEFAULT '{DEFAULT_MATURITY}'
+                     CHECK (maturity IN ({_quoted_csv(MATURITY_TIERS)})),
+    recall_count     INTEGER NOT NULL DEFAULT 0,
+    helpful_count    INTEGER NOT NULL DEFAULT 0,
+    ignored_count    INTEGER NOT NULL DEFAULT 0,
+    stale_count      INTEGER NOT NULL DEFAULT 0,
+    last_recalled_at TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
 );
 """
 
@@ -271,6 +326,221 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
+
+# ---------------------------------------------------------------------------
+# S8: Document -> chunks -> learnings grouping (Hindsight documents+chunks model)
+#
+# Tracks (transcript_id, slice_hash) -> learning_ids[] so multiple learnings
+# attribute back to one conversation and dedup across them. Enables
+# "show me everything that came out of session X" and cross-learning
+# consolidation. ``transcript_chunks.hash`` REUSES the S7 slice-chunk hash
+# (cascade ``signal_hash``); the UNIQUE constraint on (transcript_id, hash)
+# makes re-recording the same chunk idempotent so chunks are never
+# double-processed.
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPTS_DDL = """
+CREATE TABLE IF NOT EXISTS transcripts (
+    id              TEXT PRIMARY KEY,
+    captured_at     TEXT NOT NULL
+);
+"""
+
+_TRANSCRIPT_CHUNKS_DDL = """
+CREATE TABLE IF NOT EXISTS transcript_chunks (
+    id              TEXT PRIMARY KEY,
+    transcript_id   TEXT NOT NULL REFERENCES transcripts(id),
+    hash            TEXT NOT NULL,
+    slice           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    UNIQUE (transcript_id, hash)
+);
+"""
+
+_CHUNK_LEARNINGS_DDL = """
+CREATE TABLE IF NOT EXISTS chunk_learnings (
+    chunk_hash      TEXT NOT NULL,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (chunk_hash, learning_id)
+);
+"""
+
+_LEARNING_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS learning_history (
+    id              TEXT PRIMARY KEY,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    change_type     TEXT NOT NULL DEFAULT 'update',
+    changed_fields  TEXT NOT NULL DEFAULT '[]',
+    snapshot_json   TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT NOT NULL DEFAULT '',
+    actor           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+"""
+
+_CONCEPT_INDEX_DDL = """
+CREATE TABLE IF NOT EXISTS concept_index (
+    concept         TEXT NOT NULL,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (concept, learning_id)
+);
+"""
+
+_SKILLS_DDL = """
+CREATE TABLE IF NOT EXISTS skills (
+    path                TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    tags                TEXT NOT NULL DEFAULT '[]',
+    summary             TEXT NOT NULL DEFAULT '',
+    mtime               REAL NOT NULL DEFAULT 0,
+    last_refreshed_at   TEXT NOT NULL,
+    is_stale            INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SLOTS_DDL = """
+CREATE TABLE IF NOT EXISTS slots (
+    project_id      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    content         TEXT NOT NULL DEFAULT '',
+    scope           TEXT NOT NULL DEFAULT 'project'
+                    CHECK (scope IN ('project', 'global')),
+    size_limit      INTEGER NOT NULL DEFAULT 2000,
+    read_only       INTEGER NOT NULL DEFAULT 0,
+    description     TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    last_edited_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+);
+"""
+
+# O1: consolidated observations — the persona/convention aggregate layer
+# (Hindsight memory_units fact_type=observation shape). Raw learnings are
+# correction-shaped (one specific rule/fix per row); observations are the
+# drain's SECOND output stream: aggregated "this team/codebase generally
+# prefers X" statements that accumulate evidence over time via proof_count +
+# source_correction_ids[] instead of piling up as near-identical siblings.
+# Distinct from skills (workflow-shaped: how to do X).
+OBSERVATION_STATUS_ACTIVE = "active"
+OBSERVATION_STATUS_RETIRED = "retired"
+OBSERVATION_STATUSES: tuple[str, ...] = (
+    OBSERVATION_STATUS_ACTIVE,
+    OBSERVATION_STATUS_RETIRED,
+)
+
+_OBSERVATIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS observations (
+    id                      TEXT PRIMARY KEY,
+    content                 TEXT NOT NULL,
+    category                TEXT NOT NULL DEFAULT 'Unknown',
+    scope                   TEXT NOT NULL DEFAULT 'project',
+    status                  TEXT NOT NULL DEFAULT '{OBSERVATION_STATUS_ACTIVE}'
+                            CHECK (status IN ({_quoted_csv(OBSERVATION_STATUSES)})),
+    proof_count             INTEGER NOT NULL DEFAULT 1,
+    source_correction_ids   TEXT NOT NULL DEFAULT '[]',
+    retired_reason          TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+"""
+
+_OBSERVATION_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS observation_history (
+    id              TEXT PRIMARY KEY,
+    observation_id  TEXT NOT NULL REFERENCES observations(id),
+    change_type     TEXT NOT NULL DEFAULT 'update',
+    snapshot_json   TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+"""
+
+# O2: auto-refreshing per-project conventions doc — the pre-synthesized
+# "what does this project generally do?" aggregate over O1 observations
+# (Hindsight ``mental_models`` + ``trigger.refresh_after_consolidation``
+# shape). One row per project_id; ``content`` mirrors the on-disk
+# CONVENTIONS.md materialized at ``doc_path``; ``query`` is the curated
+# source query the doc answers; ``scope_tags`` is the JSON list of
+# observation scopes the doc aggregates. ``is_stale`` is the stored
+# trigger flag (R13 shape — set by mark_conventions_docs_stale, cleared
+# by the next upsert); the computed half (R14 shape — any in-scope
+# observation changed after ``last_refreshed_at``) lives in
+# :func:`compute_conventions_is_stale`.
+_CONVENTIONS_DOCS_DDL = """
+CREATE TABLE IF NOT EXISTS conventions_docs (
+    project_id          TEXT PRIMARY KEY,
+    query               TEXT NOT NULL DEFAULT '',
+    content             TEXT NOT NULL DEFAULT '',
+    scope_tags          TEXT NOT NULL DEFAULT '[]',
+    doc_path            TEXT NOT NULL DEFAULT '',
+    observation_count   INTEGER NOT NULL DEFAULT 0,
+    last_refreshed_at   TEXT NOT NULL,
+    is_stale            INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL
+);
+"""
+
+# S7: chunk-hash dedup table (Hindsight delta-retain shape,
+# engine/retain/orchestrator.py _classify_chunk_diff/_try_delta_retain). One
+# row per transcript SLICE the cascade has already handed to a drain; a re-run
+# whose chunks all hash to rows here produces 0 new learnings. The table is
+# TTL'd (rows older than the retention window are pruned) so a stale skip can
+# never wedge a chunk out of re-reflection forever — belt-and-braces, not a
+# permanent ledger.
+_CHUNK_HASHES_DDL = """
+CREATE TABLE IF NOT EXISTS chunk_hashes (
+    chunk_hash          TEXT PRIMARY KEY,
+    source_memory_id    TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL
+);
+"""
+
+# SG2: git-event capture (agentmemory post-commit.ts shape). One row per
+# commit SHA the post-commit hook captures, linked to the session_id active
+# when the commit landed. ``conflict_resolved`` flags a merge-conflict
+# resolution commit — the high-confidence learning trigger from the source.
+# A revert reads this table to find the reverted commit's session and demote
+# that session's learnings (is_latest=0). The append-only ``commits.jsonl``
+# beside the DB is the grep-able mirror (same pattern as events.jsonl).
+_COMMIT_LINKS_DDL = """
+CREATE TABLE IF NOT EXISTS commit_links (
+    sha                 TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL DEFAULT '',
+    branch              TEXT NOT NULL DEFAULT '',
+    message             TEXT NOT NULL DEFAULT '',
+    conflict_resolved   INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL
+);
+"""
+
+# O3: first-class persona/preference fields per scope (Hindsight
+# banks.disposition JSONB persona object — hindsight-api-slim
+# models.py L287-L300). The structured-fields layer that sits ON TOP of the O1
+# observations layer: where observations are free-text aggregate statements
+# ("this team generally prefers TDD"), a persona field is the DISTILLED typed
+# answer (testing_style = 'TDD') keyed by (project_id, field_name). Fields are
+# AGGREGATED from O1 observations, never hand-authored — ``confidence`` rises
+# deterministically with the count of distinct ``source_observation_ids`` cited
+# as evidence (see :func:`persona_confidence`). Open-domain queries do a field
+# lookup here FIRST (recall_persona_field) before falling back to the O1
+# observation tier — the agent gets the project's disposition without an LLM
+# call. One row per (project_id, field_name); UPDATE folds new evidence into
+# the SAME row (no sibling rows).
+_PROJECT_PERSONA_DDL = """
+CREATE TABLE IF NOT EXISTS project_persona (
+    project_id              TEXT NOT NULL DEFAULT '',
+    field_name              TEXT NOT NULL,
+    value                   TEXT NOT NULL DEFAULT '',
+    confidence              REAL NOT NULL DEFAULT 0.0,
+    source_observation_ids  TEXT NOT NULL DEFAULT '[]',
+    created_at              TEXT NOT NULL,
+    last_updated            TEXT NOT NULL,
+    PRIMARY KEY (project_id, field_name)
+);
+"""
+
 _INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
@@ -282,10 +552,34 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
 CREATE INDEX IF NOT EXISTS idx_index_jobs_learning_id ON index_jobs(learning_id);
 CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_recall_events_learning_id ON recall_events(learning_id);
+CREATE INDEX IF NOT EXISTS idx_recall_events_session_id ON recall_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_learning_id ON artifacts(learning_id);
+CREATE INDEX IF NOT EXISTS idx_learning_history_learning_id
+    ON learning_history(learning_id);
+CREATE INDEX IF NOT EXISTS idx_concept_index_learning_id
+    ON concept_index(learning_id);
+CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+CREATE INDEX IF NOT EXISTS idx_slots_name ON slots(name);
+CREATE INDEX IF NOT EXISTS idx_observations_scope ON observations(scope);
+CREATE INDEX IF NOT EXISTS idx_observations_status ON observations(status);
+CREATE INDEX IF NOT EXISTS idx_observation_history_observation_id
+    ON observation_history(observation_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
     ON events(idempotency_key)
     WHERE idempotency_key != '';
+CREATE INDEX IF NOT EXISTS idx_chunk_hashes_created_at
+    ON chunk_hashes(created_at);
+CREATE INDEX IF NOT EXISTS idx_commit_links_session_id
+    ON commit_links(session_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_chunks_transcript_id
+    ON transcript_chunks(transcript_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_chunks_hash ON transcript_chunks(hash);
+CREATE INDEX IF NOT EXISTS idx_chunk_learnings_chunk_hash
+    ON chunk_learnings(chunk_hash);
+CREATE INDEX IF NOT EXISTS idx_chunk_learnings_learning_id
+    ON chunk_learnings(learning_id);
+CREATE INDEX IF NOT EXISTS idx_project_persona_project_id
+    ON project_persona(project_id);
 """
 
 _SCHEMA_DDL = (
@@ -296,7 +590,21 @@ _SCHEMA_DDL = (
     + _SOURCES_DDL
     + _INDEX_JOBS_DDL
     + _RECALL_EVENTS_DDL
+    + _LEARNING_SIGNALS_DDL
     + _ARTIFACTS_DDL
+    + _LEARNING_HISTORY_DDL
+    + _CONCEPT_INDEX_DDL
+    + _SKILLS_DDL
+    + _SLOTS_DDL
+    + _OBSERVATIONS_DDL
+    + _OBSERVATION_HISTORY_DDL
+    + _CONVENTIONS_DOCS_DDL
+    + _CHUNK_HASHES_DDL
+    + _COMMIT_LINKS_DDL
+    + _TRANSCRIPTS_DDL
+    + _TRANSCRIPT_CHUNKS_DDL
+    + _CHUNK_LEARNINGS_DDL
+    + _PROJECT_PERSONA_DDL
 )
 
 # ---------------------------------------------------------------------------
@@ -445,16 +753,33 @@ def _rebuild_table(
     create_sql: str,
     columns: tuple[str, ...],
 ) -> None:
-    temp_table = f"{table}_old"
+    temp_table = f"{table}_new"
     column_list = ", ".join(columns)
-    with conn:
-        conn.execute(f"ALTER TABLE {table} RENAME TO {temp_table}")
-        conn.execute(create_sql)
-        conn.execute(
-            f"INSERT INTO {table} ({column_list}) "
-            f"SELECT {column_list} FROM {temp_table}"
-        )
-        conn.execute(f"DROP TABLE {temp_table}")
+    # Build the replacement under a temp name, then drop-and-rename. The
+    # naive rename-old-first approach makes ALTER TABLE rewrite every other
+    # table's FOREIGN KEY clause to point at the doomed *_old name (sqlite
+    # rewrites FK references on RENAME), leaving learning_history, artifacts,
+    # index_jobs, and recall_events with dangling FKs once the temp table is
+    # dropped ("no such table: main.learnings_old" on their next insert).
+    # Renaming the *_new table instead rewrites nothing — no FK references
+    # it. foreign_keys must be OFF so dropping the referenced table and the
+    # transient name swap don't trip enforcement (no-op inside a transaction,
+    # so it is toggled outside the ``with conn:`` block).
+    temp_create_sql = create_sql.replace(
+        f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE TABLE {temp_table}", 1
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with conn:
+            conn.execute(temp_create_sql)
+            conn.execute(
+                f"INSERT INTO {temp_table} ({column_list}) "
+                f"SELECT {column_list} FROM {table}"
+            )
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table}")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
@@ -471,6 +796,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         (
             "source_quote_hash",
             "ALTER TABLE learnings ADD COLUMN source_quote_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "source_memory_ids",
+            "ALTER TABLE learnings ADD COLUMN source_memory_ids TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "proof_count",
+            "ALTER TABLE learnings ADD COLUMN proof_count INTEGER NOT NULL DEFAULT 1",
         ),
         ("session_id", "ALTER TABLE learnings ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"),
         ("thread_id", "ALTER TABLE learnings ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''"),
@@ -489,6 +822,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "superseded_by_learning_id",
             "ALTER TABLE learnings ADD COLUMN superseded_by_learning_id TEXT",
         ),
+        ("forget_after", "ALTER TABLE learnings ADD COLUMN forget_after TEXT"),
         ("reverted_at", "ALTER TABLE learnings ADD COLUMN reverted_at TEXT"),
         ("revert_reason", "ALTER TABLE learnings ADD COLUMN revert_reason TEXT"),
         ("last_recalled_at", "ALTER TABLE learnings ADD COLUMN last_recalled_at TEXT"),
@@ -505,11 +839,33 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE learnings ADD COLUMN ignored_count INTEGER NOT NULL DEFAULT 0",
         ),
         ("stale_count", "ALTER TABLE learnings ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0"),
+        ("is_latest", "ALTER TABLE learnings ADD COLUMN is_latest INTEGER NOT NULL DEFAULT 1"),
     ]
     with conn:
         for column, sql in learning_alters:
             if column not in learning_columns:
                 conn.execute(sql)
+
+    # S3: numeric confidence (0–1) beside the display tier. Runs exactly once
+    # (gated on the column being absent): the ALTER's constant DEFAULT covers
+    # the column add, then the backfill maps each existing row's tier to its
+    # bucket midpoint — HIGH→0.9, MEDIUM→0.6, LOW→0.3 (the Hindsight
+    # memory_units.confidence_score shape; tiers stay as display buckets).
+    if "confidence_num" not in learning_columns:
+        with conn:
+            conn.execute(
+                "ALTER TABLE learnings ADD COLUMN "
+                "confidence_num REAL NOT NULL DEFAULT 0.3"
+            )
+            conn.execute(
+                """UPDATE learnings SET confidence_num = CASE upper(confidence)
+                       WHEN 'HIGH' THEN 0.9
+                       WHEN 'MEDIUM' THEN 0.6
+                       WHEN 'MED' THEN 0.6
+                       WHEN 'LOW' THEN 0.3
+                       ELSE 0.6
+                   END"""
+            )
 
     learning_sql = _table_sql(conn, "learnings")
     if learning_sql and not all(f"'{status}'" in learning_sql for status in LEARNING_STATUS_VALUES):
@@ -587,7 +943,50 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute(_INDEX_JOBS_DDL)
         conn.execute(_RECALL_EVENTS_DDL)
+        conn.execute(_LEARNING_SIGNALS_DDL)
         conn.execute(_ARTIFACTS_DDL)
+        conn.execute(_LEARNING_HISTORY_DDL)
+        conn.execute(_CONCEPT_INDEX_DDL)
+        conn.execute(_SKILLS_DDL)
+        conn.execute(_SLOTS_DDL)
+        conn.execute(_OBSERVATIONS_DDL)
+        conn.execute(_OBSERVATION_HISTORY_DDL)
+        conn.execute(_CONVENTIONS_DOCS_DDL)
+        conn.execute(_CHUNK_HASHES_DDL)
+        conn.execute(_COMMIT_LINKS_DDL)
+        conn.execute(_TRANSCRIPTS_DDL)
+        conn.execute(_TRANSCRIPT_CHUNKS_DDL)
+        conn.execute(_CHUNK_LEARNINGS_DDL)
+        conn.execute(_PROJECT_PERSONA_DDL)
+
+    # A4: pre-existing recall_events tables predate the followup-rate
+    # diagnostic (session anchor + followup flag).
+    recall_event_columns = _table_columns(conn, "recall_events")
+    recall_event_alters = [
+        (
+            "session_id",
+            "ALTER TABLE recall_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "followup",
+            "ALTER TABLE recall_events ADD COLUMN followup INTEGER NOT NULL DEFAULT 0",
+        ),
+    ]
+    with conn:
+        for column, sql in recall_event_alters:
+            if column not in recall_event_columns:
+                conn.execute(sql)
+
+    # R13: pre-existing skills tables predate the staleness flag.
+    skill_columns = _table_columns(conn, "skills")
+    if skill_columns and "is_stale" not in skill_columns:
+        with conn:
+            conn.execute(
+                "ALTER TABLE skills ADD COLUMN is_stale INTEGER NOT NULL DEFAULT 0"
+            )
+
+    _backfill_learning_signals(conn)
+    _backfill_concept_index(conn)
 
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -630,6 +1029,110 @@ def get_known_content_hashes(*, conn: Optional[sqlite3.Connection] = None) -> se
     return {r["content_hash"] for r in rows}
 
 
+# ---------------------------------------------------------------------------
+# S7: chunk-hash dedup (Hindsight delta-retain — skip re-reflecting unchanged
+# transcript slices across drain re-runs). The cascade hashes each slice it is
+# about to hand a drain; a hash already present here means that exact slice was
+# reflected before, so the cascade drops it. Rows are TTL'd by ``created_at``
+# so a skip can never wedge a chunk out forever.
+# ---------------------------------------------------------------------------
+
+# Default retention for chunk-hash dedup rows (days). A re-run within the
+# window skips identical chunks; after it, the chunk is eligible to reflect
+# again (belt-and-braces — the KB's own content-hash dedup remains the
+# durable guard against duplicate learnings).
+CHUNK_HASH_TTL_DAYS = 30
+
+
+def compute_chunk_hash(text: str) -> str:
+    """Stable 16-hex-char content hash of a single transcript slice/chunk.
+
+    Whitespace at the edges is stripped so cosmetic re-slicing (an extra
+    trailing newline across drain re-runs) still collapses to one hash.
+    """
+    return _stable_text_hash((text or "").strip())
+
+
+def get_seen_chunk_hashes(
+    hashes: Optional[Iterable[str]] = None,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> set[str]:
+    """Return which of *hashes* are already recorded (empty arg = all of them).
+
+    Best-effort membership check for the cascade's chunk-level dedup
+    fast-path. Passing the candidate set keeps the query bounded.
+    """
+    conn = conn or get_conn()
+    if hashes is None:
+        rows = conn.execute("SELECT chunk_hash FROM chunk_hashes").fetchall()
+        return {r["chunk_hash"] for r in rows}
+    wanted = [h for h in {h for h in hashes if h}]
+    if not wanted:
+        return set()
+    seen: set[str] = set()
+    # Chunk the IN-list to stay under SQLite's parameter ceiling.
+    for i in range(0, len(wanted), 500):
+        batch = wanted[i : i + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            f"SELECT chunk_hash FROM chunk_hashes WHERE chunk_hash IN ({placeholders})",
+            batch,
+        ).fetchall()
+        seen.update(r["chunk_hash"] for r in rows)
+    return seen
+
+
+def record_chunk_hashes(
+    hashes: Iterable[str],
+    *,
+    source_memory_id: str = "",
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Record *hashes* as seen; returns the count of newly inserted rows.
+
+    Idempotent: re-recording an existing hash is a no-op (INSERT OR IGNORE on
+    the PRIMARY KEY). The ``created_at`` of the first sighting is preserved so
+    the TTL clock starts when a chunk was first reflected, not last seen.
+    """
+    conn = conn or get_conn()
+    ts = _coerce_now(now).isoformat()
+    inserted = 0
+    with conn:
+        for h in {h for h in hashes if h}:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO chunk_hashes "
+                "(chunk_hash, source_memory_id, created_at) VALUES (?, ?, ?)",
+                (h, source_memory_id, ts),
+            )
+            inserted += cur.rowcount
+    return inserted
+
+
+def prune_chunk_hashes(
+    *,
+    ttl_days: int = CHUNK_HASH_TTL_DAYS,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Delete chunk-hash rows older than *ttl_days*; returns rows removed.
+
+    The TTL is the belt-and-braces guarantee from the acceptance criteria: a
+    stale dedup entry can never permanently exclude a chunk from
+    re-reflection. ``ttl_days <= 0`` disables pruning (keep forever).
+    """
+    if ttl_days <= 0:
+        return 0
+    conn = conn or get_conn()
+    cutoff = (_coerce_now(now) - timedelta(days=ttl_days)).isoformat()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM chunk_hashes WHERE created_at < ?", (cutoff,)
+        )
+    return cur.rowcount
+
+
 def get_events_by_type(
     event_type: str,
     *,
@@ -641,8 +1144,334 @@ def get_events_by_type(
 
 
 # ---------------------------------------------------------------------------
+# SG2: git-event capture (agentmemory post-commit.ts shape)
+#
+# The post-commit hook (plugins/reflect/hooks/post_commit.sh) shells out to
+# ``record_commit`` for every commit: it links the SHA to the active session,
+# appends a grep-able line to ``commits.jsonl`` beside the DB, and flags
+# merge-conflict resolutions as a high-confidence learning trigger. A revert
+# reads ``commit_links`` to find the reverted commit's session and demotes
+# that session's learnings (is_latest=0) — "contradicted by revert".
+# ---------------------------------------------------------------------------
+
+COMMIT_CAPTURED_EVENT_TYPE = "commit_captured"
+REVERT_CONTRADICTION_EVENT_TYPE = "contradicted_by_revert"
+
+# A subject is a revert when it matches git's own auto-generated revert prefix
+# (``Revert "<subject>"``) and carries the ``This reverts commit <sha>.`` body
+# line. We extract the reverted SHA from the body — the subject only echoes the
+# prior subject, not a machine-resolvable id.
+_REVERTS_COMMIT_RE = re.compile(
+    r"This reverts commit ([0-9a-f]{7,40})", re.IGNORECASE
+)
+
+
+def _commits_jsonl_path(conn: sqlite3.Connection) -> Optional[Path]:
+    """Resolve the ``commits.jsonl`` mirror path for *conn*.
+
+    Honours ``REFLECT_STATE_DIR`` when set (the test/runtime override the SG2
+    spec pins); otherwise falls back to the directory holding the DB file —
+    the same ``~/.reflect/`` default ``events.jsonl`` uses.
+    """
+    override = os.environ.get("REFLECT_STATE_DIR")
+    if override:
+        return Path(override)
+    return _conn_state_dir(conn)
+
+
+def _append_commit_jsonl(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    """Append a captured-commit record to ``commits.jsonl`` beside the DB.
+
+    Best-effort, append-only mirror of the ``commit_links`` row (same shape as
+    :func:`_append_contradiction_jsonl`): the sqlite row is the source of
+    truth; this file is for grep-ability and never raises.
+    """
+    try:
+        state = _commits_jsonl_path(conn)
+        if state is None:
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        with open(state / "commits.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def parse_reverted_sha(message: str) -> Optional[str]:
+    """Extract the reverted SHA from a git revert commit message, else None.
+
+    Matches the ``This reverts commit <sha>.`` body line git generates for a
+    ``git revert``. A non-revert message yields None — the capture path treats
+    such a commit as an ordinary commit.
+    """
+    if not message:
+        return None
+    match = _REVERTS_COMMIT_RE.search(message)
+    return match.group(1).lower() if match else None
+
+
+def add_commit_link(
+    sha: str,
+    session_id: str = "",
+    *,
+    branch: str = "",
+    message: str = "",
+    conflict_resolved: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Insert a ``commit_links`` row linking *sha* to *session_id*.
+
+    Idempotent on the SHA primary key: re-capturing a commit already on file
+    is a no-op (returns False), so a hook that fires twice never double-counts.
+    Returns True when a new row was written.
+    """
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    if not sha:
+        return False
+    with conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO commit_links
+               (sha, session_id, branch, message, conflict_resolved, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                sha,
+                session_id,
+                branch,
+                message,
+                1 if conflict_resolved else 0,
+                _now_iso(),
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def get_commit_link(
+    sha: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single ``commit_links`` row by SHA (None if absent)."""
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    if not sha:
+        return None
+    row = conn.execute(
+        "SELECT * FROM commit_links WHERE sha = ?",
+        (sha,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def revert_session_learnings(
+    session_id: str,
+    *,
+    reverted_sha: str = "",
+    revert_sha: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[str]:
+    """Demote a session's learnings on revert (is_latest=0, "contradicted").
+
+    A revert is a negative signal: the work the reverted commit's session
+    produced was undone, so the learnings captured in that session are no
+    longer the latest belief. Each still-latest learning for *session_id* is
+    demoted non-destructively — S6 history snapshot first, then
+    ``is_latest = 0`` + ``revert_reason``, plus a ``contradicted_by_revert``
+    audit event. Returns the demoted learning ids (empty when the session has
+    no still-latest learnings — idempotent re-runs are a no-op).
+    """
+    conn = conn or get_conn()
+    if not session_id:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM learnings WHERE session_id = ? AND is_latest = 1",
+        (session_id,),
+    ).fetchall()
+    demoted: list[str] = []
+    reason = (
+        f"contradicted by revert {revert_sha or '-'} of {reverted_sha or '-'}"
+    )
+    for row in rows:
+        lid = row["id"]
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                lid,
+                change_type="revert",
+                changed_fields=["is_latest", "revert_reason"],
+                reason=reason,
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                "UPDATE learnings SET is_latest = 0, revert_reason = ? WHERE id = ?",
+                (reason, lid),
+            )
+            add_event(
+                REVERT_CONTRADICTION_EVENT_TYPE,
+                lid,
+                {
+                    "session_id": session_id,
+                    "reverted_sha": reverted_sha,
+                    "revert_sha": revert_sha,
+                },
+                conn=conn,
+                autocommit=False,
+            )
+        demoted.append(lid)
+    return demoted
+
+
+def record_commit(
+    sha: str,
+    *,
+    session_id: str = "",
+    branch: str = "",
+    message: str = "",
+    files: Optional[list[str]] = None,
+    conflict_resolved: bool = False,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """SG2 capture entrypoint — the body the post-commit hook drives.
+
+    For every commit it: (1) writes a ``commit_links`` row linking the SHA to
+    the active session, (2) appends a ``commits.jsonl`` line
+    ``{sid, sha, branch, message, files, ts}`` beside the DB, and (3) when the
+    message is a git revert, demotes the reverted commit's session learnings
+    (is_latest=0). A merge-conflict resolution (``conflict_resolved=True``) is
+    recorded as the high-confidence learning trigger via a ``commit_captured``
+    audit event carrying the flag.
+
+    Returns a summary dict: ``{sha, session_id, captured, is_revert,
+    reverted_sha, demoted_learning_ids}``. ``captured`` is False when the SHA
+    was already on file (idempotent re-capture) or the SHA is empty.
+    """
+    conn = conn or get_conn()
+    sha = (sha or "").strip().lower()
+    ts = _coerce_now(now).isoformat()
+    reverted_sha = parse_reverted_sha(message)
+
+    captured = add_commit_link(
+        sha,
+        session_id,
+        branch=branch,
+        message=message,
+        conflict_resolved=conflict_resolved,
+        conn=conn,
+    )
+
+    if captured:
+        _append_commit_jsonl(
+            conn,
+            {
+                "sid": session_id,
+                "sha": sha,
+                "branch": branch,
+                "message": message,
+                "files": list(files or []),
+                "conflict_resolved": bool(conflict_resolved),
+                "ts": ts,
+            },
+        )
+        add_event(
+            COMMIT_CAPTURED_EVENT_TYPE,
+            None,
+            {
+                "sha": sha,
+                "session_id": session_id,
+                "branch": branch,
+                "conflict_resolved": bool(conflict_resolved),
+            },
+            conn=conn,  # write the audit event to the caller's connection, not get_conn()
+        )
+
+    demoted: list[str] = []
+    if reverted_sha:
+        link = get_commit_link(reverted_sha, conn=conn)
+        reverted_session = link["session_id"] if link else ""
+        if reverted_session:
+            demoted = revert_session_learnings(
+                reverted_session,
+                reverted_sha=reverted_sha,
+                revert_sha=sha,
+                conn=conn,
+            )
+
+    return {
+        "sha": sha,
+        "session_id": session_id,
+        "captured": captured,
+        "is_revert": reverted_sha is not None,
+        "reverted_sha": reverted_sha or "",
+        "demoted_learning_ids": demoted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Learnings
 # ---------------------------------------------------------------------------
+
+# S3: display tier → canonical numeric confidence (bucket midpoints). The
+# float is the stored source of truth (Hindsight memory_units.confidence_score
+# FLOAT 0..1); HIGH/MEDIUM/LOW are display buckets mapped at the edges.
+CONFIDENCE_TIER_NUMS: dict[str, float] = {
+    "HIGH": 0.9,
+    "MEDIUM": 0.6,
+    "MED": 0.6,
+    "LOW": 0.3,
+}
+# Unknown/blank tiers land mid-bucket — same neutral treatment recall's
+# reranker gives unrecognized tiers.
+DEFAULT_CONFIDENCE_NUM = 0.6
+
+
+def confidence_num_from_tier(tier: Any) -> float:
+    """S3: map a display tier to its numeric midpoint (HIGH→0.9, MEDIUM→0.6,
+    LOW→0.3; unknown→0.6). Case-insensitive; tolerates None/odd types."""
+    if tier is None or isinstance(tier, bool):
+        return DEFAULT_CONFIDENCE_NUM
+    return CONFIDENCE_TIER_NUMS.get(str(tier).strip().upper(), DEFAULT_CONFIDENCE_NUM)
+
+
+def _coerce_confidence_num(value: Any, tier: Any) -> float:
+    """S3: normalize a caller-supplied numeric confidence to [0, 1].
+
+    None / unparseable values fall back to the tier midpoint so the two
+    fields can never disagree wildly; numeric values are clamped, never
+    rejected (a typo'd 1.2 becomes 1.0, not a crash)."""
+    if value is None or isinstance(value, bool):
+        return confidence_num_from_tier(tier)
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return confidence_num_from_tier(tier)
+    if num != num:  # NaN guard — NaN compares false to everything
+        return confidence_num_from_tier(tier)
+    return min(1.0, max(0.0, num))
+
+
+def _dedupe_source_ids(values: Any) -> list[str]:
+    """Normalize a source_memory_ids payload to a unique, order-preserving
+    list of non-empty strings. Tolerates None / scalars / JSON strings."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        try:
+            parsed = json.loads(values)
+            values = parsed if isinstance(parsed, list) else [values]
+        except (json.JSONDecodeError, TypeError):
+            values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
 
 
 def add_learning(
@@ -653,12 +1482,15 @@ def add_learning(
     source_path: str = "",
     content_hash: str = "",
     *,
+    confidence_num: Optional[float] = None,
     status: str = LearningStatus.PENDING.value,
     scope: str = "project",
     source_provider: str = "",
     source_kind: str = "",
     source_quote: str = "",
     source_quote_hash: str = "",
+    source_memory_ids: Optional[list[str]] = None,
+    proof_count: int = 1,
     session_id: str = "",
     thread_id: str = "",
     privacy_level: str = PrivacyLevel.INTERNAL.value,
@@ -667,35 +1499,59 @@ def add_learning(
     commit_hash: Optional[str] = None,
     supersedes_learning_id: Optional[str] = None,
     superseded_by_learning_id: Optional[str] = None,
+    forget_after: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Insert a new learning row. Returns the generated id.
+
+    A3 per-row TTL: ``forget_after`` is an optional ISO-8601 timestamp.
+    When set, the hourly forget sweep (``reflect_forget_sweep.py``)
+    archives the row once the timestamp passes. Absent (None) means the
+    learning is permanent — the agentmemory ``Memory.forgetAfter`` shape.
 
     ``source_quote`` is captured raw regardless of ``privacy_level`` —
     redaction is applied at read-time by callers that surface the quote
     to the user (see ``RESTRICTED`` / ``SECRET_REDACTED`` in
     ``PrivacyLevel``). Storing raw lets future queries re-evaluate the
     redaction policy without losing the original evidence.
+
+    S4 provenance: CREATE always starts ``proof_count`` at 1 (or higher
+    when the caller already aggregated evidence) and stores
+    ``source_memory_ids`` as a unique, order-preserving JSON list. The
+    UPDATE half of the contract lives in :func:`add_learning_proof`.
+
+    S3 numeric confidence: ``confidence_num`` is the continuous 0–1 value
+    ranking uses; ``confidence`` stays the display bucket. When the caller
+    omits the float it is derived from the tier midpoint (HIGH→0.9,
+    MEDIUM→0.6, LOW→0.3) so both fields are always present and consistent.
+    Out-of-range values are clamped to [0, 1].
     """
     conn = conn or get_conn()
     lid = _new_id()
     provider = source_provider or source_tool
+    effective_confidence_num = _coerce_confidence_num(confidence_num, confidence)
     quote_hash = source_quote_hash or (_stable_text_hash(source_quote) if source_quote else "")
+    memory_ids = _dedupe_source_ids(source_memory_ids)
+    effective_proof_count = max(1, int(proof_count))
     now = _now_iso()
     with conn:
         conn.execute(
             """INSERT INTO learnings
-               (id, title, category, confidence, status, scope, source_tool,
+               (id, title, category, confidence, confidence_num, status,
+                scope, source_tool,
                 source_provider, source_kind, source_path, source_quote,
-                source_quote_hash, content_hash, session_id, thread_id,
+                source_quote_hash, content_hash, source_memory_ids,
+                proof_count, session_id, thread_id,
                 privacy_level, artifact_path, sidecar_path, commit_hash,
-                supersedes_learning_id, superseded_by_learning_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                supersedes_learning_id, superseded_by_learning_id,
+                forget_after, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lid,
                 title,
                 category,
                 confidence,
+                effective_confidence_num,
                 status,
                 scope,
                 source_tool,
@@ -705,6 +1561,8 @@ def add_learning(
                 source_quote,
                 quote_hash,
                 content_hash,
+                json.dumps(memory_ids),
+                effective_proof_count,
                 session_id,
                 thread_id,
                 privacy_level,
@@ -713,9 +1571,14 @@ def add_learning(
                 commit_hash,
                 supersedes_learning_id,
                 superseded_by_learning_id,
+                forget_after or None,
                 now,
             ),
         )
+        # S9: seed the volatile-signals sidecar row alongside the learning
+        # (ByteRover curate-ADD shape) so ranking signals always have a DB
+        # home — note frontmatter never carries them.
+        _ensure_signals_row(conn, lid, now)
         add_event(
             "learning_added",
             lid,
@@ -723,6 +1586,15 @@ def add_learning(
             conn=conn,
             autocommit=False,
         )
+    # SG1 post-write hook: concept-index the new title, then demote any
+    # recent in-scope learning this write contradicts (negation-stripped
+    # Jaccard > 0.9 with opposite negation polarity). Best-effort — a
+    # failure here must never break the write itself (silent-fail shaped).
+    try:
+        _index_learning_concepts(conn, lid, title, created_at=now)
+        detect_and_resolve_contradictions(lid, title, scope=scope, conn=conn)
+    except Exception:
+        pass
     return lid
 
 
@@ -765,6 +1637,15 @@ def update_learning_status(
         details["commit_hash"] = commit_hash
 
     with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_learning_history(
+            learning_id,
+            change_type="status_change",
+            changed_fields=["status", *extras.keys()],
+            reason=revert_reason or f"status -> {status}",
+            conn=conn,
+            autocommit=False,
+        )
         conn.execute(
             f"UPDATE learnings SET {', '.join(set_parts)} WHERE id = ?",
             params,
@@ -802,6 +1683,1139 @@ def get_learning(
         (learning_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def get_learnings_by_content_hash(
+    content_hash: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return every learning row carrying *content_hash* (oldest first)."""
+    if not content_hash:
+        return []
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM learnings WHERE content_hash = ? ORDER BY created_at",
+        (content_hash,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_learning_proof(
+    learning_id: str,
+    source_memory_id: str = "",
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """S4 UPDATE path: append *source_memory_id* and bump ``proof_count``.
+
+    Re-observing evidence for an existing learning strengthens it instead
+    of duplicating it. Semantics:
+
+    - new (non-empty) source id → appended to ``source_memory_ids``
+      (uniqueness preserved) and ``proof_count`` incremented;
+    - already-recorded source id → idempotent no-op (returns False), so
+      re-ingesting the same transcript can never inflate evidence;
+    - empty source id → anonymous evidence: ``proof_count`` is bumped but
+      the list is untouched (callers without a stable source identifier).
+
+    Returns True when the row was updated.
+    """
+    conn = conn or get_conn()
+    row = get_learning(learning_id, conn=conn)
+    if row is None:
+        return False
+
+    sources = _dedupe_source_ids(row.get("source_memory_ids"))
+    sid = str(source_memory_id).strip()
+    if sid and sid in sources:
+        return False
+    if sid:
+        sources.append(sid)
+
+    new_proof_count = max(1, int(row.get("proof_count") or 1)) + 1
+    with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_learning_history(
+            learning_id,
+            change_type="proof_added",
+            changed_fields=["source_memory_ids", "proof_count"],
+            reason=f"proof_count {row.get('proof_count') or 1} -> {new_proof_count}",
+            conn=conn,
+            autocommit=False,
+        )
+        conn.execute(
+            "UPDATE learnings SET source_memory_ids = ?, proof_count = ? WHERE id = ?",
+            (json.dumps(sources), new_proof_count, learning_id),
+        )
+        add_event(
+            "proof_added",
+            learning_id,
+            {
+                "source_memory_id": sid,
+                "proof_count": new_proof_count,
+                "source_count": len(sources),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Learning history (S6: non-destructive belief revision)
+# ---------------------------------------------------------------------------
+
+
+def snapshot_learning_history(
+    learning_id: str,
+    *,
+    change_type: str = "update",
+    changed_fields: Optional[list[str]] = None,
+    reason: str = "",
+    actor: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+    autocommit: bool = True,
+) -> Optional[str]:
+    """S6: snapshot the CURRENT form of a learning before it is mutated.
+
+    Called at the top of every UPDATE path so belief revision is
+    non-destructive — 'why did we change this rule?' stays answerable
+    from the ``learning_history`` audit trail. The whole row is stored
+    as canonical JSON in ``snapshot_json``; ``changed_fields`` records
+    which columns the caller is about to touch.
+
+    Returns the history row id, or None when *learning_id* doesn't
+    exist (nothing to snapshot — mirrors the no-op semantics of the
+    UPDATE paths themselves).
+
+    Like :func:`add_event`, pass ``autocommit=False`` when calling from
+    inside an open ``with conn:`` block so the snapshot commits (or
+    rolls back) atomically with the mutation it precedes.
+    """
+    conn = conn or get_conn()
+    row = get_learning(learning_id, conn=conn)
+    if row is None:
+        return None
+
+    hid = _new_id()
+    sql = """
+        INSERT INTO learning_history
+            (id, learning_id, change_type, changed_fields, snapshot_json,
+             reason, actor, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        hid,
+        learning_id,
+        change_type,
+        json.dumps(sorted(changed_fields or [])),
+        json.dumps(row, sort_keys=True, default=str),
+        reason,
+        actor,
+        _now_iso(),
+    )
+    if autocommit:
+        with conn:
+            conn.execute(sql, params)
+    else:
+        conn.execute(sql, params)
+    return hid
+
+
+def get_learning_history(
+    learning_id: str,
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return history snapshots for a learning, newest first."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM learning_history
+           WHERE learning_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (learning_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_update_counts(
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Per-learning update counts from the history table (most-updated first).
+
+    Powers the reflect-status 'update count per learning' view. Titles
+    come from a LEFT JOIN so snapshots survive even if the learning row
+    is later removed.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT h.learning_id AS learning_id,
+                  COUNT(*) AS update_count,
+                  MAX(h.created_at) AS last_updated_at,
+                  COALESCE(l.title, '') AS title
+           FROM learning_history h
+           LEFT JOIN learnings l ON l.id = h.learning_id
+           GROUP BY h.learning_id
+           ORDER BY update_count DESC, last_updated_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Concept index + contradictions (SG1: cross-turn contradiction detection)
+# ---------------------------------------------------------------------------
+
+CONTRADICTION_EVENT_TYPE = "contradiction_detected"
+
+# Statuses that never resurface as contradiction candidates — retired beliefs
+# (same set the S5 revision recall excludes, plus A3 TTL-archived rows).
+_CONTRADICTION_RETIRED_STATUSES = (
+    LearningStatus.REVERTED.value,
+    LearningStatus.SUPERSEDED.value,
+    LearningStatus.REJECTED.value,
+    LearningStatus.ARCHIVED.value,
+)
+
+
+def _load_contradiction_detector():
+    """Lazy import so reflect_db keeps working if the module is absent."""
+    import contradiction_detector
+
+    return contradiction_detector
+
+
+def _index_learning_concepts(
+    conn: sqlite3.Connection,
+    learning_id: str,
+    title: str,
+    *,
+    created_at: str,
+    autocommit: bool = True,
+) -> int:
+    """Write *title*'s concept tags into ``concept_index``.
+
+    The concept index is the candidate-pruning structure for contradiction
+    detection: only learnings sharing >= 1 concept with a new write are
+    ever compared (agentmemory's concept-index shape). Returns the number
+    of concepts indexed.
+    """
+    detector = _load_contradiction_detector()
+    rows = [
+        (concept, learning_id, created_at)
+        for concept in sorted(detector.extract_concepts(title))
+    ]
+    if not rows:
+        return 0
+    sql = (
+        "INSERT OR IGNORE INTO concept_index (concept, learning_id, created_at) "
+        "VALUES (?, ?, ?)"
+    )
+    if autocommit:
+        with conn:
+            conn.executemany(sql, rows)
+    else:
+        conn.executemany(sql, rows)
+    return len(rows)
+
+
+def _backfill_concept_index(conn: sqlite3.Connection) -> None:
+    """One-shot migration: concept-index pre-existing learnings.
+
+    Without this, learnings written before SG1 shipped would never be
+    contradiction candidates. Only runs when the index is empty and
+    learnings exist; bounded to the newest scan-cap rows (older rows
+    fall outside the recency window anyway). Best-effort — a failure
+    here must never block schema migration.
+    """
+    try:
+        detector = _load_contradiction_detector()
+        existing = conn.execute("SELECT COUNT(*) FROM concept_index").fetchone()[0]
+        if existing:
+            return
+        rows = conn.execute(
+            "SELECT id, title, created_at FROM learnings "
+            "ORDER BY created_at DESC LIMIT ?",
+            (detector.CANDIDATE_SCAN_CAP,),
+        ).fetchall()
+        with conn:
+            for row in rows:
+                _index_learning_concepts(
+                    conn, row["id"], row["title"],
+                    created_at=row["created_at"], autocommit=False,
+                )
+    except Exception:
+        return
+
+
+def _conn_state_dir(conn: sqlite3.Connection) -> Optional[Path]:
+    """Directory holding this connection's DB file (None for :memory:)."""
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main" and row[2]:
+                return Path(row[2]).resolve().parent
+    except Exception:
+        pass
+    return None
+
+
+def _append_contradiction_jsonl(
+    conn: sqlite3.Connection, payload: dict[str, Any],
+) -> None:
+    """Append a contradiction record to ``events.jsonl`` beside the DB.
+
+    With the default DB path this is ``~/.reflect/events.jsonl`` — the
+    append-only audit file the SG1 acceptance contract pins. Best-effort:
+    the sqlite event row is the source of truth; this mirror is for
+    grep-ability and never raises.
+    """
+    try:
+        state = _conn_state_dir(conn)
+        if state is None:
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        with open(state / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def detect_and_resolve_contradictions(
+    learning_id: str,
+    title: str,
+    *,
+    scope: str = "project",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """SG1 post-write hook body: demote learnings the new write contradicts.
+
+    Candidate pruning: recent (newest scan-cap) in-scope learnings sharing
+    >= 1 concept tag with *title*, still ``is_latest`` and not retired.
+    A candidate contradicts the new write when the negation-stripped
+    Jaccard similarity is > 0.9 AND a negation marker appears in exactly
+    one of the two titles (see ``contradiction_detector``).
+
+    For each hit the OLDER side (the candidate — the caller is the row
+    that was just written) is demoted non-destructively: history snapshot
+    first (S6), then ``is_latest = 0`` + ``superseded_by_learning_id``,
+    plus a ``contradiction_detected`` audit event in sqlite mirrored to
+    ``events.jsonl``. Returns the resolved pairs.
+    """
+    conn = conn or get_conn()
+    detector = _load_contradiction_detector()
+    concepts = sorted(detector.extract_concepts(title))
+    if not concepts:
+        return []
+
+    concept_marks = ", ".join("?" for _ in concepts)
+    retired_marks = ", ".join("?" for _ in _CONTRADICTION_RETIRED_STATUSES)
+    candidates = conn.execute(
+        f"""SELECT DISTINCT l.id, l.title, l.created_at
+            FROM concept_index ci
+            JOIN learnings l ON l.id = ci.learning_id
+            WHERE ci.concept IN ({concept_marks})
+              AND l.id != ?
+              AND l.scope = ?
+              AND l.is_latest = 1
+              AND l.status NOT IN ({retired_marks})
+            ORDER BY l.created_at DESC
+            LIMIT ?""",
+        (
+            *concepts,
+            learning_id,
+            scope,
+            *_CONTRADICTION_RETIRED_STATUSES,
+            detector.CANDIDATE_SCAN_CAP,
+        ),
+    ).fetchall()
+
+    resolved: list[dict[str, Any]] = []
+    for candidate in candidates:
+        similarity = detector.detect_contradiction(title, candidate["title"])
+        if similarity is None:
+            continue
+        older_id = candidate["id"]
+        details = {
+            "older_id": older_id,
+            "older_title": candidate["title"],
+            "newer_id": learning_id,
+            "newer_title": title,
+            "similarity": round(similarity, 4),
+        }
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                older_id,
+                change_type="contradiction",
+                changed_fields=["is_latest", "superseded_by_learning_id"],
+                reason=(
+                    f"contradicted by {learning_id} "
+                    f"(jaccard {similarity:.2f}): {title}"
+                ),
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                """UPDATE learnings
+                   SET is_latest = 0, superseded_by_learning_id = ?
+                   WHERE id = ?""",
+                (learning_id, older_id),
+            )
+            add_event(
+                CONTRADICTION_EVENT_TYPE,
+                older_id,
+                details,
+                conn=conn,
+                autocommit=False,
+            )
+        _append_contradiction_jsonl(
+            conn, {"type": CONTRADICTION_EVENT_TYPE, "created_at": _now_iso(), **details},
+        )
+        resolved.append(details)
+    return resolved
+
+
+def get_contradiction_count(*, conn: Optional[sqlite3.Connection] = None) -> int:
+    """Total contradiction audit events on file (powers /reflect:status)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE type = ?",
+        (CONTRADICTION_EVENT_TYPE,),
+    ).fetchone()
+    return int(row[0])
+
+
+# ---------------------------------------------------------------------------
+# Forget sweep (A3: per-row TTL, agentmemory forgetAfter + auto-forget shape)
+# ---------------------------------------------------------------------------
+
+FORGET_EVENT_TYPE = "learning_forgotten"
+
+
+def _parse_forget_after(value: Any) -> Optional[datetime]:
+    """Parse a ``forget_after`` value to an aware UTC datetime.
+
+    Tolerant: ISO-8601 with or without offset ('Z' accepted); naive
+    timestamps are treated as UTC. Returns None for empty/unparseable
+    values — a learning with a malformed TTL is treated as permanent
+    (never archive on bad data).
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _coerce_now(now: Any = None) -> datetime:
+    """Normalize the sweep's *now* (None / ISO string / datetime) to UTC."""
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        return now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    parsed = _parse_forget_after(now)
+    return parsed if parsed is not None else datetime.now(timezone.utc)
+
+
+def get_expired_learnings(
+    *,
+    now: Any = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Learnings whose ``forget_after`` TTL has passed and aren't archived yet.
+
+    Rows with NULL/empty ``forget_after`` are permanent and never returned
+    (agentmemory semantics: absent = keep forever). Timestamps are compared
+    in Python via ``datetime.fromisoformat`` so mixed offset formats and
+    'Z' suffixes compare correctly; unparseable values are skipped.
+    """
+    conn = conn or get_conn()
+    cutoff = _coerce_now(now)
+    rows = conn.execute(
+        """SELECT * FROM learnings
+           WHERE forget_after IS NOT NULL
+             AND forget_after != ''
+             AND status != ?
+           ORDER BY created_at""",
+        (LearningStatus.ARCHIVED.value,),
+    ).fetchall()
+    expired: list[dict[str, Any]] = []
+    for row in rows:
+        ttl = _parse_forget_after(row["forget_after"])
+        if ttl is not None and ttl <= cutoff:
+            expired.append(dict(row))
+    return expired
+
+
+def sweep_expired_learnings(
+    *,
+    now: Any = None,
+    dry_run: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """A3 sweep body: archive every learning past its ``forget_after`` TTL.
+
+    Non-destructive (archives, never deletes — the reflect flavour of
+    agentmemory's auto-forget): each expired row gets an S6 history
+    snapshot first, then ``status = 'archived'`` + ``is_latest = 0``, plus
+    a ``learning_forgotten`` audit event. Archived rows stop surfacing as
+    contradiction candidates and the sweep is idempotent — an already
+    archived row never expires twice.
+
+    Returns the (pre-archive) rows that expired; with ``dry_run=True``
+    nothing is mutated.
+    """
+    conn = conn or get_conn()
+    expired = get_expired_learnings(now=now, conn=conn)
+    if dry_run:
+        return expired
+    archived_at = _now_iso()
+    for row in expired:
+        lid = row["id"]
+        with conn:
+            # S6: archive the old form before mutating it.
+            snapshot_learning_history(
+                lid,
+                change_type="forget_sweep",
+                changed_fields=["status", "is_latest"],
+                reason=f"forget_after TTL expired ({row['forget_after']})",
+                conn=conn,
+                autocommit=False,
+            )
+            conn.execute(
+                "UPDATE learnings SET status = ?, is_latest = 0 WHERE id = ?",
+                (LearningStatus.ARCHIVED.value, lid),
+            )
+            add_event(
+                FORGET_EVENT_TYPE,
+                lid,
+                {
+                    "title": row["title"],
+                    "forget_after": row["forget_after"],
+                    "archived_at": archived_at,
+                },
+                conn=conn,
+                autocommit=False,
+            )
+    return expired
+
+
+# ---------------------------------------------------------------------------
+# Observations (O1: consolidated persona/convention aggregate layer)
+# ---------------------------------------------------------------------------
+# Hindsight maintains a separate semantic layer of fact_type=observation
+# memory units over the raw facts, kept current by consolidation-time
+# CREATE/UPDATE/DELETE actions. The reflect flavour: the drain's second pass
+# (reflect_cascade.execute_observation_actions) maintains the ``observations``
+# table — every mutation snapshots into ``observation_history`` first (the S6
+# non-destructive contract), evidence accumulates as proof_count +
+# source_correction_ids[] (the S4 provenance contract), and retrieval treats
+# active observations as their own tier (open-domain queries surface them
+# FIRST — see :func:`recall_observation_tier`).
+
+OBSERVATION_CREATED_EVENT = "observation_created"
+OBSERVATION_UPDATED_EVENT = "observation_updated"
+OBSERVATION_RETIRED_EVENT = "observation_retired"
+
+# O1: open-domain query shapes — aggregate "what do we generally do?"
+# questions, as opposed to closed-domain "how do I fix X?" lookups. A query
+# matching ANY pattern activates the observation tier. Deterministic and
+# stdlib-only on purpose (same philosophy as the SG1 contradiction detector):
+# no LLM call sits on the retrieval path.
+_OPEN_DOMAIN_PATTERNS: tuple[str, ...] = (
+    r"\bconventions?\b",
+    r"\bprefer(?:s|red|ence|ences)?\b",
+    r"\bgenerally\b",
+    r"\btypically\b",
+    r"\busually\b",
+    r"\bpersonas?\b",
+    r"\b(?:code|coding|house|team) style\b",
+    r"\bwhat (?:do|does) (?:we|the team|this team|the codebase|this codebase|the project|this project)\b",
+    r"\bhow (?:do|does) (?:we|the team|this team|the codebase|this codebase|the project|this project)\b",
+)
+_OPEN_DOMAIN_RE = re.compile("|".join(_OPEN_DOMAIN_PATTERNS))
+
+
+def add_observation(
+    content: str,
+    *,
+    category: str = "Unknown",
+    scope: str = "project",
+    source_correction_ids: Optional[list[str]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """O1 CREATE path: insert a new consolidated observation. Returns its id.
+
+    ``source_correction_ids`` are the learning (correction) rows this
+    aggregate is distilled from — stored as a unique, order-preserving JSON
+    list (the S4 shape). ``proof_count`` starts at the number of cited
+    corrections (floor 1), so a CREATE that already aggregates 3 corrections
+    is born with proof 3. The UPDATE half lives in
+    :func:`add_observation_evidence`.
+    """
+    conn = conn or get_conn()
+    oid = _new_id()
+    ids = _dedupe_source_ids(source_correction_ids)
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            """INSERT INTO observations
+               (id, content, category, scope, status, proof_count,
+                source_correction_ids, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                oid,
+                content,
+                category,
+                scope,
+                OBSERVATION_STATUS_ACTIVE,
+                max(1, len(ids)),
+                json.dumps(ids),
+                now,
+                now,
+            ),
+        )
+        add_event(
+            OBSERVATION_CREATED_EVENT,
+            None,
+            {
+                "observation_id": oid,
+                "content": content,
+                "scope": scope,
+                "proof_count": max(1, len(ids)),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return oid
+
+
+def get_observation(
+    observation_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single observation by id (``source_correction_ids`` stays the
+    raw JSON string, mirroring how learning rows carry ``source_memory_ids``)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM observations WHERE id = ?",
+        (observation_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_observations(
+    *,
+    scope: Optional[str] = None,
+    include_retired: bool = False,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O1 read path: observations strongest-evidence-first.
+
+    Ordered by ``proof_count`` DESC (then oldest first as the tiebreak) —
+    the most-corroborated conventions lead. With *scope* given, rows in that
+    scope plus ``global`` ones qualify (a global convention applies in every
+    project); ``scope=None`` returns all. Retired observations are excluded
+    unless ``include_retired=True``.
+    """
+    conn = conn or get_conn()
+    where: list[str] = []
+    params: list[Any] = []
+    if scope:
+        where.append("scope IN (?, 'global')")
+        params.append(scope)
+    if not include_retired:
+        where.append("status = ?")
+        params.append(OBSERVATION_STATUS_ACTIVE)
+    sql = "SELECT * FROM observations"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY proof_count DESC, created_at LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def snapshot_observation_history(
+    observation_id: str,
+    *,
+    change_type: str = "update",
+    reason: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+    autocommit: bool = True,
+) -> Optional[str]:
+    """O1/S6: snapshot the CURRENT form of an observation before mutating it.
+
+    Same contract as :func:`snapshot_learning_history`, applied to the
+    consolidated layer: called at the top of every UPDATE/retire path so
+    evidence accumulation never loses the prior wording or id list. Returns
+    the history row id, or None when the observation doesn't exist. Pass
+    ``autocommit=False`` from inside an open ``with conn:`` block.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None:
+        return None
+    hid = _new_id()
+    sql = """
+        INSERT INTO observation_history
+            (id, observation_id, change_type, snapshot_json, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        hid,
+        observation_id,
+        change_type,
+        json.dumps(row, sort_keys=True, default=str),
+        reason,
+        _now_iso(),
+    )
+    if autocommit:
+        with conn:
+            conn.execute(sql, params)
+    else:
+        conn.execute(sql, params)
+    return hid
+
+
+def get_observation_history(
+    observation_id: str,
+    *,
+    limit: int = 100,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return history snapshots for an observation, newest first."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM observation_history
+           WHERE observation_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (observation_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_observation_evidence(
+    observation_id: str,
+    source_correction_ids: Optional[list[str]] = None,
+    *,
+    content: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """O1 UPDATE path: fold new correction evidence into an observation.
+
+    Semantics (the S4 provenance contract applied to the aggregate layer):
+
+    - new correction ids → appended to ``source_correction_ids`` (uniqueness
+      preserved) and ``proof_count`` bumped by the number of NEW ids — 50
+      'team prefers X' corrections folded in one at a time end at proof 50;
+    - already-recorded ids only (and no content change) → idempotent no-op
+      (returns False), so re-running the same drain can never inflate
+      evidence;
+    - no ids at all → anonymous evidence: ``proof_count`` += 1, list
+      untouched;
+    - optional ``content`` rewrite lets the aggregate wording evolve as
+      evidence accumulates — the prior wording survives in
+      ``observation_history`` (snapshot fires BEFORE the mutation, S6).
+
+    Returns True when the row was updated.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None:
+        return False
+
+    existing = _dedupe_source_ids(row.get("source_correction_ids"))
+    incoming = _dedupe_source_ids(source_correction_ids)
+    fresh = [cid for cid in incoming if cid not in existing]
+
+    new_content = (content or "").strip()
+    content_changed = bool(new_content) and new_content != row["content"]
+
+    if incoming and not fresh and not content_changed:
+        return False  # every cited correction already recorded — idempotent
+
+    old_proof = max(1, int(row.get("proof_count") or 1))
+    bump = len(fresh) if incoming else 1
+    new_proof = old_proof + bump
+    merged = existing + fresh
+    now = _now_iso()
+    with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_observation_history(
+            observation_id,
+            change_type="evidence_added",
+            reason=f"proof_count {old_proof} -> {new_proof}",
+            conn=conn,
+            autocommit=False,
+        )
+        conn.execute(
+            """UPDATE observations
+               SET content = ?, source_correction_ids = ?, proof_count = ?,
+                   updated_at = ?
+               WHERE id = ?""",
+            (
+                new_content if content_changed else row["content"],
+                json.dumps(merged),
+                new_proof,
+                now,
+                observation_id,
+            ),
+        )
+        add_event(
+            OBSERVATION_UPDATED_EVENT,
+            None,
+            {
+                "observation_id": observation_id,
+                "proof_count": new_proof,
+                "source_count": len(merged),
+                "content_changed": content_changed,
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return True
+
+
+def retire_observation(
+    observation_id: str,
+    *,
+    reason: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """O1 DELETE path: retire an observation non-destructively.
+
+    Hindsight hard-deletes observation units; our ledger keeps the row
+    (status → 'retired' + reason, history snapshot first) so 'why did this
+    convention stop holding?' stays answerable. Idempotent: an already
+    retired (or missing) observation returns False.
+    """
+    conn = conn or get_conn()
+    row = get_observation(observation_id, conn=conn)
+    if row is None or row["status"] == OBSERVATION_STATUS_RETIRED:
+        return False
+    now = _now_iso()
+    with conn:
+        # S6: archive the old form before mutating it.
+        snapshot_observation_history(
+            observation_id,
+            change_type="retired",
+            reason=reason or "observation retired",
+            conn=conn,
+            autocommit=False,
+        )
+        conn.execute(
+            """UPDATE observations
+               SET status = ?, retired_reason = ?, updated_at = ?
+               WHERE id = ?""",
+            (OBSERVATION_STATUS_RETIRED, reason, now, observation_id),
+        )
+        add_event(
+            OBSERVATION_RETIRED_EVENT,
+            None,
+            {"observation_id": observation_id, "reason": reason},
+            conn=conn,
+            autocommit=False,
+        )
+    return True
+
+
+def is_open_domain_query(query: Any) -> bool:
+    """O1: True when *query* is aggregate-shaped (persona/convention ask).
+
+    Open-domain queries — 'what conventions does this codebase use?',
+    'what does this team prefer?' — want the pre-aggregated observation
+    tier, not 5 raw corrections the agent must fold in-context. Closed
+    lookups ('how do I fix X?') never match.
+    """
+    if not query:
+        return False
+    return _OPEN_DOMAIN_RE.search(str(query).lower()) is not None
+
+
+def recall_observation_tier(
+    query: str,
+    *,
+    scope: Optional[str] = None,
+    limit: int = 5,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O1 retrieval tier: active observations for an open-domain query.
+
+    Returns [] for closed-domain queries — the tier only activates when the
+    question is aggregate-shaped (see :func:`is_open_domain_query`). Entries
+    are proof-ranked (strongest evidence first) and tagged
+    ``tier='observation'`` so composers can place them ABOVE the raw
+    corrections tier.
+    """
+    if not is_open_domain_query(query):
+        return []
+    conn = conn or get_conn()
+    rows = get_observations(scope=scope, limit=limit, conn=conn)
+    return [
+        {
+            "id": row["id"],
+            "content": row["content"],
+            "category": row["category"],
+            "scope": row["scope"],
+            "proof_count": row["proof_count"],
+            "type": "observation",
+            "tier": "observation",
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Project persona / preference fields (O3: structured disposition layer)
+# ---------------------------------------------------------------------------
+# Hindsight carries a per-bank ``disposition`` JSONB persona object
+# (banks.disposition — models.py L287-L300). The reflect flavour: the typed
+# structured-fields layer ON TOP of the O1 observations layer. Where an
+# observation is a free-text aggregate statement ("this team generally prefers
+# TDD"), a persona field is the DISTILLED typed answer (testing_style='TDD')
+# keyed by (project_id, field_name). Fields are AGGREGATED from O1 observations
+# — never hand-authored — and confidence is a DETERMINISTIC function of the
+# count of distinct source observations cited (no LLM on the path). Open-domain
+# queries lookup persona fields FIRST (recall_persona_field) before falling back
+# to the observation tier.
+
+PERSONA_CREATED_EVENT = "persona_field_created"
+PERSONA_UPDATED_EVENT = "persona_field_updated"
+
+# O3 confidence model (deterministic): confidence saturates at 1.0 once
+# PERSONA_CONFIDENCE_SATURATION distinct source observations corroborate a
+# field. Tuned so ~10 distinct corroborating observations cross the 0.8
+# high-confidence threshold (10/12 ≈ 0.833), while a field with 1-2 thin or
+# contradictory sources stays well below it.
+PERSONA_CONFIDENCE_SATURATION = 12
+# A field is only surfaced as an "answered" open-domain lookup at/above this
+# confidence — below it the field is considered too thinly-evidenced to short
+# circuit recall.
+PERSONA_CONFIDENCE_THRESHOLD = 0.8
+
+
+def persona_confidence(source_observation_count: int) -> float:
+    """O3: deterministic confidence from the count of distinct source obs.
+
+    ``confidence = min(1.0, n / PERSONA_CONFIDENCE_SATURATION)`` — a pure
+    function of the evidence count, never an LLM judgement. ~10 distinct
+    corroborating observations clear the 0.8 high-confidence threshold; 1-2
+    thin sources stay well below it.
+    """
+    n = max(0, int(source_observation_count))
+    return min(1.0, n / PERSONA_CONFIDENCE_SATURATION)
+
+
+def get_persona_field(
+    project_id: str,
+    field_name: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single persona field by (project_id, field_name).
+
+    ``source_observation_ids`` stays the raw JSON string, mirroring how
+    observation rows carry ``source_correction_ids``. Returns None when no row
+    exists for the pair.
+    """
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM project_persona WHERE project_id = ? AND field_name = ?",
+        (project_id, field_name),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_persona_fields(
+    project_id: str,
+    *,
+    min_confidence: float = 0.0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """O3 read path: a project's persona fields, strongest-evidence-first.
+
+    Ordered by ``confidence`` DESC (then field_name as a stable tiebreak). With
+    ``min_confidence`` > 0 only fields at/above the floor qualify — pass
+    ``PERSONA_CONFIDENCE_THRESHOLD`` to read only the answered (high-confidence)
+    disposition.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT * FROM project_persona
+           WHERE project_id = ? AND confidence >= ?
+           ORDER BY confidence DESC, field_name""",
+        (project_id, min_confidence),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_persona_field(
+    project_id: str,
+    field_name: str,
+    value: str,
+    *,
+    source_observation_ids: Optional[list[str]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """O3 CREATE/UPDATE path: fold persona evidence into ONE (project, field).
+
+    Deterministic aggregation — no LLM on the path:
+
+    - CREATE (no existing row) → a new persona field is born. Its evidence set
+      is the cited ``source_observation_ids`` (deduped, order-preserving);
+      ``confidence`` = :func:`persona_confidence` over that count.
+    - UPDATE (row exists) → new observation ids fold into the SAME row:
+      ``source_observation_ids`` append uniquely and ``confidence`` is
+      recomputed from the GROWN distinct count — ~10 'prefer TDD' observations
+      folded one at a time end at one row with confidence > 0.8, never 10
+      sibling rows. ``value`` is overwritten with the latest distilled value
+      (the value evolves as evidence accumulates).
+    - Re-citing only already-recorded ids with the same value is an idempotent
+      no-op for the evidence set (confidence cannot inflate past the real
+      distinct evidence), though ``value`` / ``last_updated`` still refresh.
+
+    Returns the resulting row as a dict (``created`` True on insert).
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    existing = get_persona_field(project_id, field_name, conn=conn)
+    incoming = _dedupe_source_ids(source_observation_ids)
+
+    if existing is None:
+        merged = incoming
+        confidence = persona_confidence(len(merged))
+        with conn:
+            conn.execute(
+                """INSERT INTO project_persona
+                   (project_id, field_name, value, confidence,
+                    source_observation_ids, created_at, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    project_id,
+                    field_name,
+                    value,
+                    confidence,
+                    json.dumps(merged),
+                    now,
+                    now,
+                ),
+            )
+            add_event(
+                PERSONA_CREATED_EVENT,
+                None,
+                {
+                    "project_id": project_id,
+                    "field_name": field_name,
+                    "value": value,
+                    "confidence": confidence,
+                    "source_count": len(merged),
+                },
+                conn=conn,
+                autocommit=False,
+            )
+        return {
+            "project_id": project_id,
+            "field_name": field_name,
+            "value": value,
+            "confidence": confidence,
+            "source_observation_ids": json.dumps(merged),
+            "created_at": now,
+            "last_updated": now,
+            "created": True,
+        }
+
+    prior = _dedupe_source_ids(existing.get("source_observation_ids"))
+    fresh = [oid for oid in incoming if oid not in prior]
+    merged = prior + fresh
+    confidence = persona_confidence(len(merged))
+    with conn:
+        conn.execute(
+            """UPDATE project_persona
+               SET value = ?, confidence = ?, source_observation_ids = ?,
+                   last_updated = ?
+               WHERE project_id = ? AND field_name = ?""",
+            (
+                value,
+                confidence,
+                json.dumps(merged),
+                now,
+                project_id,
+                field_name,
+            ),
+        )
+        add_event(
+            PERSONA_UPDATED_EVENT,
+            None,
+            {
+                "project_id": project_id,
+                "field_name": field_name,
+                "value": value,
+                "confidence": confidence,
+                "source_count": len(merged),
+                "new_sources": len(fresh),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    row = get_persona_field(project_id, field_name, conn=conn) or {}
+    row["created"] = False
+    return row
+
+
+def recall_persona_field(
+    query: str,
+    project_id: str,
+    *,
+    min_confidence: float = PERSONA_CONFIDENCE_THRESHOLD,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """O3 retrieval: the direct persona-field answer for an open-domain query.
+
+    Only fires for open-domain (aggregate-shaped) queries — closed-domain
+    lookups ('how do I fix X?') return None and fall through to normal recall.
+    Among the project's high-confidence fields (confidence >= *min_confidence*),
+    returns the one whose field_name the query mentions (e.g. 'what testing
+    style do we use' -> the ``testing_style`` field) — the strongest-evidence
+    match when several qualify. Returns None when no confident field matches:
+    the caller then falls back to the O1 observation tier / raw learnings.
+
+    Deterministic and stdlib-only: the match is a substring test of the
+    field_name tokens against the lowered query; the confidence gate is a
+    numeric comparison. No LLM, no embedding sits on the path.
+    """
+    if not is_open_domain_query(query):
+        return None
+    conn = conn or get_conn()
+    lowered = str(query).lower()
+    fields = get_persona_fields(
+        project_id, min_confidence=min_confidence, conn=conn
+    )
+    for row in fields:  # already confidence DESC — strongest evidence wins
+        tokens = [t for t in str(row["field_name"]).split("_") if t]
+        if tokens and all(tok in lowered for tok in tokens):
+            return {
+                "project_id": row["project_id"],
+                "field_name": row["field_name"],
+                "value": row["value"],
+                "confidence": row["confidence"],
+                "type": "persona",
+                "tier": "persona",
+            }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1192,6 +3206,194 @@ def add_index_job(
     return jid
 
 
+# ---------------------------------------------------------------------------
+# Learning signals (S9: volatile ranking signals out of frontmatter)
+# ---------------------------------------------------------------------------
+# ByteRover runtime-signals-schema shape: ranking fields that change on every
+# query live in a sidecar store (here: the ``learning_signals`` table inside
+# reflect.db), never in note markdown frontmatter. Note files stay immutable
+# after write — per-query bumps touch only this table, so git-tracked notes
+# produce clean diffs and never merge-conflict on telemetry.
+
+
+def default_learning_signals() -> dict[str, Any]:
+    """S9: fresh sidecar values for a learning with no signals row yet.
+
+    Mirrors ByteRover's ``createDefaultRuntimeSignals`` — readers get these
+    defaults instead of a miss, so a missing row is indistinguishable from a
+    never-touched one."""
+    return {
+        "importance": DEFAULT_IMPORTANCE,
+        "maturity": DEFAULT_MATURITY,
+        "recall_count": 0,
+        "helpful_count": 0,
+        "ignored_count": 0,
+        "stale_count": 0,
+        "last_recalled_at": None,
+    }
+
+
+def strip_volatile_signal_fields(frontmatter: dict[str, Any]) -> dict[str, Any]:
+    """S9: return a copy of *frontmatter* without volatile ranking fields.
+
+    The write-time guard note writers apply before persisting markdown:
+    semantic fields pass through untouched; anything in
+    ``VOLATILE_SIGNAL_FIELDS`` (importance, maturity, recall/feedback
+    counters, last_recalled_at) is dropped — those live ONLY in the
+    ``learning_signals`` sidecar table."""
+    return {
+        key: value
+        for key, value in (frontmatter or {}).items()
+        if key not in VOLATILE_SIGNAL_FIELDS
+    }
+
+
+def _coerce_importance(value: Any, fallback: float) -> float:
+    """S9: normalize an importance to [0, 100]; unparseable → *fallback*."""
+    if value is None or isinstance(value, bool):
+        return fallback
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if num != num:  # NaN guard — NaN compares false to everything
+        return fallback
+    return min(100.0, max(0.0, num))
+
+
+def _coerce_maturity(value: Any, fallback: str) -> str:
+    """S9: normalize a maturity tier; unknown values keep *fallback*."""
+    if value is None:
+        return fallback
+    text = str(value).strip().lower()
+    return text if text in MATURITY_TIERS else fallback
+
+
+def _ensure_signals_row(
+    conn: sqlite3.Connection, learning_id: str, now: str,
+) -> None:
+    """Seed a default sidecar row when none exists (idempotent, no commit —
+    callers own the transaction)."""
+    conn.execute(
+        """INSERT OR IGNORE INTO learning_signals
+               (learning_id, created_at, updated_at)
+           VALUES (?, ?, ?)""",
+        (learning_id, now, now),
+    )
+
+
+def get_learning_signals(
+    learning_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """S9: read the volatile ranking signals for a learning.
+
+    The ONLY read path for these fields — recall/ranking must come here, not
+    to note frontmatter. A learning without a sidecar row yet returns the
+    ByteRover defaults (importance 50, maturity 'draft', zero counters)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM learning_signals WHERE learning_id = ?",
+        (learning_id,),
+    ).fetchone()
+    if row is None:
+        return {"learning_id": learning_id, **default_learning_signals()}
+    return dict(row)
+
+
+def set_learning_signals(
+    learning_id: str,
+    *,
+    importance: Optional[float] = None,
+    maturity: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """S9: upsert curated ranking signals for a learning.
+
+    ``importance`` is clamped to [0, 100]; an unknown ``maturity`` tier is
+    ignored (the current tier is kept — never a crash, never bad data in the
+    CHECK-constrained column). Returns the updated row, or None when the
+    learning doesn't exist (mirrors the no-op semantics of the other UPDATE
+    paths)."""
+    conn = conn or get_conn()
+    if get_learning(learning_id, conn=conn) is None:
+        return None
+    current = get_learning_signals(learning_id, conn=conn)
+    new_importance = _coerce_importance(importance, float(current["importance"]))
+    new_maturity = _coerce_maturity(maturity, str(current["maturity"]))
+    now = _now_iso()
+    with conn:
+        _ensure_signals_row(conn, learning_id, now)
+        conn.execute(
+            """UPDATE learning_signals
+               SET importance = ?, maturity = ?, updated_at = ?
+               WHERE learning_id = ?""",
+            (new_importance, new_maturity, now, learning_id),
+        )
+    return get_learning_signals(learning_id, conn=conn)
+
+
+def _bump_learning_signals(
+    conn: sqlite3.Connection,
+    learning_id: str,
+    *,
+    feedback: str,
+    now: str,
+) -> None:
+    """S9: per-query telemetry bump — sidecar table only, never markdown.
+
+    No commit of its own: runs inside the caller's ``with conn:`` block so
+    the bump lands atomically with the recall_events insert."""
+    _ensure_signals_row(conn, learning_id, now)
+    update_parts = [
+        "recall_count = recall_count + 1",
+        "last_recalled_at = ?",
+        "updated_at = ?",
+    ]
+    if feedback == "helpful":
+        update_parts.append("helpful_count = helpful_count + 1")
+    elif feedback == "ignored":
+        update_parts.append("ignored_count = ignored_count + 1")
+    elif feedback == "stale":
+        update_parts.append("stale_count = stale_count + 1")
+    conn.execute(
+        f"UPDATE learning_signals SET {', '.join(update_parts)} "
+        "WHERE learning_id = ?",
+        (now, now, learning_id),
+    )
+
+
+def _backfill_learning_signals(conn: sqlite3.Connection) -> None:
+    """S9 migration: seed sidecar rows for pre-existing learnings.
+
+    Copies the legacy volatile counters (recall/helpful/ignored/stale,
+    last_recalled_at) off the learnings table into ``learning_signals`` so
+    existing telemetry survives the move; importance/maturity start at the
+    ByteRover defaults. Idempotent — the NOT IN guard touches only learnings
+    without a sidecar row, so re-running on every init_db never resets
+    accumulated signals. Best-effort: a failure here must never block
+    schema migration."""
+    try:
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                """INSERT INTO learning_signals
+                       (learning_id, importance, maturity, recall_count,
+                        helpful_count, ignored_count, stale_count,
+                        last_recalled_at, created_at, updated_at)
+                   SELECT l.id, ?, ?, l.recall_count, l.helpful_count,
+                          l.ignored_count, l.stale_count, l.last_recalled_at,
+                          ?, ?
+                   FROM learnings l
+                   WHERE l.id NOT IN
+                         (SELECT learning_id FROM learning_signals)""",
+                (DEFAULT_IMPORTANCE, DEFAULT_MATURITY, now, now),
+            )
+    except Exception:
+        return
+
+
 def add_recall_event(
     learning_id: str,
     query: str,
@@ -1200,9 +3402,18 @@ def add_recall_event(
     rank: Optional[int] = None,
     feedback: str = "",
     query_hash: str = "",
+    session_id: str = "",
+    followup: bool = False,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
-    """Record a recall hit and update recall telemetry on the learning row."""
+    """Record a recall hit and update recall telemetry on the learning row.
+
+    A4: ``session_id`` anchors the hit to a session for the followup-rate
+    diagnostic; ``followup`` marks hits belonging to a search that arrived
+    within the followup window with a result set disjoint from the session's
+    previous search (computed by :func:`record_recall_search` — callers
+    recording isolated hits leave both at their defaults).
+    """
     conn = conn or get_conn()
     rid = _new_id()
     now = _now_iso()
@@ -1225,8 +3436,9 @@ def add_recall_event(
     with conn:
         conn.execute(
             """INSERT INTO recall_events
-               (id, learning_id, query, query_hash, source_context, rank, feedback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, learning_id, query, query_hash, source_context, rank,
+                feedback, session_id, followup, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 rid,
                 learning_id,
@@ -1235,6 +3447,8 @@ def add_recall_event(
                 source_context,
                 rank,
                 feedback,
+                str(session_id or "").strip(),
+                1 if followup else 0,
                 now,
             ),
         )
@@ -1242,6 +3456,10 @@ def add_recall_event(
             f"UPDATE learnings SET {', '.join(update_parts)} WHERE id = ?",
             params,
         )
+        # S9: the canonical home for per-query telemetry is the
+        # learning_signals sidecar — markdown notes are never touched.
+        # (The learnings columns above stay in sync as a legacy mirror.)
+        _bump_learning_signals(conn, learning_id, feedback=feedback, now=now)
         add_event(
             "learning_recalled",
             learning_id,
@@ -1254,6 +3472,180 @@ def add_recall_event(
             autocommit=False,
         )
     return rid
+
+
+# ---------------------------------------------------------------------------
+# Followup-rate diagnostic (A4: agentmemory smart-search followup shape)
+# ---------------------------------------------------------------------------
+
+# A4: a second search in the SAME session arriving within this window with a
+# result set fully disjoint from the first is a "followup" — the empirical
+# signal that the first recall didn't satisfy. agentmemory ships 30s via
+# AGENTMEMORY_FOLLOWUP_WINDOW_SECONDS; ours is RECALL_FOLLOWUP_WINDOW_SECONDS
+# (one knob shared with recall.py's session-side tracker).
+FOLLOWUP_WINDOW_ENV = "RECALL_FOLLOWUP_WINDOW_SECONDS"
+DEFAULT_FOLLOWUP_WINDOW_SECONDS = 30.0
+# A4: metrics counters carrying the diagnostic (followup rate =
+# followups / searches).
+FOLLOWUP_SEARCHES_METRIC = "recall_searches_total"
+FOLLOWUP_HITS_METRIC = "recall_followups_total"
+
+
+def followup_window_seconds() -> float:
+    """A4: the followup detection window, env-tunable, floored at 1s.
+
+    The floor mirrors the source's ``Math.max(1, windowSeconds)`` guard —
+    a zero/negative window would disable detection silently instead of
+    erroring; unparseable values fall back to the default.
+    """
+    raw = os.environ.get(FOLLOWUP_WINDOW_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FOLLOWUP_WINDOW_SECONDS
+    return max(1.0, value)
+
+
+def _latest_recall_search(
+    conn: sqlite3.Connection, session_id: str,
+) -> Optional[dict[str, Any]]:
+    """A4: the session's most recent recorded search, with its full id set.
+
+    A "search" is the group of recall_events rows sharing (session_id,
+    query_hash, created_at) — :func:`record_recall_search` inserts every
+    hit of one search under a single timestamp.
+    """
+    row = conn.execute(
+        """SELECT query, query_hash, created_at FROM recall_events
+           WHERE session_id = ?
+           ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    id_rows = conn.execute(
+        """SELECT learning_id FROM recall_events
+           WHERE session_id = ? AND query_hash = ? AND created_at = ?""",
+        (session_id, row["query_hash"], row["created_at"]),
+    ).fetchall()
+    return {
+        "query": row["query"],
+        "created_at": row["created_at"],
+        "learning_ids": {r["learning_id"] for r in id_rows},
+    }
+
+
+def record_recall_search(
+    query: str,
+    learning_ids: list[str],
+    *,
+    session_id: str = "",
+    source_context: str = "",
+    feedback: str = "",
+    window_seconds: Optional[float] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """A4: record one SEARCH (a ranked set of recalled learnings) and flag
+    followups.
+
+    Inserts one ``recall_events`` row per learning (rank = list position,
+    all sharing one timestamp) and computes the ``followup`` flag for the
+    whole group: the flag is set when the session's PREVIOUS search landed
+    within the followup window (default 30s), asked something different,
+    and its result set is fully disjoint from this one — recall didn't
+    satisfy the first time, so the agent searched again.
+
+    Skip rules (the agentmemory smart-search shape):
+
+    - no ``session_id`` → rows are still inserted but the search is not
+      counted and can never be a followup (no session anchor);
+    - empty ``learning_ids`` → nothing recorded: an empty result set is a
+      retrieval failure (SG6 logs it as a knowledge gap), not a
+      reader-failure signal — counting it would inflate the rate;
+    - identical query within the window → a retry, not a followup;
+    - ANY overlap between the two result sets → not a followup.
+
+    Counted searches bump the ``recall_searches_total`` metric; detected
+    followups additionally bump ``recall_followups_total`` (followup rate =
+    followups / searches — see :func:`get_followup_stats`).
+
+    Returns ``{"followup": bool, "counted": bool, "recall_event_ids": [...]}``.
+    """
+    conn = conn or get_conn()
+    sid = str(session_id or "").strip()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in learning_ids or []:
+        lid = str(raw).strip()
+        if lid and lid not in seen:
+            seen.add(lid)
+            ordered.append(lid)
+    if not ordered:
+        return {"followup": False, "counted": False, "recall_event_ids": []}
+
+    window = (
+        followup_window_seconds()
+        if window_seconds is None
+        else max(1.0, float(window_seconds))
+    )
+    counted = bool(sid)
+    followup = False
+    if counted:
+        prior = _latest_recall_search(conn, sid)
+        if prior is not None and prior["learning_ids"]:
+            prior_at = _parse_forget_after(prior["created_at"])
+            if prior_at is not None:
+                age = (datetime.now(timezone.utc) - prior_at).total_seconds()
+                followup = (
+                    0 <= age <= window
+                    and prior["query"] != query
+                    and prior["learning_ids"].isdisjoint(ordered)
+                )
+
+    event_ids = [
+        add_recall_event(
+            lid,
+            query,
+            source_context=source_context,
+            rank=position,
+            feedback=feedback,
+            session_id=sid,
+            followup=followup,
+            conn=conn,
+        )
+        for position, lid in enumerate(ordered, start=1)
+    ]
+    if counted:
+        increment_metric(FOLLOWUP_SEARCHES_METRIC, conn=conn)
+        if followup:
+            increment_metric(FOLLOWUP_HITS_METRIC, conn=conn)
+    return {"followup": followup, "counted": counted, "recall_event_ids": event_ids}
+
+
+def get_followup_stats(*, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
+    """A4: the followup-rate diagnostic read-back (powers /reflect:cost).
+
+    ``rate`` is followups / searches — high means recall keeps failing to
+    satisfy on the first ask (tune rerank weights / graph budget / OOD
+    threshold). Directional: rapid topic switches may overcount.
+    """
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    conn = conn or get_conn()
+    searches = _as_int(get_metric(FOLLOWUP_SEARCHES_METRIC, 0, conn=conn))
+    followups = _as_int(get_metric(FOLLOWUP_HITS_METRIC, 0, conn=conn))
+    return {
+        "searches": searches,
+        "followups": followups,
+        "rate": (followups / searches) if searches else 0.0,
+    }
 
 
 def add_artifact(
@@ -1291,25 +3683,1185 @@ def add_artifact(
 
 
 # ---------------------------------------------------------------------------
+# S8: Transcript -> chunks -> learnings grouping
+# ---------------------------------------------------------------------------
+
+
+def record_transcript(
+    transcript_id: str,
+    *,
+    captured_at: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Register a transcript (conversation) so its chunks/learnings can group.
+
+    Idempotent: re-recording the same ``transcript_id`` keeps the original
+    ``captured_at`` rather than clobbering it. Returns the transcript id.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO transcripts (id, captured_at) VALUES (?, ?)
+               ON CONFLICT(id) DO NOTHING""",
+            (transcript_id, captured_at or _now_iso()),
+        )
+    return transcript_id
+
+
+def record_chunk(
+    transcript_id: str,
+    chunk_hash: str,
+    *,
+    slice_text: str = "",
+    captured_at: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Record a (transcript, slice_hash) chunk, reusing the S7 slice hash.
+
+    Ensures the parent transcript exists, then inserts the chunk under a
+    UNIQUE (transcript_id, hash) constraint so the same chunk is never
+    double-processed — a repeat call is a no-op. Returns the chunk hash.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO transcripts (id, captured_at) VALUES (?, ?)
+               ON CONFLICT(id) DO NOTHING""",
+            (transcript_id, captured_at or _now_iso()),
+        )
+        conn.execute(
+            """INSERT INTO transcript_chunks
+                   (id, transcript_id, hash, slice, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(transcript_id, hash) DO NOTHING""",
+            (_new_id(), transcript_id, chunk_hash, slice_text, _now_iso()),
+        )
+    return chunk_hash
+
+
+def chunk_already_processed(
+    transcript_id: str,
+    chunk_hash: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """True if this (transcript_id, slice_hash) chunk is already recorded."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM transcript_chunks WHERE transcript_id = ? AND hash = ?",
+        (transcript_id, chunk_hash),
+    ).fetchone()
+    return row is not None
+
+
+def link_chunk_learning(
+    chunk_hash: str,
+    learning_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Attribute a learning back to the chunk it was drained from.
+
+    Idempotent on (chunk_hash, learning_id) so re-recording the same mapping
+    adds no duplicate.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO chunk_learnings (chunk_hash, learning_id, created_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(chunk_hash, learning_id) DO NOTHING""",
+            (chunk_hash, learning_id, _now_iso()),
+        )
+
+
+def record_chunk_with_learnings(
+    transcript_id: str,
+    chunk_hash: str,
+    learning_ids: list[str],
+    *,
+    slice_text: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Convenience: record a chunk and attribute its learnings in one call.
+
+    Used at the cascade drain point. Fully idempotent — re-running with the
+    same chunk + learnings produces no duplicate rows.
+    """
+    conn = conn or get_conn()
+    record_chunk(transcript_id, chunk_hash, slice_text=slice_text, conn=conn)
+    for learning_id in learning_ids:
+        link_chunk_learning(chunk_hash, learning_id, conn=conn)
+
+
+def get_learnings_for_transcript(
+    transcript_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[str]:
+    """Return the distinct learning ids that came from a transcript/session.
+
+    Answers "show me everything that came out of session X" by joining
+    transcript -> chunks -> chunk_learnings. Ordered by attribution time.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT DISTINCT cl.learning_id AS learning_id, cl.created_at AS created_at
+               FROM transcript_chunks tc
+               JOIN chunk_learnings cl ON cl.chunk_hash = tc.hash
+              WHERE tc.transcript_id = ?
+              ORDER BY cl.created_at, cl.learning_id""",
+        (transcript_id,),
+    ).fetchall()
+    return [r["learning_id"] for r in rows]
+
+
+def get_transcript_grouping(
+    transcript_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, list[str]]:
+    """Return the per-chunk learning grouping for a transcript.
+
+    Maps each chunk hash to the list of learning ids attributed to it. Lets
+    callers see cross-chunk consolidation candidates within one session.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute(
+        """SELECT tc.hash AS chunk_hash, cl.learning_id AS learning_id
+               FROM transcript_chunks tc
+               LEFT JOIN chunk_learnings cl ON cl.chunk_hash = tc.hash
+              WHERE tc.transcript_id = ?
+              ORDER BY tc.created_at, cl.created_at""",
+        (transcript_id,),
+    ).fetchall()
+    grouping: dict[str, list[str]] = {}
+    for r in rows:
+        bucket = grouping.setdefault(r["chunk_hash"], [])
+        if r["learning_id"] is not None:
+            bucket.append(r["learning_id"])
+    return grouping
+
+
+# ---------------------------------------------------------------------------
+# Skills index (R20: hindsight mental_models shape)
+# ---------------------------------------------------------------------------
+
+
+def _decode_tags(raw: Any) -> list[str]:
+    """Decode a stored tags payload to a list of strings (never raises)."""
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    try:
+        parsed = json.loads(raw or "[]")
+        return [str(t) for t in parsed] if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def upsert_skill(
+    name: str,
+    path: str,
+    *,
+    tags: Optional[list[str]] = None,
+    summary: str = "",
+    mtime: float = 0.0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Insert or refresh a skills-index row. Returns the path (natural key).
+
+    R20: the skills table is the fast 'is there a skill for this query?'
+    structure (hindsight ``mental_models`` shape — name + tags + summary +
+    last_refreshed_at). ``path`` points at the skill's SKILL.md and is the
+    primary key (skill *names* can collide across plugin namespaces);
+    ``mtime`` is the file's modification time, which makes the staleness
+    check in ``skill_index.refresh_if_stale`` a pure stat() pass.
+
+    R13: ``is_stale`` clears ONLY when the upsert carries a NEW mtime —
+    i.e. the SKILL.md was actually regenerated/edited on disk. Re-upserting
+    an unchanged file (a full ``rebuild_index`` pass) preserves the flag, so
+    a skill marked stale by belief revision stays stale until its content
+    is really refreshed.
+    """
+    conn = conn or get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO skills (path, name, tags, summary, mtime, last_refreshed_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(path) DO UPDATE SET
+                   name = excluded.name,
+                   tags = excluded.tags,
+                   summary = excluded.summary,
+                   is_stale = CASE WHEN excluded.mtime != skills.mtime
+                                   THEN 0 ELSE skills.is_stale END,
+                   mtime = excluded.mtime,
+                   last_refreshed_at = excluded.last_refreshed_at""",
+            (path, name, json.dumps(tags or []), summary, float(mtime), _now_iso()),
+        )
+    return path
+
+
+def get_skills(
+    *,
+    compute_stale: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return every indexed skill (tags decoded to a list), name-ordered.
+
+    R14: with ``compute_stale=True`` each row's ``is_stale`` is recomputed
+    on read (stored R13 flag OR any in-scope learning updated after
+    ``last_refreshed_at`` — see :func:`compute_skills_staleness`). The
+    stored column is untouched; only the returned records are annotated.
+    """
+    conn = conn or get_conn()
+    rows = conn.execute("SELECT * FROM skills ORDER BY name, path").fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["tags"] = _decode_tags(record.get("tags"))
+        out.append(record)
+    if compute_stale and out:
+        computed = compute_skills_staleness(skills=out, conn=conn)
+        for record in out:
+            record["is_stale"] = 1 if computed.get(record["path"]) else 0
+    return out
+
+
+def get_skill_by_name(
+    name: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single skill by name (first match when namespaces collide)."""
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM skills WHERE name = ? ORDER BY path LIMIT 1",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["tags"] = _decode_tags(record.get("tags"))
+    return record
+
+
+def remove_skills(
+    paths: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Delete skills rows for *paths* (uninstalled skills). Returns count."""
+    if not paths:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in paths)
+    with conn:
+        cur = conn.execute(f"DELETE FROM skills WHERE path IN ({marks})", paths)
+    return cur.rowcount
+
+
+def mark_skills_stale(
+    paths: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """R13: flag the skills at *paths* as stale. Returns rows newly flagged.
+
+    A stale skill is one whose backing learnings changed (belief-revision
+    UPDATE/DELETE) after the SKILL.md was last written — its guidance may
+    no longer match the corpus. Stale skills are excluded from the inject
+    matcher (``skill_index.match_skills``) until regenerated; the flag
+    clears when the SKILL.md is re-edited (mtime change → ``upsert_skill``)
+    or via :func:`clear_skill_stale`.
+    """
+    if not paths:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in paths)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE skills SET is_stale = 1 "
+            f"WHERE path IN ({marks}) AND is_stale = 0",
+            paths,
+        )
+    return cur.rowcount
+
+
+def clear_skill_stale(
+    path: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """R13: clear the staleness flag for one skill (refresh completed)."""
+    if not path:
+        return False
+    conn = conn or get_conn()
+    with conn:
+        cur = conn.execute(
+            "UPDATE skills SET is_stale = 0 WHERE path = ? AND is_stale = 1",
+            (path,),
+        )
+    return cur.rowcount > 0
+
+
+def get_stale_skills(
+    *, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """R13: every skill currently flagged stale (tags decoded), name-ordered."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM skills WHERE is_stale = 1 ORDER BY name, path"
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["tags"] = _decode_tags(record.get("tags"))
+        out.append(record)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-skill computed staleness (R14: hindsight compute_mental_model_is_stale
+# shape — is_stale flips true iff any in-scope learning changed after the
+# skill was last refreshed)
+# ---------------------------------------------------------------------------
+
+# R14 scope tokenizer — MUST stay in lockstep with
+# ``reflect_cascade._content_tokens`` / ``skills_backing_learning`` (the R13
+# event-driven trigger). Both sides answer the same question ("is this
+# learning in this skill's scope?"); if they drift, the computed flag and
+# the stored flag disagree about which learnings back a skill.
+_SCOPE_TOKEN_RE = re.compile(r"[a-z0-9_+./-]+")
+_SCOPE_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "has", "have", "here", "in", "into", "is", "it", "its", "of", "on", "or",
+    "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "to", "was", "were", "when", "which", "with", "you", "your",
+})
+
+
+def _scope_tokens(text: str) -> set[str]:
+    """Lowercased content-word tokens (stopwords + 1-char noise dropped)."""
+    return {
+        tok
+        for tok in _SCOPE_TOKEN_RE.findall((text or "").lower())
+        if len(tok) >= 2 and tok not in _SCOPE_STOPWORDS
+    }
+
+
+def _tag_specs(tags: Any) -> list[tuple[str, frozenset[str]]]:
+    """Normalize skill tags to (lowercased tag, content-token set) pairs."""
+    specs: list[tuple[str, frozenset[str]]] = []
+    for tag in tags or []:
+        tag = str(tag).strip().lower()
+        if tag:
+            specs.append((tag, frozenset(_scope_tokens(tag))))
+    return specs
+
+
+def _scope_hit(
+    tag_specs: list[tuple[str, frozenset[str]]],
+    title_tokens: set[str],
+    category: str,
+) -> bool:
+    """One skill-vs-learning scope test over precomputed token sets."""
+    for tag, tag_tokens in tag_specs:
+        if category and tag == category:
+            return True
+        if tag_tokens and tag_tokens <= title_tokens:
+            return True
+    return False
+
+
+def skill_scope_matches(tags: Any, title: str, category: str = "") -> bool:
+    """R14: True when a learning (title/category) is in a skill's scope.
+
+    A learning is in scope when any skill tag either equals the learning's
+    category (case-insensitive) or has ALL of its content tokens present in
+    the learning's title — multi-word tags must match whole, so the tag
+    "belief revision" doesn't fire on every title that merely says
+    "revision". Same semantics as ``reflect_cascade.skills_backing_learning``
+    (the R13 event-driven side of the contract). A skill with no tags has an
+    empty scope: nothing matches.
+    """
+    return _scope_hit(
+        _tag_specs(tags),
+        _scope_tokens(title),
+        str(category or "").strip().lower(),
+    )
+
+
+# Per-learning effective update timestamp: creation counts as an update (a
+# NEW in-scope learning stales a skill just like a revision), and every
+# mutation path snapshots into learning_history first (S6), so the newest
+# history row's created_at is the row's last-modified time.
+_LEARNING_UPDATES_SQL = """
+SELECT l.id, l.title, l.category, l.created_at,
+       MAX(h.created_at) AS last_history_at
+FROM learnings l
+LEFT JOIN learning_history h ON h.learning_id = l.id
+GROUP BY l.id
+"""
+
+
+def compute_skills_staleness(
+    *,
+    skills: Optional[list[dict[str, Any]]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, bool]:
+    """R14: map of skill path -> computed ``is_stale`` (hindsight
+    ``compute_mental_model_is_stale`` shape, recomputed on read).
+
+    A skill is stale iff:
+
+    - its STORED flag is set (the R13 event-driven trigger fired and the
+      SKILL.md hasn't been regenerated yet), OR
+    - any in-scope learning (see :func:`skill_scope_matches`) was created
+      or mutated after the skill's ``last_refreshed_at``. This computed
+      half catches writes that never pass through the R13 trigger
+      (``add_learning``, ``add_learning_proof``, ``update_learning_status``,
+      contradiction demotion).
+
+    Nothing is persisted — the stored flag stays R13's. Timestamp parsing
+    is tolerant (the A3 ``forget_after`` rules): a learning with an
+    unparseable timestamp never flips a skill, and a skill with an
+    unparseable ``last_refreshed_at`` falls back to its stored flag alone
+    (never stale on bad data).
+
+    One learnings pass for the whole index: rows older than the OLDEST
+    ``last_refreshed_at`` are pruned before any scope matching, and token
+    sets are computed once per skill/candidate — cheap (<10ms) even with
+    dozens of skills over hundreds of learnings.
+    """
+    conn = conn or get_conn()
+    if skills is None:
+        skills = get_skills(conn=conn)
+    if not skills:
+        return {}
+
+    floors: dict[str, Optional[datetime]] = {
+        str(s.get("path", "")): _parse_forget_after(s.get("last_refreshed_at"))
+        for s in skills
+    }
+    valid_floors = [f for f in floors.values() if f is not None]
+
+    # (title_tokens, category, updated_at) for every learning that could
+    # possibly flip at least one skill.
+    candidates: list[tuple[set[str], str, datetime]] = []
+    if valid_floors:
+        oldest_floor = min(valid_floors)
+        for row in conn.execute(_LEARNING_UPDATES_SQL).fetchall():
+            updated = _parse_forget_after(row["created_at"])
+            history_at = _parse_forget_after(row["last_history_at"])
+            if history_at is not None and (updated is None or history_at > updated):
+                updated = history_at
+            if updated is None or updated <= oldest_floor:
+                continue
+            candidates.append((
+                _scope_tokens(str(row["title"] or "")),
+                str(row["category"] or "").strip().lower(),
+                updated,
+            ))
+
+    result: dict[str, bool] = {}
+    for skill in skills:
+        path = str(skill.get("path", ""))
+        if skill.get("is_stale"):
+            result[path] = True
+            continue
+        floor = floors[path]
+        if floor is None:
+            result[path] = False
+            continue
+        tag_specs = _tag_specs(skill.get("tags"))
+        if not tag_specs:
+            result[path] = False
+            continue
+        result[path] = any(
+            updated > floor and _scope_hit(tag_specs, title_tokens, category)
+            for title_tokens, category, updated in candidates
+        )
+    return result
+
+
+def compute_skill_is_stale(
+    path: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[bool]:
+    """R14: computed staleness for ONE indexed skill (None when not indexed)."""
+    if not path:
+        return None
+    conn = conn or get_conn()
+    row = conn.execute("SELECT * FROM skills WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["tags"] = _decode_tags(record.get("tags"))
+    return compute_skills_staleness(skills=[record], conn=conn)[path]
+
+
+# ---------------------------------------------------------------------------
+# Conventions docs (O2: auto-refreshing per-project conventions aggregate —
+# hindsight mental_models refresh_after_consolidation shape)
+# ---------------------------------------------------------------------------
+# The doc row is the DB source of truth; the on-disk CONVENTIONS.md (written
+# by ``conventions_generator``) is its materialization. Rendering and file
+# I/O live in conventions_generator.py (R20-style split: this module owns
+# the table, the generator owns the artefact).
+
+CONVENTIONS_REFRESHED_EVENT = "conventions_doc_refreshed"
+
+
+def upsert_conventions_doc(
+    project_id: str,
+    *,
+    query: str = "",
+    content: str = "",
+    scope_tags: Optional[list[str]] = None,
+    doc_path: str = "",
+    observation_count: int = 0,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Insert or refresh the conventions-doc row for *project_id*.
+
+    Every upsert IS a refresh: ``last_refreshed_at`` moves to now and the
+    stored ``is_stale`` flag clears (the doc was just regenerated from the
+    live observations, so by definition it is current). ``created_at`` is
+    preserved across refreshes. Returns the project_id (natural key).
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            """INSERT INTO conventions_docs
+               (project_id, query, content, scope_tags, doc_path,
+                observation_count, last_refreshed_at, is_stale, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(project_id) DO UPDATE SET
+                   query = excluded.query,
+                   content = excluded.content,
+                   scope_tags = excluded.scope_tags,
+                   doc_path = excluded.doc_path,
+                   observation_count = excluded.observation_count,
+                   last_refreshed_at = excluded.last_refreshed_at,
+                   is_stale = 0""",
+            (
+                project_id,
+                query,
+                content,
+                json.dumps(scope_tags or []),
+                doc_path,
+                max(0, int(observation_count)),
+                now,
+                now,
+            ),
+        )
+        add_event(
+            CONVENTIONS_REFRESHED_EVENT,
+            None,
+            {
+                "project_id": project_id,
+                "doc_path": doc_path,
+                "observation_count": max(0, int(observation_count)),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return project_id
+
+
+def get_conventions_doc(
+    project_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch one conventions-doc row (``scope_tags`` decoded to a list)."""
+    if not project_id:
+        return None
+    conn = conn or get_conn()
+    row = conn.execute(
+        "SELECT * FROM conventions_docs WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["scope_tags"] = _decode_tags(record.get("scope_tags"))
+    return record
+
+
+def get_conventions_docs(
+    *, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Every conventions-doc row (``scope_tags`` decoded), project-ordered."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT * FROM conventions_docs ORDER BY project_id"
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        record = dict(r)
+        record["scope_tags"] = _decode_tags(record.get("scope_tags"))
+        out.append(record)
+    return out
+
+
+def mark_conventions_docs_stale(
+    project_ids: list[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """O2/R13 shape: flag the docs for *project_ids* stale. Returns rows
+    newly flagged. A stale doc stops injecting at SessionStart until the
+    next regeneration (``upsert_conventions_doc`` clears the flag)."""
+    if not project_ids:
+        return 0
+    conn = conn or get_conn()
+    marks = ", ".join("?" for _ in project_ids)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE conventions_docs SET is_stale = 1 "
+            f"WHERE project_id IN ({marks}) AND is_stale = 0",
+            project_ids,
+        )
+    return cur.rowcount
+
+
+def compute_conventions_is_stale(
+    project_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[bool]:
+    """O2/R14 shape: computed staleness for one conventions doc.
+
+    Mirrors :func:`compute_skill_is_stale` (the hindsight
+    ``compute_mental_model_is_stale`` port): the doc is stale iff its
+    STORED flag is set, OR any observation in its scope was created,
+    updated, or retired after ``last_refreshed_at``. Scope = the doc's
+    ``scope_tags`` plus its own project_id plus ``global`` (a global
+    convention applies in every project). Retired observations count —
+    a convention that stopped holding must drop out of the doc, so its
+    retirement stales it just like new evidence does.
+
+    Timestamp parsing is tolerant (the A3 rules): an observation with an
+    unparseable ``updated_at`` never flips the doc, and a doc with an
+    unparseable ``last_refreshed_at`` falls back to its stored flag alone.
+    Returns None when *project_id* has no registered doc. Nothing is
+    persisted — the stored flag stays the trigger's.
+    """
+    row = get_conventions_doc(project_id, conn=conn)
+    if row is None:
+        return None
+    if row.get("is_stale"):
+        return True
+    floor = _parse_forget_after(row.get("last_refreshed_at"))
+    if floor is None:
+        return False
+    conn = conn or get_conn()
+    scopes = sorted(
+        {str(s).strip() for s in (row.get("scope_tags") or []) if str(s).strip()}
+        | {project_id, "global"}
+    )
+    marks = ", ".join("?" for _ in scopes)
+    candidates = conn.execute(
+        f"SELECT updated_at FROM observations WHERE scope IN ({marks})",
+        scopes,
+    ).fetchall()
+    for candidate in candidates:
+        updated = _parse_forget_after(candidate["updated_at"])
+        if updated is not None and updated > floor:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Memory slots (A1: pinned editable agent scratchpads, agentmemory shape)
+# ---------------------------------------------------------------------------
+
+# A small fixed vocabulary of named, size-capped, agent-editable scratchpads.
+# Slots sit between skills (workflow-shaped, slow to refresh) and learnings
+# (aggregated from corrections): they are the agent's FAST working memory.
+# Global-scope slots live under project_id='' and apply everywhere; project
+# slots are keyed by project_id and shadow a same-named global slot on read.
+
+SLOT_SCOPE_PROJECT = "project"
+SLOT_SCOPE_GLOBAL = "global"
+SLOT_EVENT_TYPE = "slot_edited"
+DEFAULT_SLOT_SIZE_LIMIT = 2000
+_SLOT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+# The 8 default slots seeded on init. Descriptions are the inject-time hint
+# telling the agent what belongs in each slot.
+DEFAULT_SLOTS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "persona",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 1000,
+        "description": "Self-image: the role, voice, and operating principles the agent works under.",
+    },
+    {
+        "name": "user_preferences",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 2000,
+        "description": "Durable user habits: style, naming, tooling picks to carry across sessions.",
+    },
+    {
+        "name": "tool_guidelines",
+        "scope": SLOT_SCOPE_GLOBAL,
+        "size_limit": 1500,
+        "description": "Tool selection and sequencing rules the agent must respect.",
+    },
+    {
+        "name": "project_context",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 3000,
+        "description": "This project's architecture notes, conventions, and build/test commands.",
+    },
+    {
+        "name": "guidance",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "Live steering for the next session: focus areas, hazards, open risks.",
+    },
+    {
+        "name": "pending_items",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 2000,
+        "description": "Unfinished work and TODOs that must survive the session boundary.",
+    },
+    {
+        "name": "session_patterns",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "Recurring behaviours observed over recent sessions (auto-counted).",
+    },
+    {
+        "name": "self_notes",
+        "scope": SLOT_SCOPE_PROJECT,
+        "size_limit": 1500,
+        "description": "The agent's own scratch notes: hypotheses, dead ends, follow-ups.",
+    },
+)
+
+
+def validate_slot_name(name: Any) -> Optional[str]:
+    """Normalize a slot name: lowercase snake_case, <= 64 chars, or None."""
+    if not isinstance(name, str):
+        return None
+    trimmed = name.strip()
+    if not _SLOT_NAME_RE.match(trimmed):
+        return None
+    return trimmed
+
+
+def derive_slot_project_id(cwd: Optional[Path] = None) -> str:
+    """Project identity for slot scoping: git remote basename, else dir name.
+
+    Mirrors the derivation in memory_discovery's ``project-id`` and the
+    SessionStart hook's ``project_name`` so the same checkout always maps
+    to the same slot bucket. Never raises — a broken git falls back to
+    the directory basename.
+    """
+    cwd = Path(cwd) if cwd is not None else Path.cwd()
+    try:
+        r = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            base = r.stdout.strip().rstrip("/").rsplit("/", 1)[-1]
+            return re.sub(r"\.git$", "", base)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return cwd.name
+
+
+def _slot_bucket(scope: str, project_id: str) -> str:
+    """The project_id key a slot of *scope* is stored under."""
+    return "" if scope == SLOT_SCOPE_GLOBAL else project_id
+
+
+def ensure_default_slots(
+    project_id: str = "",
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Seed any missing default slot rows. Returns the number created.
+
+    Idempotent: existing rows (including agent-edited content) are never
+    touched. Global defaults seed under project_id=''; project defaults
+    seed under *project_id*. A fresh DB gains exactly 8 rows.
+    """
+    conn = conn or get_conn()
+    now = _now_iso()
+    created = 0
+    with conn:
+        for tmpl in DEFAULT_SLOTS:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO slots
+                   (project_id, name, content, scope, size_limit, read_only,
+                    description, created_at, last_edited_at)
+                   VALUES (?, ?, '', ?, ?, 0, ?, ?, ?)""",
+                (
+                    _slot_bucket(tmpl["scope"], project_id),
+                    tmpl["name"],
+                    tmpl["scope"],
+                    tmpl["size_limit"],
+                    tmpl["description"],
+                    now,
+                    now,
+                ),
+            )
+            created += cur.rowcount
+    return created
+
+
+def get_slot(
+    name: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict[str, Any]]:
+    """Fetch one slot: the project row wins, else the global ('') row."""
+    label = validate_slot_name(name)
+    if label is None:
+        return None
+    conn = conn or get_conn()
+    for bucket in (project_id, ""):
+        row = conn.execute(
+            "SELECT * FROM slots WHERE project_id = ? AND name = ?",
+            (bucket, label),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    return None
+
+
+def list_slots(
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """All slots visible from *project_id* (project shadows global), by name."""
+    conn = conn or get_conn()
+    merged: dict[str, dict[str, Any]] = {}
+    for bucket in ("", project_id):
+        rows = conn.execute(
+            "SELECT * FROM slots WHERE project_id = ? ORDER BY name",
+            (bucket,),
+        ).fetchall()
+        for r in rows:
+            merged[r["name"]] = dict(r)
+    return [merged[k] for k in sorted(merged)]
+
+
+def _slot_result(ok: bool, *, error: str = "", slot: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    out: dict[str, Any] = {"ok": ok}
+    if error:
+        out["error"] = error
+    if slot is not None:
+        out["slot"] = slot
+        out["size"] = len(slot.get("content", ""))
+    return out
+
+
+def _write_slot_content(
+    conn: sqlite3.Connection,
+    slot: dict[str, Any],
+    content: str,
+    action: str,
+) -> dict[str, Any]:
+    """Persist *content* into *slot* and audit the edit (shared UPDATE path)."""
+    now = _now_iso()
+    with conn:
+        conn.execute(
+            "UPDATE slots SET content = ?, last_edited_at = ? "
+            "WHERE project_id = ? AND name = ?",
+            (content, now, slot["project_id"], slot["name"]),
+        )
+        add_event(
+            SLOT_EVENT_TYPE,
+            None,
+            {
+                "name": slot["name"],
+                "project_id": slot["project_id"],
+                "action": action,
+                "size": len(content),
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    updated = dict(slot)
+    updated["content"] = content
+    updated["last_edited_at"] = now
+    return _slot_result(True, slot=updated)
+
+
+def slot_append(
+    name: str,
+    text: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: append *text* as a new line. Size cap is a hard error —
+    the agent must compact via :func:`slot_replace` rather than silently
+    losing content."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    if not text:
+        return _slot_result(False, error="text required")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    sep = "\n" if slot["content"] and not slot["content"].endswith("\n") else ""
+    merged = f"{slot['content']}{sep}{text}"
+    if len(merged) > slot["size_limit"]:
+        return _slot_result(
+            False,
+            error=(
+                f"append would exceed size_limit ({len(merged)} > "
+                f"{slot['size_limit']}); use replace to compact first"
+            ),
+        )
+    return _write_slot_content(conn, slot, merged, "append")
+
+
+def slot_replace(
+    name: str,
+    content: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: replace the slot body wholesale (size cap enforced)."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    if not isinstance(content, str):
+        return _slot_result(False, error="content required (string)")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    if len(content) > slot["size_limit"]:
+        return _slot_result(
+            False,
+            error=f"content exceeds size_limit ({len(content)} > {slot['size_limit']})",
+        )
+    return _write_slot_content(conn, slot, content, "replace")
+
+
+def slot_delete(
+    name: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Agent edit: clear a slot's content (the named slot row survives so
+    the vocabulary stays fixed — delete means 'empty it', not 'unname it')."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return _slot_result(False, error="invalid slot name (lowercase snake_case, <= 64 chars)")
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None:
+        return _slot_result(False, error=f"slot not found: {label}")
+    if slot["read_only"]:
+        return _slot_result(False, error=f"slot is read-only: {label}")
+    return _write_slot_content(conn, slot, "", "delete")
+
+
+def slot_auto_append(
+    name: str,
+    lines: list[str],
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Deterministic (hook) writer: append *lines* not already present.
+
+    Unlike :func:`slot_append`, overflow is tolerated by keeping the TAIL
+    of the merged content within size_limit — a background hook can't ask
+    the agent to compact, and newest entries matter most. Skips read-only
+    slots. Returns True when the slot changed.
+    """
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None or not lines:
+        return False
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None or slot["read_only"]:
+        return False
+    existing = set(slot["content"].split("\n"))
+    fresh = [ln for ln in lines if ln and ln not in existing]
+    if not fresh:
+        return False
+    sep = "\n" if slot["content"] and not slot["content"].endswith("\n") else ""
+    merged = f"{slot['content']}{sep}" + "\n".join(fresh)
+    if len(merged) > slot["size_limit"]:
+        merged = merged[len(merged) - slot["size_limit"]:]
+    _write_slot_content(conn, slot, merged, "auto_append")
+    return True
+
+
+def slot_auto_replace(
+    name: str,
+    content: str,
+    *,
+    project_id: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> bool:
+    """Deterministic (hook) writer: replace content, head-truncated to fit.
+    Skips read-only slots. Returns True when the slot changed."""
+    conn = conn or get_conn()
+    label = validate_slot_name(name)
+    if label is None:
+        return False
+    slot = get_slot(label, project_id=project_id, conn=conn)
+    if slot is None or slot["read_only"]:
+        return False
+    capped = content[: slot["size_limit"]]
+    if capped == slot["content"]:
+        return False
+    _write_slot_content(conn, slot, capped, "auto_replace")
+    return True
+
+
+def render_slots_context(
+    *,
+    project_id: str = "",
+    max_chars: int = 4000,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Markdown block of every non-empty slot visible from *project_id*.
+
+    This is the Tier-0 SessionStart inject: slots come BEFORE skills and
+    raw learnings. Empty slots render nothing; no slots → "".
+    """
+    conn = conn or get_conn()
+    filled = [s for s in list_slots(project_id=project_id, conn=conn) if s["content"].strip()]
+    if not filled:
+        return ""
+    lines = ["## Memory slots (agent-curated — edit via /reflect:slots)"]
+    for slot in filled:
+        lines.append(f"### {slot['name']}")
+        lines.append(slot["content"].strip())
+    return "\n".join(lines)[:max_chars]
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Reflect SQLite manager")
     parser.add_argument(
         "command",
-        choices=["init", "stats", "events", "doctor"],
+        choices=[
+            "init", "stats", "events", "history", "contradictions", "doctor",
+            "slot-list", "slot-get", "slot-append", "slot-replace", "slot-delete",
+            "record-commit",
+        ],
         help="Action to perform",
     )
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--name", default="", help="Slot name (slot-* commands)")
+    parser.add_argument("--text", default="", help="Text to append (slot-append)")
+    parser.add_argument("--content", default="", help="New body (slot-replace)")
+    # SG2 record-commit args (driven by hooks/post_commit.sh)
+    parser.add_argument("--sha", default="", help="Commit SHA (record-commit)")
+    parser.add_argument("--session", default="", help="Session id (record-commit)")
+    parser.add_argument("--branch", default="", help="Branch name (record-commit)")
+    parser.add_argument("--message", default="", help="Commit subject (record-commit)")
+    parser.add_argument(
+        "--files", default="", help="Newline-separated changed files (record-commit)"
+    )
+    parser.add_argument(
+        "--conflict-resolved",
+        action="store_true",
+        help="Flag a merge-conflict resolution commit (record-commit)",
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Slot project id (default: derived from cwd git remote/basename)",
+    )
     args = parser.parse_args()
 
     conn = init_db()
 
+    if args.command.startswith("slot-"):
+        project_id = (
+            args.project if args.project is not None else derive_slot_project_id()
+        )
+        ensure_default_slots(project_id, conn=conn)
+        if args.command == "slot-list":
+            for slot in list_slots(project_id=project_id, conn=conn):
+                size = len(slot["content"])
+                print(
+                    f"  {slot['name']:<18} [{slot['scope']}] "
+                    f"{size}/{slot['size_limit']} chars"
+                    + ("  (read-only)" if slot["read_only"] else "")
+                    + f"  — {slot['description']}"
+                )
+        elif args.command == "slot-get":
+            slot = get_slot(args.name, project_id=project_id, conn=conn)
+            if slot is None:
+                print(f"slot not found: {args.name!r}", file=sys.stderr)
+                raise SystemExit(1)
+            print(json.dumps(slot, indent=2))
+        else:
+            if args.command == "slot-append":
+                result = slot_append(
+                    args.name, args.text, project_id=project_id, conn=conn,
+                )
+            elif args.command == "slot-replace":
+                result = slot_replace(
+                    args.name, args.content, project_id=project_id, conn=conn,
+                )
+            else:  # slot-delete
+                result = slot_delete(args.name, project_id=project_id, conn=conn)
+            if not result["ok"]:
+                print(f"error: {result['error']}", file=sys.stderr)
+                raise SystemExit(1)
+            print(
+                f"ok: {args.command} {args.name} "
+                f"({result['size']}/{result['slot']['size_limit']} chars)"
+            )
+        return
+
+    if args.command == "record-commit":
+        files = [ln for ln in (args.files or "").splitlines() if ln.strip()]
+        result = record_commit(
+            args.sha,
+            session_id=args.session,
+            branch=args.branch,
+            message=args.message,
+            files=files,
+            conflict_resolved=args.conflict_resolved,
+            conn=conn,
+        )
+        print(json.dumps(result))
+        return
+
     if args.command == "init":
+        ensure_default_slots(derive_slot_project_id(), conn=conn)
         print(f"Database initialized at {_db_path()}")
 
     elif args.command == "stats":
@@ -1322,6 +4874,14 @@ def main() -> None:
             "index_jobs",
             "recall_events",
             "artifacts",
+            "learning_history",
+            "concept_index",
+            "skills",
+            "slots",
+            "observations",
+            "observation_history",
+            "conventions_docs",
+            "commit_links",
         ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
@@ -1332,6 +4892,32 @@ def main() -> None:
                 f"  [{ev['created_at']}] {ev['type']}  "
                 f"learning={ev['learning_id'] or '-'}  "
                 f"{ev['details_json']}"
+            )
+
+    elif args.command == "history":
+        counts = get_update_counts(limit=args.limit, conn=conn)
+        if not counts:
+            print("  no learning updates recorded")
+        for row in counts:
+            print(
+                f"  {row['learning_id']}  updates={row['update_count']}  "
+                f"last={row['last_updated_at']}  {row['title']}"
+            )
+
+    elif args.command == "contradictions":
+        total = get_contradiction_count(conn=conn)
+        print(f"  contradictions detected: {total}")
+        for ev in get_events_by_type(
+            CONTRADICTION_EVENT_TYPE, limit=args.limit, conn=conn,
+        ):
+            details = json.loads(ev["details_json"] or "{}")
+            print(
+                f"  [{ev['created_at']}] "
+                f"older={details.get('older_id', ev['learning_id'] or '-')} "
+                f"newer={details.get('newer_id', '-')} "
+                f"jaccard={details.get('similarity', '-')}  "
+                f"{details.get('older_title', '')!r} -> "
+                f"{details.get('newer_title', '')!r}"
             )
 
     elif args.command == "doctor":

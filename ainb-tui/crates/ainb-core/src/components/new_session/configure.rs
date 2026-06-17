@@ -103,6 +103,20 @@ pub enum BaseMode {
     Checkout,
 }
 
+/// Why the chosen worktree branch name would make launch fail — surfaced
+/// inline on the Branch row so the user fixes it BEFORE pressing Launch
+/// (Stevie 2026-06-07: feat/ota off main died only at launch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchProblem {
+    /// Already checked out in a live worktree — `git worktree add` rejects it.
+    InUse,
+    /// Already exists as a branch (local or remote). Harmless in Checkout
+    /// mode (that's the point), but in base-off mode we'd try to create a
+    /// NEW branch with that name and fail (`worktree add -b` errors; the
+    /// remote cache pre-check rejects "already exists in cache").
+    Exists,
+}
+
 /// The user's pick from the base-branch popup. Threaded through `LaunchSpec`
 /// into `create_session_from_configure`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,8 +271,15 @@ pub struct ConfigureState {
     pub branch_prefix: String,
     /// Snapshot of existing worktree branch names — passed to
     /// `derive_branch_name` so collision-disambiguation actually fires
-    /// (finding #16).
+    /// (finding #16). These are branches *in use by a worktree*.
     pub existing_branches: Vec<String>,
+    /// All branch short names that exist in the repo (local heads +
+    /// remote-tracking), regardless of whether a worktree holds them. Seeded
+    /// for local repos at construction and refreshed from the base-branch
+    /// picker (which lists/fetches them). Drives the base-off "⚠ exists"
+    /// guard — creating a NEW branch over an existing name fails
+    /// (Stevie 2026-06-07: feat/ota off main).
+    pub repo_branch_names: Vec<String>,
     /// Which segment of the Branch row Enter acts on (←/→ toggles).
     pub branch_segment: BranchSegment,
     /// The user's base-branch pick, when they used the popup. `None` keeps
@@ -279,6 +300,7 @@ impl ConfigureState {
         branch_source: Option<String>,
         branch_prefix: &str,
         existing_branches: Vec<String>,
+        repo_branch_names: Vec<String>,
     ) -> Self {
         // Build the presets cache ONCE here (finding #4). Tab/Shift-Tab
         // cycling consults the cache, not the disk.
@@ -352,6 +374,7 @@ impl ConfigureState {
             presets_cache,
             branch_prefix: branch_prefix.to_string(),
             existing_branches,
+            repo_branch_names,
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
@@ -454,15 +477,33 @@ impl ConfigureState {
         self.branch_override.clone().unwrap_or_else(|| self.branch_worktree.clone())
     }
 
-    /// True when the effective branch is already checked out in a live
-    /// worktree (a hard `git worktree add` failure if we launched). Only
-    /// reachable via a manual override — the auto default avoids
-    /// `existing_branches` at derivation time. Drives the inline "⚠ in use"
-    /// warning on the Branch row (Stevie 2026-05-27).
+    /// Why the effective worktree branch name would make launch fail, if at
+    /// all. Drives the inline Branch-row warning and the pre-launch block.
+    /// Only reachable via a manual override / picked name — the auto default
+    /// is a fresh random 8-hex that avoids every existing branch.
+    ///
+    /// `InUse` (checked out by a live worktree) applies in BOTH modes — git
+    /// rejects a second worktree on the same branch. `Exists` (the name is a
+    /// branch but not in a worktree) applies ONLY in base-off mode, where we
+    /// create a NEW branch off the base; in Checkout mode an existing branch
+    /// is exactly what's wanted (Stevie 2026-06-07: feat/ota off main).
+    #[must_use]
+    pub fn branch_problem(&self) -> Option<BranchProblem> {
+        let b = self.effective_branch();
+        if self.existing_branches.iter().any(|x| x == &b) {
+            return Some(BranchProblem::InUse);
+        }
+        if !self.is_checkout() && self.repo_branch_names.iter().any(|x| x == &b) {
+            return Some(BranchProblem::Exists);
+        }
+        None
+    }
+
+    /// True when the chosen branch name would fail at `git worktree add` —
+    /// the pre-launch chokepoint reads this to block + refocus the Branch row.
     #[must_use]
     pub fn branch_collision(&self) -> bool {
-        let b = self.effective_branch();
-        self.existing_branches.iter().any(|x| x == &b)
+        self.branch_problem().is_some()
     }
 
     /// Recompute `branch_worktree`. After the 2026-05-27 refactor branch
@@ -784,7 +825,7 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let mut options: Vec<String> = state.available_presets.clone();
     options.push(CUSTOM_PRESET_LABEL.to_string());
 
-    let line = build_pills_line("Preset:  ", &options, &current, focused, area.width);
+    let line = build_pills_line("Preset:  ", &options, &current, focused, &[], area.width);
 
     // Tack on the modified badge to the same line (after the pills).
     let line = if modified {
@@ -829,17 +870,44 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
 
 fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     let preset = state.effective_preset();
-    let current = match preset.agent_provider.as_str() {
-        "claude" => "Claude",
-        "codex" => "Codex",
-        "shell" => "Shell",
-        "ssh" => "SSH",
-        other => other,
+    let current = agent_label(preset.agent_provider.as_str()).to_string();
+    // Gemini is shown but greyed-out / non-selectable for now (kept out of the
+    // `AGENTS` cycle ring) — `build_pills_line` renders it muted with a
+    // `[soon]` tag. Copilot is a real, selectable option. `DISABLED_AGENTS` is
+    // the single source of truth shared with the launch guard.
+    let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let disabled: Vec<&str> = DISABLED_AGENTS.iter().map(|p| agent_label(p)).collect();
+
+    // Width-fit gate (mirrors render_model_row): the row grew to six pills, so
+    // on narrow terminals fall back to the single `◀ value ▶` cycle display
+    // rather than overflowing and truncating pills off the right edge.
+    let pill_width = estimate_pill_width("Agent:   ", &options, &disabled, focused);
+    if pill_width > area.width as usize {
+        let spans = vec![
+            focus_indicator(focused),
+            label_span("Agent:   "),
+            cyclable_arrow_left(focused),
+            Span::styled(
+                current,
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            cyclable_arrow_right(focused),
+        ];
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
     }
-    .to_string();
-    let options: Vec<String> =
-        ["Claude", "Codex", "Shell", "SSH"].iter().map(|s| (*s).to_string()).collect();
-    let line = build_pills_line("Agent:   ", &options, &current, focused, area.width);
+
+    let line = build_pills_line(
+        "Agent:   ",
+        &options,
+        &current,
+        focused,
+        &disabled,
+        area.width,
+    );
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -870,7 +938,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
     // single-value cycle display. The Model row's labels include ctx hints
     // like "[1M]" so they grow fast; on narrow terminals the cycle form is
     // more readable.
-    let pill_width = estimate_pill_width("Model:   ", &options, focused);
+    let pill_width = estimate_pill_width("Model:   ", &options, &[], focused);
     if pill_width > area.width as usize {
         // Mute "system default" so the user can tell at a glance.
         let is_default = current == "system default";
@@ -890,7 +958,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         return;
     }
 
-    let line = build_pills_line("Model:   ", &options, &current, focused, area.width);
+    let line = build_pills_line("Model:   ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -996,17 +1064,32 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
     let options = vec!["ON".to_string(), "OFF".to_string()];
-    let line = build_pills_line("Yolo:    ", &options, &current, focused, area.width);
+    let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Inline marker + guidance sub-line for a Branch-row problem. Returns
+/// `(trailing marker, guidance text)`; the caller styles them red / muted.
+const fn branch_problem_text(problem: BranchProblem) -> (&'static str, &'static str) {
+    match problem {
+        BranchProblem::InUse => (
+            "   \u{26a0} in use",
+            "\u{2514} already checked out by a session \u{2014} pick another name, or Esc \u{2192} menu \u{2192} Recovery to respawn it",
+        ),
+        BranchProblem::Exists => (
+            "   \u{26a0} exists",
+            "\u{2514} a branch with this name already exists \u{2014} pick another name, or Enter on Branch \u{2192} check it out as the base",
+        ),
+    }
 }
 
 fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     if let Some(ref buf) = state.branch_edit {
-        // Inline edit mode. Collision evaluates live against the edit buffer
+        // Inline edit mode. The problem evaluates live against the edit buffer
         // (effective_branch() prefers branch_edit), so the ⚠ warning appears
-        // as the user types a name that's already checked out.
-        let collide = state.branch_collision();
-        let buf_style = if collide {
+        // as the user types a name that's already in use or already exists.
+        let problem = state.branch_problem();
+        let buf_style = if problem.is_some() {
             Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
@@ -1018,20 +1101,21 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
             Span::styled(" \u{2192} ", Style::default().fg(MUTED_GRAY)),
             Span::styled(buf.clone(), buf_style),
             Span::styled("_", Style::default().fg(MUTED_GRAY)),
-            if collide {
-                Span::styled(
-                    "   \u{26a0} in use",
-                    Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("")
-            },
+            problem.map_or_else(
+                || Span::raw(""),
+                |p| {
+                    Span::styled(
+                        branch_problem_text(p).0,
+                        Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+                    )
+                },
+            ),
         ]);
-        if collide {
+        if let Some(p) = problem {
             let guide = Line::from(vec![
                 Span::raw("           "),
                 Span::styled(
-                    "\u{2514} already checked out by a session \u{2014} pick another name, or Esc \u{2192} menu \u{2192} Recovery to respawn it",
+                    branch_problem_text(p).1,
                     Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
                 ),
             ]);
@@ -1065,7 +1149,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     }
 
     let worktree = state.effective_branch();
-    let collision = state.branch_collision();
+    let problem = state.branch_problem();
 
     // Segment targeting (2026-06 base picker): when the row is focused the
     // targeted segment renders underlined; ←/→ toggles, Enter acts on it.
@@ -1077,9 +1161,9 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         source_style = source_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
     }
 
-    // Branch worktree name renders red when it collides with a live worktree,
-    // green otherwise. The collision is only reachable via manual override.
-    let mut worktree_style = if collision {
+    // Branch worktree name renders red on a problem (in-use OR an existing
+    // base-off name), green otherwise. Only reachable via a manual override.
+    let mut worktree_style = if problem.is_some() {
         Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
@@ -1087,27 +1171,28 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     if worktree_targeted {
         worktree_style = worktree_style.add_modifier(Modifier::UNDERLINED);
     }
-    let trailing = if collision {
-        Span::styled(
-            "   \u{26a0} in use",
-            Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
-        )
-    } else if source_targeted {
-        Span::styled(
-            "   [Enter to pick base \u{00b7} \u{2192} name]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    } else if worktree_targeted {
-        Span::styled(
-            "   [Enter to edit \u{00b7} \u{2190} base]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Span::styled(
-            "   [Enter to edit]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    };
+    let trailing = problem.map_or_else(
+        || {
+            // No problem: show the contextual targeting hint instead.
+            let hint = if source_targeted {
+                "   [Enter to pick base \u{00b7} \u{2192} name]"
+            } else if worktree_targeted {
+                "   [Enter to edit \u{00b7} \u{2190} base]"
+            } else {
+                "   [Enter to edit]"
+            };
+            Span::styled(
+                hint,
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )
+        },
+        |p| {
+            Span::styled(
+                branch_problem_text(p).0,
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            )
+        },
+    );
     let branch_line = Line::from(vec![
         focus_indicator(focused),
         label_span("Branch:  "),
@@ -1117,13 +1202,12 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         trailing,
     ]);
 
-    if collision {
-        // Two-line block with the guidance sub-line (both paths: edit the
-        // name here, or Esc → Recovery to respawn the existing session).
+    if let Some(p) = problem {
+        // Two-line block: the worktree-name problem + the guidance sub-line.
         let guide = Line::from(vec![
             Span::raw("           "),
             Span::styled(
-                "\u{2514} already checked out by a session — edit the name (Enter), or Esc → menu → Recovery to respawn it",
+                branch_problem_text(p).1,
                 Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
         ]);
@@ -1263,6 +1347,7 @@ fn build_pills_line(
     options: &[String],
     current: &str,
     focused: bool,
+    disabled: &[&str],
     _available_width: u16,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1273,7 +1358,25 @@ fn build_pills_line(
         if i > 0 {
             spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
         }
-        if opt == current {
+        let is_disabled = disabled.contains(&opt.as_str());
+        let is_current = opt == current;
+        if is_disabled {
+            // Greyed-out, non-selectable option (e.g. Gemini): muted + italic
+            // with a `[soon]` tag so it reads as unavailable — distinct from a
+            // merely-not-current option, which is plain muted with no tag. If a
+            // disabled option is somehow also the current one (a hand-authored
+            // preset), still bracket it — muted — so the row always shows a
+            // selection rather than nothing.
+            let style = Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC);
+            if is_current {
+                spans.push(Span::styled("[", style));
+                spans.push(Span::styled(opt.clone(), style));
+                spans.push(Span::styled("]", style));
+            } else {
+                spans.push(Span::styled(opt.clone(), style));
+            }
+            spans.push(Span::styled(" [soon]", style));
+        } else if is_current {
             spans.push(Span::styled(
                 "[",
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
@@ -1305,7 +1408,7 @@ fn build_pills_line(
 /// Used to gate fallback to the `◀ value ▶` single-cycle display on narrow
 /// terminals. Slightly over-approximates: counts char_indices (Unicode) but
 /// charges 1 cell per char (good enough for ASCII + the few `·` separators).
-fn estimate_pill_width(label: &str, options: &[String], focused: bool) -> usize {
+fn estimate_pill_width(label: &str, options: &[String], disabled: &[&str], focused: bool) -> usize {
     // 2 chars for focus indicator ("▸ " or "  "), then label, then pills.
     let mut w = 2 + label.chars().count();
     for (i, opt) in options.iter().enumerate() {
@@ -1315,6 +1418,10 @@ fn estimate_pill_width(label: &str, options: &[String], focused: bool) -> usize 
         // Plus 2 for the [ ] around the current item — over-counts for
         // non-current options, but we want the gate to fire generously.
         w += opt.chars().count() + 2;
+        // Disabled options carry a trailing " [soon]" tag.
+        if disabled.contains(&opt.as_str()) {
+            w += " [soon]".chars().count();
+        }
     }
     if focused {
         w += "   ←/→ to change".chars().count();
@@ -1750,6 +1857,15 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         state.focused_row = ConfigureRow::Branch;
         return ConfigureOutcome::Stay;
     }
+    // Defense-in-depth: a greyed-out agent (e.g. Gemini) is never selectable in
+    // the UI, but a hand-authored preset could still carry one. Refuse to launch
+    // a disabled provider and refocus the Agent row, mirroring the collision
+    // guard above. `DISABLED_AGENTS` is the shared source of truth with the
+    // Agent-row greying, so the two never disagree.
+    if DISABLED_AGENTS.contains(&state.effective_preset().agent_provider.as_str()) {
+        state.focused_row = ConfigureRow::Agent;
+        return ConfigureOutcome::Stay;
+    }
     let preset = state.effective_preset();
     let prompt = state.prompt.to_non_empty_string();
     // Checkout-direct pick: the session branch IS the picked branch — the
@@ -1870,9 +1986,28 @@ fn ensure_overrides_seed(state: &mut ConfigureState) -> &mut CustomOverrides {
     state.custom_overrides.as_mut().expect("just seeded")
 }
 
-const AGENTS: &[&str] = &["claude", "codex", "shell", "ssh"];
+const AGENTS: &[&str] = &["claude", "codex", "copilot", "shell", "ssh"];
 
-/// Cycle agent for Custom selection: rotates through claude → codex → shell → ssh.
+/// Agent providers shown in the Agent row but greyed-out / non-selectable:
+/// kept OUT of the `AGENTS` cycle ring AND refused at launch. Single source of
+/// truth so the greyed pill and the launch guard never disagree.
+const DISABLED_AGENTS: &[&str] = &["gemini"];
+
+/// Map an `agent_provider` id to its Agent-row display label.
+fn agent_label(provider: &str) -> &str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "copilot" => "Copilot",
+        "shell" => "Shell",
+        "ssh" => "SSH",
+        other => other,
+    }
+}
+
+/// Cycle agent for Custom selection: rotates through claude → codex → copilot → shell → ssh.
+/// Gemini is intentionally excluded — it renders greyed-out (non-selectable) in the Agent row.
 fn cycle_agent(state: &mut ConfigureState, delta: i32) {
     let prev_provider = {
         let overrides = ensure_overrides_seed(state);
@@ -1883,10 +2018,11 @@ fn cycle_agent(state: &mut ConfigureState, delta: i32) {
         overrides.agent_provider = AGENTS[next].to_string();
         prev
     };
-    // Crossing the Claude/Codex boundary: reset the model field to the new
-    // provider's `default` so a Claude-flavoured id doesn't linger on a
-    // Codex agent (or vice versa). Stays on `"default"` so `--model` keeps
-    // getting omitted by default.
+    // Crossing the Claude/Codex boundary directly: reset the model field to
+    // `"default"` so a Claude-flavoured id doesn't linger on a Codex agent (or
+    // vice versa). Non-adjacent paths (e.g. codex → copilot → … → claude) skip
+    // this, but `ClaudeModel::parse` / `CodexModel::parse` map any stale/unknown
+    // id to SystemDefault and omit `--model`, so it stays safe either way.
     {
         let overrides = state.custom_overrides.as_mut().expect("just seeded");
         let crossed = matches!(
@@ -2155,10 +2291,181 @@ mod tests {
             presets_cache,
             branch_prefix: "agents/".into(),
             existing_branches: Vec::new(),
+            repo_branch_names: Vec::new(),
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
         }
+    }
+
+    #[test]
+    fn agent_pills_gemini_greyed_copilot_selectable() {
+        // The Agent row shows Gemini greyed-out (non-selectable, `[soon]` tag)
+        // and Copilot as a real, selectable pill. Current pill stays green/bold.
+        let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let line = build_pills_line("Agent:   ", &options, "Claude", false, &["Gemini"], 200);
+
+        let find = |needle: &str| {
+            line.spans.iter().find(|s| s.content.as_ref() == needle).unwrap_or_else(|| {
+                panic!(
+                    "no span with content {needle:?}; spans: {:?}",
+                    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+                )
+            })
+        };
+
+        // Current pill (Claude): green + bold, bracketed.
+        let claude = find("Claude");
+        assert_eq!(
+            claude.style.fg,
+            Some(SELECTION_GREEN),
+            "current pill must be green"
+        );
+        assert!(
+            claude.style.add_modifier.contains(Modifier::BOLD),
+            "current pill must be bold"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.content.as_ref() == "[" && s.style.fg == Some(SELECTION_GREEN)),
+            "current pill must be bracketed in green"
+        );
+
+        // Gemini: greyed-out (muted + italic) with a ` [soon]` tag, never green/bold.
+        let gemini = find("Gemini");
+        assert_eq!(
+            gemini.style.fg,
+            Some(MUTED_GRAY),
+            "Gemini must be muted grey"
+        );
+        assert!(
+            gemini.style.add_modifier.contains(Modifier::ITALIC),
+            "Gemini must be italic (disabled)"
+        );
+        assert!(
+            !gemini.style.add_modifier.contains(Modifier::BOLD),
+            "Gemini must not be bold"
+        );
+        let soon = find(" [soon]");
+        assert_eq!(soon.style.fg, Some(MUTED_GRAY));
+        assert!(soon.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            !line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == " [soon]" && s.style.fg == Some(SELECTION_GREEN)),
+            "the [soon] tag must never render as the green current pill"
+        );
+
+        // Copilot: a real, selectable (not current) pill — plain muted, no italic, no tag.
+        let copilot = find("Copilot");
+        assert_eq!(
+            copilot.style.fg,
+            Some(MUTED_GRAY),
+            "Copilot must be muted grey"
+        );
+        assert!(
+            !copilot.style.add_modifier.contains(Modifier::ITALIC),
+            "Copilot must not be italic (it is selectable, not disabled)"
+        );
+        assert!(!copilot.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn agent_cycle_ring_excludes_gemini_includes_copilot() {
+        // Copilot is selectable (in the cycle ring); Gemini is not.
+        assert!(
+            AGENTS.contains(&"copilot"),
+            "copilot must be a selectable agent"
+        );
+        assert!(
+            !AGENTS.contains(&"gemini"),
+            "gemini stays out of the cycle ring (greyed-out)"
+        );
+    }
+
+    #[test]
+    fn render_agent_row_shows_gemini_greyed_and_copilot() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = mk_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        terminal.draw(|f| render_agent_row(f, &state, f.size(), true)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains("Agent:"),
+            "agent row label missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Gemini"),
+            "Gemini pill missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("[soon]"),
+            "Gemini greyed [soon] tag missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Copilot"),
+            "Copilot pill missing: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn agents_picker_gemini_disabled_copilot_available() {
+        use crate::app::state::{AgentProvider, ProviderStatus};
+        assert_eq!(
+            AgentProvider::gemini().status,
+            ProviderStatus::Disabled,
+            "Gemini must be greyed-out / non-launchable in the Agents picker"
+        );
+        assert_eq!(
+            AgentProvider::copilot().status,
+            ProviderStatus::Available,
+            "Copilot stays selectable in the Agents picker"
+        );
+    }
+
+    #[test]
+    fn disabled_current_pill_still_shows_selection() {
+        // A hand-authored preset could make a disabled agent the current one.
+        // The row must still bracket it (muted) so a selection always reads,
+        // and must never render it in the green current style.
+        let options: Vec<String> = ["Claude", "Gemini"].iter().map(|s| (*s).to_string()).collect();
+        let line = build_pills_line("Agent:   ", &options, "Gemini", false, &["Gemini"], 200);
+        assert!(
+            line.spans.iter().any(|s| s.content.as_ref() == "["),
+            "disabled-current must still show a bracket; otherwise nothing reads selected"
+        );
+        assert!(
+            !line.spans.iter().any(|s| s.style.fg == Some(SELECTION_GREEN)),
+            "disabled-current must never use the green current style"
+        );
+        assert!(
+            line.spans.iter().any(|s| s.content.as_ref() == " [soon]"),
+            "disabled-current must still carry the [soon] tag"
+        );
+    }
+
+    #[test]
+    fn launch_refused_for_disabled_agent_preset() {
+        // Gemini is non-selectable in the UI, but a TOML preset could carry it.
+        // Launch must be refused and focus moved to the Agent row.
+        let mut s = mk_state();
+        s.presets_cache.get_mut("a").unwrap().agent_provider = "gemini".into();
+        let outcome = launch_outcome(&mut s);
+        assert!(
+            matches!(outcome, ConfigureOutcome::Stay),
+            "a disabled-agent preset must not launch"
+        );
+        assert_eq!(
+            s.focused_row,
+            ConfigureRow::Agent,
+            "launch refusal should refocus the Agent row"
+        );
     }
 
     #[test]
@@ -2185,6 +2492,47 @@ mod tests {
         s.existing_branches = vec!["feat/blog".into()];
         s.branch_override = Some("feat/something-else".into());
         assert!(!s.branch_collision());
+    }
+
+    #[test]
+    fn branch_problem_exists_when_baseoff_name_already_a_branch() {
+        // feat/ota exists as a branch but is NOT in a worktree. Base-off would
+        // try to create it anew off main and fail → block at selection
+        // (Stevie 2026-06-07).
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["main".into(), "feat/ota".into()];
+        s.branch_override = Some("feat/ota".into());
+        assert_eq!(s.branch_problem(), Some(BranchProblem::Exists));
+        assert!(
+            s.branch_collision(),
+            "existing base-off name must block launch"
+        );
+    }
+
+    #[test]
+    fn branch_problem_none_for_existing_name_in_checkout_mode() {
+        // In Checkout mode an existing branch is exactly the point — never a
+        // problem (the picker separately blocks checking out an in-use branch).
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["feat/ota".into()];
+        s.base_selection = Some(BaseSelection {
+            display: "feat/ota".into(),
+            short_name: "feat/ota".into(),
+            is_remote: false,
+            mode: BaseMode::Checkout,
+        });
+        assert_eq!(s.branch_problem(), None);
+        assert!(!s.branch_collision());
+    }
+
+    #[test]
+    fn branch_problem_inuse_takes_precedence_over_exists() {
+        // A name that is both a branch AND in a worktree reports InUse.
+        let mut s = mk_state();
+        s.existing_branches = vec!["feat/ota".into()];
+        s.repo_branch_names = vec!["feat/ota".into()];
+        s.branch_override = Some("feat/ota".into());
+        assert_eq!(s.branch_problem(), Some(BranchProblem::InUse));
     }
 
     #[test]

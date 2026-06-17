@@ -121,7 +121,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     thread::sleep(Duration::from_millis(200));
 
     // Navigate into SkillManager.
-    send_key(&session, "m");
+    send_key(&session, "z");
     if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Sources") && c.contains("Units") && c.contains("Detail")
     })

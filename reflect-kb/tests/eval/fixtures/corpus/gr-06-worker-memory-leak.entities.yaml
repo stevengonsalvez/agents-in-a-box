@@ -1,0 +1,15 @@
+document_id: gr-06-worker-memory-leak
+extracted_at: '2026-04-08T00:00:00'
+entities:
+  - name: "worker-memory-leak"
+    type: error
+    description: "RSS creep in workers"
+  - name: "celery-prefetch"
+    type: config
+    description: "worker prefetch multiplier"
+relationships:
+  - source: "worker-memory-leak"
+    target: "celery-prefetch"
+    type: caused_by
+    description: "payload hoarding leaks memory"
+    strength: 8

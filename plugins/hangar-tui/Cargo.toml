@@ -1,0 +1,83 @@
+[package]
+name = "ainb-plugin-hangar"
+version = "0.1.0"
+# This crate lives outside the workspace root dir (`ainb-tui/`), so cargo
+# can't discover the workspace by walking parent dirs — point at it
+# explicitly so `*.workspace = true` inheritance resolves.
+workspace = "../../ainb-tui"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar control plane TUI — subprocess plugin (ABI v2)"
+categories = ["command-line-utilities"]
+keywords = ["ainb", "hangar", "plugin", "tui", "control-plane"]
+
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`, so usage is invisible to it — same false positive
+# documented in ainb-plugin-burndown.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
+[lib]
+name = "ainb_plugin_hangar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-plugin-hangar"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../../ainb-tui/crates/ainb-plugin-sdk-rust" }
+ainb-hangar-proto = { path = "../../ainb-tui/crates/ainb-hangar-proto" }
+# Pure, IO-free domain vocabulary (typed ids, actor refs). No SQLite/tokio,
+# so the plugin still "owns zero domain data" — it only borrows the type
+# names to address rows it pulls over RPC.
+ainb-hangar-core = { path = "../../ainb-tui/crates/ainb-hangar-core" }
+
+tokio = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# P5.6: the first-run danger-full-access flow reads/writes the `warnings_ack`
+# array of `~/.ainb/hangar/state.toml`, preserving foreign keys (TOML round-trip).
+toml = { workspace = true }
+
+[dev-dependencies]
+ainb-plugin-protocol = { path = "../../ainb-tui/crates/ainb-plugin-protocol" }
+tempfile = { workspace = true }
+# Event fixtures in the issue-list reducer tests carry `DateTime<Utc>` start
+# stamps (`TaskStarted`); the proto crate re-exports the types but tests build
+# the values directly.
+chrono = { workspace = true }
+# Inline snapshot assertions for the P4.4 transcript render goldens. Inline
+# snapshots keep the goldens in-test (no `.snap` files); the glyph map is
+# `trim_end`-ed before comparison to dodge the insta trailing-newline trap
+# (`reference_insta_trailing_newline_trap`).
+insta = "1.40"
+
+# Local lint config rather than `workspace = true`, mirroring the sibling
+# ainb-hangar-* crates: the workspace-level lints declare lint groups at the
+# same priority as specific lints (which rustc rejects), and the `cargo`
+# clippy group would demand a `readme`. Replicate the intent locally so
+# `cargo clippy -p ainb-plugin-hangar --all-targets -- -D warnings` stays
+# clean while still enforcing pedantic + nursery.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

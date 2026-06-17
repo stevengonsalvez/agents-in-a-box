@@ -25,6 +25,15 @@ pub mod ids {
     /// plugin-screen registration — no witr domain logic in the host;
     /// the same plumbing the `analytics` screen uses for `burndown`.
     pub const WITR: &str = "witr";
+    /// Knowledge-base browser screen, owned by the `learnings` plugin.
+    /// Generic plugin-screen registration — no learnings domain logic in
+    /// the host; the same plumbing `analytics`/`witr` use.
+    pub const LEARNINGS: &str = "learnings";
+    /// top-for-agents screen, owned by the `abtop` plugin. Generic
+    /// plugin-screen registration like `witr`; the live menu hands the
+    /// terminal to the external `abtop` binary full-screen, so this
+    /// screen only paints the plugin's install-hint / ready empty-state.
+    pub const ABTOP: &str = "abtop";
     pub const SESSION_LIST: &str = "session_list";
     pub const LOGS: &str = "logs";
     pub const LOG_HISTORY: &str = "log_history";
@@ -44,6 +53,9 @@ pub mod ids {
     pub const SKILLS: &str = "skills";
     pub const SKILL_MANAGER: &str = "skill_manager";
     pub const INBOX: &str = "inbox";
+    /// Hangar managed-agents control plane — a plugin-owned screen rendered by
+    /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
+    pub const HANGAR: &str = "hangar";
 }
 
 /// Outcome of a screen-handled event.

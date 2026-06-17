@@ -1,4 +1,4 @@
-//! Tripwire: pressing `M` on the HomeScreen opens the SkillManager
+//! Tripwire: pressing `z` on the HomeScreen opens the SkillManager
 //! screen with the spec §10.1 layout markers visible.
 //!
 //! Catches: HomeScreen `M` keybind missing, View::SkillManager
@@ -203,7 +203,7 @@ fn pressing_m_on_home_opens_skill_manager_screen() {
     // Press m (lowercase — see app/events.rs HomeScreen V2 match arm).
     // NEVER append Enter to a single-char nav key, per tripwire-skill
     // hard rule #3.
-    send_key(&session, "m");
+    send_key(&session, "z");
 
     // Positive AND negative markers per hard rule #2 — substring-OR
     // on lone chrome strings ("Sources", "ainb") would silently pass

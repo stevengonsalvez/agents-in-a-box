@@ -1,0 +1,2 @@
+This non-markdown file exists so test_scan_learnings_dir can assert the
+directory scan ignores anything that is not a `*.md` learning record.

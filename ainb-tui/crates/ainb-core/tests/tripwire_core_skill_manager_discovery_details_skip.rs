@@ -187,7 +187,7 @@ fn open_with_visible_banner(session_suffix: &str) -> (String, SandboxLayout, tem
     }
 
     thread::sleep(Duration::from_millis(200));
-    send_key(&session, "m"); // Home → SkillManager (banner pops).
+    send_key(&session, "z"); // Home → SkillManager (banner pops).
 
     // The banner MUST appear (no skip-marker, empty manifest, walkers
     // found candidates). Substring-AND across the title + the compact
