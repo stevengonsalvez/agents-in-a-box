@@ -1,4 +1,4 @@
-# `ainb fleet bridge` — native phone bridge (Telegram + Slack)
+# `ainb fleet bridge` — native phone bridge (Telegram + Slack + Discord)
 
 A single-binary Rust daemon, built into `ainb`, that relays messages **two-way**
 between a chat app and a named `ainb` session — a conductor/ATC session when one
@@ -7,12 +7,12 @@ session from your phone while away from the keyboard, with **no separate Python
 runtime** to install or manage.
 
 It ports the proven logic of the Python `ainb_phone_bridge` (now deprecated) and
-adds a **Slack** channel. Both channels share one relay/routing core.
+adds **Slack** and **Discord** channels. All channels share one relay/routing core.
 
 ```
   Telegram ─long-poll─▶                                  ┌─▶ ainb session
-                        ainb fleet bridge ─tmux send-keys─┤
-  Slack ─socket-mode─▶  (shared relay core)              └─ read JSONL transcript
+  Slack ───socket-mode─▶ ainb fleet bridge ─tmux send-keys┤
+  Discord ─gateway-wss─▶  (shared relay core)            └─ read JSONL transcript
      ▲                          │                              │
      └──── reply (split) ───────┴──── wait for assistant end_turn ◀──┘
 ```
@@ -59,6 +59,9 @@ across restarts). An unknown `name:` prefix is treated as plain text.
   (`mentions` default, or `all`) decides whether the bot acts only on
   app-mentions/DMs or on every message in subscribed channels. The bot ignores
   its own and other bots' messages (no reply loops).
+- **Discord** — by Discord `user_id` (snowflake); unknown senders ignored. The
+  bot ignores any message flagged `author.bot` (its own and every other bot),
+  so it never relays its own replies.
 
 Tokens are resolved through the **secret resolver** and are **never** placed on
 argv or written into the launchd/systemd unit:
@@ -92,6 +95,13 @@ user_id = "U0123ABC"               # authorized Slack user id (string)
 default_target = "conductor"        # optional
 listen_mode = "mentions"            # "mentions" (default) | "all"
 response_timeout = 300              # optional
+
+[fleet.bridge.discord]
+token = "$DISCORD_BOT_TOKEN"        # Bot token (gateway IDENTIFY + REST posts)
+user_id = "123456789012345678"     # authorized Discord user id (snowflake, string)
+default_target = "conductor"        # optional
+channel_id = "123456789012345678"  # optional: fallback channel for replies
+response_timeout = 300              # optional
 ```
 
 ### Slack app setup (socket-mode)
@@ -102,6 +112,26 @@ response_timeout = 300              # optional
 3. Event subscriptions (over socket mode): `app_mention`, `message.im` (and
    `message.channels` if you use `listen_mode = "all"`).
 4. App-level token (`xapp-…`) with `connections:write`.
+
+### Discord bot setup (gateway)
+
+1. Create an application at <https://discord.com/developers/applications>.
+2. Under **Bot**, click **Add Bot**, then **Reset Token** to reveal the bot
+   token — this is the `token` value (store it as an env/keychain ref, never a
+   literal in prod).
+3. On the same **Bot** page, enable the **MESSAGE CONTENT INTENT** (privileged).
+   Without it the gateway delivers empty `content`, so the bridge has nothing to
+   relay. (The bridge requests the `GUILD_MESSAGES`, `MESSAGE_CONTENT`, and
+   `DIRECT_MESSAGES` intents.)
+4. Invite the bot to your server: **OAuth2 → URL Generator**, scopes `bot`,
+   bot permissions `View Channels` + `Send Messages` + `Read Message History`,
+   then open the generated URL and add it to a server. For DM-only use, no
+   server invite is needed once the bot shares a server with you.
+5. Get your **own** Discord user id: enable **Settings → Advanced → Developer
+   Mode**, then right-click your name → **Copy User ID**. That snowflake is the
+   `user_id` value (messages from anyone else are ignored).
+6. Optional `channel_id`: a fallback channel the bot posts to if a reply has no
+   originating channel. Right-click a channel → **Copy Channel ID**.
 
 ## Running
 
@@ -152,10 +182,13 @@ cargo test -p ainb --lib fleet::bridge
 
 Coverage: prefix routing + conductor-first default + degrade; markdown→HTML and
 4096-char split (split-before-convert); secret resolution (`$ENV`/`${ENV}`/
-`keychain:`/literal); config parsing/validation for both channel tables; the
+`keychain:`/literal); config parsing/validation for all three channel tables; the
 shared relay core (every outcome, via an in-memory transport fake); the JSONL
 reply scan (complete-line-only, send-time guard accept/reject, no-timestamp
 rejection, multi-block concat); Telegram mention-gating + mention-strip; Slack
 event classification (mentions vs all, auth, self/bot/subtype filtering) +
-envelope parsing; and launchd/systemd unit rendering (argv correct, no token
+envelope parsing; Discord message authorization (auth, self/bot filtering) +
+gateway HELLO/MESSAGE_CREATE payload parsing + the relay path over the mock
+transport; token redaction (a bot-token-shaped substring is scrubbed from any
+diagnostic); and launchd/systemd unit rendering (argv correct, no token
 leakage). A live-token end-to-end run is manual.
