@@ -84,6 +84,48 @@ fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(u64::try_from(capped).unwrap_or(u64::MAX))
 }
 
+/// ACK-zombie detection state (M2). The gateway must acknowledge (`op-11`) every
+/// heartbeat; a half-open socket silently stops acknowledging while
+/// `read.next()` blocks forever. We require the previous beat to be acknowledged
+/// before sending the next — an unacknowledged beat means the connection is dead.
+#[derive(Debug)]
+struct HeartbeatTracker {
+    /// Whether the most recent beat we sent has been acknowledged. Starts `true`
+    /// so the very first beat is allowed to send.
+    acked: bool,
+}
+
+impl HeartbeatTracker {
+    const fn new() -> Self {
+        Self { acked: true }
+    }
+
+    /// Called when an `op-11` acknowledgement arrives.
+    const fn on_ack(&mut self) {
+        self.acked = true;
+    }
+
+    /// Called on a heartbeat tick. Returns `true` if it's safe to send the beat,
+    /// or `false` if the previous beat was never acknowledged (zombie →
+    /// reconnect). Records that a fresh beat is now outstanding when it returns
+    /// `true`.
+    const fn on_tick(&mut self) -> bool {
+        if !self.acked {
+            return false;
+        }
+        self.acked = false;
+        true
+    }
+}
+
+/// Build an `op-1` heartbeat frame carrying the last received sequence (or
+/// `null` if none yet).
+fn heartbeat_frame(last_seq: &AtomicU64) -> String {
+    let seq = last_seq.load(Ordering::Relaxed);
+    let d = if seq == 0 { Value::Null } else { json!(seq) };
+    json!({ "op": op::HEARTBEAT, "d": d }).to_string()
+}
+
 /// Gateway opcodes we handle (subset of the documented set).
 mod op {
     pub const DISPATCH: u64 = 0;
@@ -194,14 +236,19 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
     // the gateway is ready (Discord tolerates an early beat, but this is tidy).
     heartbeat.tick().await;
 
+    // M2: ACK-zombie detection — require each beat to be ACKed before the next.
+    let mut hb = HeartbeatTracker::new();
+
     loop {
         tokio::select! {
             // Periodic heartbeat (op 1 with the last seq, or null if none yet).
             _ = heartbeat.tick() => {
-                let seq = last_seq.load(Ordering::Relaxed);
-                let d = if seq == 0 { Value::Null } else { json!(seq) };
-                let beat = json!({ "op": op::HEARTBEAT, "d": d }).to_string();
-                if write.send(Message::Text(beat)).await.is_err() {
+                if !hb.on_tick() {
+                    // Previous beat was never ACKed → zombie connection.
+                    tracing::warn!("Discord heartbeat not ACKed; treating socket as dead");
+                    break;
+                }
+                if write.send(Message::Text(heartbeat_frame(&last_seq))).await.is_err() {
                     break; // socket gone — outer loop reconnects
                 }
             }
@@ -224,13 +271,12 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
                 match payload.op {
                     op::HEARTBEAT => {
                         // Server asked for an immediate beat.
-                        let seq = last_seq.load(Ordering::Relaxed);
-                        let d = if seq == 0 { Value::Null } else { json!(seq) };
-                        let beat = json!({ "op": op::HEARTBEAT, "d": d }).to_string();
-                        write.send(Message::Text(beat)).await.ok();
+                        write.send(Message::Text(heartbeat_frame(&last_seq))).await.ok();
                     }
                     op::HEARTBEAT_ACK => {
                         tracing::trace!("Discord heartbeat ack");
+                        // M2: mark this beat ACKed so the next tick may send.
+                        hb.on_ack();
                         // M1: a two-way-confirmed connection is healthy — reset
                         // the reconnect streak so the next blip starts cheap.
                         backoff.reset();
@@ -661,6 +707,30 @@ mod tests {
         // A healthy (ACKed) connection resets the streak → next blip starts cheap.
         b.reset();
         assert_eq!(b.next_delay(), Duration::from_secs(1));
+    }
+
+    // ── M2: ACK-zombie state machine ─────────────────────────────────────────
+
+    #[test]
+    fn heartbeat_beat_without_ack_triggers_reconnect() {
+        let mut hb = HeartbeatTracker::new();
+        // First beat may send (starts ACKed=true), leaving a beat outstanding.
+        assert!(hb.on_tick(), "first beat should be allowed");
+        // Next tick with NO intervening ACK → unhealthy → reconnect signal.
+        assert!(
+            !hb.on_tick(),
+            "un-ACKed beat before next tick must signal a zombie connection"
+        );
+    }
+
+    #[test]
+    fn heartbeat_beat_then_ack_stays_healthy() {
+        let mut hb = HeartbeatTracker::new();
+        assert!(hb.on_tick(), "first beat allowed");
+        hb.on_ack();
+        assert!(hb.on_tick(), "ACKed beat → next beat allowed");
+        hb.on_ack();
+        assert!(hb.on_tick(), "still healthy after repeated ack/beat cycles");
     }
 
     // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
