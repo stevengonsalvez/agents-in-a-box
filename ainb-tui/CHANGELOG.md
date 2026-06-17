@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.7] - 2026-06-17
+### Added
+- Merge pull request #289 from stevengonsalvez/f/copilot-upgrade
+- Merge pull request #297 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: auto-start the pool when importing into a stopped daemon
+- **notifyd**: wire Copilot hooks install/uninstall via ainb-notifyd
+- **reflect**: per-repo installer for the SG2 post-commit hook
+- **reflect**: wire S8 doc-chunk-learning grouping into the drain
+- **scripts**: add Raycast clipboard-image-to-ssh-path command
+
+### Fixed
+- chore(reflect): bump to 4.1.0 / reflect-kb 0.2.0 — recall upgrade (57 ports)
+- **notifyd**: JSON-escape hook path + update stale Copilot doc comments
+- **notifyd**: mention Copilot in TUI install success notification
+- **reflect**: S8 grouping links by source, not content_hash (review)
+- **reflect**: clear PR #248 LOW/NIT review items (#296)
+- **reflect**: clear the PR #248 LOW/NIT review items
+
+### Documentation
+- **mcp-pool**: reflect import auto-starting the pool + re-record GIF
+
+### Other
+- **reflect**: 4.1.0 release hardening — version bump, SG2 installer, S8 drain wiring (#294)
+- **reflect**: bump to 4.1.0 / reflect-kb 0.2.0 — recall upgrade (57 ports)
+
+
 ## [1.7.6] - 2026-06-17
 ### Added
 - Merge pull request #288 from stevengonsalvez/f/copilot-upgrade
