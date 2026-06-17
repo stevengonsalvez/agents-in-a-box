@@ -82,7 +82,7 @@ cat > "$TARGET" <<EOF
 #!/usr/bin/env bash
 $MARKER
 # Managed by reflect install_post_commit.sh — edits will be overwritten on
-# re-install. To remove: $REAL_HOOK's installer with --uninstall.
+# re-install. To remove: $HOOK_DIR/install_post_commit.sh --uninstall
 $CHAIN_CALL
 REFLECT_SCRIPTS_DIR="$SCRIPTS_DIR" "$REAL_HOOK" "\$@" || true
 $END_MARKER

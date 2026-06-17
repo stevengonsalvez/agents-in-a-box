@@ -1588,15 +1588,19 @@ def record_chunk_for_transcript(transcript: str | Path) -> dict:
     the learning ids.
 
     The drain runs ``claude -p /reflect <transcript>`` headlessly; the shell
-    never gets a structured list of the learnings the skill wrote. But every
-    learning is written with ``content_hash`` == the slice ``signal_hash`` (the
-    S7 dedup contract), so we can recompute that hash deterministically from the
-    transcript (the same ``detect_signals`` + ``_signal_set_hash`` ``prepare``
-    uses, no LLM) and look the learnings up by it. Idempotent and best-effort —
-    the drain calls this after a successful reflect run, guarded so it can never
-    fail the drain.
+    never gets a structured list of the learnings the skill wrote. But the
+    skill writes them via ``revise --source "<transcript-path>"`` (SKILL.md),
+    so each learning carries that transcript path in ``source_memory_ids`` —
+    that is the transcript->learnings link. We recompute the slice
+    ``signal_hash`` deterministically (the same ``detect_signals`` +
+    ``_signal_set_hash`` ``prepare`` uses, no LLM) for the chunk key, and look
+    the learnings up by their source-memory id. Idempotent and best-effort —
+    the drain calls this after a successful reflect run, guarded so it can
+    never fail the drain.
 
-    Returns a small summary dict (``recorded``, ``chunk_hash``, ``learnings``).
+    Returns a summary dict (``recorded``, ``chunk_hash``, ``learnings``).
+    ``recorded`` is False with ``reason`` when nothing could be linked, so a
+    silent miss is diagnosable in the drain log rather than a fake success.
     """
     p = Path(transcript)
     if not p.exists():
@@ -1609,18 +1613,28 @@ def record_chunk_for_transcript(transcript: str | Path) -> dict:
     signal_hash = _signal_set_hash(detect_signals(dialogue))
     if not signal_hash:
         return {"recorded": False, "reason": "no-signal-hash"}
+    transcript_id = str(p)
     try:
         from reflect_db import (
-            get_learnings_by_content_hash,
+            get_learnings_by_source_memory_id,
             record_chunk_with_learnings,
             record_transcript,
         )
         ids = [
             str(lrn.get("id"))
-            for lrn in get_learnings_by_content_hash(signal_hash)
+            for lrn in get_learnings_by_source_memory_id(transcript_id)
             if lrn.get("id")
         ]
-        transcript_id = str(p)
+        if not ids:
+            # The chunk exists but no learnings link back yet (e.g. the drain
+            # produced none, or used a different source id) — record the chunk
+            # for traceability but flag the miss so it is not a fake success.
+            record_transcript(transcript_id)
+            record_chunk_with_learnings(transcript_id, signal_hash, [])
+            return {
+                "recorded": False, "reason": "no-matching-learnings",
+                "transcript": transcript_id, "chunk_hash": signal_hash, "learnings": 0,
+            }
         record_transcript(transcript_id)
         record_chunk_with_learnings(transcript_id, signal_hash, ids)
         return {

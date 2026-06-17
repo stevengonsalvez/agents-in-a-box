@@ -1701,6 +1701,35 @@ def get_learnings_by_content_hash(
     return [dict(r) for r in rows]
 
 
+def get_learnings_by_source_memory_id(
+    source_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Return every learning whose ``source_memory_ids`` JSON array contains
+    *source_id* (the drain passes the transcript path as ``revise --source``,
+    so this is the transcript->learnings link). LIKE pre-filters on the
+    JSON-quoted id, then membership is verified by parsing the array (so a path
+    that is a substring of another can't false-match)."""
+    if not source_id:
+        return []
+    conn = conn or get_conn()
+    like = "%" + json.dumps(source_id) + "%"  # json.dumps quotes it -> matches the array element
+    rows = conn.execute(
+        "SELECT * FROM learnings WHERE source_memory_ids LIKE ? ORDER BY created_at",
+        (like,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        try:
+            if source_id in json.loads(d.get("source_memory_ids") or "[]"):
+                out.append(d)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
 def add_learning_proof(
     learning_id: str,
     source_memory_id: str = "",
