@@ -824,7 +824,11 @@ mod tests {
 
         let dropin = dir.path().join(".copilot/hooks/ainb.json");
         assert_eq!(record.copilot_hooks_json.as_deref(), Some(dropin.as_path()));
-        assert!(dropin.exists(), "drop-in file must exist at {}", dropin.display());
+        assert!(
+            dropin.exists(),
+            "drop-in file must exist at {}",
+            dropin.display()
+        );
 
         let raw = std::fs::read_to_string(&dropin).unwrap();
         assert!(
@@ -837,7 +841,11 @@ mod tests {
         );
 
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["version"], serde_json::json!(1), "missing version:1: {raw}");
+        assert_eq!(
+            v["version"],
+            serde_json::json!(1),
+            "missing version:1: {raw}"
+        );
         let hooks = v["hooks"].as_object().expect("hooks object");
 
         for event in ["notification", "agentStop"] {
@@ -864,10 +872,16 @@ mod tests {
                 "copilot uses timeoutSec, not timeout: {raw}"
             );
             let cmd = entry["command"].as_str().expect("command string");
-            assert!(cmd.contains("AINB_AGENT=copilot"), "command not tagged for copilot: {cmd}");
+            assert!(
+                cmd.contains("AINB_AGENT=copilot"),
+                "command not tagged for copilot: {cmd}"
+            );
             assert!(cmd.contains("notify.sh"), "command lacks script: {cmd}");
         }
-        assert!(hooks.get("Notification").is_none(), "leaked Codex event: {raw}");
+        assert!(
+            hooks.get("Notification").is_none(),
+            "leaked Codex event: {raw}"
+        );
         assert!(hooks.get("Stop").is_none(), "leaked Codex event: {raw}");
     }
 
@@ -887,8 +901,14 @@ mod tests {
 
         uninstall(&p, &[Agent::Copilot]).unwrap();
         assert!(!dropin.exists(), "our drop-in must be removed");
-        assert!(sibling.exists(), "uninstall must not touch sibling drop-ins");
-        assert!(hooks_dir.exists(), "uninstall must not remove the hooks dir");
+        assert!(
+            sibling.exists(),
+            "uninstall must not touch sibling drop-ins"
+        );
+        assert!(
+            hooks_dir.exists(),
+            "uninstall must not remove the hooks dir"
+        );
 
         let record = InstallRecord::load(&p).unwrap();
         assert!(!record.agents.contains(&Agent::Copilot));
