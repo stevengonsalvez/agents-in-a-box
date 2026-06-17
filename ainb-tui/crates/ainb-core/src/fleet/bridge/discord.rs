@@ -440,13 +440,50 @@ fn split_for_discord(text: &str) -> Vec<String> {
     super::format::split_message(text, DISCORD_MAX_LENGTH)
 }
 
+/// Cap on a single honoured `Retry-After` sleep (L2). Discord rate limits are
+/// short; an absurd value (or a hostile one) must not wedge the reply task.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Parse a Discord `Retry-After` header (seconds, possibly fractional) into a
+/// bounded sleep duration. Returns `None` for missing/garbage values. Pure.
+fn parse_retry_after(raw: Option<&str>) -> Option<Duration> {
+    let secs: f64 = raw?.trim().parse().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(secs).min(MAX_RETRY_AFTER))
+}
+
 /// Post a message to a channel via the REST API (`Authorization: Bot <token>`).
+///
+/// On HTTP 429 (rate limited) the chunk is retried ONCE after sleeping for the
+/// `Retry-After` the gateway returns (L2); any other failure — or a second 429 —
+/// surfaces an error so the caller drops the chunk as before.
 async fn post_message(
     client: &reqwest::Client,
     token: &str,
     channel_id: &str,
     text: &str,
 ) -> Result<()> {
+    if let Some(retry_after) = post_message_once(client, token, channel_id, text).await? {
+        // 429: honour Retry-After once, then try a single resend.
+        tracing::warn!(?retry_after, "Discord rate limited; retrying chunk once");
+        tokio::time::sleep(retry_after).await;
+        if let Some(_again) = post_message_once(client, token, channel_id, text).await? {
+            anyhow::bail!("Discord message post rate limited (429) twice; dropping chunk");
+        }
+    }
+    Ok(())
+}
+
+/// Single POST attempt. Returns `Ok(Some(retry_after))` on a 429 (so the caller
+/// may retry), `Ok(None)` on success, and `Err` on any other failure.
+async fn post_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: &str,
+    text: &str,
+) -> Result<Option<Duration>> {
     let resp = client
         .post(format!("{API_BASE}/channels/{channel_id}/messages"))
         .header("Authorization", format!("Bot {token}"))
@@ -455,19 +492,28 @@ async fn post_message(
         .await
         .context("POST /channels/{id}/messages request")?;
     let status = resp.status();
-    if !status.is_success() {
-        // Surface status + the API error code/message, never the token.
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let code = body.get("code").and_then(Value::as_i64);
-        let message = body.get("message").and_then(Value::as_str).unwrap_or("");
-        anyhow::bail!(
-            "Discord message post failed: HTTP {} (code {:?}: {})",
-            status.as_u16(),
-            code,
-            message
-        );
+    if status.is_success() {
+        return Ok(None);
     }
-    Ok(())
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| parse_retry_after(Some(s)))
+            .unwrap_or(RECONNECT_BACKOFF_MIN);
+        return Ok(Some(retry_after));
+    }
+    // Surface status + the API error code/message, never the token.
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let code = body.get("code").and_then(Value::as_i64);
+    let message = body.get("message").and_then(Value::as_str).unwrap_or("");
+    anyhow::bail!(
+        "Discord message post failed: HTTP {} (code {:?}: {})",
+        status.as_u16(),
+        code,
+        message
+    );
 }
 
 // ── Gateway / REST wire types ───────────────────────────────────────────────
@@ -756,6 +802,22 @@ mod tests {
         // Out-of-range fractions are clamped, never panic or overshoot.
         assert_eq!(first_beat_delay(interval, 1.5), interval);
         assert_eq!(first_beat_delay(interval, -0.5), Duration::ZERO);
+    }
+
+    // ── L2: Retry-After parsing for the 429 retry ────────────────────────────
+
+    #[test]
+    fn parse_retry_after_reads_seconds_and_bounds_garbage() {
+        assert_eq!(
+            parse_retry_after(Some("1.5")),
+            Some(Duration::from_secs_f64(1.5))
+        );
+        assert_eq!(parse_retry_after(Some("0")), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after(None), None);
+        assert_eq!(parse_retry_after(Some("not-a-number")), None);
+        assert_eq!(parse_retry_after(Some("-3")), None);
+        // An absurd value is capped so a hostile header can't wedge the task.
+        assert_eq!(parse_retry_after(Some("99999")), Some(MAX_RETRY_AFTER));
     }
 
     // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
