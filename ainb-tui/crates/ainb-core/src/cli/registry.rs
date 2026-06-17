@@ -1569,6 +1569,10 @@ impl CliCommand for FleetCommand {
                     .short('v')
                     .action(clap::ArgAction::SetTrue),
             );
+        let daemons = Command::new("daemons").about(
+            "Unified runtime health of every long-running daemon \
+             (phone bridge / notifyd / ATC / fleet daemon)",
+        );
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -1587,7 +1591,7 @@ impl CliCommand for FleetCommand {
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / atc / bridge",
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -1597,6 +1601,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(needs)
                 .subcommand(cost)
                 .subcommand(daemon)
+                .subcommand(daemons)
                 .subcommand(atc)
                 .subcommand(bridge)
                 .subcommand(enrich_cache),
@@ -1807,6 +1812,57 @@ mod tests {
                 "missing required command: {required}"
             );
         }
+    }
+
+    #[test]
+    fn fleet_exposes_ten_subcommands_including_daemons() {
+        // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
+        // update this count + list — it is the registry guard the daemons-
+        // observability feature wired through. `daemon` (the watcher) and
+        // `daemons` (the health view) are deliberately distinct.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let fleet = app
+            .get_subcommands()
+            .find(|c| c.get_name() == "fleet")
+            .expect("fleet command registered");
+        let mut names: Vec<&str> = fleet.get_subcommands().map(clap::Command::get_name).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "atc",
+                "bridge",
+                "broadcast",
+                "cost",
+                "daemon",
+                "daemons",
+                "enrich-cache",
+                "needs",
+                "sequence",
+                "standup",
+            ],
+            "fleet subcommand surface changed — update this guard"
+        );
+        assert_eq!(
+            names.len(),
+            10,
+            "expected 10 fleet subcommands, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_daemons_subcommand_parses() {
+        // Surface check: `ainb fleet daemons` parses to the daemons subcommand.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "fleet", "daemons"])
+            .expect("fleet daemons parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "fleet");
+        let (name, _) = sub.subcommand().expect("fleet subcommand");
+        assert_eq!(name, "daemons");
     }
 
     #[test]
