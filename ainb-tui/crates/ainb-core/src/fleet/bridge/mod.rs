@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod format;
+pub mod heartbeat;
 pub mod relay;
 pub mod routing;
 pub mod secrets;
@@ -51,18 +52,27 @@ pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
     // reference for the lifetime of the daemon (it lives until process exit).
     let transport: &'static AinbTransport = Box::leak(Box::new(AinbTransport));
 
+    // Heartbeat: write the initial "starting" record and keep the liveness clock
+    // fresh via the idle ticker. Each channel reports its own connection +
+    // relay activity through a clone of this handle. This is what closes the
+    // "running bridge is indistinguishable from a dead one" blind spot.
+    let heartbeat = heartbeat::BridgeHeartbeat::start();
+    heartbeat.spawn_ticker();
+
     let mut tasks = Vec::new();
 
     if let Some(tg) = cfg.telegram {
+        let hb = heartbeat.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = telegram::run(tg, transport).await {
+            if let Err(e) = telegram::run(tg, transport, hb).await {
                 tracing::error!(error = %e, "Telegram channel exited with error");
             }
         }));
     }
     if let Some(sl) = cfg.slack {
+        let hb = heartbeat.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = slack::run(sl, transport).await {
+            if let Err(e) = slack::run(sl, transport, hb).await {
                 tracing::error!(error = %e, "Slack channel exited with error");
             }
         }));

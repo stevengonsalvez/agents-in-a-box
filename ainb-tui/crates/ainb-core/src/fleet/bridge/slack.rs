@@ -22,14 +22,20 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::config::{SlackConfig, SlackListenMode};
+use super::heartbeat::BridgeHeartbeat;
 use super::relay::{FleetTransport, RelayParams, relay};
 
 const API_BASE: &str = "https://slack.com/api";
 /// Slack message text limit (chat.postMessage). We split below this.
 const SLACK_MAX_LENGTH: usize = 3900;
 
-/// Run the Slack channel forever (reconnecting on disconnect).
-pub async fn run<T: FleetTransport>(cfg: SlackConfig, transport: &T) -> Result<()> {
+/// Run the Slack channel forever (reconnecting on disconnect). Reports
+/// connection + relay activity through the shared `heartbeat`.
+pub async fn run<T: FleetTransport>(
+    cfg: SlackConfig,
+    transport: &T,
+    heartbeat: BridgeHeartbeat,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -37,6 +43,11 @@ pub async fn run<T: FleetTransport>(cfg: SlackConfig, transport: &T) -> Result<(
 
     // Resolve our own bot user id once so we never relay our own posts.
     let self_user_id = auth_test(&client, &cfg.bot_token).await;
+    // A successful auth_test is the "channel online" signal.
+    heartbeat.set_connected(
+        self_user_id.is_some(),
+        Some("Slack (socket-mode)".to_string()),
+    );
     tracing::info!(
         bot_user = self_user_id.as_deref().unwrap_or("?"),
         mode = ?cfg.listen_mode,
@@ -44,12 +55,21 @@ pub async fn run<T: FleetTransport>(cfg: SlackConfig, transport: &T) -> Result<(
     );
 
     loop {
-        match connect_and_serve(&client, &cfg, self_user_id.as_deref(), transport).await {
+        match connect_and_serve(
+            &client,
+            &cfg,
+            self_user_id.as_deref(),
+            transport,
+            &heartbeat,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("Slack socket closed; reconnecting");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Slack socket error; reconnecting in 5s");
+                heartbeat.record_error(format!("socket error: {e}"));
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -61,6 +81,7 @@ async fn connect_and_serve<T: FleetTransport>(
     cfg: &SlackConfig,
     self_user_id: Option<&str>,
     transport: &T,
+    heartbeat: &BridgeHeartbeat,
 ) -> Result<()> {
     let ws_url = open_connection(client, &cfg.app_token).await?;
     let (ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
@@ -99,7 +120,7 @@ async fn connect_and_serve<T: FleetTransport>(
             }
             Some("events_api") => {
                 if let Some(event) = envelope.payload.and_then(|p| p.event) {
-                    handle_event(client, cfg, self_user_id, transport, event).await;
+                    handle_event(client, cfg, self_user_id, transport, heartbeat, event).await;
                 }
             }
             _ => {}
@@ -113,6 +134,7 @@ async fn handle_event<T: FleetTransport>(
     cfg: &SlackConfig,
     self_user_id: Option<&str>,
     transport: &T,
+    heartbeat: &BridgeHeartbeat,
     event: SlackEvent,
 ) {
     if classify_event(cfg, self_user_id, &event).is_none() {
@@ -129,6 +151,8 @@ async fn handle_event<T: FleetTransport>(
         response_timeout: Duration::from_secs(cfg.response_timeout),
     };
     let reply = relay(transport, &params, &text).await;
+    // A relayed turn is the "last relay" activity signal.
+    heartbeat.record_relay();
 
     let Some(channel) = event.channel.as_deref() else {
         return;
@@ -145,6 +169,7 @@ async fn handle_event<T: FleetTransport>(
         .await
         {
             tracing::warn!(error = %e, "Slack chat.postMessage failed");
+            heartbeat.record_error(format!("chat.postMessage failed: {e}"));
         }
     }
 }

@@ -21,6 +21,7 @@ use serde_json::json;
 
 use super::config::TelegramConfig;
 use super::format::{TG_MAX_LENGTH, md_to_tg_html, split_message};
+use super::heartbeat::BridgeHeartbeat;
 use super::relay::{FleetTransport, RelayParams, relay};
 
 const API_BASE: &str = "https://api.telegram.org";
@@ -34,12 +35,26 @@ const LONG_POLL_SECS: u64 = 30;
 const CLIENT_TIMEOUT_BUFFER_SECS: u64 = 15;
 
 /// Run the Telegram channel forever (until the task is cancelled). Drives the
-/// shared `transport` through the relay core.
-pub async fn run<T: FleetTransport>(cfg: TelegramConfig, transport: &T) -> Result<()> {
+/// shared `transport` through the relay core, reporting connection + relay
+/// activity through the shared `heartbeat` so the Daemons surface can show
+/// "Telegram channel online" + last-relay (the original blind spot).
+pub async fn run<T: FleetTransport>(
+    cfg: TelegramConfig,
+    transport: &T,
+    heartbeat: BridgeHeartbeat,
+) -> Result<()> {
     let client = build_client()?;
 
     let me = get_me(&client, &cfg.token).await;
     let bot_username = me.as_ref().and_then(|m| m.username.clone());
+    // A successful getMe is the "channel online" signal. Label the channel with
+    // the bot handle so the operator sees exactly which account is relaying.
+    let online = me.is_some();
+    let channel = match &bot_username {
+        Some(u) => format!("Telegram (@{u})"),
+        None => "Telegram".to_string(),
+    };
+    heartbeat.set_connected(online, Some(channel));
     tracing::info!(
         bot = bot_username.as_deref().unwrap_or("?"),
         "ainb phone bridge: Telegram channel online (long-polling)"
@@ -56,19 +71,34 @@ pub async fn run<T: FleetTransport>(cfg: TelegramConfig, transport: &T) -> Resul
             Err(e) => {
                 // Surface the FULL reqwest failure shape, not a generic context
                 // string, so an intermittent flap is diagnosable from the logs.
+                let desc = describe_get_updates_error(&e);
                 tracing::warn!(
                     offset,
-                    error = describe_get_updates_error(&e),
+                    error = desc,
                     "getUpdates failed; backing off (offset preserved)"
                 );
+                // A failed poll means the channel is no longer confirmed online.
+                heartbeat.record_error(format!("getUpdates: {desc}"));
+                heartbeat.set_connected(false, None);
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
         };
+        // A successful poll (re)confirms the channel is online — recover from a
+        // prior transient failure that flipped connected=false.
+        heartbeat.set_connected(true, None);
         for update in updates {
             offset = offset.max(update.update_id + 1);
             if let Some(message) = update.message {
-                handle_message(&client, &cfg, bot_username.as_deref(), transport, message).await;
+                handle_message(
+                    &client,
+                    &cfg,
+                    bot_username.as_deref(),
+                    transport,
+                    &heartbeat,
+                    message,
+                )
+                .await;
             }
         }
     }
@@ -158,6 +188,7 @@ async fn handle_message<T: FleetTransport>(
     cfg: &TelegramConfig,
     bot_username: Option<&str>,
     transport: &T,
+    heartbeat: &BridgeHeartbeat,
     message: TgMessage,
 ) {
     // Authorization by user_id — unknown senders are silently ignored.
@@ -182,6 +213,8 @@ async fn handle_message<T: FleetTransport>(
         response_timeout: Duration::from_secs(cfg.response_timeout),
     };
     let reply = relay(transport, &params, &text).await;
+    // A relayed turn is the "last relay" activity signal the operator watches.
+    heartbeat.record_relay();
 
     // Split the RAW reply BEFORE HTML conversion (the verified ordering).
     for raw_chunk in split_message(&reply, TG_MAX_LENGTH) {
@@ -192,6 +225,7 @@ async fn handle_message<T: FleetTransport>(
                 send_message(client, &cfg.token, message.chat.id, &raw_chunk, false).await
             {
                 tracing::warn!(error = %e2, "plain-text retry also failed");
+                heartbeat.record_error(format!("sendMessage failed: {e2}"));
             }
         }
     }
