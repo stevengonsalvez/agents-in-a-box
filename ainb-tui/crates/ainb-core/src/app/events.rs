@@ -1050,6 +1050,14 @@ impl EventHandler {
             return Self::handle_inbox_keys(key_event, state);
         }
 
+        // Daemons observability screen (read-only). Esc/q must pop back to the
+        // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
+        // the generic fallthrough below treats this non-plugin screen as
+        // GoToHomeScreen, which ignored the saved origin (L2).
+        if state.current_screen == screen_ids::DAEMONS {
+            return Self::handle_daemons_keys(key_event, state);
+        }
+
         // AINB 2.0: Handle agent selection view
         if state.current_screen == screen_ids::AGENT_SELECTION {
             return Self::handle_agent_selection_keys(key_event, state);
@@ -2077,6 +2085,20 @@ impl EventHandler {
             KeyCode::Char('a') => Some(AppEvent::InboxToggleArchived),
             KeyCode::Char('p') => Some(AppEvent::InboxCycleAgent),
             KeyCode::Char('r') => Some(AppEvent::InboxRefresh),
+            _ => None,
+        }
+    }
+
+    /// Daemons observability screen key dispatcher. The screen is read-only
+    /// (no list navigation), so the only binding is back:
+    ///
+    ///   - q / Esc   back to the screen it was opened from (home if none)
+    ///
+    /// Routed through `PanelBack` so it pops the `previous_screen` that
+    /// `GoToDaemons` saved, instead of hardcoding home (L2).
+    fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             _ => None,
         }
     }
@@ -5446,6 +5468,51 @@ mod panel_back_tests {
             ids::HOME,
             "Hangar must not pop the stale session_list origin"
         );
+    }
+
+    /// L2 regression: the Daemons screen is read-only and NOT a plugin screen,
+    /// so before the fix its Esc fell through the generic handler to
+    /// `GoToHomeScreen` — discarding the `previous_screen` that `GoToDaemons`
+    /// saved. Drive the real Esc key through the dispatcher and assert it routes
+    /// to `PanelBack` and returns to the origin, not home.
+    #[test]
+    fn daemons_esc_routes_through_panel_back_to_origin() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+        assert_eq!(state.current_screen, ids::DAEMONS);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        // The key dispatcher must turn Esc on the Daemons screen into PanelBack
+        // (the pre-fix bug produced GoToHomeScreen, ignoring the saved origin).
+        let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Esc), &mut state);
+        assert!(
+            matches!(event, Some(AppEvent::PanelBack)),
+            "Daemons Esc must resolve to PanelBack, not GoToHomeScreen; got {event:?}"
+        );
+
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(
+            state.current_screen,
+            ids::SESSION_LIST,
+            "Daemons must pop back to the screen it was opened from"
+        );
+    }
+
+    /// `q` on the Daemons screen behaves identically to Esc.
+    #[test]
+    fn daemons_q_routes_through_panel_back() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+
+        let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Char('q')), &mut state);
+        assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
     #[test]
