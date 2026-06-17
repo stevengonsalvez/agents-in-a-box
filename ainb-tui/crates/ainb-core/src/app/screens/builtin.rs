@@ -622,6 +622,23 @@ impl Screen for InboxScreen {
     }
 }
 
+/// Daemons screen — read-only runtime health of every long-running ainb daemon
+/// (phone bridge / notifyd / ATC / fleet daemon). Renders from
+/// `fleet::daemons::collect` via the shared component, refreshing live on the
+/// render tick. State lives on `AppState::daemons_state` so the cached snapshot
+/// survives cross-screen navigation.
+#[derive(Default)]
+pub struct DaemonsScreen;
+
+impl Screen for DaemonsScreen {
+    fn id(&self) -> &str {
+        ids::DAEMONS
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stateful screens — own their component instance
 // ---------------------------------------------------------------------------
@@ -912,6 +929,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
     registry.register(Box::new(InboxScreen));
+    registry.register(Box::new(DaemonsScreen));
 }
 
 #[cfg(test)]

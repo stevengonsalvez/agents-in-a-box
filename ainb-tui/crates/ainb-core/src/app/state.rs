@@ -2718,6 +2718,9 @@ pub struct AppState {
     /// filters, in-process SQLite store handle).
     pub inbox_state: crate::components::inbox::InboxState,
 
+    /// Daemons screen state (cached runtime-health snapshot + poll tick).
+    pub daemons_state: crate::components::daemons::DaemonsState,
+
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -3235,6 +3238,9 @@ impl Default for AppState {
 
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
             inbox_state: crate::components::inbox::InboxState::default(),
+
+            // Daemons observability (collects health on first/periodic render)
+            daemons_state: crate::components::daemons::DaemonsState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),

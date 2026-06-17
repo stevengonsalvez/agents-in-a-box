@@ -217,6 +217,7 @@ pub enum AppEvent {
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
+    GoToDaemons,             // Navigate to the daemon runtime-health view
     PanelBack,               // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
@@ -2093,6 +2094,7 @@ impl EventHandler {
         match key_event.code {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
+            KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
@@ -3533,6 +3535,10 @@ impl EventHandler {
                         // exactly one code path.
                         Self::process_event(AppEvent::GoToInbox, state);
                     }
+                    SidebarItem::Daemons => {
+                        // Same canonical-event routing as Inbox.
+                        Self::process_event(AppEvent::GoToDaemons, state);
+                    }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
@@ -3816,6 +3822,14 @@ impl EventHandler {
                 }
                 state.current_screen = screen_ids::INBOX.to_string();
                 state.inbox_state.refresh();
+            }
+            AppEvent::GoToDaemons => {
+                tracing::info!("Navigating to Daemons");
+                if state.current_screen != screen_ids::DAEMONS {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
+                state.current_screen = screen_ids::DAEMONS.to_string();
+                state.daemons_state.refresh();
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");

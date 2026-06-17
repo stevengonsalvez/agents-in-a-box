@@ -36,6 +36,7 @@ pub enum SidebarItem {
     Config,    // Settings & presets
     Sessions,  // Session manager
     Inbox,     // ainb-hooks notification inbox
+    Daemons,   // Daemon runtime-health observability
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
@@ -57,6 +58,7 @@ impl SidebarItem {
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
+            Self::Daemons => "⚙️",
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
@@ -78,6 +80,7 @@ impl SidebarItem {
             Self::Config => "Config",
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
+            Self::Daemons => "Daemons",
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
@@ -99,6 +102,7 @@ impl SidebarItem {
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
+            Self::Daemons => "Runtime Health",
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
@@ -120,6 +124,7 @@ impl SidebarItem {
             Self::Config => "C",
             Self::Sessions => "s",
             Self::Inbox => "b",
+            Self::Daemons => "d",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
@@ -141,6 +146,7 @@ impl SidebarItem {
             Self::Config,
             Self::Sessions,
             Self::Inbox,
+            Self::Daemons,
             Self::Recovery,
             Self::Logs,
             Self::Stats,
@@ -528,6 +534,27 @@ mod tests {
         let collisions =
             all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
+    }
+
+    #[test]
+    fn daemons_tile_registered_with_discoverable_shortcut() {
+        // The Daemons observability screen must be reachable from the home menu
+        // like every other read-only panel. Lock the tile shape + a
+        // non-colliding shortcut so a refactor can't silently drop it.
+        let all = SidebarItem::all();
+        let pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Daemons)
+            .expect("SidebarItem::Daemons missing from all()");
+        assert!(pos > 0, "Daemons shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Daemons.label(), "Daemons");
+        assert_eq!(SidebarItem::Daemons.shortcut(), "d");
+        assert_eq!(SidebarItem::Daemons.description(), "Runtime Health");
+        let collisions = all
+            .iter()
+            .filter(|i| **i != SidebarItem::Daemons && i.shortcut() == "d")
+            .count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'd' collides");
     }
 
     #[test]

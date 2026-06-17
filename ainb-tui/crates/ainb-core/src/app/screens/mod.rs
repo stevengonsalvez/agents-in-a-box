@@ -55,6 +55,9 @@ pub mod ids {
     /// Hangar managed-agents control plane — a plugin-owned screen rendered by
     /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
     pub const HANGAR: &str = "hangar";
+    /// Daemons observability screen — read-only runtime health of the phone
+    /// bridge / notifyd / ATC / fleet daemon. Reached from home with `d`.
+    pub const DAEMONS: &str = "daemons";
 }
 
 /// Outcome of a screen-handled event.

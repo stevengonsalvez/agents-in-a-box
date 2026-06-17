@@ -11,6 +11,7 @@ pub mod code_review;
 pub mod config_popup;
 pub mod config_screen;
 pub mod confirmation_dialog;
+pub mod daemons;
 pub mod fuzzy_file_finder;
 pub mod git_view;
 pub mod help;
