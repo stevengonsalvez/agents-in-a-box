@@ -118,6 +118,14 @@ impl HeartbeatTracker {
     }
 }
 
+/// Jittered delay for the FIRST heartbeat (L1, Discord spec): the gateway tells
+/// clients to send the first beat after `heartbeat_interval * rand[0, 1)` so a
+/// fleet of bots doesn't beat in lockstep. Pure in `frac` for testability.
+fn first_beat_delay(interval: Duration, frac: f64) -> Duration {
+    let frac = frac.clamp(0.0, 1.0);
+    interval.mul_f64(frac)
+}
+
 /// Build an `op-1` heartbeat frame carrying the last received sequence (or
 /// `null` if none yet).
 fn heartbeat_frame(last_seq: &AtomicU64) -> String {
@@ -231,10 +239,13 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
 
     // Last received sequence number, shared with the heartbeat loop.
     let last_seq = Arc::new(AtomicU64::new(0));
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms));
-    // The first tick fires immediately; skip it so we don't double-send before
-    // the gateway is ready (Discord tolerates an early beat, but this is tidy).
-    heartbeat.tick().await;
+    let interval = Duration::from_millis(heartbeat_ms);
+
+    // L1: jitter the FIRST beat by `interval * rand[0, 1)` per the Discord spec,
+    // so a fleet of bots reconnecting together don't all beat in lockstep.
+    let first_delay = first_beat_delay(interval, rand::random::<f64>());
+    let start = tokio::time::Instant::now() + first_delay;
+    let mut heartbeat = tokio::time::interval_at(start, interval);
 
     // M2: ACK-zombie detection — require each beat to be ACKed before the next.
     let mut hb = HeartbeatTracker::new();
@@ -731,6 +742,20 @@ mod tests {
         assert!(hb.on_tick(), "ACKed beat → next beat allowed");
         hb.on_ack();
         assert!(hb.on_tick(), "still healthy after repeated ack/beat cycles");
+    }
+
+    // ── L1: first-heartbeat jitter ───────────────────────────────────────────
+
+    #[test]
+    fn first_beat_delay_is_jittered_within_one_interval() {
+        let interval = Duration::from_millis(41250);
+        assert_eq!(first_beat_delay(interval, 0.0), Duration::ZERO);
+        assert_eq!(first_beat_delay(interval, 0.5), interval.mul_f64(0.5));
+        // frac approaching 1.0 stays strictly under a full interval.
+        assert!(first_beat_delay(interval, 0.999) < interval);
+        // Out-of-range fractions are clamped, never panic or overshoot.
+        assert_eq!(first_beat_delay(interval, 1.5), interval);
+        assert_eq!(first_beat_delay(interval, -0.5), Duration::ZERO);
     }
 
     // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
