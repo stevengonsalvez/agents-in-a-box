@@ -327,7 +327,10 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     let Some((name, hbs, interval_min)) = best else {
         return DaemonStatus::stopped(
             kind,
-            format!("{} instance(s) provisioned, none have beaten yet", names.len()),
+            format!(
+                "{} instance(s) provisioned, none have beaten yet",
+                names.len()
+            ),
         );
     };
 
@@ -350,7 +353,10 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
             last_activity_at: hbs.last_active_ms,
             ..DaemonStatus::stopped(
                 kind,
-                format!("stale — last heartbeat {}m ago (timer stopped?)", age / 60_000),
+                format!(
+                    "stale — last heartbeat {}m ago (timer stopped?)",
+                    age / 60_000
+                ),
             )
         };
     }
@@ -420,7 +426,11 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
             .map(|h| h.join(".agents-in-a-box"))
             .unwrap_or_else(|| ainb_home.clone())
     };
-    Ok(collect_in(&ainb_home, &notifyd_base, super::heartbeat::now_ms()))
+    Ok(collect_in(
+        &ainb_home,
+        &notifyd_base,
+        super::heartbeat::now_ms(),
+    ))
 }
 
 #[cfg(test)]
@@ -452,7 +462,12 @@ mod tests {
     #[test]
     fn fresh_heartbeat_with_live_pid_is_running_connected() {
         let now = 1_000_000;
-        let s = classify_heartbeat(DaemonKind::Bridge, Some(hb(42, now - 5000, now - 1000, true)), true, now);
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(hb(42, now - 5000, now - 1000, true)),
+            true,
+            now,
+        );
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert_eq!(s.pid, Some(42));
@@ -463,7 +478,12 @@ mod tests {
     #[test]
     fn fresh_heartbeat_not_yet_connected_is_running_connecting() {
         let now = 1_000_000;
-        let s = classify_heartbeat(DaemonKind::Bridge, Some(hb(42, now - 5000, now - 1000, false)), true, now);
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(hb(42, now - 5000, now - 1000, false)),
+            true,
+            now,
+        );
         assert_eq!(s.state, DaemonState::Running);
         assert!(!s.connected);
         assert!(s.reason.contains("connecting"));
@@ -473,7 +493,12 @@ mod tests {
     fn dead_pid_is_stale_even_with_recent_beat() {
         // The crash signal: a very recent heartbeat but the writing pid is gone.
         let now = 1_000_000;
-        let s = classify_heartbeat(DaemonKind::Bridge, Some(hb(42, now - 5000, now - 100, true)), false, now);
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(hb(42, now - 5000, now - 100, true)),
+            false,
+            now,
+        );
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale heartbeat"));
         assert!(s.reason.contains("crashed"));
@@ -498,7 +523,12 @@ mod tests {
     fn beat_exactly_at_window_edge_is_still_running() {
         let now = 1_000_000;
         // age == STALE_AFTER_MS is NOT > the window, so still running.
-        let s = classify_heartbeat(DaemonKind::Bridge, Some(hb(7, now - 100_000, now - STALE_AFTER_MS, true)), true, now);
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(hb(7, now - 100_000, now - STALE_AFTER_MS, true)),
+            true,
+            now,
+        );
         assert_eq!(s.state, DaemonState::Running);
     }
 
@@ -510,7 +540,11 @@ mod tests {
         h.pid = 0x7fff_ffff;
         h.set_connected(true, Some("Telegram".into()));
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
-        let s = probe_heartbeat_daemon(home.path(), DaemonKind::Bridge, super::super::heartbeat::now_ms());
+        let s = probe_heartbeat_daemon(
+            home.path(),
+            DaemonKind::Bridge,
+            super::super::heartbeat::now_ms(),
+        );
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("crashed"));
     }
@@ -521,7 +555,11 @@ mod tests {
         let mut h = DaemonHeartbeat::starting(); // pid = self, alive
         h.set_connected(true, Some("Telegram".into()));
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
-        let s = probe_heartbeat_daemon(home.path(), DaemonKind::Bridge, super::super::heartbeat::now_ms());
+        let s = probe_heartbeat_daemon(
+            home.path(),
+            DaemonKind::Bridge,
+            super::super::heartbeat::now_ms(),
+        );
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
     }
@@ -547,7 +585,11 @@ mod tests {
     #[test]
     fn probe_notifyd_live_pid_with_socket_and_db_is_connected() {
         let base = TempDir::new().unwrap();
-        std::fs::write(base.path().join("notify.pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(
+            base.path().join("notify.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
         std::fs::write(base.path().join("notify.sock"), b"").unwrap();
         std::fs::write(base.path().join("notifications.db"), b"").unwrap();
         let s = probe_notifyd(base.path(), super::super::heartbeat::now_ms());
@@ -559,7 +601,11 @@ mod tests {
     #[test]
     fn probe_notifyd_live_pid_without_socket_is_running_not_connected() {
         let base = TempDir::new().unwrap();
-        std::fs::write(base.path().join("notify.pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(
+            base.path().join("notify.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
         let s = probe_notifyd(base.path(), super::super::heartbeat::now_ms());
         assert_eq!(s.state, DaemonState::Running);
         assert!(!s.connected);
@@ -587,7 +633,11 @@ mod tests {
         let now = super::super::heartbeat::now_ms();
         std::fs::write(
             atc_dir.join("heartbeat-state.json"),
-            format!(r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#, now - 1000, now - 2000),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 2000
+            ),
         )
         .unwrap();
         let s = probe_atc(home.path(), now);
@@ -610,7 +660,10 @@ mod tests {
         // last beat hours ago — well past 2*15m + grace.
         std::fs::write(
             atc_dir.join("heartbeat-state.json"),
-            format!(r#"{{"last_heartbeat_ms":{},"continue_counts":{{}}}}"#, now - 10 * 3_600_000),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"continue_counts":{{}}}}"#,
+                now - 10 * 3_600_000
+            ),
         )
         .unwrap();
         let s = probe_atc(home.path(), now);
@@ -622,7 +675,11 @@ mod tests {
     fn collect_in_returns_all_four_in_stable_order() {
         let home = TempDir::new().unwrap();
         let notifyd = TempDir::new().unwrap();
-        let rows = collect_in(home.path(), notifyd.path(), super::super::heartbeat::now_ms());
+        let rows = collect_in(
+            home.path(),
+            notifyd.path(),
+            super::super::heartbeat::now_ms(),
+        );
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].kind, DaemonKind::Bridge);
         assert_eq!(rows[1].kind, DaemonKind::Notifyd);
@@ -640,7 +697,11 @@ mod tests {
         h.set_connected(true, Some("Telegram (@bot)".into()));
         h.record_activity();
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
-        let rows = collect_in(home.path(), notifyd.path(), super::super::heartbeat::now_ms());
+        let rows = collect_in(
+            home.path(),
+            notifyd.path(),
+            super::super::heartbeat::now_ms(),
+        );
         assert_eq!(rows[0].kind, DaemonKind::Bridge);
         assert_eq!(rows[0].state, DaemonState::Running);
         assert!(rows[0].connected);
