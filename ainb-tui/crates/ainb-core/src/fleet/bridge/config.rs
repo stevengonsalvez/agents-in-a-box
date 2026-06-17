@@ -25,6 +25,13 @@
 //   listen_mode = "mentions"         # "mentions" (default) | "all"
 //   response_timeout = 300           # optional
 //
+//   [fleet.bridge.discord]
+//   token = "$DISCORD_BOT_TOKEN"      # Bot token (gateway + REST), secret ref
+//   user_id = "123456789012345678"   # authorized Discord user id (snowflake, string)
+//   default_target = "conductor"     # optional
+//   channel_id = "123456789012345678"# optional fallback channel for replies
+//   response_timeout = 300           # optional
+//
 // At least ONE channel table must be present and valid.
 
 use std::path::{Path, PathBuf};
@@ -68,18 +75,33 @@ pub struct SlackConfig {
     pub response_timeout: u64,
 }
 
+/// Resolved, validated Discord channel config.
+#[derive(Debug, Clone)]
+pub struct DiscordConfig {
+    /// Discord Bot token (used for both the gateway IDENTIFY and REST posts).
+    pub token: String,
+    /// Authorized Discord user id (snowflake, kept as a string).
+    pub authorized_user_id: String,
+    pub default_target: Option<String>,
+    /// Fallback channel to post a reply to when the inbound message carries no
+    /// originating channel id.
+    pub channel_id: Option<String>,
+    pub response_timeout: u64,
+}
+
 /// Resolved bridge config — at least one channel is present.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackConfig>,
+    pub discord: Option<DiscordConfig>,
 }
 
 impl BridgeConfig {
     /// Whether any channel is configured to run.
     #[must_use]
     pub fn any_channel(&self) -> bool {
-        self.telegram.is_some() || self.slack.is_some()
+        self.telegram.is_some() || self.slack.is_some() || self.discord.is_some()
     }
 }
 
@@ -100,6 +122,7 @@ struct RawBridge {
     response_timeout: Option<toml::Value>,
     telegram: Option<RawTelegram>,
     slack: Option<RawSlack>,
+    discord: Option<RawDiscord>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,6 +141,15 @@ struct RawSlack {
     user_id: Option<String>,
     default_target: Option<String>,
     listen_mode: Option<String>,
+    response_timeout: Option<toml::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDiscord {
+    token: Option<String>,
+    user_id: Option<String>,
+    default_target: Option<String>,
+    channel_id: Option<String>,
     response_timeout: Option<toml::Value>,
 }
 
@@ -243,6 +275,39 @@ fn parse_slack(raw: RawSlack, shared_timeout: u64) -> Result<SlackConfig> {
     })
 }
 
+fn parse_discord(raw: RawDiscord, shared_timeout: u64) -> Result<DiscordConfig> {
+    let token_ref =
+        raw.token.ok_or_else(|| anyhow!("[fleet.bridge.discord] is missing `token`"))?;
+    let token = resolve_secret(&token_ref).trim().to_string();
+    if token.is_empty() {
+        bail!("discord token resolved to empty — check the env var / keychain ref");
+    }
+    let user_ref = raw
+        .user_id
+        .ok_or_else(|| anyhow!("[fleet.bridge.discord] is missing `user_id`"))?;
+    let authorized_user_id = resolve_secret(&user_ref).trim().to_string();
+    if authorized_user_id.is_empty() {
+        bail!("discord user_id resolved to empty");
+    }
+    let default_target = raw.default_target.and_then(|s| {
+        let t = s.trim().to_string();
+        (!t.is_empty()).then_some(t)
+    });
+    let channel_id = raw.channel_id.and_then(|s| {
+        let t = s.trim().to_string();
+        (!t.is_empty()).then_some(t)
+    });
+    let response_timeout = coerce_timeout(raw.response_timeout.as_ref(), shared_timeout)
+        .context("[fleet.bridge.discord] `response_timeout`")?;
+    Ok(DiscordConfig {
+        token,
+        authorized_user_id,
+        default_target,
+        channel_id,
+        response_timeout,
+    })
+}
+
 /// Build a [`BridgeConfig`] from a parsed TOML string. Split out so it can be
 /// unit-tested without touching the filesystem.
 pub fn parse_config(toml_text: &str) -> Result<BridgeConfig> {
@@ -257,14 +322,19 @@ pub fn parse_config(toml_text: &str) -> Result<BridgeConfig> {
 
     let telegram = bridge.telegram.map(|t| parse_telegram(t, shared_timeout)).transpose()?;
     let slack = bridge.slack.map(|s| parse_slack(s, shared_timeout)).transpose()?;
+    let discord = bridge.discord.map(|d| parse_discord(d, shared_timeout)).transpose()?;
 
-    if telegram.is_none() && slack.is_none() {
+    if telegram.is_none() && slack.is_none() && discord.is_none() {
         bail!(
-            "[fleet.bridge] has neither a [fleet.bridge.telegram] nor a \
-             [fleet.bridge.slack] channel — configure at least one"
+            "[fleet.bridge] has no channel — configure at least one of \
+             [fleet.bridge.telegram], [fleet.bridge.slack], or [fleet.bridge.discord]"
         );
     }
-    Ok(BridgeConfig { telegram, slack })
+    Ok(BridgeConfig {
+        telegram,
+        slack,
+        discord,
+    })
 }
 
 /// Load and validate the bridge config from disk.
@@ -378,6 +448,96 @@ mod tests {
     fn no_channel_errors() {
         let err = parse_config("[fleet.bridge]\nresponse_timeout = 60\n").unwrap_err();
         assert!(err.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn parses_discord_only() {
+        let cfg = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            token = "bot-literal"
+            user_id = "123456789012345678"
+            default_target = "conductor"
+            channel_id = "987654321098765432"
+            "#,
+        )
+        .unwrap();
+        let dc = cfg.discord.unwrap();
+        assert_eq!(dc.token, "bot-literal");
+        assert_eq!(dc.authorized_user_id, "123456789012345678");
+        assert_eq!(dc.default_target.as_deref(), Some("conductor"));
+        assert_eq!(dc.channel_id.as_deref(), Some("987654321098765432"));
+        assert_eq!(dc.response_timeout, RESPONSE_TIMEOUT);
+        assert!(cfg.telegram.is_none());
+        assert!(cfg.slack.is_none());
+    }
+
+    #[test]
+    fn discord_channel_id_is_optional() {
+        let cfg = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            token = "bot"
+            user_id = "1"
+            "#,
+        )
+        .unwrap();
+        let dc = cfg.discord.unwrap();
+        assert!(dc.channel_id.is_none());
+        assert!(dc.default_target.is_none());
+    }
+
+    #[test]
+    fn discord_missing_token_errors() {
+        let err = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            user_id = "1"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("token"));
+    }
+
+    #[test]
+    fn discord_missing_user_id_errors() {
+        let err = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            token = "bot"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("user_id"));
+    }
+
+    #[test]
+    fn discord_empty_token_after_resolution_errors() {
+        let err = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            token = "$AINB_BRIDGE_DISCORD_UNSET_TOKEN_VAR"
+            user_id = "1"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("resolved to empty"));
+    }
+
+    #[test]
+    fn discord_shares_bridge_timeout() {
+        let cfg = parse_config(
+            r#"
+            [fleet.bridge]
+            response_timeout = 120
+
+            [fleet.bridge.discord]
+            token = "bot"
+            user_id = "1"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.discord.unwrap().response_timeout, 120);
     }
 
     #[test]
