@@ -84,8 +84,9 @@ pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
         }));
     }
     if let Some(dc) = cfg.discord {
+        let hb = heartbeat.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = discord::run(dc, transport).await {
+            if let Err(e) = discord::run(dc, transport, hb).await {
                 tracing::error!(error = %e, "Discord channel exited with error");
             }
         }));

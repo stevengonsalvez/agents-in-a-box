@@ -9,11 +9,12 @@
 // can likewise reach a diagnostic string. Letting any of those reach `last_error`
 // or a log leaks the token to disk and to anyone watching the surface.
 //
-// These scrubbers are the defense-in-depth sink: every diagnostic string is run
-// through one before it is recorded or logged, so even a future code path that
-// forgets to build a clean message can't leak a known token shape. They are pure
-// string transforms (no allocation when nothing matches) so they are cheap and
-// exhaustively testable.
+// [`scrub`] is the single defense-in-depth sink shared by all three channels
+// (Telegram, Slack, Discord) and the heartbeat error recorder: every diagnostic
+// string is run through it before it is recorded or logged, so even a future
+// code path that forgets to build a clean message can't leak a known token
+// shape. It is a pure string transform (no allocation when nothing matches) so
+// it is cheap and exhaustively testable.
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -41,24 +42,33 @@ lazy_static! {
 /// tests can assert on it.
 pub const REDACTED: &str = "<redacted>";
 
-/// Scrub Telegram/Slack token shapes out of a diagnostic string before it is
-/// persisted or displayed. Order matters only in that the more specific `bot…:…`
-/// form is replaced before the bare `digits:base64` form, so the `bot` prefix is
-/// also removed. Returns a new string; secret-free inputs round-trip unchanged.
+/// Scrub every known token shape (Telegram, Slack, Discord) out of a diagnostic
+/// string before it is persisted or logged. Order matters only in that the more
+/// specific `bot…:…` Telegram form is replaced before the bare `digits:base64`
+/// form, so the `bot` prefix is also removed. Returns a new string; secret-free
+/// inputs round-trip unchanged.
 #[must_use]
-pub fn scrub_secrets(input: &str) -> String {
+pub fn scrub(input: &str) -> String {
     let s = TELEGRAM_TOKEN.replace_all(input, REDACTED);
     let s = TELEGRAM_BARE_TOKEN.replace_all(&s, REDACTED);
     let s = SLACK_TOKEN.replace_all(&s, REDACTED);
+    let s = DISCORD_TOKEN.replace_all(&s, REDACTED);
     s.into_owned()
 }
 
-/// Replace any Discord-bot-token-shaped substring in `text` with `[redacted]`.
-///
-/// Pure; safe to call on every diagnostic string before logging.
+/// Telegram/Slack-oriented alias for [`scrub`]. Retained so the heartbeat error
+/// sink and the Telegram/Slack channels read intent-fully; it scrubs every known
+/// token shape, not just Telegram/Slack ones.
+#[must_use]
+pub fn scrub_secrets(input: &str) -> String {
+    scrub(input)
+}
+
+/// Discord-oriented alias for [`scrub`]. Retained so the Discord channel reads
+/// intent-fully; it scrubs every known token shape, not just Discord ones.
 #[must_use]
 pub fn scrub_token(text: &str) -> String {
-    DISCORD_TOKEN.replace_all(text, "[redacted]").into_owned()
+    scrub(text)
 }
 
 #[cfg(test)]
@@ -134,7 +144,7 @@ mod tests {
             !scrubbed.contains(token),
             "token must not survive scrubbing"
         );
-        assert!(scrubbed.contains("[redacted]"));
+        assert!(scrubbed.contains(REDACTED));
         assert!(scrubbed.contains("(401)"), "non-token text is preserved");
     }
 
@@ -142,7 +152,7 @@ mod tests {
     fn redacts_token_anywhere_in_the_string() {
         let token = "placeholder-first-segment-zz.midseg.placeholder-third-segment-w";
         let scrubbed = scrub_token(&format!("prefix {token} suffix"));
-        assert_eq!(scrubbed, "prefix [redacted] suffix");
+        assert_eq!(scrubbed, format!("prefix {REDACTED} suffix"));
     }
 
     #[test]
@@ -154,10 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn redacts_multiple_tokens() {
+    fn redacts_multiple_discord_tokens() {
         let t1 = "AAAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC";
         let t2 = "DDDDDDDDDDDDDDDDDDDDDDDDD.EEEEEE.FFFFFFFFFFFFFFFFFFFFFFFFFFF";
         let scrubbed = scrub_token(&format!("{t1} and {t2}"));
-        assert_eq!(scrubbed, "[redacted] and [redacted]");
+        assert_eq!(scrubbed, format!("{REDACTED} and {REDACTED}"));
     }
 }

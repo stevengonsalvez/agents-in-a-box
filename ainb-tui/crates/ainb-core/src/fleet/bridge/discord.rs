@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::config::DiscordConfig;
+use super::heartbeat::BridgeHeartbeat;
 use super::redact::scrub_token;
 use super::relay::{FleetTransport, RelayParams, relay};
 
@@ -155,9 +156,17 @@ const INTENTS: u64 = (1 << 9) | (1 << 15) | (1 << 12);
 /// its own `tokio::spawn` task (H1) so a slow reply can never starve the gateway
 /// heartbeat; the spawned future must therefore not borrow a non-`'static`
 /// transport. The daemon leaks a single shared transport, so this costs nothing.
+///
+/// `heartbeat` is the shared daemon heartbeat handle (cheap `Arc` clone): the
+/// channel reports `set_connected("Discord (gateway)")` once the gateway accepts
+/// our IDENTIFY (the `READY` dispatch), `record_relay()` on a relayed reply, and
+/// `record_error(...)` (token-scrubbed) on every gateway/REST failure — so the
+/// `ainb fleet daemons` view and the Daemons TUI screen show Discord alongside
+/// Telegram and Slack instead of leaving it as a silent blind spot.
 pub async fn run<T: FleetTransport + 'static>(
     cfg: DiscordConfig,
     transport: &'static T,
+    heartbeat: BridgeHeartbeat,
 ) -> Result<()> {
     let client =
         reqwest::Client::builder()
@@ -177,17 +186,20 @@ pub async fn run<T: FleetTransport + 'static>(
 
     let mut backoff = ReconnectBackoff::new();
     loop {
-        match connect_and_serve(&client, &cfg, transport, &mut backoff).await {
+        match connect_and_serve(&client, &cfg, transport, &heartbeat, &mut backoff).await {
             Ok(()) => tracing::info!("Discord gateway closed; reconnecting"),
             Err(e) => {
                 // Build the diagnostic from the error's text, then scrub any
-                // token-shaped substring so a Bot token can never leak into logs.
-                tracing::warn!(
-                    error = %scrub_token(&e.to_string()),
-                    "Discord gateway error; reconnecting"
-                );
+                // token-shaped substring so a Bot token can never leak into logs
+                // or onto the persisted heartbeat surface.
+                let scrubbed = scrub_token(&e.to_string());
+                tracing::warn!(error = %scrubbed, "Discord gateway error; reconnecting");
+                heartbeat.record_error(format!("gateway: {scrubbed}"));
             }
         }
+        // A dropped/closed gateway means the channel is no longer confirmed
+        // online — reflect that on the surface until the next IDENTIFY succeeds.
+        heartbeat.set_connected(false, None);
         // M1: never reconnect with zero delay — a server that drops us
         // immediately (clean op-7/op-9 close OR an error) would otherwise spin a
         // hot reconnect loop. The streak is reset inside `connect_and_serve` once
@@ -204,6 +216,7 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
     client: &reqwest::Client,
     cfg: &DiscordConfig,
     transport: &'static T,
+    heartbeat: &BridgeHeartbeat,
     backoff: &mut ReconnectBackoff,
 ) -> Result<()> {
     let (ws, _resp) = tokio_tungstenite::connect_async(GATEWAY_URL)
@@ -245,7 +258,7 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
     // so a fleet of bots reconnecting together don't all beat in lockstep.
     let first_delay = first_beat_delay(interval, rand::random::<f64>());
     let start = tokio::time::Instant::now() + first_delay;
-    let mut heartbeat = tokio::time::interval_at(start, interval);
+    let mut beat_timer = tokio::time::interval_at(start, interval);
 
     // M2: ACK-zombie detection — require each beat to be ACKed before the next.
     let mut hb = HeartbeatTracker::new();
@@ -253,7 +266,7 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
     loop {
         tokio::select! {
             // Periodic heartbeat (op 1 with the last seq, or null if none yet).
-            _ = heartbeat.tick() => {
+            _ = beat_timer.tick() => {
                 if !hb.on_tick() {
                     // Previous beat was never ACKed → zombie connection.
                     tracing::warn!("Discord heartbeat not ACKed; treating socket as dead");
@@ -303,27 +316,37 @@ async fn connect_and_serve<T: FleetTransport + 'static>(
                         break;
                     }
                     op::DISPATCH => {
+                        // READY is the canonical "IDENTIFY succeeded" signal — the
+                        // gateway accepted our token and opened the session. Mark
+                        // the channel online so the Daemons surface shows Discord
+                        // connected (mirrors Telegram's getMe / Slack's auth_test).
+                        if payload.t.as_deref() == Some("READY") {
+                            tracing::info!("Discord gateway READY (IDENTIFY accepted)");
+                            heartbeat.set_connected(true, Some("Discord (gateway)".into()));
+                        }
                         if payload.t.as_deref() == Some("MESSAGE_CREATE") {
                             if let Some(d) = payload.d {
                                 if let Ok(msg) = serde_json::from_value::<DiscordMessage>(d) {
                                     // H1: the relay polls the agent for up to
                                     // `response_timeout` (300s default). Doing that
-                                    // inline here would block `heartbeat.tick()`,
+                                    // inline here would block `beat_timer.tick()`,
                                     // starve the op-1 beat, and make Discord
                                     // force-close the socket — under exactly the
                                     // slow-reply workload the bridge exists for. So
                                     // dispatch the handle-and-reply work to its own
                                     // task: the `reqwest::Client` is `Arc` inside
-                                    // (cheap clone), the config is cloned, and the
+                                    // (cheap clone), the config is cloned, the
                                     // transport is `&'static` (shared, not the WSS
-                                    // socket). The REST reply uses its own HTTPS
-                                    // connection and never touches the gateway
+                                    // socket), and the daemon heartbeat handle is a
+                                    // cheap `Arc` clone. The REST reply uses its own
+                                    // HTTPS connection and never touches the gateway
                                     // `write` half, so there's no shared-socket
                                     // contention with the heartbeat.
                                     spawn_handle_message(
                                         client.clone(),
                                         cfg.clone(),
                                         transport,
+                                        heartbeat.clone(),
                                         msg,
                                     );
                                 }
@@ -361,24 +384,29 @@ where
 /// run OFF the gateway socket task and can never starve the heartbeat.
 ///
 /// Owns everything it needs: a cloned `reqwest::Client` (cheap — `Arc` inside),
-/// a cloned [`DiscordConfig`], and the `&'static` shared transport.
+/// a cloned [`DiscordConfig`], the `&'static` shared transport, and a cloned
+/// [`BridgeHeartbeat`] handle (cheap `Arc` clone) so the off-task relay can still
+/// record relay activity / errors on the shared daemon surface.
 fn spawn_handle_message<T: FleetTransport + 'static>(
     client: reqwest::Client,
     cfg: DiscordConfig,
     transport: &'static T,
+    heartbeat: BridgeHeartbeat,
     msg: DiscordMessage,
 ) {
     tokio::spawn(async move {
-        handle_message(&client, &cfg, transport, msg).await;
+        handle_message(&client, &cfg, transport, &heartbeat, msg).await;
     });
 }
 
 /// Process one `MESSAGE_CREATE`: authorize, relay through the shared core, and
-/// post the reply back to the originating (or configured) channel.
+/// post the reply back to the originating (or configured) channel. Reports relay
+/// activity / REST failures through the shared `heartbeat`.
 async fn handle_message<T: FleetTransport>(
     client: &reqwest::Client,
     cfg: &DiscordConfig,
     transport: &T,
+    heartbeat: &BridgeHeartbeat,
     msg: DiscordMessage,
 ) {
     if !authorize(cfg, &msg) {
@@ -395,6 +423,8 @@ async fn handle_message<T: FleetTransport>(
         response_timeout: Duration::from_secs(cfg.response_timeout),
     };
     let reply = relay(transport, &params, text).await;
+    // A relayed turn — the "last relay" signal the operator needs on the surface.
+    heartbeat.record_relay();
 
     // Reply to the message's channel; fall back to the configured channel_id.
     let channel = msg.channel_id.as_deref().or(cfg.channel_id.as_deref());
@@ -407,8 +437,13 @@ async fn handle_message<T: FleetTransport>(
 
     for chunk in split_for_discord(&reply) {
         if let Err(e) = post_message(client, &cfg.token, channel, &chunk).await {
-            // Scrub before logging: the error may echo the Authorization header.
-            tracing::warn!(error = %scrub_token(&e.to_string()), "Discord post message failed");
+            // Scrub before logging AND before the heartbeat surface: the error may
+            // echo the Authorization header / Bot token. `record_error` scrubs
+            // again (defense in depth), but route through the unified redact here
+            // too so the logged and persisted strings are identical.
+            let scrubbed = scrub_token(&e.to_string());
+            tracing::warn!(error = %scrubbed, "Discord post message failed");
+            heartbeat.record_error(format!("postMessage: {scrubbed}"));
         }
     }
 }
