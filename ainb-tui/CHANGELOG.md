@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.6] - 2026-06-17
+### Added
+- Merge pull request #288 from stevengonsalvez/f/copilot-upgrade
+- Merge pull request #295 from stevengonsalvez/f/copilot-burndown
+- **ainb-hooks**: add copilot notify path (ainb-notifyd --copilot)
+- **copilot**: port the rich statusline to the Copilot CLI
+- **reflect**: KB export/import for cross-machine snapshots (C5)
+- **reflect**: MMR diversity step after rerank (R3)
+- **reflect**: add fuzzy Jaccard cache tier before vector search (R9)
+- **reflect**: add installed-skills index for fast query matching (R20)
+- **reflect**: add pinned editable memory slots (A1)
+- **reflect**: add temporal retrieval arm filtered by query date range (R5)
+- **reflect**: auto-flag and refresh skills when backing learnings change (R13)
+- **reflect**: auto-refreshing per-project conventions doc (O2)
+- **reflect**: auto-trigger consolidation when N new learnings land (C2)
+- **reflect**: belief revision on ingest with CREATE/UPDATE/DELETE actions (S5)
+- **reflect**: bitemporal graph edges — tcommit + tvalid (A2)
+- **reflect**: bounded multiplicative rerank boosts (R8)
+- **reflect**: branch-aware capture & isolation + behavioral proof (A6)
+- **reflect**: capture TodoWrite completions as process learnings (SG7)
+- **reflect**: capture permission prompt replies as policy learnings (SG8)
+- **reflect**: chunk-hash delta retain dedup + behavioral proof (S7)
+- **reflect**: compute per-skill staleness on read (R14)
+- **reflect**: consolidated observations layer for persona/conventions (O1)
+- **reflect**: copilot adapter reaches reflect hook parity (native drop-in hooks)
+- **reflect**: cross-encoder rerank after RRF fusion (R2)
+- **reflect**: cross-turn contradiction detection on learning writes (SG1)
+- **reflect**: detect agent tool-loops and arm mini-learnings
+- **reflect**: document->chunks->learnings grouping persistence (S8)
+- **reflect**: enforced 3-layer staged recall workflow (M1)
+- **reflect**: extract structured fields at drain (S1)
+- **reflect**: first-class persona/preference fields per scope (O3)
+- **reflect**: followup-rate recall-quality diagnostic (A4)
+- **reflect**: forced-grounding short-circuit on warm skill hit (R11)
+- **reflect**: git event capture — commit_links + commits.jsonl, revert demotes session learnings (SG2)
+- **reflect**: graph arm, OOD gate, token budget in recall (R1/R7/R4)
+- **reflect**: graph maintenance post-delete sweep (C3)
+- **reflect**: idle-session sweep with speculative down-rank (SG3)
+- **reflect**: knowledge-corpus Q&A — build/prime/query/reprime (M7)
+- **reflect**: lifecycle events JSONL + per-event shell hooks (C4)
+- **reflect**: make hook scripts harness-aware (camelCase stdin + copilot output envelope)
+- **reflect**: move volatile ranking signals into reflect.db sidecar (S9)
+- **reflect**: native copilot + codex marketplace plugin manifests
+- **reflect**: parse natural-language dates from queries into temporal ranges (R6)
+- **reflect**: parse test-runner outcomes from Bash output into memory signals (SG4)
+- **reflect**: per-arm calibrated OOD thresholds (R12)
+- **reflect**: per-ingest semantic-dedup adjudication (C1)
+- **reflect**: per-project sharding in recall + behavioral proof (R15)
+- **reflect**: per-row TTL with hourly forget sweep (A3)
+- **reflect**: persist zero-result recalls as knowledge-gap signals (SG6)
+- **reflect**: pluggable mode system with parent--override inheritance (M4)
+- **reflect**: project-affinity multiplicative boost in recall rerank (R16)
+- **reflect**: provenance source ids and proof_count on learnings (S4)
+- **reflect**: recall-upgrade — 57/57 ports, all behaviorally proven (#248)
+- **reflect**: recover typed causal links from stored graph (S2)
+- **reflect**: snapshot old learning form to history on update (S6)
+- **reflect**: store numeric confidence 0-1 beside display tiers (S3)
+- **reflect**: strip private tags at the LLM-prompt boundary
+- **reflect**: subscription-quota-aware writer abort via quota store (M3)
+- **reflect**: surface token economics on every recall block (M8)
+- **reflect**: synthetic no-LLM compression fallback (A5)
+- **reflect**: tiered skills-first injection at session start (R10)
+- **reflect**: typed causal-link enum in sidecar validator + drain (S2 plugin half)
+- **reflect**: verify commit refs in learnings before persistence
+- **reflect**: write-validate-retry loop on drain note body (S10)
+- **reflect**: writer-output classifier + respawn circuit breaker (M2)
+- **reflect-kb**: recall eval harness with hermetic KB and golden queries
+- **session-reader**: add GitHub Copilot CLI provider
+- fix(reflect): pin trunk branch in R15 proof for A6 branch-shard parity
+
+### Fixed
+- **burndown**: unify the two provider controls into one
+- **notifyd**: add Copilot arm to render_title so OS notifications capitalize correctly
+- **reflect**: add isinstance guards to inline fallback get_* helpers in hook scripts
+- **reflect**: apply R14 computed staleness to the inject tier
+- **reflect**: clean error on malformed corpus date filter (M7)
+- **reflect**: correct copilot plugin.json skills paths + drop premature hooks field
+- **reflect**: degrade validate_sidecar as a library, not sys.exit
+- **reflect**: pin trunk branch in R15 proof for A6 branch-shard parity
+- **reflect**: strip nested <private> spans depth-aware (M6)
+- **reflect**: write SG2 commit_captured event to the caller's connection
+- **session-reader**: address review on copilot provider
+
+### Documentation
+- **reflect**: correct copilot plugin install hook status
+- **reflect**: correct stale 'no hooks' claims for codex + copilot
+- **reflect**: native plugin install for all three harnesses
+- **reflect**: retrieval feature guide — example + counterfactual per feature
+- **site**: how recall works — by example (end-to-end + per-feature)
+
+### Other
+- **settings**: sync editor prefs + generic OTEL; portable marketplace source
+- merge origin/main — resolve install.rs Copilot agent conflict
+
+
 ## [1.7.5] - 2026-06-16
 ### Fixed
 - Merge pull request #285 from stevengonsalvez/feat/mcp-socket
