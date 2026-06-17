@@ -59,9 +59,8 @@ pub enum Agent {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
-    /// GitHub Copilot CLI. Recognised so an `install.json` written by a
-    /// Copilot-capable build round-trips cleanly; this binary does not
-    /// install Copilot hooks itself (it is intentionally absent from `ALL`).
+    /// GitHub Copilot CLI. Hooks are installed as a standalone drop-in at
+    /// `~/.copilot/hooks/ainb.json`; included in `ALL`.
     Copilot,
     /// Catch-all for any agent written by a newer build that this binary
     /// doesn't know. Keeps `install.json` forward-compatible: an unknown
@@ -99,9 +98,9 @@ pub struct InstallRecord {
     pub claude_plugin_dir: Option<PathBuf>,
     /// Resolved per-agent config path (Codex only).
     pub codex_hooks_json: Option<PathBuf>,
-    /// Resolved per-agent config path (Copilot only). Modelled so a record
-    /// written by a Copilot-capable build round-trips without dropping the
-    /// field; this binary never sets it.
+    /// Resolved path to ainb's standalone Copilot hooks drop-in
+    /// (`~/.copilot/hooks/ainb.json`). Set on install; used by uninstall
+    /// to remove only the managed file while leaving sibling drop-ins intact.
     #[serde(default)]
     pub copilot_hooks_json: Option<PathBuf>,
     /// The plugin manifest version that was written to disk at install
@@ -500,13 +499,13 @@ fn install_copilot(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf>
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    // Resolve our template against the actual hook script path, then
-    // round-trip through serde_json to normalise formatting and prove
-    // the substituted template is valid JSON before it lands on disk.
-    let resolved = COPILOT_HOOKS_TEMPLATE.replace(
-        "__AINB_HOOK_SCRIPT__",
-        &hook_script_canonical.to_string_lossy(),
-    );
+    // JSON-encode the path to escape backslashes, quotes, etc., then strip
+    // the surrounding `"…"` to get just the escaped interior for substitution.
+    // Round-trip through serde_json afterwards to normalise formatting and
+    // prove the final JSON is valid before it lands on disk.
+    let path_json = serde_json::to_string(&hook_script_canonical.to_string_lossy())?;
+    let path_escaped = path_json.trim_matches('"');
+    let resolved = COPILOT_HOOKS_TEMPLATE.replace("__AINB_HOOK_SCRIPT__", path_escaped);
     let value: serde_json::Value = serde_json::from_str(&strip_line_comments(&resolved))
         .context("parsing embedded copilot hooks template")?;
     let text = serde_json::to_string_pretty(&value)?;
