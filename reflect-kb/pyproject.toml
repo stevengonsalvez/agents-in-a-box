@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reflect-kb"
-version = "0.1.1"
+version = "0.2.0"
 description = "Universal cross-harness retrieval + learning KB for AI coding agents"
 readme = "README.md"
 license = { text = "MIT" }

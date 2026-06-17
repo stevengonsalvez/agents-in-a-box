@@ -200,3 +200,49 @@ def test_S8_record_drain_chunk_via_cascade_groups_learnings(db):
     got = reflect_db.get_learnings_for_transcript("sess-S8-cascade", conn=conn)
     assert sorted(got) == sorted([l1, l2])
     assert reflect_db.chunk_already_processed("sess-S8-cascade", "sig-deadbeef", conn=conn)
+
+
+def test_S8_record_chunk_for_transcript_links_via_real_drain_write_path(db, tmp_path, monkeypatch):
+    """Regression (PR #294 review): record_chunk_for_transcript must link the
+    learnings a REAL drain wrote, not assume content_hash==signal_hash.
+
+    The drain writes learnings via `revise --source "<transcript>"`
+    (execute_revision_actions CREATE), which stamps source_memory_ids=[transcript]
+    and leaves content_hash=''. Driving that real write path (no LLM) and then
+    record_chunk_for_transcript must group the learning under the transcript.
+    The earlier content_hash-based lookup linked 0 here — this is the guard.
+    """
+    import reflect_cascade
+    conn = db
+    monkeypatch.setenv("REFLECT_STATE_DIR", str(tmp_path))
+
+    # A transcript with a clear correction signal (so prepare/record-chunk see a hash).
+    transcript = tmp_path / "t.jsonl"
+    rows = [
+        '{"type":"user","message":{"role":"user","content":"no, that is wrong — use os.replace not os.rename for atomic moves"}}',
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Right, fixing."}]}}',
+    ]
+    transcript.write_text("\n".join(rows) + "\n")
+    tid = str(transcript)
+
+    # REAL write path: a CREATE through execute_revision_actions with --source = transcript.
+    summary = reflect_cascade.execute_revision_actions(
+        [{"action": "CREATE", "content": "Use os.replace for atomic file moves",
+          "category": "reliability", "confidence": "0.8", "dedup_adjudicated": True}],
+        source_memory_id=tid,
+    )
+    assert summary["created"] == 1, summary
+    # The learning carries the transcript in source_memory_ids, NOT content_hash==signal_hash.
+    created = reflect_db.get_learnings_by_source_memory_id(tid, conn=conn)
+    assert len(created) == 1, "real CREATE must link the transcript via source_memory_ids"
+
+    # Now the drain-time call must group it under the transcript.
+    res = reflect_cascade.record_chunk_for_transcript(transcript)
+    assert res.get("recorded") is True, res
+    assert res.get("learnings") == 1, res
+    got = reflect_db.get_learnings_for_transcript(tid, conn=conn)
+    assert len(got) == 1, "the drained learning must be queryable by transcript"
+
+    # Idempotent re-run: still exactly one, no duplicate link.
+    reflect_cascade.record_chunk_for_transcript(transcript)
+    assert len(reflect_db.get_learnings_for_transcript(tid, conn=conn)) == 1

@@ -284,6 +284,24 @@ reflect-owned layer (`reflect-kb[graph]` via `uv`) after one confirm, and only
 *prints* the commands for system tools (bash, coreutils, jq) so it never
 touches your OS or PATH without you.
 
+### Optional: per-repo git-commit capture (SG2)
+
+A git commit is the strongest "this was deliberate" signal. To capture commits
+(SHA + branch + files linked to the active session, merge-conflict and revert
+handling) in a repo, install the post-commit hook **once per repo** — it chains
+any existing hook and never fails your commit:
+
+```bash
+# from anywhere; pass the repo dir, or run inside it
+bash "$REFLECT_PLUGIN_ROOT"/hooks/install_post_commit.sh /path/to/repo
+# undo: ... install_post_commit.sh --uninstall /path/to/repo
+```
+
+This is the only reflect hook that lives in a repo's `.git/hooks` (the rest are
+Claude Code session hooks wired by `claude plugin install`). The `launchd`
+timers (idle/drain/forget/synthesis) each ship an INSTALL block in
+`launchd/*.plist`.
+
 ### Manual (what bootstrap runs, annotated)
 
 ```bash

@@ -736,6 +736,18 @@ reflect_db.clear_skill_stale(sys.argv[2], conn=conn)
 PY
         log "    skill-refresh complete: cleared staleness for $transcript"
     fi
+
+    # S8: persist the (transcript -> slice chunk -> learnings) grouping for this
+    # drained transcript, so "what came out of session X" is queryable and
+    # cross-learning consolidation has a stable key. record-chunk recomputes the
+    # slice content hash (no ids needed back from claude -p) and links the
+    # learnings written under it. Best-effort, after the critical path — a
+    # failure here never affects the drain outcome. Skip the skill_refresh
+    # trigger (it edits a SKILL.md, it does not write slice learnings).
+    if [[ "$trigger" != "skill_refresh" ]]; then
+        python3 "${SCRIPT_DIR}/../scripts/reflect_cascade.py" record-chunk \
+            --transcript "$transcript" >/dev/null 2>>"$LOG_FILE" || true
+    fi
     return 0
 }
 

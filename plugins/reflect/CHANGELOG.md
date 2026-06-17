@@ -4,6 +4,64 @@ All notable changes to the **reflect** plugin. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic
 versioning.
 
+## [4.1.0] — 2026-06-17 — Recall upgrade (57 ports)
+
+Minor bump for the recall-upgrade campaign (PR #248): **57 features ported** from
+Hindsight, ByteRover, agentmemory, and claude-mem into the recall layer, each
+shipped with a real-engine behavioral proof
+(`reflect-kb/tests/eval/behavioral/proofs/`). Additive and backward-compatible —
+every new arm/signal is gated by a `RECALL_*`/`REFLECT_*` env knob that defaults
+off or to the pre-4.1 behavior, and the DB schema migration is additive
+(`CREATE TABLE IF NOT EXISTS` on first connection). No existing 4.0 install
+breaks; the retrieval improvements are live out of the box.
+
+### Added — retrieval / inject
+- **Graph-expansion arm** (R1, `RECALL_GRAPH_ARM`), **cross-encoder rerank** (R2,
+  `RECALL_CROSS_ENCODER`, lazy `sentence-transformers` — degrades to the legacy
+  formula if absent), **MMR diversity** (R3, `RECALL_MMR`), **token-budget
+  retrieval** (R4, `REFLECT_RECALL_MAX_TOKENS`), **temporal arm + query-date
+  parsing** (R5/R6, `RECALL_TEMPORAL`), **OOD relevance gate** (R7,
+  `--min-overlap`), **bounded multiplicative boosts** (R8, `RECALL_*_ALPHA`),
+  **fuzzy cache tier** (R9), **3-tier hierarchical inject + forced-grounding
+  short-circuit** (R10/R11, `REFLECT_TIERED_INJECT`), **per-arm calibrated
+  thresholds** (R12, `reflect calibrate-thresholds`), **auto-skill-refresh +
+  per-skill staleness** (R13/R14), **per-project sharding** (R15), **project
+  affinity** (R16), **skills index** (R20), **staged 3-layer recall** (M1).
+- See **`docs/retrieval-features.md`** for each feature with a worked example and
+  the counterfactual.
+
+### Added — storage / signals / consolidation / open-domain
+- Storage: structured drain fields (S1), typed causal links (S2), numeric
+  confidence (S3), provenance/proof-count (S4), belief revision (S5), history
+  snapshots (S6), chunk-hash dedup (S7), doc→chunk→learning grouping (S8),
+  volatile-signals sidecar (S9), write-validate-retry (S10).
+- Signals: cross-turn contradiction (SG1), git-event capture (SG2, post-commit
+  hook), idle trigger (SG3, launchd), test-outcome (SG4), tool-loop detect
+  (SG5), knowledge-gap (SG6), todo-completion (SG7), permission capture (SG8).
+- claude-mem: writer breaker (M2), quota-aware abort (M3), pluggable modes (M4),
+  commit verification (M5), privacy stripping (M6), corpus Q&A (M7,
+  `/reflect:corpus`), token economics (M8).
+- agentmemory: pinned slots (A1), bitemporal edges (A2), per-row TTL (A3),
+  followup-rate diagnostic (A4), synthetic no-LLM compression (A5), branch-aware
+  isolation (A6).
+- Open-domain: observations layer (O1), conventions doc (O2), persona fields
+  (O3). Consolidation: semantic dedup (C1), auto-consolidation (C2), graph
+  maintenance (C3), lifecycle events (C4), KB export/import (C5).
+
+### Infrastructure
+- **DB schema**: 14 new `reflect.db` tables (auto-migrated, additive).
+- **New `reflect.db` is migrated transparently** on first connection — no manual
+  migration step for existing installs.
+- **Pre-merge review fixes**: depth-aware `<private>` stripping (M6 nested-tag
+  leak), corpus date-filter validation (M7), R14 staleness applied to the inject
+  tier, `validate_sidecar` degrades as a library instead of `sys.exit`.
+
+### Activation notes (features that need a one-time wiring step)
+- **SG2 git-event capture** needs the post-commit hook installed per repo (see
+  Install below). **SG3 idle** and the other launchd timers load via their
+  `launchd/*.plist` INSTALL blocks. **S8** document-grouping persists once the
+  drain calls the chunk-record step.
+
 ## [4.0.0] — 2026-05-31 — Cost rearchitecture
 
 Major bump for the drain cost rearchitecture (W1–W5). Triggered by an incident:

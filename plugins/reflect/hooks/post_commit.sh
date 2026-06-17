@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SG2: git post-commit capture (agentmemory post-commit.ts shape).
 #
-# Installed by `/reflect setup` into the repo's .git/hooks/post-commit (or
-# chained from an existing one). On every commit it captures the new SHA,
+# Installed per-repo by `hooks/install_post_commit.sh` into .git/hooks/post-commit
+# (chained from an existing one if present). On every commit it captures the new SHA,
 # branch, subject, and changed files, links the SHA to the active reflect
 # session, and appends a line to $REFLECT_STATE_DIR/commits.jsonl. A
 # merge-conflict resolution is flagged as a high-confidence learning trigger;
