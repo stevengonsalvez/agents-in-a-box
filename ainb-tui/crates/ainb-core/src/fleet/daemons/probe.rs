@@ -320,13 +320,29 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     // Pick the most-recently-beating instance as the representative row, and
     // report it. (v1 surfaces ATC as one daemon; the instance name goes in the
     // channel label.)
+    //
+    // Only instances whose `heartbeat_enabled` is true are running-sources: an
+    // instance with the OS timer DISABLED is not running no matter how recent
+    // its last (pre-disable) heartbeat looks — counting it was the M2 false
+    // "running". Track how many enabled instances we saw so we can distinguish
+    // "all disabled" from "none have beaten yet".
     let mut best: Option<(String, HeartbeatState, u32)> = None;
+    let mut enabled_count = 0_usize;
     for name in &names {
         let p = AtcPaths::under_root(&atc_root, name);
-        let interval_min = std::fs::read_to_string(&p.meta)
-            .ok()
-            .and_then(|s| AtcMeta::from_json(&s).ok())
-            .map_or(15, |m| m.heartbeat_interval_min.max(1));
+        let meta = std::fs::read_to_string(&p.meta).ok().and_then(|s| AtcMeta::from_json(&s).ok());
+        // Default to enabled when meta is unreadable: a missing/corrupt meta is a
+        // probe problem, not proof the timer is off, so we don't silently hide a
+        // possibly-running instance. `AtcMeta::new` defaults `heartbeat_enabled`
+        // to true, matching this.
+        let heartbeat_enabled = meta.as_ref().map_or(true, |m| m.heartbeat_enabled);
+        let interval_min = meta.map_or(15, |m| m.heartbeat_interval_min.max(1));
+        if !heartbeat_enabled {
+            // Disabled instances are never a running-source. Skip before reading
+            // the heartbeat state so a stale beat can't promote it.
+            continue;
+        }
+        enabled_count += 1;
         let Some(hbs) = std::fs::read_to_string(&p.heartbeat_state)
             .ok()
             .map(|s| HeartbeatState::from_json_or_default(&s))
@@ -343,11 +359,22 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     }
 
     let Some((name, hbs, interval_min)) = best else {
+        // No enabled instance produced a usable heartbeat. If NONE of the
+        // provisioned instances are even enabled, the daemon is configured off.
+        if enabled_count == 0 {
+            return DaemonStatus::stopped(
+                kind,
+                format!(
+                    "{} instance(s) provisioned, all heartbeat-disabled",
+                    names.len()
+                ),
+            );
+        }
         return DaemonStatus::stopped(
             kind,
             format!(
-                "{} instance(s) provisioned, none have beaten yet",
-                names.len()
+                "{} enabled instance(s), none have beaten yet",
+                enabled_count
             ),
         );
     };
@@ -719,6 +746,78 @@ mod tests {
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
+    }
+
+    #[test]
+    fn probe_atc_heartbeat_disabled_instance_is_stopped_not_running() {
+        // M2 regression: an instance with `heartbeat_enabled:false` but a very
+        // recent `last_heartbeat_ms` must report Stopped — the timer is off, so
+        // a leftover recent beat must not be counted as running.
+        let home = TempDir::new().unwrap();
+        let atc_dir = home.path().join("atc").join("primary");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(
+            atc_dir.join("meta.json"),
+            r#"{"name":"primary","heartbeat_enabled":false,"heartbeat_interval_min":15,"idle_pause_min":60}"#,
+        )
+        .unwrap();
+        let now = super::super::heartbeat::now_ms();
+        std::fs::write(
+            atc_dir.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 2000
+            ),
+        )
+        .unwrap();
+        let s = probe_atc(home.path(), now);
+        assert_eq!(
+            s.state,
+            DaemonState::Stopped,
+            "a heartbeat-disabled ATC instance must never report Running"
+        );
+        assert!(
+            s.reason.contains("disabled"),
+            "reason should explain the disable: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn probe_atc_disabled_does_not_mask_an_enabled_running_sibling() {
+        // Defense for the multi-instance case: a disabled instance with a recent
+        // beat sits next to an ENABLED instance that is genuinely beating. The
+        // probe must report Running from the enabled one, not be confused by the
+        // disabled sibling.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        for (name, enabled) in [("off", false), ("on", true)] {
+            let dir = home.path().join("atc").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("meta.json"),
+                format!(
+                    r#"{{"name":"{name}","heartbeat_enabled":{enabled},"heartbeat_interval_min":15,"idle_pause_min":60}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("heartbeat-state.json"),
+                format!(
+                    r#"{{"last_heartbeat_ms":{},"continue_counts":{{}}}}"#,
+                    now - 1000
+                ),
+            )
+            .unwrap();
+        }
+        let s = probe_atc(home.path(), now);
+        assert_eq!(s.state, DaemonState::Running);
+        assert!(
+            s.channel.as_deref().unwrap().contains("on"),
+            "the enabled instance must be the representative row: {:?}",
+            s.channel
+        );
     }
 
     #[test]
