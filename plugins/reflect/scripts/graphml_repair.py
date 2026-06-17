@@ -317,7 +317,15 @@ def maintain(path: Path, *, quiet: bool = False) -> bool:
         say("  maintenance rewrite did not validate; restored original.")
         return False
 
-    say(f"  MAINTAINED (backed up to {backup.name}): "
+    # Rewrite validated — the rollback path above uses the in-memory `original`,
+    # not this file, so the on-disk backup has served its purpose. Remove it so a
+    # stale .premaint.bak never lingers next to the live graph. Best-effort.
+    try:
+        backup.unlink()
+    except OSError:
+        pass
+
+    say("  MAINTAINED: "
         f"orphans_pruned={stats['orphans_pruned']} "
         f"edges_pruned={stats['edges_pruned']} "
         f"nodes_relinked={stats['nodes_relinked']}")

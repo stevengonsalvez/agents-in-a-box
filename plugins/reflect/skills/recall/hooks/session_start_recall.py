@@ -542,17 +542,25 @@ def _rerank_score(rec: dict) -> float:
 
 
 def _age_days(archived_at: str | None) -> float | None:
-    """Days since the skill's archive timestamp; None if unknown/unparseable."""
+    """Days since the skill's archive timestamp; None if unknown/unparseable.
+
+    Handles BOTH tz-aware (``...Z`` / ``+00:00``) and naive timestamps — a
+    tz-aware ``archived_at`` previously raised on the naive-vs-aware subtraction
+    and was swallowed to None (so a tz-aware skill could never short-circuit).
+    """
     if not archived_at:
         return None
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     try:
-        ts = datetime.fromisoformat(str(archived_at).rstrip("Z"))
+        # `Z` -> `+00:00` so fromisoformat keeps the offset (don't rstrip it,
+        # which would silently turn an aware ts into a naive one).
+        ts = datetime.fromisoformat(str(archived_at).strip().replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    now = datetime.now(timezone.utc) if ts.tzinfo is not None else datetime.now()
     try:
-        return max(0.0, (datetime.now() - ts).days)
+        return max(0.0, (now - ts).days)
     except (TypeError, ValueError):
         return None
 
