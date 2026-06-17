@@ -12,7 +12,6 @@ default = []
 test-fixtures = []
 
 [dependencies]
-anyhow = { workspace = true }
 fs2 = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
