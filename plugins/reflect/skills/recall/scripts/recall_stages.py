@@ -277,7 +277,10 @@ def reflect_index(query: str, limit: int = DEFAULT_INDEX_LIMIT) -> dict[str, Any
     scan when the reflect CLI is missing so the staged workflow degrades
     instead of breaking.
     """
-    result = recall_mod.recall(query, limit=limit)
+    # gap_log/followup_track OFF: this is an internal staged-recall index probe,
+    # not a genuine user ask — counting it would double-log knowledge gaps (SG6)
+    # and inflate the followup-rate diagnostic (A4).
+    result = recall_mod.recall(query, limit=limit, gap_log=False, followup_track=False)
     if result.error or not result.learnings:
         rows = _lexical_index(query, limit)
         return {"step": 1, "query": query, "count": len(rows), "results": rows}

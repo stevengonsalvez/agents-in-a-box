@@ -298,30 +298,39 @@ def create_knowledge_note(
         content_hash=content_hash,
     )
 
-    if yaml:
-        fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
-    else:
-        # Fallback: manual YAML
-        fm_lines = []
-        for k, v in frontmatter.items():
-            if isinstance(v, list):
-                if any(isinstance(i, (dict, list)) for i in v):
-                    # S1: causal_relations is a list of dicts — JSON is valid
-                    # YAML, unlike str() of a python dict.
-                    fm_lines.append(f"{k}: {json.dumps(v)}")
-                else:
-                    fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
-            elif isinstance(v, dict):
-                fm_lines.append(f"{k}:")
-                for dk, dv in v.items():
-                    fm_lines.append(f'  {dk}: "{dv}"' if isinstance(dv, str) else f"  {dk}: {dv}")
-            else:
-                fm_lines.append(f'{k}: "{v}"' if isinstance(v, str) else f"{k}: {v}")
-        fm_str = '\n'.join(fm_lines)
+    def _render_note() -> str:
+        """Serialize the current ``frontmatter`` + body to the note text.
 
-    content = f"---\n{fm_str}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
-    if context:
-        content += f"\n## Context\n\n{context}\n"
+        Defined as a closure so it can be re-called after a later mutation
+        (e.g. adding ``unverified_refs``) and the change lands in BOTH the
+        pyyaml and the manual-fallback path — not only when pyyaml is present.
+        """
+        if yaml:
+            fm = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
+        else:
+            # Fallback: manual YAML
+            fm_lines = []
+            for k, v in frontmatter.items():
+                if isinstance(v, list):
+                    if any(isinstance(i, (dict, list)) for i in v):
+                        # S1: causal_relations is a list of dicts — JSON is valid
+                        # YAML, unlike str() of a python dict.
+                        fm_lines.append(f"{k}: {json.dumps(v)}")
+                    else:
+                        fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
+                elif isinstance(v, dict):
+                    fm_lines.append(f"{k}:")
+                    for dk, dv in v.items():
+                        fm_lines.append(f'  {dk}: "{dv}"' if isinstance(dv, str) else f"  {dk}: {dv}")
+                else:
+                    fm_lines.append(f'{k}: "{v}"' if isinstance(v, str) else f"{k}: {v}")
+            fm = '\n'.join(fm_lines)
+        out = f"---\n{fm}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
+        if context:
+            out += f"\n## Context\n\n{context}\n"
+        return out
+
+    content = _render_note()
 
     # M5: verify commit-like refs in the LLM-authored body against the local
     # repo before persistence. Hallucinated refs get recorded in frontmatter
@@ -344,11 +353,10 @@ def create_knowledge_note(
             )
         if report.checked and report.unverified:
             frontmatter["unverified_refs"] = report.unverified
-            if yaml:
-                fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
-                content = f"---\n{fm_str}---\n\n## Problem\n\n{problem}\n\n## Solution\n\n{solution}\n"
-                if context:
-                    content += f"\n## Context\n\n{context}\n"
+            # Rebuild via the shared renderer so the hallucination flag is
+            # serialized in the no-pyyaml fallback path too (previously it was
+            # only re-rendered under `if yaml:`, silently dropping the flag).
+            content = _render_note()
     except ImportError:  # pragma: no cover — verifier is best-effort
         pass
 

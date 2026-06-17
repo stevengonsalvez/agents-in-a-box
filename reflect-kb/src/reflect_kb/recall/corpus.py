@@ -85,9 +85,21 @@ def documents_root() -> Path:
 
 
 def _safe_name(name: str) -> str:
-    """Restrict a corpus name to a single filesystem-safe path component."""
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-._")
-    return cleaned or "corpus"
+    """Restrict a corpus name to a single filesystem-safe path component.
+
+    When sanitizing actually changed the name, append a short hash of the RAW
+    name so distinct inputs that collapse to the same cleaned form (e.g.
+    ``auth/sub`` vs ``auth sub`` vs ``auth-sub``) get distinct files instead of
+    silently overwriting one another. Already-safe names are returned unchanged.
+    """
+    raw = name.strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-._")
+    if not cleaned:
+        return "corpus"
+    if cleaned != raw:
+        import hashlib
+        return f"{cleaned}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:6]}"
+    return cleaned
 
 
 # --- Filter ---------------------------------------------------------------
