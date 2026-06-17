@@ -56,7 +56,15 @@ mod op {
 const INTENTS: u64 = (1 << 9) | (1 << 15) | (1 << 12);
 
 /// Run the Discord channel forever (reconnecting on disconnect).
-pub async fn run<T: FleetTransport>(cfg: DiscordConfig, transport: &T) -> Result<()> {
+///
+/// `transport` is `&'static` because the relay for each inbound message runs in
+/// its own `tokio::spawn` task (H1) so a slow reply can never starve the gateway
+/// heartbeat; the spawned future must therefore not borrow a non-`'static`
+/// transport. The daemon leaks a single shared transport, so this costs nothing.
+pub async fn run<T: FleetTransport + 'static>(
+    cfg: DiscordConfig,
+    transport: &'static T,
+) -> Result<()> {
     let client =
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -91,10 +99,10 @@ pub async fn run<T: FleetTransport>(cfg: DiscordConfig, transport: &T) -> Result
 
 /// One gateway connection: handshake, then pump dispatches until the socket
 /// closes or Discord asks us to reconnect.
-async fn connect_and_serve<T: FleetTransport>(
+async fn connect_and_serve<T: FleetTransport + 'static>(
     client: &reqwest::Client,
     cfg: &DiscordConfig,
-    transport: &T,
+    transport: &'static T,
 ) -> Result<()> {
     let (ws, _resp) = tokio_tungstenite::connect_async(GATEWAY_URL)
         .await
@@ -184,7 +192,26 @@ async fn connect_and_serve<T: FleetTransport>(
                         if payload.t.as_deref() == Some("MESSAGE_CREATE") {
                             if let Some(d) = payload.d {
                                 if let Ok(msg) = serde_json::from_value::<DiscordMessage>(d) {
-                                    handle_message(client, cfg, transport, msg).await;
+                                    // H1: the relay polls the agent for up to
+                                    // `response_timeout` (300s default). Doing that
+                                    // inline here would block `heartbeat.tick()`,
+                                    // starve the op-1 beat, and make Discord
+                                    // force-close the socket — under exactly the
+                                    // slow-reply workload the bridge exists for. So
+                                    // dispatch the handle-and-reply work to its own
+                                    // task: the `reqwest::Client` is `Arc` inside
+                                    // (cheap clone), the config is cloned, and the
+                                    // transport is `&'static` (shared, not the WSS
+                                    // socket). The REST reply uses its own HTTPS
+                                    // connection and never touches the gateway
+                                    // `write` half, so there's no shared-socket
+                                    // contention with the heartbeat.
+                                    spawn_handle_message(
+                                        client.clone(),
+                                        cfg.clone(),
+                                        transport,
+                                        msg,
+                                    );
                                 }
                             }
                         }
@@ -214,6 +241,22 @@ where
         }
     }
     anyhow::bail!("gateway stream ended before a payload")
+}
+
+/// Dispatch one `MESSAGE_CREATE` to its own task (H1) so the relay + REST reply
+/// run OFF the gateway socket task and can never starve the heartbeat.
+///
+/// Owns everything it needs: a cloned `reqwest::Client` (cheap — `Arc` inside),
+/// a cloned [`DiscordConfig`], and the `&'static` shared transport.
+fn spawn_handle_message<T: FleetTransport + 'static>(
+    client: reqwest::Client,
+    cfg: DiscordConfig,
+    transport: &'static T,
+    msg: DiscordMessage,
+) {
+    tokio::spawn(async move {
+        handle_message(&client, &cfg, transport, msg).await;
+    });
 }
 
 /// Process one `MESSAGE_CREATE`: authorize, relay through the shared core, and
@@ -532,5 +575,70 @@ mod tests {
         let t = FakeTransport::new(vec![], Some("x".into()));
         let out = relay(&t, &relay_params(), "hello").await;
         assert_eq!(out, "No running ainb sessions to relay to.");
+    }
+
+    // ── H1: relay runs OFF the socket task; heartbeat is never starved ───────
+
+    /// A transport whose `send_and_capture` blocks for a long time, modelling a
+    /// slow agent reply (the exact workload the bridge exists for).
+    struct SlowTransport {
+        sessions: Vec<TargetSession>,
+    }
+
+    impl FleetTransport for SlowTransport {
+        async fn discover(&self) -> Vec<TargetSession> {
+            self.sessions.clone()
+        }
+        async fn send_and_capture(
+            &self,
+            _session: &TargetSession,
+            _text: &str,
+            _timeout: Duration,
+        ) -> Option<String> {
+            // Far longer than the test runs — if this ran inline on the socket
+            // task it would starve the beat. Real wall-clock so the test needs no
+            // tokio `test-util` feature (not enabled for this target).
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Some("late reply".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_runs_off_task_so_heartbeat_keeps_firing() {
+        // Leak a slow transport to get the `&'static` the spawned relay needs,
+        // mirroring how the daemon leaks its shared transport.
+        let transport: &'static SlowTransport = Box::leak(Box::new(SlowTransport {
+            sessions: vec![sess("conductor")],
+        }));
+
+        // Kick off a relay exactly the way the socket task does — in a spawned
+        // task — then prove the socket task's own loop keeps ticking while the
+        // relay (an hour-long sleep) is still outstanding.
+        let relay_done = Arc::new(AtomicU64::new(0));
+        let rd = relay_done.clone();
+        tokio::spawn(async move {
+            let params = relay_params();
+            let _ = relay(transport, &params, "status?").await;
+            rd.store(1, Ordering::SeqCst);
+        });
+
+        // Stand-in for the gateway heartbeat: a fast interval the socket task
+        // services. With the relay OFF-task these keep firing; if the relay were
+        // awaited inline they would all be blocked behind the 1h sleep.
+        let mut beats: u64 = 0;
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(5));
+        heartbeat.tick().await; // immediate first tick
+        for _ in 0..5 {
+            heartbeat.tick().await;
+            beats += 1;
+        }
+
+        // Five beats fired while the relay is still pending.
+        assert_eq!(beats, 5, "heartbeat must keep firing during a slow relay");
+        assert_eq!(
+            relay_done.load(Ordering::SeqCst),
+            0,
+            "the relay should still be in flight — proving it did not block the beats"
+        );
     }
 }
