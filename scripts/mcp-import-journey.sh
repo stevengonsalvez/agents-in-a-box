@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Journey harness for the MCP pool overlay's IMPORT action, recorded by vhs.
 # Sets up an isolated $HOME + a project dir holding a `.mcp.json` (a real,
-# host-resolvable stdio server), starts an EMPTY pool daemon, then execs the
+# host-resolvable stdio server) with NO pool daemon running, then execs the
 # ainb TUI from inside that project so vhs can drive it:
-#   `p` opens the overlay (empty — nothing pooled yet)
+#   `p` opens the overlay (empty — "Pool daemon not running")
 #   `i` imports the launch dir's .mcp.json (+ Claude user scope) into the global
-#       user config AND registers it with the live daemon, so the server appears
-#       in the table. The overlay is a global view, so import targets the user
-#       config (the one read from anywhere), not a per-worktree project config.
+#       user config AND starts the pool daemon (which loads every configured
+#       server on boot), so the imported server appears in the table. The
+#       overlay is a global view, so import targets the user config (the one
+#       read from anywhere), not a per-worktree project config.
 #
 # Self-contained & deterministic: own $HOME (never touches your real env),
 # onboarding pre-completed so no wizard, a fake stdio MCP (no network).
@@ -51,9 +52,8 @@ cat > "$PROJECT/.mcp.json" <<EOF
 { "mcpServers": { "context7": { "command": "node", "args": ["$T/fake.js"] } } }
 EOF
 
-# Empty daemon, so the overlay opens on "No servers pooled yet" until import.
-( "$AINB" mcp daemon >"$T/d.log" 2>&1 & )
-sleep 2
+# No daemon — the overlay opens on "Pool daemon not running"; pressing `i`
+# imports AND auto-starts the pool, which is exactly what we're proving.
 
 # Clean up the sandbox when the TUI exits.
 trap '"$AINB" mcp stop >/dev/null 2>&1; pkill -f "$T/fake.js" 2>/dev/null; rm -rf "$T"' EXIT
