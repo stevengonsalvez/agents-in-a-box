@@ -71,6 +71,8 @@ tempfile = { workspace = true }
 # (blake3, for exactly-once turn fingerprints, is already a dependency below.)
 fs2 = { workspace = true }
 nix = { workspace = true }
+# Process-identity cross-check in the Daemons liveness probe (see workspace dep).
+sysinfo = { workspace = true }
 arboard = { workspace = true }
 keyring = { workspace = true }
 regex = { workspace = true }

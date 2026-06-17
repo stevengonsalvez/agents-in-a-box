@@ -91,6 +91,12 @@ clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 tempfile = "3.8"
 nix = { version = "0.27", features = ["user", "signal"] }
+# Process-identity cross-check for the Daemons liveness probe: a bare
+# `kill(pid,0)` can't tell a live daemon from a recycled pid, so we read the
+# live process's real start time and match it against the heartbeat's
+# `started_at`. Portable across macOS (kinfo_proc) and Linux (/proc/<pid>/stat);
+# `system` feature only (no disk/network/component collectors).
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 arboard = "3.3"
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 regex = "1.10"

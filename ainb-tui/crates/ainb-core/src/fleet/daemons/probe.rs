@@ -24,7 +24,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::heartbeat::{DaemonHeartbeat, is_pid_alive};
+use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity};
 
 /// A heartbeat older than this (and whose pid is *still* alive — e.g. a wedged
 /// daemon that stopped ticking) is treated as stale. A dead pid is caught
@@ -150,13 +150,18 @@ impl DaemonStatus {
 }
 
 /// Decide a heartbeat-backed daemon's status from its heartbeat (if any),
-/// cross-checking pid liveness and the staleness window against `now_ms`. Pure
-/// over its inputs so it is exhaustively unit-testable without touching disk.
+/// cross-checking process *identity* (not mere liveness) and the staleness
+/// window against `now_ms`. Pure over its inputs so it is exhaustively
+/// unit-testable without touching disk.
+///
+/// `pid_check` is the identity verdict from [`super::heartbeat::pid_identity`]:
+/// liveness alone is never enough — a recycled pid (a different process that
+/// inherited the dead daemon's pid) must report Stopped, not Running.
 #[must_use]
 pub fn classify_heartbeat(
     kind: DaemonKind,
     hb: Option<DaemonHeartbeat>,
-    pid_alive: bool,
+    pid_check: PidCheck,
     now_ms: i64,
 ) -> DaemonStatus {
     let Some(hb) = hb else {
@@ -166,9 +171,20 @@ pub fn classify_heartbeat(
     let age = now_ms.saturating_sub(hb.last_heartbeat_at);
     let uptime = Some(now_ms.saturating_sub(hb.started_at));
 
-    // A dead pid is the strongest possible signal: the writing process is gone,
-    // so the heartbeat is a tombstone no matter how recent it looks.
-    if !pid_alive {
+    // A dead OR recycled pid is the strongest possible signal: the process that
+    // wrote this heartbeat is gone, so the heartbeat is a tombstone no matter
+    // how recent it looks. A recycled pid is *alive* but is a different process
+    // that merely inherited the dead daemon's pid — treating it as Running was
+    // the bug.
+    if matches!(pid_check, PidCheck::Dead | PidCheck::Recycled) {
+        let reason = match pid_check {
+            PidCheck::Recycled => format!(
+                "stale heartbeat — pid {} recycled (different process, crashed)",
+                hb.pid
+            ),
+            // PidCheck::Dead (Matched is excluded by the match arm).
+            _ => format!("stale heartbeat — pid {} not alive (crashed)", hb.pid),
+        };
         return DaemonStatus {
             kind,
             state: DaemonState::Stopped,
@@ -179,7 +195,7 @@ pub fn classify_heartbeat(
             last_activity_at: hb.last_activity_at,
             error_count: hb.error_count,
             last_error: hb.last_error,
-            reason: format!("stale heartbeat — pid {} not alive (crashed)", hb.pid),
+            reason,
         };
     }
 
@@ -224,8 +240,10 @@ pub fn classify_heartbeat(
 #[must_use]
 pub fn probe_heartbeat_daemon(home: &Path, kind: DaemonKind, now_ms: i64) -> DaemonStatus {
     let hb = DaemonHeartbeat::read_in(home, kind.id());
-    let pid_alive = hb.as_ref().is_some_and(|h| is_pid_alive(h.pid));
-    classify_heartbeat(kind, hb, pid_alive, now_ms)
+    // Cross-check process IDENTITY, not bare liveness: a recycled pid is alive
+    // but is not our daemon, so it must classify as Stopped (H1).
+    let pid_check = hb.as_ref().map_or(PidCheck::Dead, |h| pid_identity(h.pid, h.started_at));
+    classify_heartbeat(kind, hb, pid_check, now_ms)
 }
 
 /// Probe notifyd from the signals it already maintains: PID-file liveness, the
@@ -453,7 +471,7 @@ mod tests {
 
     #[test]
     fn no_heartbeat_is_clean_stopped() {
-        let s = classify_heartbeat(DaemonKind::Bridge, None, false, 1000);
+        let s = classify_heartbeat(DaemonKind::Bridge, None, PidCheck::Dead, 1000);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("not running"));
         assert!(s.pid.is_none());
@@ -465,7 +483,7 @@ mod tests {
         let s = classify_heartbeat(
             DaemonKind::Bridge,
             Some(hb(42, now - 5000, now - 1000, true)),
-            true,
+            PidCheck::Matched,
             now,
         );
         assert_eq!(s.state, DaemonState::Running);
@@ -481,7 +499,7 @@ mod tests {
         let s = classify_heartbeat(
             DaemonKind::Bridge,
             Some(hb(42, now - 5000, now - 1000, false)),
-            true,
+            PidCheck::Matched,
             now,
         );
         assert_eq!(s.state, DaemonState::Running);
@@ -496,7 +514,7 @@ mod tests {
         let s = classify_heartbeat(
             DaemonKind::Bridge,
             Some(hb(42, now - 5000, now - 100, true)),
-            false,
+            PidCheck::Dead,
             now,
         );
         assert_eq!(s.state, DaemonState::Stopped);
@@ -506,12 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn recycled_pid_is_stale_even_with_recent_beat_and_live_pid() {
+        // H1 regression: the writing daemon died, the OS recycled its pid, and a
+        // DIFFERENT live process now owns it. A bare liveness check would say
+        // "running"; the identity cross-check must say Stopped (recycled).
+        let now = 1_000_000;
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(hb(42, now - 5000, now - 100, true)),
+            PidCheck::Recycled,
+            now,
+        );
+        assert_eq!(
+            s.state,
+            DaemonState::Stopped,
+            "a recycled pid (live but not our process) must never report Running"
+        );
+        assert!(s.reason.contains("recycled"), "reason: {}", s.reason);
+        assert!(s.reason.contains("crashed"), "reason: {}", s.reason);
+        assert!(
+            !s.connected,
+            "a recycled-pid daemon must not report connected"
+        );
+    }
+
+    #[test]
     fn wedged_daemon_live_pid_but_old_beat_is_stale() {
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::FleetDaemon,
             Some(hb(42, now - 200_000, now - (STALE_AFTER_MS + 5000), true)),
-            true,
+            PidCheck::Matched,
             now,
         );
         assert_eq!(s.state, DaemonState::Stopped);
@@ -526,7 +569,7 @@ mod tests {
         let s = classify_heartbeat(
             DaemonKind::Bridge,
             Some(hb(7, now - 100_000, now - STALE_AFTER_MS, true)),
-            true,
+            PidCheck::Matched,
             now,
         );
         assert_eq!(s.state, DaemonState::Running);
@@ -553,6 +596,12 @@ mod tests {
     fn probe_heartbeat_daemon_running_for_self_pid() {
         let home = TempDir::new().unwrap();
         let mut h = DaemonHeartbeat::starting(); // pid = self, alive
+        // The identity cross-check (H1) matches the heartbeat's `started_at`
+        // against the live process's OS start time. `starting()` stamps
+        // started_at = NOW, but the test process started earlier — so stamp the
+        // real OS start time to simulate an honest daemon heartbeat.
+        h.started_at = super::super::heartbeat::process_start_ms(std::process::id())
+            .expect("self process start time readable");
         h.set_connected(true, Some("Telegram".into()));
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
         let s = probe_heartbeat_daemon(
@@ -562,6 +611,32 @@ mod tests {
         );
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
+    }
+
+    #[test]
+    fn probe_heartbeat_daemon_stale_for_recycled_self_pid() {
+        // H1 disk-backed regression: a heartbeat for a LIVE pid (this process)
+        // whose `started_at` does NOT match the process's real start time is the
+        // pid-recycle signature — a dead daemon whose pid the OS handed to a
+        // different, live process. It must classify Stopped (recycled), never
+        // Running, even though `kill(pid,0)` succeeds.
+        let home = TempDir::new().unwrap();
+        let mut h = DaemonHeartbeat::starting(); // pid = self (alive)
+        let now = super::super::heartbeat::now_ms();
+        // started_at one hour ago — far outside the identity tolerance vs the
+        // real process start, but a recent beat so staleness alone wouldn't trip.
+        h.started_at = now - 3_600_000;
+        h.last_heartbeat_at = now - 1_000;
+        h.set_connected(true, Some("Telegram".into()));
+        h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
+        let s = probe_heartbeat_daemon(home.path(), DaemonKind::Bridge, now);
+        assert_eq!(
+            s.state,
+            DaemonState::Stopped,
+            "live-but-mismatched pid must be Stopped (recycled), not Running"
+        );
+        assert!(s.reason.contains("recycled"), "reason: {}", s.reason);
+        assert!(!s.connected);
     }
 
     #[test]
@@ -694,6 +769,10 @@ mod tests {
         let home = TempDir::new().unwrap();
         let notifyd = TempDir::new().unwrap();
         let mut h = DaemonHeartbeat::starting();
+        // Stamp the real OS start time so the H1 identity cross-check matches
+        // (the test process started earlier than `starting()`'s NOW).
+        h.started_at = super::super::heartbeat::process_start_ms(std::process::id())
+            .expect("self process start time readable");
         h.set_connected(true, Some("Telegram (@bot)".into()));
         h.record_activity();
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();

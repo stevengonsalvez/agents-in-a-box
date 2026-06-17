@@ -60,13 +60,20 @@ git_directories = []
     // Seed a LIVE bridge heartbeat: pid = this test process (definitely alive),
     // a fresh last_heartbeat_at, connected to Telegram. The aggregator's pid
     // cross-check then reports the bridge running + connected (not stale).
+    //
+    // The H1 identity guard matches `started_at` against the live process's REAL
+    // OS start time, so the seed must use the test process's actual start time
+    // (not an arbitrary "10 minutes ago") — otherwise the live-but-mismatched
+    // pid would correctly classify as a recycled-pid tombstone (Stopped).
     let daemons = base.join("daemons");
     fs::create_dir_all(&daemons).expect("create daemons dir");
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let started_at = ainb::fleet::daemons::heartbeat::process_start_ms(std::process::id())
+        .expect("test process start time readable");
     let bridge = format!(
         r#"{{"pid":{pid},"started_at":{started},"last_heartbeat_at":{beat},"last_activity_at":{act},"connected":true,"channel":"Telegram (@tripwire_bot)","error_count":0}}"#,
         pid = std::process::id(),
-        started = now_ms - 600_000,
+        started = started_at,
         beat = now_ms - 1_000,
         act = now_ms - 5_000,
     );

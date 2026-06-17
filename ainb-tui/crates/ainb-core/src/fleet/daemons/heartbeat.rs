@@ -170,11 +170,84 @@ impl DaemonHeartbeat {
 /// Best-effort liveness check: is `pid` still backing a running process? Uses
 /// `kill(pid, 0)`, which succeeds when the process exists (and we may signal
 /// it) and returns `ESRCH` otherwise. Mirrors `ainb-plugin-notifyd::pid`.
+///
+/// LIVENESS IS NOT IDENTITY. The OS recycles pids, so a `true` here only means
+/// *some* process owns `pid` right now — not that it is the daemon that wrote
+/// the heartbeat. Use [`pid_identity`] to distinguish the original process from
+/// a recycled-pid impostor.
 #[must_use]
 pub fn is_pid_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     matches!(kill(Pid::from_raw(pid as i32), None), Ok(()))
+}
+
+/// Tolerance (ms) for matching a heartbeat's `started_at` against the live
+/// process's OS-reported start time. The heartbeat clock (`chrono` epoch ms,
+/// stamped *inside* the process a moment after `fork`/`exec`) and the kernel's
+/// start time (whole seconds, stamped at `fork`) are recorded by different
+/// clocks at slightly different instants, so an exact match is impossible. 5s
+/// comfortably covers that skew while staying far tighter than any realistic
+/// pid-recycle gap (a recycled pid's new process started seconds-to-hours after
+/// the dead daemon, never within 5s of the dead daemon's recorded start).
+pub const PID_IDENTITY_TOLERANCE_MS: i64 = 5_000;
+
+/// The verdict of cross-checking a heartbeat's pid against the live process
+/// identity. The whole point of the H1 fix: liveness alone must never equal
+/// "running".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidCheck {
+    /// A live process owns `pid` and its start time matches the heartbeat's
+    /// `started_at` — this is (overwhelmingly likely) the original daemon.
+    Matched,
+    /// A live process owns `pid` but its start time does NOT match — the pid was
+    /// recycled after the daemon died. The heartbeat is a tombstone.
+    Recycled,
+    /// No live process owns `pid`. The daemon is gone.
+    Dead,
+}
+
+/// Read the live process's start time as epoch milliseconds, if `pid` is backed
+/// by a process we can inspect. `sysinfo` reports whole-second granularity on
+/// both macOS (`kinfo_proc`) and Linux (`/proc/<pid>/stat`), so this is the
+/// second floored to ms. `None` means the process is gone or unreadable.
+#[must_use]
+pub fn process_start_ms(pid: u32) -> Option<i64> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let spid = Pid::from_u32(pid);
+    // Refresh ONLY this pid (no full process-table sweep) and don't mutate a
+    // shared map — `System::new()` starts empty.
+    sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), false);
+    let secs = sys.process(spid)?.start_time();
+    i64::try_from(secs).ok().map(|s| s * 1000)
+}
+
+/// Cross-check a heartbeat's `pid`/`started_at` against the live process,
+/// returning whether it's the original daemon, a recycled-pid impostor, or
+/// dead. This is the identity guard the bare `kill(pid,0)` liveness check
+/// lacked.
+#[must_use]
+pub fn pid_identity(pid: u32, started_at_ms: i64) -> PidCheck {
+    classify_pid_identity(started_at_ms, process_start_ms(pid))
+}
+
+/// Pure core of [`pid_identity`]: given the heartbeat's recorded `started_at`
+/// and the live process's start time (`None` when no process owns the pid),
+/// decide the verdict. Separated so it is exhaustively unit-testable without a
+/// real process.
+#[must_use]
+pub fn classify_pid_identity(started_at_ms: i64, live_start_ms: Option<i64>) -> PidCheck {
+    match live_start_ms {
+        None => PidCheck::Dead,
+        Some(live) => {
+            if (live - started_at_ms).abs() <= PID_IDENTITY_TOLERANCE_MS {
+                PidCheck::Matched
+            } else {
+                PidCheck::Recycled
+            }
+        }
+    }
 }
 
 /// Neutralise a daemon name for use as a filename: keep alphanumerics, `-`, `_`;
@@ -296,5 +369,73 @@ mod tests {
     fn is_pid_alive_true_for_self_false_for_impossible() {
         assert!(is_pid_alive(std::process::id()));
         assert!(!is_pid_alive(0x7fff_ffff));
+    }
+
+    #[test]
+    fn classify_pid_identity_dead_when_no_live_process() {
+        // No process owns the pid → Dead regardless of recorded start.
+        assert_eq!(classify_pid_identity(1_000_000, None), PidCheck::Dead);
+    }
+
+    #[test]
+    fn classify_pid_identity_matches_within_tolerance() {
+        let started = 1_700_000_000_000;
+        // Live start within the tolerance window (sub-second skew between the
+        // chrono stamp and the kernel's whole-second start time).
+        assert_eq!(
+            classify_pid_identity(started, Some(started + 2_000)),
+            PidCheck::Matched
+        );
+        assert_eq!(
+            classify_pid_identity(started, Some(started - PID_IDENTITY_TOLERANCE_MS)),
+            PidCheck::Matched
+        );
+    }
+
+    #[test]
+    fn classify_pid_identity_recycled_when_live_start_far_off() {
+        // H1 core: the pid is alive but the live process started long after the
+        // heartbeat's daemon did → a recycled pid, NOT our daemon.
+        let started = 1_700_000_000_000;
+        assert_eq!(
+            classify_pid_identity(started, Some(started + 3_600_000)),
+            PidCheck::Recycled
+        );
+        // Just past the tolerance edge is already Recycled (no false Matched).
+        assert_eq!(
+            classify_pid_identity(started, Some(started + PID_IDENTITY_TOLERANCE_MS + 1)),
+            PidCheck::Recycled
+        );
+    }
+
+    #[test]
+    fn process_start_ms_reads_self_and_is_in_the_past() {
+        // The live identity probe must read SOMETHING for our own pid, and that
+        // start time must be at or before now (a process can't start in the
+        // future). This is what makes the recycled-pid cross-check possible.
+        let start = process_start_ms(std::process::id()).expect("self start readable");
+        assert!(start > 0);
+        assert!(
+            start <= now_ms() + PID_IDENTITY_TOLERANCE_MS,
+            "self start {start} must not be in the future (now {})",
+            now_ms()
+        );
+    }
+
+    #[test]
+    fn pid_identity_recycled_for_self_pid_with_bogus_started_at() {
+        // End-to-end identity check over a real live pid (ourself) whose recorded
+        // started_at is an hour off the real OS start: alive, but NOT a match →
+        // Recycled. This is exactly the H1 dead-daemon-pid-reuse signature.
+        let bogus_started = now_ms() - 3_600_000;
+        assert_eq!(
+            pid_identity(std::process::id(), bogus_started),
+            PidCheck::Recycled
+        );
+    }
+
+    #[test]
+    fn pid_identity_dead_for_impossible_pid() {
+        assert_eq!(pid_identity(0x7fff_ffff, now_ms()), PidCheck::Dead);
     }
 }
