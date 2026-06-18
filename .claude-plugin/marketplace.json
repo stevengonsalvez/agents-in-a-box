@@ -5,7 +5,7 @@
     "url": "https://github.com/stevengonsalvez"
   },
   "metadata": {
-    "description": "Marketplace for plugins shipped with the agents-in-a-box toolkit. Plugins live under toolkit/packages/plugins/ and are installable via `claude plugin install <name>@agents-in-a-box`.",
+    "description": "Marketplace for plugins shipped with agents-in-a-box. Plugins live under plugins/ at the repo root and are installable via `claude plugin install <name>@agents-in-a-box`.",
     "version": "1.0.0"
   },
   "plugins": [
