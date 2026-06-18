@@ -129,16 +129,28 @@ pub fn claude_settings_path() -> Result<PathBuf> {
         .join(".claude/settings.json"))
 }
 
-/// Short machine hostname (`hostname -s`), falling back to `localhost`.
+/// Short machine hostname (`hostname -s`), then `$HOSTNAME`, then `localhost`.
+/// The `$HOSTNAME` fallback matters on minimal Linux containers where the
+/// `hostname` binary is often absent (otherwise every host reads `localhost`).
 pub fn detect_host_name() -> String {
-    Command::new("hostname")
+    if let Some(h) = Command::new("hostname")
         .arg("-s")
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "localhost".to_string())
+    {
+        return h;
+    }
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        // `$HOSTNAME` is usually the FQDN; keep just the short label.
+        let short = h.split('.').next().unwrap_or(&h).trim();
+        if !short.is_empty() {
+            return short.to_string();
+        }
+    }
+    "localhost".to_string()
 }
 
 // ── Asset writing ─────────────────────────────────────────────────────────
@@ -164,32 +176,72 @@ pub fn write_assets() -> Result<()> {
     Ok(())
 }
 
+/// Escape a value for safe inclusion inside a single-quoted POSIX shell string.
+/// The template wraps every value in `'...'`; this returns the inner content
+/// with each `'` rewritten as `'\''` (close-quote, escaped quote, reopen). The
+/// rendered file is `source`d by the user's shell + start-alloy.sh, so anything
+/// less leaves a shell-injection hole (a token containing `"`, `` ` ``, `$`, or
+/// `'` could otherwise execute arbitrary code at every shell startup).
+fn sh_squote_inner(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+/// Reject values that can't be safely represented on a single shell line.
+fn validate_cred_value(label: &str, v: &str) -> Result<()> {
+    if v.contains('\n') || v.contains('\r') {
+        anyhow::bail!("{label} contains a newline — paste the value on a single line");
+    }
+    Ok(())
+}
+
 /// Render the env template with creds + host and write it to grafana-cloud.env
 /// with 0600 perms. Returns the path written.
 pub fn write_env_file(creds: &GrafanaCloudCreds, host_name: &str) -> Result<PathBuf> {
     let dir = otel_dir()?;
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    write_env_file_to(&env_file_path()?, creds, host_name)
+}
+
+/// `write_env_file` against an explicit path (testable; no `$HOME` dependency).
+/// The caller is responsible for the parent directory existing.
+pub fn write_env_file_to(
+    path: &std::path::Path,
+    creds: &GrafanaCloudCreds,
+    host_name: &str,
+) -> Result<PathBuf> {
+    validate_cred_value("host.name", host_name.trim())?;
+    validate_cred_value("OTLP endpoint", creds.otlp_endpoint.trim())?;
+    validate_cred_value("Instance ID", creds.instance_id.trim())?;
+    validate_cred_value("API token", creds.api_token.trim())?;
 
     let rendered = ASSET_ENV_TEMPLATE
-        .replace("__HOST_NAME__", host_name.trim())
-        .replace("__GRAFANA_OTLP_ENDPOINT__", creds.otlp_endpoint.trim())
-        .replace("__GRAFANA_INSTANCE_ID__", creds.instance_id.trim())
-        .replace("__GRAFANA_API_TOKEN__", creds.api_token.trim());
+        .replace("__HOST_NAME__", &sh_squote_inner(host_name.trim()))
+        .replace(
+            "__GRAFANA_OTLP_ENDPOINT__",
+            &sh_squote_inner(creds.otlp_endpoint.trim()),
+        )
+        .replace(
+            "__GRAFANA_INSTANCE_ID__",
+            &sh_squote_inner(creds.instance_id.trim()),
+        )
+        .replace(
+            "__GRAFANA_API_TOKEN__",
+            &sh_squote_inner(creds.api_token.trim()),
+        );
 
-    let path = env_file_path()?;
     // Create with 0600 from the start so the token is never briefly world-readable.
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     f.write_all(rendered.as_bytes()).context("writing grafana-cloud.env")?;
     // Re-assert perms in case the file pre-existed with looser bits.
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .context("chmod grafana-cloud.env")?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 /// Merge the generic (non-secret) OTEL keys into ~/.claude/settings.json's
@@ -201,10 +253,14 @@ pub fn ensure_settings_env() -> Result<Vec<String>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
+    ensure_settings_env_at(&path)
+}
 
+/// `ensure_settings_env` against an explicit path (testable; no `$HOME`).
+pub fn ensure_settings_env_at(path: &std::path::Path) -> Result<Vec<String>> {
     let mut root: serde_json::Value = if path.exists() {
         let raw =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         if raw.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -216,17 +272,30 @@ pub fn ensure_settings_env() -> Result<Vec<String>> {
     };
 
     if !root.is_object() {
-        anyhow::bail!("{} is not a JSON object", path.display());
+        anyhow::bail!(
+            "{} is not a JSON object — fix or remove it, then re-run",
+            path.display()
+        );
     }
+    let obj = root.as_object_mut().unwrap();
 
-    let env = root
-        .as_object_mut()
-        .unwrap()
-        .entry("env")
-        .or_insert_with(|| serde_json::json!({}));
-    let env = env
-        .as_object_mut()
-        .context("the `env` field in settings.json is not an object")?;
+    // A null `env` is treated as absent (safe to replace). A non-null,
+    // non-object `env` (array/string/number/bool) is a user value we must NOT
+    // clobber — bail with an actionable message instead of overwriting.
+    match obj.get("env") {
+        None | Some(serde_json::Value::Null) => {
+            obj.insert("env".to_string(), serde_json::json!({}));
+        }
+        Some(v) if v.is_object() => {}
+        Some(_) => anyhow::bail!(
+            "the `env` field in {} is not an object — fix or remove it, then re-run",
+            path.display()
+        ),
+    }
+    let env = obj
+        .get_mut("env")
+        .and_then(|e| e.as_object_mut())
+        .expect("env normalized to an object above");
 
     let mut added = Vec::new();
     for (k, v) in SETTINGS_ENV {
@@ -242,7 +311,7 @@ pub fn ensure_settings_env() -> Result<Vec<String>> {
     if !added.is_empty() {
         let mut out = serde_json::to_string_pretty(&root).context("serializing settings.json")?;
         out.push('\n');
-        fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+        fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(added)
 }
@@ -272,16 +341,35 @@ pub fn shell_rc_path() -> Result<PathBuf> {
 /// the marker is already present. Backs up the rc to `<rc>.bak` before the first
 /// append. Returns `true` if it appended (rc was modified).
 pub fn ensure_shell_rc_sources_env() -> Result<bool> {
-    let rc = shell_rc_path()?;
-    let env_file = env_file_path()?;
+    ensure_shell_rc_at(&shell_rc_path()?, &env_file_path()?)
+}
 
-    let existing = fs::read_to_string(&rc).unwrap_or_default();
+/// `ensure_shell_rc_sources_env` against explicit paths (testable).
+///
+/// Note: this read-check-append is not atomic across concurrent processes —
+/// two simultaneous setups could both pass the marker check and append twice.
+/// That race is acceptable for a single-user, interactive onboarding tool; if
+/// it ever matters, guard with an advisory file lock.
+pub fn ensure_shell_rc_at(rc: &std::path::Path, env_file: &std::path::Path) -> Result<bool> {
+    // NotFound -> treat as empty (we'll create it). Any other read error
+    // (permission denied, rc is a directory) is real — surface it rather than
+    // silently masking it as an empty file.
+    let existing = match fs::read_to_string(rc) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", rc.display())),
+    };
     if existing.contains(RC_MARKER) || existing.contains("otel/grafana-cloud.env") {
         return Ok(false);
     }
 
     if rc.exists() {
-        let _ = fs::copy(&rc, rc.with_extension("bak"));
+        // Build "<name>.bak" from the full file name — `with_extension` would
+        // turn `.zshrc` into `.zsh.bak` (and `.profile` into `.bak`).
+        if let Some(name) = rc.file_name() {
+            let bak = rc.with_file_name(format!("{}.bak", name.to_string_lossy()));
+            let _ = fs::copy(rc, bak);
+        }
     }
 
     let block = format!(
@@ -291,7 +379,7 @@ pub fn ensure_shell_rc_sources_env() -> Result<bool> {
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&rc)
+        .open(rc)
         .with_context(|| format!("opening {}", rc.display()))?;
     f.write_all(block.as_bytes())
         .with_context(|| format!("appending to {}", rc.display()))?;
@@ -454,5 +542,134 @@ mod tests {
     fn config_alloy_asset_is_the_fan_in_pipeline() {
         assert!(ASSET_CONFIG_ALLOY.contains("otelcol.receiver.otlp"));
         assert!(ASSET_CONFIG_ALLOY.contains("deltatocumulative"));
+    }
+
+    #[test]
+    fn sh_squote_neutralizes_injection() {
+        // A single quote becomes '\'' so the value can't break out of '...'.
+        assert_eq!(sh_squote_inner("a'b$c`x`"), "a'\\''b$c`x`");
+    }
+
+    #[test]
+    fn write_env_file_is_0600_and_shell_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grafana-cloud.env");
+        let creds = GrafanaCloudCreds {
+            otlp_endpoint: "https://e/otlp".into(),
+            instance_id: "12345".into(),
+            // Hostile token: quote + command-substitution + backticks.
+            api_token: "a'b$(rm -rf ~)`x`".into(),
+        };
+        write_env_file_to(&path, &creds, "my-host").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "env file must be 0600, got {mode:o}");
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("__"), "unresolved placeholder:\n{body}");
+        // The token stays inside single quotes with the embedded ' escaped, so
+        // $(...) / backticks are inert.
+        assert!(
+            body.contains("export GRAFANA_API_TOKEN='a'\\''b$(rm -rf ~)`x`'"),
+            "token not safely single-quoted:\n{body}"
+        );
+        assert!(body.contains("host.name=my-host"));
+    }
+
+    #[test]
+    fn write_env_file_rejects_newline_in_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        let creds = GrafanaCloudCreds {
+            otlp_endpoint: "https://e/otlp".into(),
+            instance_id: "1".into(),
+            api_token: "line1\nexport EVIL=1".into(),
+        };
+        assert!(write_env_file_to(&path, &creds, "h").is_err());
+    }
+
+    #[test]
+    fn settings_env_merge_preserves_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"foo":"bar","env":{"EXISTING":"keep","OTEL_LOG_USER_PROMPTS":"0"}}"#,
+        )
+        .unwrap();
+
+        let added = ensure_settings_env_at(&path).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["foo"], "bar", "unrelated top-level key dropped");
+        assert_eq!(v["env"]["EXISTING"], "keep", "unrelated env key dropped");
+        // Must NOT clobber a user's existing value for one of our keys.
+        assert_eq!(v["env"]["OTEL_LOG_USER_PROMPTS"], "0");
+        assert!(!added.contains(&"OTEL_LOG_USER_PROMPTS".to_string()));
+        assert!(added.contains(&"CLAUDE_CODE_ENABLE_TELEMETRY".to_string()));
+
+        // Second run is a no-op.
+        assert!(ensure_settings_env_at(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settings_env_creates_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let added = ensure_settings_env_at(&path).unwrap();
+        assert_eq!(added.len(), SETTINGS_ENV.len());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn settings_env_bails_on_non_object_env_without_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = r#"{"env":["x"]}"#;
+        fs::write(&path, original).unwrap();
+        assert!(ensure_settings_env_at(&path).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original,
+            "must not modify a file it refuses to merge"
+        );
+    }
+
+    #[test]
+    fn settings_env_treats_null_env_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"env":null}"#).unwrap();
+        let added = ensure_settings_env_at(&path).unwrap();
+        assert_eq!(added.len(), SETTINGS_ENV.len());
+    }
+
+    #[test]
+    fn shell_rc_backup_name_is_full_filename_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join(".zshrc");
+        fs::write(&rc, "# my rc\nexport FOO=1\n").unwrap();
+        let env_file = dir.path().join("grafana-cloud.env");
+
+        assert!(ensure_shell_rc_at(&rc, &env_file).unwrap());
+        // Backup must be `.zshrc.bak`, NOT `.zsh.bak`.
+        let bak = dir.path().join(".zshrc.bak");
+        assert!(bak.exists(), "backup not at .zshrc.bak");
+        assert_eq!(fs::read_to_string(&bak).unwrap(), "# my rc\nexport FOO=1\n");
+        assert!(fs::read_to_string(&rc).unwrap().contains("grafana-cloud.env"));
+
+        // Idempotent: second run does nothing, no duplicate source block.
+        assert!(!ensure_shell_rc_at(&rc, &env_file).unwrap());
+        let sources = fs::read_to_string(&rc).unwrap().matches("source").count();
+        assert_eq!(sources, 1, "duplicate source block appended");
+    }
+
+    #[test]
+    fn shell_rc_created_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join(".bashrc");
+        let env_file = dir.path().join("grafana-cloud.env");
+        assert!(ensure_shell_rc_at(&rc, &env_file).unwrap());
+        assert!(rc.exists());
     }
 }

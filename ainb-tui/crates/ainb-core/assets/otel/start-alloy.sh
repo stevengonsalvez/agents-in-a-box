@@ -18,7 +18,7 @@ LOG="$HOME/.agents-in-a-box/logs/alloy.log"
 [ -f "$CONFIG" ] || { echo "missing $CONFIG — run 'ainb otel setup' first"; exit 1; }
 # shellcheck disable=SC1090
 source "$ENV_FILE"
-case "${GRAFANA_API_TOKEN:-}" in ""|REPLACE_*) echo "fill creds in $ENV_FILE first (run 'ainb otel setup')"; exit 1;; esac
+case "${GRAFANA_API_TOKEN:-}" in ""|__GRAFANA_*|REPLACE_*) echo "fill creds in $ENV_FILE first (run 'ainb otel setup')"; exit 1;; esac
 
 command -v alloy >/dev/null || { echo "alloy not installed — brew install grafana/grafana/alloy"; exit 1; }
 
