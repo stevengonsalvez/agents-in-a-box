@@ -199,14 +199,32 @@ fn assistant_text_from_row(obj: &Value) -> Option<(Option<String>, Option<String
     Some((stop_reason, (!text.is_empty()).then(|| text.to_string())))
 }
 
+/// Is this assistant row's `stop_reason` an end-of-turn signal?
+///
+/// TURN-END REALITY: Claude (>= 2.1.x) streams the assistant turn as JSONL rows
+/// that all carry `stop_reason: null` — the visible reply text lands in a
+/// `stop_reason: null` row, and the only `"end_turn"` (if any) rides a later
+/// metadata row that carries NO text. The original scan accepted ONLY
+/// `stop_reason == "end_turn"`, so a real reply (e.g. `PONG`) whose text row is
+/// stamped `null` was never recognised and `wait_for_reply` timed out despite a
+/// delivered answer. We therefore treat an absent/`null` `stop_reason` as a
+/// candidate end-of-turn too. Non-terminal reasons (`tool_use`, `max_tokens`,
+/// etc.) are still rejected: a `tool_use` row means the turn is mid-flight, and
+/// `assistant_text_from_row` already drops rows with no `type:text` block, so a
+/// thinking-only or tool-only row never reaches here as a reply.
+#[must_use]
+fn is_turn_end_stop_reason(stop_reason: Option<&str>) -> bool {
+    matches!(stop_reason, None | Some("end_turn"))
+}
+
 /// Scan rows from `start_offset`; return `(new_offset, reply_text|None)`.
 ///
-/// `reply_text` is set only when an assistant row with
-/// `stop_reason == "end_turn"` is found in the new region; the LAST such turn
-/// wins. When `min_ts_ms` is given, only rows whose JSONL `timestamp` is
-/// strictly AFTER it are accepted (the send-time backlog guard). Only
-/// COMPLETE (newline-terminated) lines are consumed — a trailing partial write
-/// is left for the next poll.
+/// `reply_text` is set only when an assistant row that BOTH carries visible
+/// text AND has an end-of-turn `stop_reason` (see [`is_turn_end_stop_reason`])
+/// is found in the new region; the LAST such turn wins. When `min_ts_ms` is
+/// given, only rows whose JSONL `timestamp` is strictly AFTER it are accepted
+/// (the send-time backlog guard). Only COMPLETE (newline-terminated) lines are
+/// consumed — a trailing partial write is left for the next poll.
 pub fn scan_new_rows_for_turn_end(
     path: &Path,
     start_offset: u64,
@@ -246,7 +264,7 @@ pub fn scan_new_rows_for_turn_end(
         let Some((stop_reason, text)) = assistant_text_from_row(&obj) else {
             continue;
         };
-        if stop_reason.as_deref() == Some("end_turn") {
+        if is_turn_end_stop_reason(stop_reason.as_deref()) {
             if let Some(text) = text {
                 if let Some(min_ts) = min_ts_ms {
                     match row_timestamp_ms(&obj) {
@@ -448,6 +466,61 @@ mod tests {
         assert!(
             reply.is_none(),
             "unprovable (no-timestamp) row must be rejected under guard"
+        );
+    }
+
+    #[test]
+    fn captures_null_stop_reason_text_reply() {
+        // REGRESSION (PR #293): real Claude >= 2.1.x transcripts stamp the
+        // visible-text assistant row with `stop_reason: null`, not "end_turn".
+        // Rows below are trimmed verbatim from the live `bridgetest` transcript
+        // that replied PONG yet produced "no reply within 120s": a thinking row
+        // and the PONG text row, BOTH `stop_reason:null`, dated AFTER the send.
+        // Before the fix the scan required "end_turn" and returned None here.
+        let path = tmp_jsonl("null-stopreason");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.109Z","message":{{"model":"claude-sonnet-4-6","stop_reason":null,"content":[{{"type":"thinking","thinking":"Discord ping; respond."}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.121Z","message":{{"model":"claude-sonnet-4-6","stop_reason":null,"content":[{{"type":"text","text":"PONG"}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        // Send watermark just before the reply rows.
+        let send_ms = chrono::DateTime::parse_from_rfc3339("2026-06-18T22:01:52Z")
+            .unwrap()
+            .timestamp_millis();
+        let (_, reply) = scan_new_rows_for_turn_end(&path, 0, Some(send_ms));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            reply.as_deref(),
+            Some("PONG"),
+            "a null-stop_reason text reply (real transcript shape) must be captured"
+        );
+    }
+
+    #[test]
+    fn tool_use_row_is_not_a_reply() {
+        // A mid-turn `tool_use` row is NOT end-of-turn: the turn is still in
+        // flight. It must never be surfaced as the reply even though it may
+        // carry a leading text block.
+        let path = tmp_jsonl("tooluse-midturn");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.000Z","message":{{"stop_reason":"tool_use","content":[{{"type":"text","text":"let me check"}},{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        let (_, reply) = scan_new_rows_for_turn_end(&path, 0, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            reply.is_none(),
+            "a tool_use (mid-turn) row must not be a reply"
         );
     }
 
