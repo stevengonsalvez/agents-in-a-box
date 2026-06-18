@@ -1,7 +1,9 @@
 # agents-in-a-box — workspace root for Python projects in this monorepo.
-# Currently houses one workspace member: reflect-kb (Python library +
-# `reflect` CLI). Additional packages can be added later by extending
-# the workspace.members list.
+# Workspace members:
+#   - reflect-kb            local file-based learning KB + `reflect` CLI
+#   - ainb-reflect-memory   Postgres-backed GraphRAG memory substrate
+#                           (extractable as a standalone repo later)
+# Additional packages can be added by extending workspace.members.
 
 [tool.uv.workspace]
-members = ["reflect-kb"]
+members = ["reflect-kb", "ainb-reflect-memory"]
