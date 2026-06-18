@@ -3994,6 +3994,34 @@ impl AppState {
                 self.app_config.ui_preferences.preferred_editor = Some(editor);
             }
 
+            // Optional OpenTelemetry -> Grafana Cloud setup. Best-effort: a
+            // failure here must never block finishing onboarding. The TUI does
+            // NOT brew-install Alloy (interactive brew in the alt-screen is
+            // hostile) — if Alloy is missing we still write the config and the
+            // user finishes with `ainb otel setup` / `ainb otel start` later.
+            if state.otel_should_setup() {
+                let creds = crate::otel::GrafanaCloudCreds {
+                    otlp_endpoint: state.otel_otlp_endpoint.trim().to_string(),
+                    instance_id: state.otel_instance_id.trim().to_string(),
+                    api_token: state.otel_api_token.trim().to_string(),
+                };
+                let host = crate::otel::detect_host_name();
+                let result = (|| -> anyhow::Result<()> {
+                    crate::otel::write_assets()?;
+                    crate::otel::write_env_file(&creds, &host)?;
+                    crate::otel::ensure_settings_env()?;
+                    let _ = crate::otel::ensure_shell_rc_sources_env();
+                    if crate::otel::alloy_installed() {
+                        let _ = crate::otel::start_alloy();
+                    }
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => info!("OTEL setup written (host.name={host})"),
+                    Err(e) => warn!("OTEL setup during onboarding failed (non-fatal): {e}"),
+                }
+            }
+
             if let Err(e) = self.app_config.save() {
                 warn!(
                     "Failed to save app config during onboarding completion: {}",

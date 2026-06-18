@@ -451,6 +451,10 @@ pub enum AppEvent {
     OnboardingEditorDown,      // Move editor selection down
     OnboardingFinish,          // Complete onboarding
     OnboardingInstallConfig,   // Install recommended config (I key)
+    OnboardingOtelChar(char),  // Type into the focused OTEL field
+    OnboardingOtelBackspace,   // Backspace the focused OTEL field
+    OnboardingOtelNextField,   // Focus next OTEL field (Tab/Down)
+    OnboardingOtelPrevField,   // Focus previous OTEL field (Shift-Tab/Up)
     // Setup menu events
     SetupMenuBack,   // Return to home screen (Esc)
     SetupMenuSelect, // Select menu item (Enter)
@@ -2243,6 +2247,18 @@ impl EventHandler {
                         Some(AppEvent::OnboardingBack)
                     }
                     KeyCode::Char('s') | KeyCode::Char('S') => Some(AppEvent::OnboardingSkipAuth),
+                    _ => None,
+                },
+                OnboardingStep::OtelSetup => match key_event.code {
+                    // Enter advances; if all 3 creds are filled, finish-time
+                    // setup runs, otherwise the step is effectively skipped.
+                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                    KeyCode::Left => Some(AppEvent::OnboardingBack),
+                    KeyCode::Tab | KeyCode::Down => Some(AppEvent::OnboardingOtelNextField),
+                    KeyCode::BackTab | KeyCode::Up => Some(AppEvent::OnboardingOtelPrevField),
+                    KeyCode::Backspace => Some(AppEvent::OnboardingOtelBackspace),
+                    KeyCode::Char(ch) => Some(AppEvent::OnboardingOtelChar(ch)),
                     _ => None,
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
@@ -6226,6 +6242,26 @@ impl EventHandler {
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
                     }
+                }
+            }
+            AppEvent::OnboardingOtelChar(ch) => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_input_char(ch);
+                }
+            }
+            AppEvent::OnboardingOtelBackspace => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_backspace();
+                }
+            }
+            AppEvent::OnboardingOtelNextField => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_next_field();
+                }
+            }
+            AppEvent::OnboardingOtelPrevField => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_prev_field();
                 }
             }
             AppEvent::OnboardingInstallConfig => {

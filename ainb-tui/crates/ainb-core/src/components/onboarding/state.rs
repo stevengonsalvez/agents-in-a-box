@@ -12,6 +12,7 @@ pub enum OnboardingStep {
     DependencyCheck,
     GitDirectories,
     Authentication,
+    OtelSetup,
     EditorSelection,
     Summary,
 }
@@ -35,6 +36,7 @@ impl OnboardingStep {
             Self::DependencyCheck,
             Self::GitDirectories,
             Self::Authentication,
+            Self::OtelSetup,
             Self::EditorSelection,
             Self::Summary,
         ]
@@ -47,14 +49,15 @@ impl OnboardingStep {
             Self::DependencyCheck => 2,
             Self::GitDirectories => 3,
             Self::Authentication => 4,
-            Self::EditorSelection => 5,
-            Self::Summary => 6,
+            Self::OtelSetup => 5,
+            Self::EditorSelection => 6,
+            Self::Summary => 7,
         }
     }
 
     /// Get the total number of steps
     pub fn total() -> usize {
-        6
+        7
     }
 
     /// Get display title for this step
@@ -64,6 +67,7 @@ impl OnboardingStep {
             Self::DependencyCheck => "Dependencies",
             Self::GitDirectories => "Git Directories",
             Self::Authentication => "Authentication",
+            Self::OtelSetup => "Telemetry",
             Self::EditorSelection => "Editor",
             Self::Summary => "Summary",
         }
@@ -76,6 +80,7 @@ impl OnboardingStep {
             Self::DependencyCheck => "Checking required tools",
             Self::GitDirectories => "Where are your projects?",
             Self::Authentication => "Set up AI agent authentication",
+            Self::OtelSetup => "Optional: ship metrics to Grafana Cloud",
             Self::EditorSelection => "Choose your preferred editor",
             Self::Summary => "You're all set!",
         }
@@ -97,6 +102,10 @@ impl OnboardingStep {
                 // Auth can be skipped
                 true
             }
+            Self::OtelSetup => {
+                // OTEL is optional — always advanceable (fill creds or skip)
+                true
+            }
             Self::EditorSelection => {
                 // Editor selection can be skipped (will use fallback)
                 true
@@ -114,7 +123,8 @@ impl OnboardingStep {
             Self::Welcome => Some(Self::DependencyCheck),
             Self::DependencyCheck => Some(Self::GitDirectories),
             Self::GitDirectories => Some(Self::Authentication),
-            Self::Authentication => Some(Self::EditorSelection),
+            Self::Authentication => Some(Self::OtelSetup),
+            Self::OtelSetup => Some(Self::EditorSelection),
             Self::EditorSelection => Some(Self::Summary),
             Self::Summary => None,
         }
@@ -127,7 +137,8 @@ impl OnboardingStep {
             Self::DependencyCheck => Some(Self::Welcome),
             Self::GitDirectories => Some(Self::DependencyCheck),
             Self::Authentication => Some(Self::GitDirectories),
-            Self::EditorSelection => Some(Self::Authentication),
+            Self::OtelSetup => Some(Self::Authentication),
+            Self::EditorSelection => Some(Self::OtelSetup),
             Self::Summary => Some(Self::EditorSelection),
         }
     }
@@ -243,6 +254,16 @@ pub struct OnboardingState {
     pub available_editors: Vec<EditorOption>,
     /// Currently selected editor index
     pub selected_editor_index: usize,
+    /// OTEL: user chose to skip the OpenTelemetry step (no setup on finish)
+    pub otel_skip: bool,
+    /// OTEL: Grafana Cloud OTLP endpoint URL (ends in /otlp)
+    pub otel_otlp_endpoint: String,
+    /// OTEL: Grafana Cloud Instance ID (Basic-auth username)
+    pub otel_instance_id: String,
+    /// OTEL: Grafana Cloud API token (secret)
+    pub otel_api_token: String,
+    /// OTEL: focused form field (0=endpoint, 1=instance, 2=token)
+    pub otel_field: usize,
 }
 
 impl OnboardingState {
@@ -264,7 +285,54 @@ impl OnboardingState {
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,
+            otel_skip: true,
+            otel_otlp_endpoint: String::new(),
+            otel_instance_id: String::new(),
+            otel_api_token: String::new(),
+            otel_field: 0,
         }
+    }
+
+    /// Mutable handle to the currently focused OTEL field's string.
+    fn otel_field_mut(&mut self) -> &mut String {
+        match self.otel_field {
+            0 => &mut self.otel_otlp_endpoint,
+            1 => &mut self.otel_instance_id,
+            _ => &mut self.otel_api_token,
+        }
+    }
+
+    /// Type a character into the focused OTEL field (entering data un-skips).
+    pub fn otel_input_char(&mut self, c: char) {
+        self.otel_skip = false;
+        self.otel_field_mut().push(c);
+    }
+
+    /// Backspace the focused OTEL field.
+    pub fn otel_backspace(&mut self) {
+        self.otel_field_mut().pop();
+    }
+
+    /// Move focus to the next OTEL field (wraps).
+    pub fn otel_next_field(&mut self) {
+        self.otel_field = (self.otel_field + 1) % 3;
+    }
+
+    /// Move focus to the previous OTEL field (wraps).
+    pub fn otel_prev_field(&mut self) {
+        self.otel_field = (self.otel_field + 2) % 3;
+    }
+
+    /// True when all three OTEL fields are filled (after trim).
+    pub fn otel_creds_complete(&self) -> bool {
+        !self.otel_otlp_endpoint.trim().is_empty()
+            && !self.otel_instance_id.trim().is_empty()
+            && !self.otel_api_token.trim().is_empty()
+    }
+
+    /// Whether OTEL setup should run on finish (not skipped + creds complete).
+    pub fn otel_should_setup(&self) -> bool {
+        !self.otel_skip && self.otel_creds_complete()
     }
 
     /// Detect available editors on the system
@@ -479,15 +547,37 @@ mod tests {
 
         let step = OnboardingStep::EditorSelection;
         assert_eq!(step.next(), Some(OnboardingStep::Summary));
+        assert_eq!(step.previous(), Some(OnboardingStep::OtelSetup));
+
+        let step = OnboardingStep::OtelSetup;
+        assert_eq!(step.next(), Some(OnboardingStep::EditorSelection));
         assert_eq!(step.previous(), Some(OnboardingStep::Authentication));
     }
 
     #[test]
     fn test_step_numbers() {
         assert_eq!(OnboardingStep::Welcome.number(), 1);
-        assert_eq!(OnboardingStep::EditorSelection.number(), 5);
-        assert_eq!(OnboardingStep::Summary.number(), 6);
-        assert_eq!(OnboardingStep::total(), 6);
+        assert_eq!(OnboardingStep::OtelSetup.number(), 5);
+        assert_eq!(OnboardingStep::EditorSelection.number(), 6);
+        assert_eq!(OnboardingStep::Summary.number(), 7);
+        assert_eq!(OnboardingStep::total(), 7);
+    }
+
+    #[test]
+    fn test_otel_field_input() {
+        let mut state = OnboardingState::new();
+        assert!(state.otel_skip);
+        state.current_step = OnboardingStep::OtelSetup;
+        state.otel_input_char('h');
+        state.otel_input_char('i');
+        assert_eq!(state.otel_otlp_endpoint, "hi");
+        assert!(!state.otel_skip);
+        state.otel_next_field();
+        state.otel_input_char('7');
+        assert_eq!(state.otel_instance_id, "7");
+        state.otel_backspace();
+        assert_eq!(state.otel_instance_id, "");
+        assert!(!state.otel_creds_complete());
     }
 
     #[test]
