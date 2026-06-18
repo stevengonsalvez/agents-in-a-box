@@ -227,7 +227,8 @@
     "ainb-fleet@agents-in-a-box": true,
     "ainb-hooks@agents-in-a-box": true,
     "caveman-stats@agents-in-a-box": true,
-    "caveman@caveman": true
+    "caveman@caveman": true,
+    "ponytail@ponytail": true
   },
   "extraKnownMarketplaces": {
     "agents-in-a-box": {
@@ -241,10 +242,16 @@
         "source": "github",
         "repo": "JuliusBrussee/caveman"
       }
+    },
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
     }
   },
   "skipDangerousModePermissionPrompt": true,
-  "teammateMode": "auto",
+  "teammateMode": "in-process",
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
   "inputNeededNotifEnabled": true,
