@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/notification.py --notify"
+            "command": "uv run --no-project ~/.claude/hooks/notification.py --notify"
           }
         ]
       }
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/dev_server_tmux.py"
+            "command": "uv run --no-project ~/.claude/hooks/dev_server_tmux.py"
           }
         ]
       },
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/pre_tool_use.py"
+            "command": "uv run --no-project ~/.claude/hooks/pre_tool_use.py"
           }
         ]
       }
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/post_tool_use.py"
+            "command": "uv run --no-project ~/.claude/hooks/post_tool_use.py"
           }
         ]
       },
@@ -99,7 +99,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/stop.py --chat"
+            "command": "uv run --no-project ~/.claude/hooks/stop.py --chat"
           }
         ]
       },
@@ -108,7 +108,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/cost_tracker.py",
+            "command": "uv run --no-project ~/.claude/hooks/cost_tracker.py",
             "timeout": 10,
             "async": true
           }
@@ -129,7 +129,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/subagent_stop.py"
+            "command": "uv run --no-project ~/.claude/hooks/subagent_stop.py"
           }
         ]
       }
@@ -139,7 +139,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/user_prompt_submit.py --log-only"
+            "command": "uv run --no-project ~/.claude/hooks/user_prompt_submit.py --log-only"
           }
         ]
       },
@@ -158,7 +158,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
+            "command": "uv run --no-project ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
           }
         ]
       }
@@ -169,7 +169,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/session_start.py --git-status --load-context"
+            "command": "uv run --no-project ~/.claude/hooks/session_start.py --git-status --load-context"
           }
         ]
       },
