@@ -1,0 +1,82 @@
+{
+  "model": "sonnet",
+  "samples": [
+    {
+      "sample_id": "conv-26",
+      "n_notes": 239,
+      "n_selected": 50,
+      "by_config": {
+        "arms_on": {
+          "n_qa": 50,
+          "j_score": 0.58,
+          "per_category": {
+            "adversarial": {
+              "n": 10,
+              "j_score": 1.0
+            },
+            "multi_hop": {
+              "n": 10,
+              "j_score": 0.5
+            },
+            "open_domain": {
+              "n": 10,
+              "j_score": 0.4
+            },
+            "single_hop": {
+              "n": 10,
+              "j_score": 0.5
+            },
+            "temporal": {
+              "n": 10,
+              "j_score": 0.5
+            }
+          },
+          "recall_latency_p50_s": 398.391,
+          "recall_latency_p95_s": 825.855,
+          "answer_latency_p50_s": 5.263,
+          "answer_latency_p95_s": 8.968,
+          "total_tokens": 762197,
+          "total_cost_usd": 5.2608,
+          "memory_notes": 239
+        },
+        "arms_off": {
+          "n_qa": 50,
+          "j_score": 0.6,
+          "per_category": {
+            "adversarial": {
+              "n": 10,
+              "j_score": 1.0
+            },
+            "multi_hop": {
+              "n": 10,
+              "j_score": 0.5
+            },
+            "open_domain": {
+              "n": 10,
+              "j_score": 0.5
+            },
+            "single_hop": {
+              "n": 10,
+              "j_score": 0.5
+            },
+            "temporal": {
+              "n": 10,
+              "j_score": 0.5
+            }
+          },
+          "recall_latency_p50_s": 469.786,
+          "recall_latency_p95_s": 767.718,
+          "answer_latency_p50_s": 5.13,
+          "answer_latency_p95_s": 10.078,
+          "total_tokens": 212880,
+          "total_cost_usd": 2.1329,
+          "memory_notes": 239
+        }
+      }
+    }
+  ],
+  "configs": [
+    "arms_on",
+    "arms_off"
+  ]
+}

@@ -1,0 +1,13 @@
+# Generated benchmark artifacts — not source.
+# (Tracked: locomo_bench.py, make_report.py, README.md, REPORT.md, results/report_*.json)
+
+# per-sample hermetic KBs (reindexed, large)
+results/kb/
+# per-session extraction + per-QA verdict caches (resumable)
+results/cache/
+# run logs
+results/*.log
+__pycache__/
+
+# LOCOMO dataset — fetched from github.com/snap-research/locomo, not vendored.
+data/

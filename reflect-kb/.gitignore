@@ -8,6 +8,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-locomo/
 venv/
 env/
 .pytest_cache/
