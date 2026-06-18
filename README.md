@@ -453,6 +453,12 @@ agents-in-a-box/
 │   ├── tests/                  #   Unit + integration tests
 │   └── pyproject.toml          #   Workspace member
 │
+├── ainb-reflect-memory/        # Python library — Postgres GraphRAG memory substrate
+│   ├── src/                    #   Typed helper layer (dumb server, client keeps the brain)
+│   ├── supabase/migrations/    #   Phase 1 schema: memory/entities/edges + FTS + RLS
+│   ├── tests/                  #   Unit (no DB) + integration (auto-skip without DB)
+│   └── pyproject.toml          #   Workspace member (extractable as its own repo later)
+│
 ├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
 │   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
 │   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
