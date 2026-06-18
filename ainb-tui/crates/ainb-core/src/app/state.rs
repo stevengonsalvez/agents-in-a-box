@@ -3333,6 +3333,7 @@ struct ConfigureLaunchSnapshot {
     /// The base-branch popup pick (2026-06). `None` = legacy base policy:
     /// HEAD for local repos, origin/HEAD for remote/star launches.
     base: Option<crate::components::new_session::configure::BaseSelection>,
+    headroom_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7047,6 +7048,7 @@ impl AppState {
             session_model,
             codex_model,
             base: spec.base.clone(),
+            headroom_enabled: spec.headroom_enabled,
         };
 
         // Boss mode builds its own Docker workspace from `repo_path` and
@@ -7201,6 +7203,7 @@ impl AppState {
                 snapshot.codex_model,
                 existing_worktree,
                 base_start_point,
+                snapshot.headroom_enabled,
             )
             .await;
 
@@ -7823,6 +7826,7 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -7837,6 +7841,7 @@ impl AppState {
                     codex_model,
                     existing_worktree,
                     base_start_point,
+                    headroom_enabled,
                 )
                 .await
             }
@@ -7877,6 +7882,7 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -7936,6 +7942,7 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
                 )
                 .await
         } else {
@@ -7952,6 +7959,7 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
                 )
                 .await
         };
@@ -8654,6 +8662,7 @@ impl AppState {
                     codex_model,
                     metadata.agent_type,
                     transcript.clone(),
+                    metadata.headroom_enabled,
                 )
                 .await?;
 
@@ -10147,7 +10156,21 @@ impl AppState {
         if skip_permissions {
             cmd_parts.push(provider.skip_permissions_flag().to_string());
         }
-        let cli_cmd = cmd_parts.join(" ");
+        // Preserve per-session Headroom routing across restart. `send-keys`
+        // bypasses build_env_setup_for_provider, so re-derive the proxy export
+        // from the persisted SessionMetadata (keyed by tmux name) and prepend
+        // it — otherwise a restarted HR session would silently stop routing
+        // through the proxy.
+        let headroom_enabled = crate::interactive::SessionStore::load()
+            .sessions
+            .get(&tmux_session_name)
+            .map(|m| m.headroom_enabled)
+            .unwrap_or(false);
+        let cli_cmd = format!(
+            "{}{}",
+            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_enabled),
+            cmd_parts.join(" ")
+        );
 
         info!(
             "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",

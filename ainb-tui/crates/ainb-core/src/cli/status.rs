@@ -205,6 +205,7 @@ mod tests {
             workspace_name: workspace.to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         }
     }
 

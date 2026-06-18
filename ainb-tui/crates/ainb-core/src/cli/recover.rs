@@ -392,6 +392,7 @@ fn execute_resume(session: &str) -> Result<()> {
         workspace_name: workspace.clone(),
         created_at: matched.created_at.unwrap_or_else(Utc::now),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
     };
 
     let mut store = SessionStore::load();
@@ -612,6 +613,7 @@ mod tests {
             workspace_name: workspace.to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         }
     }
 

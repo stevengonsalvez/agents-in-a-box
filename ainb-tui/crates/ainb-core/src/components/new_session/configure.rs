@@ -212,6 +212,7 @@ pub enum ConfigureRow {
     Model,
     Mode,
     Yolo,
+    HeadroomProxy,
     Host,
     User,
     Port,
@@ -287,6 +288,9 @@ pub struct ConfigureState {
     pub base_selection: Option<BaseSelection>,
     /// Base-branch popup state — `Some` while the popup is open.
     pub branch_picker: Option<BranchPickerState>,
+    /// Route this session's CLI through the local Headroom compression proxy.
+    /// Only active for Claude and Codex agents.
+    pub headroom_enabled: bool,
 }
 
 impl ConfigureState {
@@ -378,6 +382,7 @@ impl ConfigureState {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
         }
     }
 
@@ -546,6 +551,9 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
             }
         } else {
             // Real preset — Mode/Yolo are shown locked, but only when the
@@ -553,6 +561,9 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
             }
         }
         // Branch row visible for everything that isn't SSH.
@@ -626,6 +637,7 @@ pub struct LaunchSpec {
     /// (HEAD for local repos, origin/HEAD for remote/star launches).
     pub base: Option<BaseSelection>,
     pub prompt: Option<String>,
+    pub headroom_enabled: bool,
 }
 
 impl LaunchSpec {
@@ -708,6 +720,9 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             }
             ConfigureRow::Yolo => {
                 render_yolo_row(f, state, area_for_row, focused);
+            }
+            ConfigureRow::HeadroomProxy => {
+                render_headroom_row(f, state, area_for_row, focused);
             }
             ConfigureRow::Host | ConfigureRow::User | ConfigureRow::Port | ConfigureRow::Key => {
                 render_ssh_field(f, state, area_for_row, *row);
@@ -1065,6 +1080,17 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
     }
     let options = vec!["ON".to_string(), "OFF".to_string()];
     let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    let current = if state.headroom_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    let options = vec!["on".to_string(), "off".to_string()];
+    let line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1885,6 +1911,7 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         branch_override: state.branch_override.clone(),
         base: state.base_selection.clone(),
         prompt,
+        headroom_enabled: state.headroom_enabled,
     })
 }
 
@@ -1912,6 +1939,9 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
             if state.preset_selection == PresetSelection::Custom {
                 cycle_yolo(state);
             }
+        }
+        ConfigureRow::HeadroomProxy => {
+            state.headroom_enabled = !state.headroom_enabled;
         }
         ConfigureRow::Branch => {
             // ←/→ on the Branch row toggles the targeted segment
@@ -2295,6 +2325,7 @@ mod tests {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
         }
     }
 

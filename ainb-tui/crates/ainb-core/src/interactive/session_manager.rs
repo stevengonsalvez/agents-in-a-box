@@ -62,6 +62,7 @@ pub struct InteractiveSession {
     pub created_at: DateTime<Utc>,
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     pub model: Option<ClaudeModel>,   // Claude model for this session (only for Claude agent)
+    pub headroom_enabled: bool,       // Route this session's CLI through the local Headroom proxy
 }
 
 /// Persisted session metadata for discovery across restarts
@@ -79,6 +80,8 @@ pub struct SessionMetadata {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub agent_type: SessionAgentType,
+    #[serde(default)]
+    pub headroom_enabled: bool,
 }
 
 /// Storage for all persisted session metadata
@@ -179,6 +182,37 @@ impl SessionStore {
     }
 }
 
+/// Default port for the ainb-managed Headroom compression proxy.
+pub const HEADROOM_DEFAULT_PORT: u16 = 8787;
+
+/// Base URL of the local Headroom proxy. Port overridable via `AINB_HEADROOM_PORT`.
+pub fn headroom_base_url() -> String {
+    let port = std::env::var("AINB_HEADROOM_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(HEADROOM_DEFAULT_PORT);
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Shell `export … && ` prefix that routes a session's CLI through the local
+/// Headroom proxy. Empty when disabled or for providers that can't be proxied
+/// (Gemini/Copilot). One source of truth for both initial launch
+/// (`build_env_setup_for_provider`) and restart, so the two never drift.
+pub fn headroom_env_prefix(agent_type: SessionAgentType, enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
+    match agent_type {
+        SessionAgentType::Claude => {
+            format!("export ANTHROPIC_BASE_URL='{}' && ", headroom_base_url())
+        }
+        SessionAgentType::Codex => {
+            format!("export OPENAI_BASE_URL='{}/v1' && ", headroom_base_url())
+        }
+        _ => String::new(),
+    }
+}
+
 /// Manager for Interactive mode sessions (host-based, no Docker)
 pub struct InteractiveSessionManager {
     worktree_manager: WorktreeManager,
@@ -225,6 +259,7 @@ impl InteractiveSessionManager {
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
         codex_model: Option<CodexModel>,
+        headroom_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
@@ -278,6 +313,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    headroom_enabled,
                 )
                 .await?;
             }
@@ -298,6 +334,7 @@ impl InteractiveSessionManager {
             created_at,
             agent_type,
             model,
+            headroom_enabled,
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -310,6 +347,7 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
+            headroom_enabled,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -361,6 +399,7 @@ impl InteractiveSessionManager {
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
         codex_model: Option<CodexModel>,
+        headroom_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?}, codex_model={:?})",
@@ -424,6 +463,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    headroom_enabled,
                 )
                 .await?;
             }
@@ -445,6 +485,7 @@ impl InteractiveSessionManager {
             created_at,
             agent_type,
             model,
+            headroom_enabled,
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -457,6 +498,7 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
+            headroom_enabled,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -583,6 +625,7 @@ impl InteractiveSessionManager {
                     created_at: metadata.created_at,
                     agent_type,
                     model: None,
+                    headroom_enabled: metadata.headroom_enabled,
                 });
             } else {
                 debug!(
@@ -631,6 +674,7 @@ impl InteractiveSessionManager {
                     created_at: Utc::now(),
                     agent_type,
                     model: None,
+                    headroom_enabled: false,
                 });
             }
         }
@@ -1171,6 +1215,7 @@ impl InteractiveSessionManager {
         codex_model: Option<CodexModel>,
         agent_type: SessionAgentType,
         resume_transcript: Option<PathBuf>,
+        headroom_enabled: bool,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
 
@@ -1192,7 +1237,7 @@ impl InteractiveSessionManager {
         };
 
         // Build environment setup for API key injection
-        let env_setup = Self::build_env_setup_for_provider(agent_type);
+        let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_enabled);
 
         // Build the CLI command with appropriate flags
         let mut cmd_parts = vec![provider.command().to_string()];
@@ -1346,37 +1391,37 @@ impl InteractiveSessionManager {
     }
 
     /// Build environment setup for injecting API key based on provider
-    fn build_env_setup_for_provider(agent_type: SessionAgentType) -> String {
+    fn build_env_setup_for_provider(
+        agent_type: SessionAgentType,
+        headroom_enabled: bool,
+    ) -> String {
         use crate::credentials;
 
-        match agent_type {
-            SessionAgentType::Claude => {
-                // Use existing logic for Claude
-                Self::build_env_setup()
-            }
+        let headroom_prefix = headroom_env_prefix(agent_type, headroom_enabled);
+
+        let base = match agent_type {
+            SessionAgentType::Claude => Self::build_env_setup(),
             SessionAgentType::Codex => {
-                // Inject OpenAI API key if available
                 if let Ok(Some(api_key)) = credentials::get_openai_api_key() {
                     info!("Injecting OPENAI_API_KEY for Codex CLI");
-                    return format!("export OPENAI_API_KEY='{}' && ", api_key);
+                    format!("export OPENAI_API_KEY='{}' && ", api_key)
+                } else {
+                    String::new()
                 }
-                String::new()
             }
             SessionAgentType::Gemini => {
-                // Inject Gemini API key if available
                 if let Ok(Some(api_key)) = credentials::get_gemini_api_key() {
                     info!("Injecting GEMINI_API_KEY for Gemini CLI");
-                    return format!("export GEMINI_API_KEY='{}' && ", api_key);
+                    format!("export GEMINI_API_KEY='{}' && ", api_key)
+                } else {
+                    String::new()
                 }
-                String::new()
             }
-            SessionAgentType::Copilot => {
-                // Copilot uses gh OAuth — no API key injection needed
-                // gh auth handles authentication transparently
-                String::new()
-            }
+            SessionAgentType::Copilot => String::new(),
             _ => String::new(),
-        }
+        };
+
+        format!("{headroom_prefix}{base}")
     }
 }
 
@@ -1407,6 +1452,36 @@ impl InteractiveSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headroom_env_prefix_routes_claude_and_codex_only() {
+        use crate::models::session::SessionAgentType;
+
+        // Disabled → no injection for any provider.
+        assert_eq!(headroom_env_prefix(SessionAgentType::Claude, false), "");
+        assert_eq!(headroom_env_prefix(SessionAgentType::Codex, false), "");
+
+        // Enabled → Claude routes via ANTHROPIC_BASE_URL, Codex via OPENAI_BASE_URL/v1.
+        let base = headroom_base_url();
+        assert_eq!(
+            headroom_env_prefix(SessionAgentType::Claude, true),
+            format!("export ANTHROPIC_BASE_URL='{base}' && ")
+        );
+        assert_eq!(
+            headroom_env_prefix(SessionAgentType::Codex, true),
+            format!("export OPENAI_BASE_URL='{base}/v1' && ")
+        );
+
+        // Providers Headroom can't proxy → empty even when enabled (gating).
+        assert_eq!(headroom_env_prefix(SessionAgentType::Gemini, true), "");
+        assert_eq!(headroom_env_prefix(SessionAgentType::Copilot, true), "");
+    }
+
+    #[test]
+    fn headroom_base_url_honors_port_override() {
+        // Default port when unset is the documented 8787.
+        assert!(headroom_base_url().ends_with(&HEADROOM_DEFAULT_PORT.to_string()));
+    }
 
     #[test]
     fn test_derive_workspace_name() {

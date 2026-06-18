@@ -116,6 +116,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         workspace_name: workspace_name.clone(),
         created_at: Utc::now(),
         agent_type,
+        headroom_enabled: false,
     };
 
     let mut store = SessionStore::load();

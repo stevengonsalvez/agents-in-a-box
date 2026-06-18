@@ -190,6 +190,7 @@ mod tests {
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);
@@ -205,6 +206,7 @@ mod tests {
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, false);
@@ -220,6 +222,7 @@ mod tests {
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, false, false);
@@ -250,6 +253,7 @@ mod tests {
             workspace_name: "my-workspace".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);
