@@ -162,6 +162,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Architecture deep-dive', slug: 'reference/architecture' },
+            { label: 'Repositories', slug: 'reference/repositories' },
             { label: 'Glossary', slug: 'reference/glossary' },
           ],
         },
