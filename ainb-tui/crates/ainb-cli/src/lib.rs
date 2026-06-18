@@ -46,7 +46,7 @@ pub enum Command {
     },
     /// Day-1 migration helpers: scan existing tool homes, optionally
     /// wipe them with a backup, or seed the manifest from
-    /// `toolkit/external-dependencies.yaml`.
+    /// `external-dependencies.yaml`.
     Migrate(MigrateArgs),
     /// Health-check the manifest, lockfile, deployed files, and
     /// configured sources. Exits non-zero when any problem is found.
@@ -79,7 +79,7 @@ pub struct MigrateArgs {
     #[arg(long, requires = "clean")]
     pub backup: bool,
 
-    /// Parse `toolkit/external-dependencies.yaml` from the supplied
+    /// Parse `external-dependencies.yaml` from the supplied
     /// path (or the working directory if omitted) and populate the
     /// manifest with one source + matching unit entries.
     #[arg(long = "from-bootstrap", conflicts_with_all = ["discover", "upgrade_schema"])]

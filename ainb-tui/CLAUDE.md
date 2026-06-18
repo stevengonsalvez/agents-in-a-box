@@ -217,7 +217,9 @@ backend processes as Claude.
 
 ## Monorepo Context
 
-This TUI can reference packages from the parent `toolkit/` directory. Git operations work against the monorepo root.
+The curated skills/agents/installer/catalog live in the standalone
+`stevengonsalvez/ainb-toolkit` repo (flattened at its root); `ainb` consumes
+it as a pinned external source. Git operations work against the monorepo root.
 
 ---
 

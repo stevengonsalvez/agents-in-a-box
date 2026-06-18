@@ -270,24 +270,36 @@ jobs:
         with:
           path: artifacts
 
-      # Publish the curated skill catalog index as a release asset. The
-      # AinbCuratedCatalogBackend fetches `catalog-index.json` from
-      # `releases/<tag>/download/` (or `releases/latest/download/`); the owned
-      # install_uris inside it pin THIS tag, so a browse and its installs
-      # always agree on bytes. Generating it here (from the tagged tree)
-      # writes it into artifacts/, which the `files` glob below attaches.
+      # Publish the curated skill catalog index as a release asset. The curated
+      # skills live in the standalone stevengonsalvez/ainb-toolkit repo (Option
+      # B), so we clone the PINNED ainb-toolkit ref and run the xtask against
+      # that checkout. AinbCuratedCatalogBackend fetches `catalog-index.json`
+      # from this (agents-in-a-box) release's assets; the owned install_uris
+      # inside it pin `ainb-toolkit@${AINB_TOOLKIT_REF}`, so a browse and its
+      # installs always resolve to the same ainb-toolkit bytes. Bump
+      # AINB_TOOLKIT_REF when adopting a new ainb-toolkit release.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Clone pinned ainb-toolkit
+        env:
+          AINB_TOOLKIT_REF: v1.6.0
+        run: |
+          git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
+            https://github.com/stevengonsalvez/ainb-toolkit.git \
+            "${{ github.workspace }}/ainb-toolkit"
+
       - name: Generate curated catalog index
         working-directory: ${{ env.WORKING_DIR }}
-        # The xtask reads NO env vars — these only feed the shell-quoted flag
-        # values below. Passing the workflow inputs via `env:` (not inline
-        # `${{ }}` in `run:`) is the injection-safe pattern for untrusted input.
+        # The xtask reads --toolkit-root / --release-tag below; passing values
+        # via `env:` (not inline `${{ }}` in `run:`) is the injection-safe
+        # pattern. --release-tag MUST equal the cloned ainb-toolkit ref so the
+        # owned install_uris pin the same bytes the checkout was cut from.
         env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          AINB_TOOLKIT_REF: v1.6.0
+          TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
           OUT_DIR: ${{ github.workspace }}/artifacts
-        run: cargo run -p xtask -- gen-catalog-index --release-tag "v${RELEASE_VERSION}" --out "${OUT_DIR}/catalog-index.json"
+        run: cargo run -p xtask -- gen-catalog-index --toolkit-root "${TOOLKIT_DIR}" --release-tag "${AINB_TOOLKIT_REF}" --out "${OUT_DIR}/catalog-index.json"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

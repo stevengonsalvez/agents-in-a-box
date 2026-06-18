@@ -13,11 +13,11 @@
 //! ```text
 //!   glob       skills/**
 //!   home       .claude/skills
-//!   repo       toolkit/packages/skills
+//!   repo       skills
 //!   unit_path  skills/commit/SKILL.md
 //!              └─────┘ static prefix → stripped, tail = commit/SKILL.md
 //!   ⇒ home: .claude/skills/commit/SKILL.md
-//!     repo: toolkit/packages/skills/commit/SKILL.md
+//!     repo: skills/commit/SKILL.md
 //! ```
 //!
 //! The function is **pure** — no I/O, no globals — so it is trivially

@@ -1,55 +1,70 @@
-name: Toolkit Validation
+name: Skill Manager & Catalog CI
+
+# The curated skills/installer/catalog moved out of this monorepo into the
+# standalone stevengonsalvez/ainb-toolkit repo. This workflow validates the
+# ainb skill-manager (which consumes ainb-toolkit as a pinned external source)
+# and cross-checks the embedded agent templates against a fetched ainb-toolkit
+# checkout. The old toolkit/ structure-validation jobs were retired with the
+# folder.
 
 on:
   push:
     paths:
-      - 'toolkit/**'
       - 'ainb-tui/**'
       - '.github/workflows/toolkit-validation.yml'
   pull_request:
     paths:
-      - 'toolkit/**'
       - 'ainb-tui/**'
       - '.github/workflows/toolkit-validation.yml'
 
+# The pinned ainb-toolkit ref this build of ainb consumes. Keep in lockstep
+# with release.yml's AINB_TOOLKIT_REF.
+env:
+  AINB_TOOLKIT_REF: v1.6.0
+
 jobs:
-  validate-packages:
-    name: Validate Packages Structure
+  validate-template-skill-refs:
+    name: Validate template skill refs against ainb-toolkit
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate package structure
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo state
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ainb-tui
+
+      - name: Clone pinned ainb-toolkit
         run: |
-          cd toolkit
+          git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
+            https://github.com/stevengonsalvez/ainb-toolkit.git \
+            "${{ github.workspace }}/ainb-toolkit"
 
-          echo "=== Checking packages/ structure ==="
+      - name: Enforce every embedded template skill resolves in ainb-toolkit
+        env:
+          # The runtime mirror test enforces existence (instead of skipping)
+          # when this points at a real ainb-toolkit skills/ dir.
+          AINB_TOOLKIT_SKILLS_DIR: ${{ github.workspace }}/ainb-toolkit/skills
+        run: |
+          cd ainb-tui
+          cargo test -p ainb-hangar-core --test template_registry_tests -- --nocapture
 
-          # Required directories
-          for dir in agents skills workflows utilities; do
-            if [ ! -d "packages/$dir" ]; then
-              echo "ERROR: Missing required directory: packages/$dir"
-              exit 1
-            fi
-            echo "✓ packages/$dir exists"
-          done
-
-          # Count files
-          AGENT_COUNT=$(find packages/agents -name "*.md" | wc -l)
-          SKILL_COUNT=$(find packages/skills -mindepth 2 -name "SKILL.md" | wc -l)
-
-          echo ""
-          echo "File counts:"
-          echo "  Agents:    $AGENT_COUNT"
-          echo "  Skills:    $SKILL_COUNT"
-
-          # Minimum thresholds. Commands have been consolidated into skills,
-          # so we no longer count a separate commands/ tree.
-          [ "$AGENT_COUNT" -lt 30 ] && echo "WARNING: Agent count seems low" && exit 1
-          [ "$SKILL_COUNT" -lt 60 ] && echo "WARNING: Skill count seems low" && exit 1
-
-          echo "✓ Package structure validated"
+      - name: Generate catalog index from the pinned ainb-toolkit (sanity)
+        run: |
+          cd ainb-tui
+          cargo run -p xtask -- gen-catalog-index \
+            --toolkit-root "${{ github.workspace }}/ainb-toolkit" \
+            --release-tag "${AINB_TOOLKIT_REF}" \
+            --out "${RUNNER_TEMP}/catalog-index.json"
+          # Owned URIs must pin the cloned ainb-toolkit ref.
+          grep -q "gh:stevengonsalvez/ainb-toolkit@${AINB_TOOLKIT_REF}/skills/" \
+            "${RUNNER_TEMP}/catalog-index.json" \
+            || (echo "ERROR: owned install_uris do not pin ainb-toolkit@${AINB_TOOLKIT_REF}"; exit 1)
+          echo "✓ catalog-index owned URIs pin ainb-toolkit@${AINB_TOOLKIT_REF}"
 
   test-ainb-installations:
     name: Test ainb installations (replaces bootstrap.js parity tests)
@@ -132,34 +147,3 @@ jobs:
 
           # Doctor against the just-installed state.
           "$BIN" doctor --offline
-
-  check-claude-code-thin-layer:
-    name: Verify claude-code-4.5 is thin layer
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check claude-code-4.5 structure
-        run: |
-          cd toolkit/claude-code-4.5
-
-          echo "=== Checking claude-code-4.5 is a thin layer ==="
-
-          # Should only have these files
-          ALLOWED_FILES="CLAUDE.md settings.json settings.local.json .gitignore"
-          ALLOWED_DIRS="session logs"
-
-          # Check for unexpected directories (agents, commands, etc should NOT exist)
-          for dir in agents commands hooks skills templates utils orchestration output-styles reflections; do
-            if [ -d "$dir" ]; then
-              echo "ERROR: claude-code-4.5/$dir should not exist (content is in packages/)"
-              exit 1
-            fi
-          done
-
-          # Verify required files exist
-          [ ! -f "CLAUDE.md" ] && echo "ERROR: CLAUDE.md missing" && exit 1
-          [ ! -f "settings.json" ] && echo "ERROR: settings.json missing" && exit 1
-
-          echo "✓ claude-code-4.5 is correctly structured as a thin layer"

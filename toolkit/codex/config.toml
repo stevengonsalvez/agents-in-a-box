@@ -1,9 +1,0 @@
-# Codex CLI configuration
-# See: https://developers.openai.com/codex/guides/agents-md/
-
-# Treat these filenames as instruction sources when AGENTS.md isn't present.
-project_doc_fallback_filenames = ["CLAUDE.md", "TEAM_GUIDE.md", ".agents.md"]
-
-# Allow larger combined guidance before truncation.
-project_doc_max_bytes = 65536
-

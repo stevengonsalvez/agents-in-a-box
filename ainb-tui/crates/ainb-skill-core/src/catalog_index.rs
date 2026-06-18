@@ -11,9 +11,9 @@
 //!    frontmatter block ([`parse_skill_frontmatter`]) and the install-URI
 //!    builders ([`owned_install_uri`], [`external_install_uri`]).
 //!
-//! The filesystem walk that feeds these (glob `toolkit/packages/skills/*`,
-//! read `external-dependencies.yaml`) lives in the `xtask` generator — this
-//! module never touches disk.
+//! The filesystem walk that feeds these (glob a fetched ainb-toolkit's
+//! `skills/*`, read its `external-dependencies.yaml`) lives in the `xtask`
+//! generator — this module never touches disk.
 //!
 //! ```text
 //! ┌──────────────────────┐   build_*    ┌───────────────┐  to_hits/search
@@ -32,19 +32,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{CatalogEntryKind, CatalogHit};
 
-/// `owner/repo` slug of the standalone toolkit mirror — the source for every
-/// owned (toolkit-authored) catalog entry. The monorepo `toolkit/` folder is
-/// mirrored to this repo via `git subtree`, so the mirror's root *is* the
-/// toolkit contents.
+/// `owner/repo` slug of the standalone ainb-toolkit repo — the sole canonical
+/// home for every owned (curated) catalog entry. ainb consumes it as a pinned
+/// external source; the repo root *is* the skills/installer/catalog contents.
 pub const OWNED_REPO: &str = "stevengonsalvez/ainb-toolkit";
 
-/// Directory holding the toolkit's owned skills, relative to the
-/// [`OWNED_REPO`] mirror root. The mirror re-roots the toolkit's
-/// `packages/skills/` to a top-level `skills/` — the native external-skill
-/// repo layout that ainb's source adapter and sync engine consume
-/// (home-relative path == repo-relative path). This constant only builds
-/// install URIs; the generator's filesystem glob reads the in-monorepo
-/// `toolkit/packages/skills` independently.
+/// Directory holding the owned skills, relative to the [`OWNED_REPO`] root.
+/// ainb-toolkit is flattened — curated skills live at a top-level `skills/`,
+/// the native external-skill repo layout that ainb's source adapter and sync
+/// engine consume (home-relative path == repo-relative path). This constant
+/// builds install URIs; the `xtask` generator globs a fetched ainb-toolkit
+/// checkout's `skills/` independently.
 pub const OWNED_SKILLS_REPO_DIR: &str = "skills";
 
 /// Schema version of the published index. Bumped only on a breaking change

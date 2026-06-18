@@ -594,8 +594,8 @@ tools via the `ainb` skill manager (`ainb-tui/`):
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  toolkit/packages/skills/                                        │
-│  (canonical source)                                              │
+│  ainb-toolkit: skills/                                           │
+│  (github.com/stevengonsalvez/ainb-toolkit — canonical source)   │
 │                                                                  │
 │  ├── reflect/          ├── research/       ├── prime/            │
 │  ├── instincts/        └── compound-docs/                        │

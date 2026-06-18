@@ -13,10 +13,10 @@
 //!     reinstall from the manifest's desired state. Honors --yes /
 //!     --dry-run.
 //!
-//!   - `--from-bootstrap`: parse `toolkit/external-dependencies.yaml`
-//!     and write equivalent source + unit entries into the manifest.
-//!     A single `toolkit` `local:` source is added pointing at the
-//!     toolkit root; one UnitEntry is recorded per bundled-skill /
+//!   - `--from-bootstrap`: parse `external-dependencies.yaml` from an
+//!     ainb-toolkit checkout root and write equivalent source + unit
+//!     entries into the manifest. A single `toolkit` `local:` source is
+//!     added pointing at that root; one UnitEntry is recorded per bundled-skill /
 //!     agent-skill path so a subsequent `ainb skill sync` picks them
 //!     up cleanly.
 //!
@@ -248,14 +248,18 @@ fn migrate_clean(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Res
 /// `toolkit` source + one UnitEntry per bundled-skill / agent-skill
 /// path.
 fn migrate_from_bootstrap(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Result<()> {
+    // The curated toolkit now lives in the standalone ainb-toolkit repo with
+    // `external-dependencies.yaml` at its root (flattened). Default to the
+    // current dir so `ainb migrate --from-bootstrap` works from inside a cloned
+    // ainb-toolkit; `--toolkit-root` overrides with an explicit checkout path.
     let toolkit_root = args
         .toolkit_root
         .clone()
-        .or_else(|| std::env::current_dir().ok().map(|p| p.join("toolkit")))
-        .ok_or_else(|| anyhow!("could not determine toolkit root; pass --toolkit-root"))?;
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| anyhow!("could not determine ainb-toolkit root; pass --toolkit-root"))?;
     if !toolkit_root.is_dir() {
         bail!(
-            "toolkit root `{}` does not exist or is not a directory",
+            "ainb-toolkit root `{}` does not exist or is not a directory",
             toolkit_root.display()
         );
     }

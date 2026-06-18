@@ -96,7 +96,7 @@ pub mod scheduler;
 pub mod seed;
 /// Toolkit-directory skill importer behind `ainb hangar skills sync` (P6.2).
 ///
-/// Walks a `toolkit/packages/skills/`-shaped tree (`<name>/SKILL.md` + nested
+/// Walks a `ainb-toolkit/skills/`-shaped tree (`<name>/SKILL.md` + nested
 /// assets), parses each skill's YAML frontmatter, validates the whole batch
 /// (uniqueness + parse) before any write, then upserts every skill
 /// workspace-scoped via

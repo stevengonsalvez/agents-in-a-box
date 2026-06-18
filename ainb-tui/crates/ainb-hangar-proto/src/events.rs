@@ -103,7 +103,7 @@ pub enum HangarEvent {
         state: PresenceState,
     },
     /// A skill's curated source was updated remotely (the daemon pulled a newer
-    /// version from `toolkit/packages/skills/`).
+    /// version from `ainb-toolkit/skills/`).
     ///
     /// The skill-manager screen (P4.6) folds this into a conflict banner only
     /// when the local copy is dirty; a clean local copy refreshes silently.

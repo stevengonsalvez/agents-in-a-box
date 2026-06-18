@@ -2,7 +2,19 @@
 title: "Toolkit overview"
 ---
 
-One canonical source tree, many AI tools. Author a skill, agent, or workflow once under `toolkit/packages/` and `bootstrap.js` deploys it into each supported tool's home directory.
+:::note[The toolkit is now its own repo]
+The portable toolkit moved out of this monorepo into the standalone
+**[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)**
+repo, where it is **flattened** at the repo root: skills at `skills/`, agents at
+`agents/`, workflows at `workflows/`, utilities at `utilities/`, plus
+`bootstrap.js`, `external-dependencies.yaml`, and `catalog.yaml`. `ainb`
+consumes it as a pinned external source. The paths shown below use the legacy
+`toolkit/packages/` form for continuity — in ainb-toolkit they live without the
+`toolkit/packages/` prefix. See [Repositories](/reference/repositories/) for how
+the two repos fit together.
+:::
+
+One canonical source tree, many AI tools. Author a skill, agent, or workflow once in the [ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit) repo and `bootstrap.js` (or `ainb skill install`) deploys it into each supported tool's home directory.
 
 ## What lives in `toolkit/packages/`
 

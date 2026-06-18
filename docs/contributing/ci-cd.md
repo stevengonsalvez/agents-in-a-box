@@ -22,14 +22,16 @@ Manual `workflow_dispatch` (inputs: `version`, `prerelease`). Jobs run in sequen
 - **Create Release** — `softprops/action-gh-release` publishes a GitHub Release with the artifacts and install instructions.
 - **Update Homebrew Tap** — regenerates `Formula/ainb.rb` in `stevengonsalvez/homebrew-agents-in-a-box` with the new version and per-platform SHA256s, then commits and pushes.
 
-## `toolkit-validation.yml` — toolkit structure + install checks
+## `toolkit-validation.yml` — Skill Manager & Catalog CI
 
-Runs on push and PR touching `toolkit/**`. Jobs:
+> **Note:** the toolkit now lives in the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo (flattened layout — no `packages/` wrapper). This workflow validates the ainb-side skill-manager integration and, at release time, generates the catalog index by cloning `ainb-toolkit` at the pinned tag (Option B). Path trigger is `.github/workflows/toolkit-validation.yml` itself; the toolkit source is cloned, not checked-in.
 
-- **Validate Packages Structure** — asserts `packages/{agents,skills,workflows,utilities}` exist and enforces minimum counts (agents ≥ 30, skills ≥ 60).
-- **Test Tool Installations** — runs `bootstrap.js` into a fake `$HOME` for a `claude-code-4.5` / `codex` / `gemini` matrix, asserting the install dir, a minimum file count (≥ 100), a `skills/` dir, and an `agents/` dir for `claude-code-4.5`.
+Jobs:
+
+- **Validate Packages Structure** — clones `ainb-toolkit@<pinned-tag>` and asserts `agents/`, `skills/`, `workflows/`, `utilities/` exist at the repo root; enforces minimum counts (agents ≥ 30, skills ≥ 60).
+- **Test Tool Installations** — runs `bootstrap.js` (ainb-toolkit root) into a fake `$HOME` for a `claude-code-4.5` / `codex` / `gemini` matrix, asserting the install dir, a minimum file count (≥ 100), a `skills/` dir, and an `agents/` dir for `claude-code-4.5`.
 - **Check Template Substitution** — installs `claude-code-4.5` and greps for unsubstituted `{{TOOL_DIR}}` / `{{HOME_TOOL_DIR}}` placeholders.
-- **Verify claude-code-4.5 is thin layer** — asserts `toolkit/claude-code-4.5` carries only the thin-layer files (no `agents`/`commands`/`skills`/etc. dirs).
+- **Verify claude-code-4.5 is thin layer** — asserts the `claude-code-4.5` adapter in ainb-toolkit carries only the thin-layer files (no `agents`/`commands`/`skills`/etc. dirs).
 
 ## `deploy-pages.yml` — docs site to GitHub Pages
 

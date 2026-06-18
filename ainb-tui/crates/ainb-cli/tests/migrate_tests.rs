@@ -48,15 +48,15 @@ fn with_tool_homes<R>(base: &Path, body: impl FnOnce() -> R) -> R {
     r
 }
 
-/// Seed a local toolkit fixture with `external-dependencies.yaml` and
-/// a few skills under `packages/skills/`. Returns the toolkit root.
+/// Seed a local ainb-toolkit fixture with `external-dependencies.yaml` and
+/// a few skills under the flattened `skills/`. Returns the toolkit root.
 fn seed_toolkit_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let toolkit = dir.path();
 
-    // Two bundled skills under packages/skills/{commit,herdr}.
+    // Two bundled skills under skills/{commit,herdr} (flattened layout).
     for name in ["commit", "herdr"] {
-        let p: PathBuf = toolkit.join(format!("packages/skills/{name}/SKILL.md"));
+        let p: PathBuf = toolkit.join(format!("skills/{name}/SKILL.md"));
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(
             &p,
@@ -69,10 +69,10 @@ fn seed_toolkit_fixture() -> tempfile::TempDir {
 version: "1.0.0"
 bundled-skills:
   - name: commit
-    path: packages/skills/commit
+    path: skills/commit
     purpose: "commit messages"
   - name: herdr
-    path: packages/skills/herdr
+    path: skills/herdr
     purpose: "herder"
 agent-skills: []
 "#;
@@ -493,8 +493,8 @@ fn migrate_from_bootstrap_seeds_manifest_with_toolkit_source_and_units() {
     assert!(manifest.sources.iter().any(|s| s.name == "toolkit"));
     assert_eq!(manifest.units.len(), 2);
     let uris: Vec<_> = manifest.units.iter().map(|u| u.uri.clone()).collect();
-    assert!(uris.iter().any(|u| u.contains("packages/skills/commit")));
-    assert!(uris.iter().any(|u| u.contains("packages/skills/herdr")));
+    assert!(uris.iter().any(|u| u.contains("skills/commit")));
+    assert!(uris.iter().any(|u| u.contains("skills/herdr")));
 }
 
 #[test]

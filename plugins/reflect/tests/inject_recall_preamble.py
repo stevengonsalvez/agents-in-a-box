@@ -11,11 +11,18 @@ Inserts the block immediately before the first H2 heading in the file.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]  # repo root
-SKILLS = ROOT / "toolkit" / "packages" / "skills"
+# The curated skills moved to the standalone, flattened ainb-toolkit repo.
+# Point AINB_TOOLKIT_SKILLS_DIR at a cloned ainb-toolkit's `skills/` to run
+# this against the canonical source; otherwise look for a sibling checkout.
+SKILLS = Path(
+    os.environ.get("AINB_TOOLKIT_SKILLS_DIR")
+    or (ROOT.parent / "ainb-toolkit" / "skills")
+)
 
 # (skill_name, tier, query_hint) — query_hint is skill-specific guidance
 # on how to build the recall query from user input / context.
@@ -33,7 +40,7 @@ TARGETS = [
     ("gh-issue", 2, "issue title + top labels + repo name (e.g. `\"flaky signup test frontend auth\"`)"),
     ("find-missing-tests", 2, "target module/package name + `\"testing\"` (e.g. `\"payment webhook handler testing\"`)"),
     ("validate", 2, "the feature/change being validated + relevant verification keywords (e.g. `\"OAuth callback validation edge cases\"`)"),
-    # `review` skill is provided by an external plugin (not in toolkit/packages/skills/) — skipped.
+    # `review` skill is provided by an external plugin (not in ainb-toolkit skills/) — skipped.
 ]
 
 
