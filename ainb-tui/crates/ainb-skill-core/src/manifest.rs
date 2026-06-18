@@ -96,7 +96,7 @@ pub struct TargetMapping {
     pub home: PathBuf,
 
     /// Source location relative to the repo root
-    /// (e.g. `toolkit/packages/skills`).
+    /// (e.g. `skills`).
     pub repo: PathBuf,
 }
 

@@ -8691,7 +8691,7 @@ impl AppState {
     /// Then prefix with `-` (callers do this).
     ///
     /// Mirror of `find_transcript_path()` in
-    /// `toolkit/packages/utilities/utils/spawn-agent-lib.sh:30-69`.
+    /// `ainb-toolkit utilities/utils/spawn-agent-lib.sh:30-69`.
     pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
         let s = worktree_path.to_string_lossy();
         let stripped = s.strip_prefix('/').unwrap_or(&s);
