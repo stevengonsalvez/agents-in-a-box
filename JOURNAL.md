@@ -176,3 +176,34 @@ schema + FTS + graph tables + typed helper layer + tests + docs. pgvector
   PG17+pgvector spun up/torn down per run.
 - OPEN: "shotclubhouse" password rule still unclarified — nothing password-
   protected yet (the reflect explainer is public).
+
+## 2026-06-18 — PR opened, code review, fixes, Tier B
+- Rebuilt branch into 28 atomic commits (soft-reset to base 39dfe251 + rebuild;
+  tree verified IDENTICAL to pre-split backup). Force-pushed. PR #302 updated
+  (title + body) to the full scope.
+- Ran `/code-review high` (independent finder agents) + `supabase-security-reviewer`
+  (empirically reproduced findings against a throwaway PG). Consolidated 7
+  findings; FIXED all:
+  1. HIGH — resolver read GUC before JWT (trust inversion). → JWT-authoritative
+     resolver; GUC only when no JWT. Regression test test_jwt_claim_wins_over_guc.
+  2. MED — adapter never set app.current_workspace → fails under RLS for non-owner
+     roles. → adapter sets the GUC on connect.
+  3. MED — `authenticated` had full CRUD. → reduced to SELECT + EXECUTE(search fns);
+     writes via service_role only (0001 + 0002).
+  4. MED — DATABASE_URL auto-enabled PG mode. → trigger is REFLECT_PG_DSN only.
+  5. MED — graph save upsert-only left stale rows. → atomic full-replace.
+  6. LOW — REVOKE PUBLIC; pinned search_path on all fns; entity_neighborhood depth
+     clamped ≤5.
+  7. LOW — vector_literal non-finite guard; kv get_by_ids dict guard.
+  Posted the review + fix table to PR #302. RLS still needs HUMAN partner review
+  before merge (automated pass is not a substitute).
+- Tier B (Stevie: build now): env was feasible (all-mpnet cached, qmd present,
+  sentence-transformers 5.2.3; graspologic shimmed). Shipped
+  test_backend_parity_realmodel — local vs PG return the same evidence with the
+  REAL all-mpnet-base-v2 model (naive/local/global), upgrading Tier A's
+  fake-embedding parity to real. (Full 13-lookup + qmd/BM25 + per-port Acceptance
+  golden remains the broader CI scope = the existing 57 behavioral proofs.)
+- Final: 58 tests green (32 no-DB + 26 integration). 33 atomic commits + the
+  fix/Tier-B commits pushed. SQLite local-only = default file-mode (no new
+  backend, per Stevie). Throwaway dup here.now site deleted. shotclubhouse =
+  a project (this reflect explainer stays public).
