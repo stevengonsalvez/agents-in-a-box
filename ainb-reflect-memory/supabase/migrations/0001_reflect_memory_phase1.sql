@@ -39,6 +39,7 @@ create schema if not exists reflect_memory;
 create or replace function reflect_memory.set_updated_at()
 returns trigger
 language plpgsql
+set search_path = pg_catalog
 as $$
 begin
   new.updated_at := now();
@@ -48,34 +49,36 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- Tenant resolver — single source of truth for "which workspace is this
--- request?", used by every RLS policy. Reads, in order:
---   1. the `app.current_workspace` GUC (set by a trusted worker, or by tests)
---   2. the `workspace_id` claim inside Supabase's `request.jwt.claims`
--- Returns NULL when neither is present, which makes every RLS policy deny.
--- STABLE + SECURITY INVOKER. Portable: on a vanilla Postgres with no JWT, it
--- simply falls back to the GUC.
+-- request?", used by every RLS policy.
+--
+-- The SIGNED JWT claim is AUTHORITATIVE. Resolution order:
+--   1. `request.jwt.claims -> workspace_id` (Supabase, verified signature).
+--      When a JWT is present, its workspace_id is the only answer — a JWT with
+--      no workspace_id DENIES (returns NULL); it never falls through to the GUC.
+--   2. ONLY when there is no JWT at all (trusted no-JWT worker / tests): the
+--      `app.current_workspace` GUC.
+-- Returns NULL when neither resolves, so every RLS policy fails CLOSED.
+--
+-- Why JWT-first: `app.current_workspace` is a custom placeholder GUC and is
+-- USERSET — any role (incl. anon/authenticated) could `set_config` it. If the
+-- GUC won over the JWT, a client who could set it would override their signed
+-- tenant. JWT-first removes that trust inversion; the GUC only matters on
+-- connections that carry no JWT (the trusted worker), which clients cannot
+-- forge into having a JWT.
+-- STABLE, SECURITY INVOKER, pinned search_path.
 -- ---------------------------------------------------------------------------
 create or replace function reflect_memory.current_workspace_id()
 returns uuid
 language plpgsql
 stable
+set search_path = pg_catalog
 as $$
 declare
   v_guc text;
   v_claims text;
   v_ws text;
 begin
-  -- 1. explicit GUC (trusted worker / tests)
-  begin
-    v_guc := current_setting('app.current_workspace', true);
-  exception when others then
-    v_guc := null;
-  end;
-  if v_guc is not null and v_guc <> '' then
-    return v_guc::uuid;
-  end if;
-
-  -- 2. Supabase JWT claim
+  -- 1. signed JWT claim is authoritative when a JWT is present
   begin
     v_claims := current_setting('request.jwt.claims', true);
   exception when others then
@@ -86,6 +89,17 @@ begin
     if v_ws is not null and v_ws <> '' then
       return v_ws::uuid;
     end if;
+    return null;  -- JWT present but no workspace_id => deny; do NOT use the GUC
+  end if;
+
+  -- 2. no JWT at all (trusted worker / tests) => the GUC
+  begin
+    v_guc := current_setting('app.current_workspace', true);
+  exception when others then
+    v_guc := null;
+  end;
+  if v_guc is not null and v_guc <> '' then
+    return v_guc::uuid;
   end if;
 
   return null;
@@ -250,6 +264,7 @@ returns table (
 )
 language sql
 stable
+set search_path = pg_catalog, public, extensions, reflect_memory
 as $$
   with q as (select websearch_to_tsquery('english', p_query) as tsq)
   select
@@ -290,6 +305,7 @@ returns table (
 )
 language sql
 stable
+set search_path = pg_catalog, public, extensions, reflect_memory
 as $$
   select
     e.id, e.workspace_id, e.canonical_name, e.entity_type, e.aliases,
@@ -337,6 +353,7 @@ returns table (
 )
 language sql
 stable
+set search_path = pg_catalog, public, extensions, reflect_memory
 as $$
   with recursive reachable(entity_id, depth) as (
     select p_entity_id, 0
@@ -349,7 +366,7 @@ as $$
     join reflect_memory.edges e
       on e.workspace_id = p_workspace_id
      and (e.source_entity_id = r.entity_id or e.target_entity_id = r.entity_id)
-    where r.depth < greatest(p_max_depth, 0)
+    where r.depth < least(greatest(p_max_depth, 0), 5)  -- clamp fan-out depth
   )
   select distinct
     e.id, e.workspace_id, e.source_entity_id, e.target_entity_id,
@@ -394,18 +411,32 @@ create policy edges_tenant_isolation
   with check (workspace_id = reflect_memory.current_workspace_id());
 
 -- ===========================================================================
--- Grants — applied only to roles that exist, so this migration is portable to
--- a vanilla Postgres (tests) as well as Supabase (authenticated/anon/
--- service_role). On Supabase, `authenticated` gets full CRUD (still gated by
--- RLS); `anon` gets nothing by default; `service_role` is full + BYPASSRLS.
+-- Grants — least privilege, matching the documented access model:
+--   * direct clients (`authenticated`) get READ-ONLY: SELECT + EXECUTE on the
+--     read-only search functions. Writes/graph mutations go through the trusted
+--     worker (`service_role`), NOT direct PostgREST — so an authenticated user
+--     can't poison their tenant's graph/vectors via a raw REST write.
+--   * `anon` gets nothing; PUBLIC defaults are revoked so inertness is explicit.
+--   * `service_role` is full + BYPASSRLS (the trusted migration/worker path).
+-- Portable: only touches roles that exist (vanilla Postgres tests skip them).
 -- ===========================================================================
+-- Strip PostgreSQL's default PUBLIC grants so "anon gets nothing" is enforced,
+-- not incidental (PUBLIC has EXECUTE on functions by default).
+revoke all on all functions in schema reflect_memory from public;
+revoke all on all tables in schema reflect_memory from public;
+
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
     grant usage on schema reflect_memory to authenticated;
-    grant select, insert, update, delete
-      on all tables in schema reflect_memory to authenticated;
-    grant execute on all functions in schema reflect_memory to authenticated;
+    -- READ-ONLY: select on tables; execute only on the search functions.
+    grant select on all tables in schema reflect_memory to authenticated;
+    grant execute on function
+      reflect_memory.search_memory(uuid, text, int, uuid, real),
+      reflect_memory.search_entities(uuid, text, int),
+      reflect_memory.entity_neighborhood(uuid, uuid, int),
+      reflect_memory.current_workspace_id()
+      to authenticated;
   end if;
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     grant usage on schema reflect_memory to service_role;

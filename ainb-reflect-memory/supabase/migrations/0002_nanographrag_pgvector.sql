@@ -178,13 +178,18 @@ create policy ng_vectors_tenant_isolation on reflect_memory.ng_vectors
   with check (workspace_id = reflect_memory.current_workspace_id());
 
 -- ===========================================================================
--- Grants — only to roles that exist, so this stays portable to vanilla
--- Postgres (tests) and Supabase (authenticated / service_role).
+-- Grants — least privilege (matches 0001): direct `authenticated` clients get
+-- READ-ONLY; writes to the graph/vector store go through the trusted worker
+-- (`service_role`). PUBLIC defaults revoked. Portable to vanilla Postgres.
 -- ===========================================================================
+revoke all on reflect_memory.ng_kv, reflect_memory.ng_graph_nodes,
+              reflect_memory.ng_graph_edges, reflect_memory.ng_vectors
+  from public;
+
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
-    grant select, insert, update, delete
+    grant select
       on reflect_memory.ng_kv, reflect_memory.ng_graph_nodes,
          reflect_memory.ng_graph_edges, reflect_memory.ng_vectors
       to authenticated;
