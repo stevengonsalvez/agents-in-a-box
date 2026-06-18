@@ -177,7 +177,7 @@ pub async fn stats() -> Option<HeadroomStats> {
 // ── Status ───────────────────────────────────────────────────────────────────
 
 /// Combined status of the ainb-managed Headroom proxy.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProxyStatus {
     pub running: bool,
     pub port: u16,

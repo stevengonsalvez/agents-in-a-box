@@ -988,6 +988,44 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 }
 
 // ============================================================================
+// Daemons overlay (MCP pool + Headroom proxy — read-only status)
+// ============================================================================
+
+/// Fetched snapshot delivered through the daemons overlay channel.
+#[derive(Debug, Clone)]
+pub struct DaemonsFetchResult {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+}
+
+/// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
+/// the overlay is open; dropping it stops all refresh activity.
+#[derive(Debug)]
+pub struct DaemonsOverlayState {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Receiver for the in-flight fetch (None = no fetch pending).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+}
+
+/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read.
+/// These are sync calls so they run on the blocking thread pool.
+pub(crate) fn daemons_sync_probe() -> (bool, Vec<String>) {
+    let mcp_alive = crate::mcp_pool::client::daemon_alive();
+    let headroom_consumers = crate::interactive::SessionStore::load()
+        .sessions
+        .into_values()
+        .filter(|m| m.headroom_enabled)
+        .map(|m| m.tmux_session_name.clone())
+        .collect::<Vec<_>>();
+    (mcp_alive, headroom_consumers)
+}
+
+// ============================================================================
 // Home Screen State
 // ============================================================================
 
@@ -2848,6 +2886,8 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
+    // Daemons status overlay (MCP pool + Headroom proxy, read-only).
+    pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3433,6 +3473,7 @@ impl Default for AppState {
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
+            daemons_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -4839,6 +4880,80 @@ impl AppState {
                 });
             let _ = tx.send(result);
         });
+    }
+
+    // ── Daemons overlay ──────────────────────────────────────────────────────
+
+    /// Open the Daemons overlay and fire the first fetch; idempotent (toggle).
+    pub fn toggle_daemons_overlay(&mut self) {
+        if self.daemons_overlay.is_some() {
+            self.daemons_overlay = None;
+            return;
+        }
+        self.daemons_overlay = Some(DaemonsOverlayState {
+            mcp_alive: false,
+            headroom: crate::headroom::ProxyStatus {
+                running: false,
+                port: crate::headroom::proxy_port(),
+                pid: None,
+                tokens_saved: None,
+            },
+            headroom_consumers: Vec::new(),
+            loading: true,
+            last_refreshed: None,
+            fetch_rx: None,
+        });
+        self.spawn_daemons_fetch();
+    }
+
+    pub fn close_daemons_overlay(&mut self) {
+        self.daemons_overlay = None;
+    }
+
+    /// Spawn one off-thread fetch of both daemon statuses (one-outstanding guard).
+    /// Runs MCP + SessionStore probes on the blocking pool; headroom::status()
+    /// is async so it runs directly in the spawned task.
+    pub fn spawn_daemons_fetch(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            // Blocking I/O (control socket + file read) on the blocking pool.
+            let (mcp_alive, headroom_consumers) = tokio::task::spawn_blocking(daemons_sync_probe)
+                .await
+                .unwrap_or((false, Vec::new()));
+            // Async HTTP probe of the Headroom /health + /stats endpoints.
+            let headroom = crate::headroom::status().await;
+            let result = DaemonsFetchResult {
+                mcp_alive,
+                headroom,
+                headroom_consumers,
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed daemons fetch. Called from the 250ms app tick.
+    pub fn check_daemons_overlay(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.mcp_alive = result.mcp_alive;
+                o.headroom = result.headroom;
+                o.headroom_consumers = result.headroom_consumers;
+                o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from
@@ -10703,6 +10818,8 @@ impl App {
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
         self.state.check_mcp_overlay();
+        // Drain completed daemons overlay fetch (no-op when closed).
+        self.state.check_daemons_overlay();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

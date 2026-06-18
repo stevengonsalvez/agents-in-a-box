@@ -48,7 +48,11 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    RefreshWorkspaces, // Manual refresh of workspace data
+    // Daemons overlay (MCP pool + Headroom, read-only)
+    DaemonsOverlayOpen,
+    DaemonsOverlayClose,
+    DaemonsOverlayRefresh,
+    RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
@@ -1230,6 +1234,17 @@ impl EventHandler {
                 KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
                 KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
                 KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
+                _ => None,
+            };
+        }
+
+        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        if state.daemons_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
+                    Some(AppEvent::DaemonsOverlayClose)
+                }
+                KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
                 _ => None,
             };
         }
@@ -2630,6 +2645,8 @@ impl EventHandler {
             // overlay. `m` is taken by the learnings/Memory browser, so the
             // pool tile + global keybind use `p` instead.
             KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
+            // `d` for "daemons" — opens the MCP pool + Headroom status overlay.
+            KeyCode::Char('d') => return Some(AppEvent::DaemonsOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2899,6 +2916,9 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
+            AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
+            AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
+            AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -4127,6 +4147,9 @@ impl EventHandler {
                         // Opens the overlay on top of the current screen (not a
                         // screen switch) and fires the first lazy fetch.
                         state.toggle_mcp_overlay();
+                    }
+                    SidebarItem::Daemons => {
+                        state.toggle_daemons_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
