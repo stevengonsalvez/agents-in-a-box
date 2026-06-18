@@ -53,19 +53,21 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
 
 
    ┌─────────────────────────────────────────────────────────────────────┐
-   │                            Toolkit                                  │
+   │              ainb-toolkit (external repo)                           │
+   │   https://github.com/stevengonsalvez/ainb-toolkit                  │
    │                                                                     │
-   │   Source of truth: toolkit/packages/                                │
+   │   Source of truth (flattened layout):                               │
    │   ├── skills/      86 skills                                        │
    │   ├── agents/      37 agents (universal, engineering, orchestrator) │
    │   ├── workflows/   structured delivery workflows                    │
    │   └── utilities/   shared hooks, config, output styles              │
    │                                                                     │
-   │   Bootstrap engine (toolkit/bootstrap.js) deploys to:               │
+   │   Bootstrap engine (bootstrap.js) deploys to:                       │
    │   ┌─ ~/.claude/        ┌─ ~/.codex/        ┌─ ~/.copilot/           │
    │   ├─ ~/.gemini/        ├─ ~/.hermes/       ├─ ~/.amazonq/           │
    │   └─ PROJECT/.cursor/  └─ PROJECT/.cline/  └─ PROJECT/.roo/         │
    │                                                                     │
+   │   ainb consumes ainb-toolkit as a pinned external source.           │
    │   Per-tool packaging is auto-detected from the toolkit catalog.     │
    └─────────────────────────────────────────────────────────────────────┘
 
@@ -109,7 +111,7 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
 4. Inside that tmux pane, ainb launches `claude` with the worktree as cwd
        │
        ▼
-5. Toolkit skills/agents already deployed to ~/.claude/ are available to Claude
+5. ainb-toolkit skills/agents already deployed to ~/.claude/ are available to Claude
        │
        ▼
 6. Session activity is captured to ~/.claude/projects/<wt>/sessions/<id>/*.jsonl
@@ -142,7 +144,7 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
 
 ~/.claude/
 ├── projects/<wt>/sessions/*.jsonl   per-session activity logs
-└── skills/, agents/, …               toolkit-deployed assets
+└── skills/, agents/, …               ainb-toolkit-deployed assets
 
 ~/.reflect/
 └── kb/
@@ -161,7 +163,7 @@ dist/plugins/<name>/            staged plugin binaries (built from in-tree
 |---|---|
 | TUI ↔ AI provider | None. The TUI spawns the provider CLI in a tmux PTY and reads/writes the pane. |
 | TUI ↔ plugin | [Plugin spec v2](../plugins/spec-v2.md) — framed JSON-RPC over stdio. |
-| TUI ↔ toolkit | None at runtime. Toolkit is deployed ahead of time to `~/.<tool>/`; the TUI doesn't read it. |
+| TUI ↔ ainb-toolkit | None at runtime. ainb-toolkit is deployed ahead of time to `~/.<tool>/`; the TUI doesn't read it. ainb pins a release of `stevengonsalvez/ainb-toolkit` and the skill manager syncs from it. |
 | Plugin ↔ Plugin | Snapshot bus (publish/subscribe) brokered by the TUI host. See spec §6. |
 | reflect-kb ↔ anyone | CLI only. No library API. |
 

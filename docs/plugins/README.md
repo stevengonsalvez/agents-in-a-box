@@ -67,4 +67,4 @@ Historical accident. ainb's plugin system pre-dated Claude Code shipping its own
 If you ever see a plain reference to "the plugin" in this repo without context, look at where it lives:
 - `ainb-tui/crates/ainb-plugin-*` → ainb v2 plugin
 - `plugins/<name>/` at root → Claude Code plugin
-- `toolkit/packages/plugins/` does **not** exist; was deprecated.
+- `toolkit/packages/plugins/` does **not** exist and was deprecated; the ainb-toolkit repo (which replaced the in-tree `toolkit/`) likewise has no `plugins/` directory.

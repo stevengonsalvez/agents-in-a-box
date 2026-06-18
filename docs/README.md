@@ -11,7 +11,7 @@ If you're looking for a specific topic, start here:
 |---|---|
 | [Product](#product) | What agents-in-a-box is, value, high-level architecture |
 | [TUI](#tui) | The `ainb` terminal app + CLI |
-| [Toolkit](#toolkit) | Portable skills, agents, workflows |
+| [Toolkit](#toolkit) | Portable skills, agents, workflows (ainb-toolkit external repo) |
 | [Plugins](#plugins) | v2 subprocess plugin system |
 | [Knowledge](#knowledge) | `reflect` / `recall` GraphRAG + QMD |
 | [Contributing](#contributing) | Build, test, ship |
@@ -40,7 +40,7 @@ The `ainb` terminal app and its CLI.
 
 ## Toolkit
 
-Portable AI-coding agent toolkit. Skills, agents, workflows — deployed to 9 AI tools.
+Portable AI-coding agent toolkit. Skills, agents, workflows — deployed to 9 AI tools. The canonical source is the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb consumes it as a pinned external source.
 
 - [Overview](toolkit/overview.md)
 - [Skills (86)](toolkit/skills.md)
@@ -87,7 +87,7 @@ The pre-restructure layout had docs scattered across three places. Here's the ma
 |---|---|
 | `docs/tui/cli.md` | `ainb-tui/docs/CLI.md` |
 | `docs/tui/faq.md` | `ainb-tui/docs/FAQ.md` |
-| `docs/toolkit/overview.md` | `toolkit/README.md` (TOC + intro) |
+| `docs/toolkit/overview.md` | `toolkit/README.md` (TOC + intro — the toolkit itself has since moved to the standalone `stevengonsalvez/ainb-toolkit` repo) |
 | `docs/plugins/overview.md` | new — disambiguates |
 | `docs/plugins/user-guide.md` | `docs/plugins.md` |
 | `docs/plugins/authoring.md` | `docs/plugin-authoring.md` |
