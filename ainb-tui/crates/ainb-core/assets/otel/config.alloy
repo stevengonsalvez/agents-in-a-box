@@ -1,0 +1,54 @@
+// ---------------------------------------------------------------------------
+// Grafana Alloy: local OTLP fan-in for AI coding CLIs -> Grafana Cloud
+//
+//   Claude Code (env-driven)  ─┐                                  ┌─ logs
+//                              ├─ OTLP :4318/:4317 ─▶ Alloy ──────┼─ traces
+//   Codex CLI (config.toml)   ─┘                                  └─ metrics*
+//
+//   *metrics pass through deltatocumulative: Grafana Cloud/Mimir rejects
+//    Delta-temporality sums ("invalid temporality and type combination"),
+//    so we convert Delta->Cumulative before export. (Claude is also set to
+//    emit cumulative at source; Codex has no such knob, hence this processor.)
+//
+// Secrets from env (set in grafana-cloud.env, sourced by start-alloy.sh):
+//   GRAFANA_INSTANCE_ID, GRAFANA_API_TOKEN, GRAFANA_OTLP_ENDPOINT
+// ---------------------------------------------------------------------------
+
+otelcol.receiver.otlp "default" {
+  grpc { endpoint = "127.0.0.1:4317" }
+  http { endpoint = "127.0.0.1:4318" }
+
+  output {
+    metrics = [otelcol.processor.deltatocumulative.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Delta -> Cumulative for monotonic sums (Mimir requirement).
+otelcol.processor.deltatocumulative "default" {
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.otlphttp.grafanacloud.input]
+    logs    = [otelcol.exporter.otlphttp.grafanacloud.input]
+    traces  = [otelcol.exporter.otlphttp.grafanacloud.input]
+  }
+}
+
+otelcol.auth.basic "grafanacloud" {
+  username = sys.env("GRAFANA_INSTANCE_ID")
+  password = sys.env("GRAFANA_API_TOKEN")
+}
+
+otelcol.exporter.otlphttp "grafanacloud" {
+  client {
+    // otlphttp appends /v1/metrics|logs|traces, so give the base .../otlp URL.
+    endpoint = sys.env("GRAFANA_OTLP_ENDPOINT")
+    auth     = otelcol.auth.basic.grafanacloud.handler
+  }
+}
