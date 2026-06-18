@@ -49,6 +49,7 @@ mod otel;
 mod perf;
 mod plugins;
 mod providers;
+mod rtk;
 mod tmux;
 mod usage_cache;
 mod widgets;

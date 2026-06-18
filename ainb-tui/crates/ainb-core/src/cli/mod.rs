@@ -28,6 +28,7 @@ pub mod presets;
 pub mod recover;
 pub mod reflect;
 pub mod registry;
+pub mod rtk;
 pub mod run;
 pub mod status;
 pub mod statusline;

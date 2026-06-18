@@ -23,6 +23,7 @@ pub mod otel;
 pub mod perf;
 pub mod plugins;
 pub mod providers;
+pub mod rtk;
 pub mod tmux;
 pub mod usage_cache;
 pub mod widgets;

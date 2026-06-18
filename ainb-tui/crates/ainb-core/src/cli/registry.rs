@@ -116,6 +116,7 @@ impl CommandRegistry {
         r.register(McpCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
+        r.register(RtkCommand); // RTK token-killer: install/uninstall/status
         r
     }
 
@@ -2012,6 +2013,58 @@ impl CliCommand for HangarCommand {
     }
 }
 
+/// `ainb rtk {status,install,uninstall}` — RTK (Rust Token Killer) lifecycle.
+///
+/// RTK compresses CLI tool output (Bash/test/diff) before it reaches the model
+/// context window via a Claude Code PreToolUse hook. It is NOT an ainb
+/// marketplace plugin — it wires directly into `~/.claude/settings.json`
+/// via `rtk init -g`.
+///
+/// - `status`    detect install + wiring state + total tokens saved
+/// - `install`   brew install rtk + rtk init -g [--codex]
+/// - `uninstall` rtk init -g --uninstall (leaves binary, removes hook)
+pub struct RtkCommand;
+impl CliCommand for RtkCommand {
+    fn name(&self) -> &'static str {
+        "rtk"
+    }
+    fn build(&self, app: Command) -> Command {
+        let status = Command::new("status")
+            .about("Show RTK install state, hook wiring, and total tokens saved");
+        let install = Command::new("install")
+            .about(
+                "Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook \
+                 (rtk init -g)",
+            )
+            .arg(
+                clap::Arg::new("codex").long("codex").action(clap::ArgAction::SetTrue).help(
+                    "Also wire Codex AGENTS.md prompt injection (rtk init -g --codex). \
+                         Best-effort; weaker than the Claude Code hook path.",
+                ),
+            );
+        let uninstall = Command::new("uninstall").about(
+            "Remove the Claude Code hook from ~/.claude/settings.json \
+             (rtk init -g --uninstall). Leaves the rtk binary installed.",
+        );
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "RTK (Rust Token Killer): compress CLI output in Claude Code via \
+                     PreToolUse hook",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(status)
+                .subcommand(install)
+                .subcommand(uninstall),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::rtk::execute(&matches, ctx.format).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,9 +2079,10 @@ mod tests {
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
         // otel + abtop + witr + learnings + plugin stub + fleet + mcp + hidden
-        // notifyd + hangar) + the headroom namespace = 31. The TUI is NOT in the
-        // registry — main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 31, "expected 31 entries, got {names:?}");
+        // notifyd + hangar) + the headroom namespace + the rtk namespace = 32.
+        // The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 32, "expected 32 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -2061,6 +2115,7 @@ mod tests {
             "notifyd",
             "hangar",
             "headroom",
+            "rtk",
         ] {
             assert!(
                 names.contains(&required),
