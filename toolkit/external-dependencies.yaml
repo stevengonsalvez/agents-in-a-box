@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-06-16"
+updated: "2026-06-18"
 
 # Internal toolkit components (skills, plugins, agents, workflows, utilities)
 # are catalogued in toolkit/catalog.yaml — auto-generated from filesystem
@@ -623,6 +623,21 @@ claude-plugins:
     purpose: "Warp terminal integration for Claude Code"
     docs: "https://github.com/warpdotdev/claude-code-warp"
 
+  - name: ponytail
+    marketplace: DietrichGebert/ponytail
+    marketplace_id: ponytail
+    version: "4.7.0"
+    install: |
+      claude plugin marketplace add DietrichGebert/ponytail
+      claude plugin install ponytail@ponytail
+    purpose: "Lazy senior dev mode — forces the simplest, shortest solution that works (YAGNI, stdlib first, no unrequested abstractions)"
+    has_skills: true  # Ships skills/ (ponytail, ponytail-audit, ponytail-review, ponytail-debt, ponytail-help)
+    features:
+      - Six-rung decision ladder before writing code (need it? stdlib? platform? installed dep? one line? then minimum)
+      - /ponytail-review audits generated code for over-engineering
+      - /ponytail-debt tracks deferred shortcuts
+    docs: "https://github.com/DietrichGebert/ponytail"
+
 # =============================================================================
 # NPX SKILLS (agent skills from npm/GitHub)
 # =============================================================================
@@ -701,6 +716,31 @@ npx-skills:
       - json-canvas: "Create and edit JSON Canvas (.canvas) files — nodes, edges, groups"
       - defuddle: "Extract clean markdown from web pages via defuddle CLI (token-saving alternative to WebFetch)"
     docs: "https://github.com/kepano/obsidian-skills"
+
+  - name: cloudflare-skills
+    repo: cloudflare/skills
+    install: "npx skills add https://github.com/cloudflare/skills --yes"
+    purpose: "Cloudflare developer-platform skill family — Workers, Durable Objects, wrangler, Agents SDK, Sandbox SDK, Cloudflare One, email, Turnstile, and Workers best practices"
+    multi-skill: true
+    # The repo ALSO ships .claude-plugin/marketplace.json, so it can be installed
+    # as a Claude plugin marketplace (claude plugin marketplace add cloudflare/skills
+    # → claude plugin install cloudflare@cloudflare). We install flat via
+    # `npx skills add` so the skills land directly in ~/.claude/skills/ (matches
+    # update-externals update_npx); refresh by re-running the install command.
+    also_marketplace: "cloudflare/skills"
+    skills:
+      - cloudflare: "Comprehensive Cloudflare platform skill — Workers, Pages, KV/D1/R2, Workers AI, networking, security, IaC; retrieval-first over pre-trained knowledge"
+      - agents-sdk: "Build AI agents on Workers with the Agents SDK — stateful agents, Workflows, durable execution, WebSockets, MCP servers, React hooks"
+      - durable-objects: "Create and review Durable Objects — stateful coordination, RPC, SQLite storage, alarms, WebSockets, Vitest testing"
+      - sandbox-sdk: "Sandboxed code execution on Workers — lifecycle, commands, files, code interpreter, preview URLs"
+      - wrangler: "Cloudflare Workers CLI — deploy/develop/manage Workers, KV, R2, D1, Vectorize, Hyperdrive, Queues, Workflows, Secrets Store"
+      - workers-best-practices: "Author/review Workers code against production best practices (streaming, floating promises, global state, secrets, bindings, observability)"
+      - web-perf: "Web performance audit via Chrome DevTools MCP — Core Web Vitals (LCP/INP/CLS), render-blocking resources, network chains, a11y gaps"
+      - cloudflare-email-service: "Send/receive transactional email (Email Sending + Email Routing) via Workers binding or REST; SPF/DKIM/DMARC, Agents SDK email handling"
+      - cloudflare-one: "Cloudflare One Zero Trust / SASE — Access, Gateway, WARP, Tunnel, Cloudflare WAN, DLP, CASB, device posture, identity"
+      - cloudflare-one-migrations: "Plan migrations from Zscaler ZIA/ZPA, Palo Alto, legacy VPN/SWG/SASE to Cloudflare One (policy mapping, parity/gap analysis)"
+      - turnstile-spin: "Set up Cloudflare Turnstile end-to-end — widget via API, managed siteverify Worker, frontend snippets, validation (mirrors /turnstile/spin)"
+    docs: "https://github.com/cloudflare/skills"
 
   - name: here-now
     source: "npx add-skill"
@@ -1073,3 +1113,11 @@ marketplaces:
   - id: openai-codex
     repo: openai/codex-plugin-cc
     description: "OpenAI Codex CLI integration for Claude Code"
+
+  - id: ponytail
+    repo: DietrichGebert/ponytail
+    description: "Lazy senior dev mode — minimal-code AI agent optimization"
+
+  - id: cloudflare-skills
+    repo: cloudflare/skills
+    description: "Cloudflare developer-platform agent skills (also installable flat via npx skills add — see npx-skills: cloudflare-skills)"

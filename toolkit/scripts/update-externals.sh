@@ -42,6 +42,7 @@ update_npx() {
   run "npx skills add vercel-labs/agent-browser --yes"
   run "npx skills add vercel-labs/agent-skills --yes"
   run "npx skills add pbakaus/impeccable --yes"
+  run "npx skills add https://github.com/cloudflare/skills --yes"
   run "npx add-skill here-now"
   run "npx add-skill find-skills"
   run "npx add-skill summarize"
@@ -54,7 +55,7 @@ update_plugins() {
   section "claude-plugins (marketplace add + plugin install)"
   # beads, debug-bridge, ralph-loop, code-review, skill-creator, discord,
   # security-guidance, dev-browser, open-prose, codex, caveman, caveman-stats,
-  # ainb-fleet, ainb-hooks, warp  (reflect handled by update_reflect)
+  # ainb-fleet, ainb-hooks, warp, ponytail  (reflect handled by update_reflect)
   run "claude plugin marketplace add stevengonsalvez/beads-marketplace"
   run "claude plugin install beads@beads-marketplace"
   run "claude plugin marketplace add stevengonsalvez/agent-bridge-marketplace"
@@ -75,6 +76,8 @@ update_plugins() {
   run "claude plugin install caveman@caveman"
   run "claude plugin marketplace add warpdotdev/claude-code-warp"
   run "claude plugin install warp@claude-code-warp"
+  run "claude plugin marketplace add DietrichGebert/ponytail"
+  run "claude plugin install ponytail@ponytail"
   # agents-in-a-box (this repo) marketplace — caveman-stats + ainb fleet/hooks
   run "claude plugin marketplace add stevengonsalvez/agents-in-a-box"
   run "claude plugin install caveman-stats@agents-in-a-box"
