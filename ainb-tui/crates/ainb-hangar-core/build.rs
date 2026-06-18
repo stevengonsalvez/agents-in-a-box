@@ -1,11 +1,19 @@
 //! Compile-time guard for the embedded curated `agent_template` registry (P6.3).
 //!
 //! Every template JSON in `templates/` references a list of skill *names*. This
-//! build script reads each template, extracts its `skills`, and **fails the
-//! build** (`panic!`) if any referenced skill name lacks a real
-//! `toolkit/packages/skills/<name>/SKILL.md`. That keeps the embedded templates
-//! from drifting away from the actual curated skill set — a missing or renamed
-//! skill is caught before a binary is ever produced, not at run time.
+//! build script reads each template and **fails the build** (`panic!`) if a
+//! template is malformed — missing/empty `skills` array, unterminated strings,
+//! empty names. That keeps the embedded registry self-consistent before a
+//! binary is ever produced.
+//!
+//! Skill-name *existence* (does `<name>` resolve to a real `SKILL.md`?) is NOT
+//! checked here: the curated skills now live in the standalone
+//! `stevengonsalvez/ainb-toolkit` repo, not in a local `toolkit/` checkout, so
+//! the build must stay self-contained (no filesystem dependency on a sibling
+//! repo, and no fetch-in-build). Existence is instead validated by a CI step
+//! that clones `ainb-toolkit@<pinned-tag>` and cross-checks every template
+//! skill name against `skills/<name>/SKILL.md` (see `.github/workflows`), and
+//! by `tests/template_registry_tests.rs` when run against a fetched checkout.
 //!
 //! The script is intentionally dependency-free (no serde): it does a minimal
 //! scan of the JSON `"skills"` array so the build has no extra build-deps. The
@@ -18,10 +26,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let templates_dir = manifest_dir.join("templates");
-    // Repo layout: <repo>/ainb-tui/crates/ainb-hangar-core -> <repo>/toolkit/...
-    let skills_dir = manifest_dir.join("../../../toolkit/packages/skills");
 
-    // Re-run if any template changes or the skills tree changes shape.
+    // Re-run if any template changes.
     println!("cargo:rerun-if-changed={}", templates_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -45,17 +51,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", json.display());
         let raw = fs::read_to_string(json)
             .unwrap_or_else(|e| panic!("cannot read template {}: {e}", json.display()));
-        for skill in extract_skills(&raw, json) {
-            let skill_md = skills_dir.join(&skill).join("SKILL.md");
-            assert!(
-                skill_md.is_file(),
-                "template `{}` references skill `{}`, but `{}` does not exist. \
-                 Add the skill to toolkit/packages/skills/ or fix the template's `skills` array.",
-                json.display(),
-                skill,
-                skill_md.display(),
-            );
-        }
+        // Validates shape: non-empty `skills` array, no empty / unterminated
+        // names. Existence against ainb-toolkit is a CI/test-time concern.
+        let _ = extract_skills(&raw, json);
     }
 }
 
