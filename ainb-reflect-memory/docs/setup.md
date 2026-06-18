@@ -188,12 +188,21 @@ extension dir). The embedding column is `vector(768)` to match all-mpnet-base-v2
 ### Enable the backend in reflect-kb
 
 `LearningsGraphEngine` switches to the shared backend when BOTH are set
-(otherwise it keeps local-file behavior):
+(otherwise it keeps local-file behavior). The trigger is `REFLECT_PG_DSN`
+**only** — the generic `DATABASE_URL` is deliberately NOT a trigger (it usually
+points at an unrelated DB):
 
 ```bash
-export REFLECT_PG_DSN="$DATABASE_URL"      # or just set DATABASE_URL
+export REFLECT_PG_DSN="postgresql://USER:PASS@HOST:5432/DBNAME"
 export REFLECT_WORKSPACE_ID="<workspace-uuid>"
 ```
+
+**DSN role:** for writes (ingest/index) the DSN must authenticate as
+`service_role` / the table owner — the trusted-worker path. The `authenticated`
+role is granted **read-only** (search/lookup), and direct writes go through the
+worker, not PostgREST. The adapter sets the `app.current_workspace` GUC on
+connect so reads work under RLS for any role; the resolver treats a signed JWT
+claim as authoritative over that GUC.
 
 The `reflect` client still needs nano-graphrag + its embedding stack (reflect-kb
 `[graph]` extra). The `ainb-reflect-memory` adapters need `[nanographrag]` (+ `[pg]`).
