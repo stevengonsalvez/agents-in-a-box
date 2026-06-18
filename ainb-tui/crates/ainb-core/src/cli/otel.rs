@@ -94,7 +94,20 @@ async fn setup(args: SetupArgs) -> Result<()> {
         "      OTLP endpoint URL (ends in /otlp)",
     )?;
     let instance_id = resolve_value("GRAFANA_INSTANCE_ID", "      Instance ID (Basic-auth user)")?;
-    let api_token = resolve_value("GRAFANA_API_TOKEN", "      API token (input visible)")?;
+    // Token is a secret — read it without echoing to the terminal.
+    let api_token = resolve_secret("GRAFANA_API_TOKEN", "      API token (hidden)")?;
+
+    // Light sanity check: the endpoint should be an http(s) URL ending in /otlp.
+    // Warn (don't bail) — a common mistake is swapping the endpoint and instance
+    // fields, which otherwise only surfaces as a confusing Alloy auth error.
+    let ep = otlp_endpoint.trim();
+    if !ep.starts_with("http://") && !ep.starts_with("https://") {
+        eprintln!(
+            "      warning: OTLP endpoint doesn't start with http(s):// — did you paste the right field?"
+        );
+    } else if !ep.ends_with("/otlp") {
+        eprintln!("      warning: OTLP endpoint usually ends in /otlp — double-check the value.");
+    }
 
     let creds = otel::GrafanaCloudCreds {
         otlp_endpoint,
@@ -249,16 +262,40 @@ fn start() -> Result<()> {
 
 // ── prompt helpers ──────────────────────────────────────────────────────────
 
-/// Use the env var if set+non-empty, else prompt.
+/// Use the env var if set+non-empty, else prompt (echoed).
 fn resolve_value(env_key: &str, label: &str) -> Result<String> {
-    if let Ok(v) = std::env::var(env_key) {
-        if !v.trim().is_empty() {
-            println!("{label}: (from ${env_key})");
-            return Ok(v.trim().to_string());
-        }
+    if let Some(v) = from_env(env_key, label) {
+        return Ok(v);
     }
     let v = prompt(label)?;
     Ok(v.trim().to_string())
+}
+
+/// Like `resolve_value` but reads the prompt without echoing (secrets). Falls
+/// back to an echoed read if there is no TTY (e.g. piped input in CI).
+fn resolve_secret(env_key: &str, label: &str) -> Result<String> {
+    if let Some(v) = from_env(env_key, label) {
+        return Ok(v);
+    }
+    match rpassword::prompt_password(format!("{label}: ")) {
+        Ok(v) => Ok(v.trim().to_string()),
+        // No TTY (piped stdin) — rpassword errors; fall back to a plain read.
+        Err(_) => {
+            let v = prompt(label)?;
+            Ok(v.trim().to_string())
+        }
+    }
+}
+
+/// Return the env var value if set+non-empty, announcing the source.
+fn from_env(env_key: &str, label: &str) -> Option<String> {
+    std::env::var(env_key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .inspect(|_| {
+            println!("{label}: (from ${env_key})");
+        })
 }
 
 fn prompt(label: &str) -> Result<String> {
