@@ -31,6 +31,8 @@ pub enum Consumer {
     Beads,
     /// ccusage-backed 5h / weekly usage bars.
     Usage,
+    /// OpenTelemetry export to Grafana Cloud (`ainb otel setup`).
+    Otel,
 }
 
 impl Consumer {
@@ -41,6 +43,7 @@ impl Consumer {
             Consumer::Statusline => "statusline",
             Consumer::Beads => "beads",
             Consumer::Usage => "usage",
+            Consumer::Otel => "otel",
         }
     }
 
@@ -52,6 +55,7 @@ impl Consumer {
             Consumer::Statusline,
             Consumer::Beads,
             Consumer::Usage,
+            Consumer::Otel,
         ]
     }
 }
@@ -238,6 +242,14 @@ pub fn catalog() -> &'static [DepSpec] {
             required: false,
             why: "the Claude Code CLI the reflect drainer shells out to",
             install_hint: "# install Claude Code: https://claude.com/claude-code",
+        },
+        DepSpec {
+            name: "alloy",
+            kind: System,
+            consumers: &[Otel],
+            required: false,
+            why: "Grafana Alloy: forwards local OTLP telemetry to Grafana Cloud (run `ainb otel setup`)",
+            install_hint: "brew install grafana/grafana/alloy   # macOS · then: ainb otel setup",
         },
     ]
 }
