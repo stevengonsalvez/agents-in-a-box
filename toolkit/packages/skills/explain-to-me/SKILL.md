@@ -11,13 +11,16 @@ description: |
   /graphify for knowledge graphs), applies a Claude-brand polish layer,
   and publishes to
   here.now at a topic-slug URL so the link is shareable immediately.
-  Local-only output is available with --local. Use when Stevie says
+  Pass --gist to publish to a GitHub Gist and return a PERMANENT
+  htmlpreview render URL instead (here.now anonymous links expire in
+  24h; a gist render does not). Local-only output is available with
+  --local. Use when Stevie says
   "/explain-to-me", "explain-to-me X", "make me an explainer for X",
   "give me an HTML explainer", "render this as a webpage", "ADR for X",
   "options paper for X", or asks for a rich visual writeup. The skill
   picks the template, names the choice up-front, and reaches for
   diagrams whenever the content shape needs them.
-argument-hint: "[topic — e.g. 'how rate limiting works in our api'] [--local]"
+argument-hint: "[topic — e.g. 'how rate limiting works in our api'] [--gist] [--local]"
 ---
 
 # /explain-to-me — rich HTML explainers
@@ -36,8 +39,10 @@ brand badge.
 
 ## Trigger
 
-- `/explain-to-me <topic>` — primary
-- `/explain-to-me <topic> --local` — skip the here.now publish, just write the file
+- `/explain-to-me <topic>` — primary (publishes to here.now)
+- `/explain-to-me <topic> --gist` — publish to a GitHub Gist and return the
+  **permanent** htmlpreview render URL instead of the ephemeral here.now one
+- `/explain-to-me <topic> --local` — skip publishing, just write the file
 - `/explain-to-me` (no args) — ask the user what to explain
 - Natural language: "explain X to me as a webpage", "make an HTML
   explainer for X", "render this concept as HTML", "ADR for choosing X",
@@ -170,9 +175,15 @@ sketch-like to read at a glance.
 6. **Preserve** every `<script>` block verbatim unless changing the
    demo's data shape.
 
-### 5. Publish to here.now (default)
+### 5. Publish (default: here.now · alternate: `--gist`)
 
-Unless the user passed `--local`, publish the file via the `/here-now`
+Pick the publish target from the flags:
+- **no flag** → here.now (default; below).
+- **`--gist`** → GitHub Gist + htmlpreview (§5b). Use this when the link must
+  outlive 24h — here.now anonymous publishes expire, a Gist render does not.
+- **`--local`** → skip publishing entirely; just report the local path.
+
+Unless the user passed `--local` or `--gist`, publish the file via the `/here-now`
 skill (`~/.claude/skills/here-now/scripts/publish.sh`).
 
 **Critical: you do not get to choose the URL on a first publish.**
@@ -203,6 +214,32 @@ Procedure:
    back to local-only mode and surface the path. Tell Stevie what
    happened — don't pretend you published.
 
+### 5b. Publish to a Gist (alternate, `--gist`)
+
+When the user passes `--gist`, publish to a GitHub Gist instead of here.now and
+return the **permanent** rendered URL. The explainer HTML is self-contained
+(inline SVG + CSS), so a single-file gist renders perfectly via
+`htmlpreview.github.io`, and — unlike an anonymous here.now publish — the link
+never expires.
+
+```
+bash ~/.claude/skills/explain-to-me/scripts/publish_gist.sh \
+  ./explainers/<slug>.html \
+  --desc "<one-line summary>"
+```
+
+The script prints four `key=value` lines; **share `preview_url`** (the
+`htmlpreview.github.io/?…` link — the live rendered page). It also prints
+`gist_url` (the gist itself) and `raw_url` (always-latest raw HTML, no commit
+SHA). Notes:
+
+- Requires `gh` authenticated (`gh auth status`). If it isn't, tell Stevie and
+  fall back to here.now or `--local` — don't pretend you published.
+- The gist is **secret/unlisted** by default (the raw URL is still publicly
+  fetchable, so htmlpreview works); pass `--public` to list it on the profile.
+- To re-publish an update to the SAME url, pass `--update <gist-id>` (keeps the
+  url stable, like here.now's `--slug` update).
+
 ### 6. Hand off
 
 Report to Stevie in this exact shape:
@@ -210,7 +247,7 @@ Report to Stevie in this exact shape:
 > **Explainer ready.**
 > - Template: `21-adr.html` — *why this one*
 > - Local: `./explainers/<slug>.html`
-> - Live: `https://<server-slug>.here.now`  *(or "skipped, --local")*
+> - Live: `https://<server-slug>.here.now`  *(here.now default; "skipped, --local"; or for `--gist`: the `preview_url` htmlpreview link — note it's permanent, no 24h expiry)*
 > - Diagrams: from /fireworks-tech-graph  *(omit line if none)*
 
 If the returned URL is a three-word auto-slug (e.g.
