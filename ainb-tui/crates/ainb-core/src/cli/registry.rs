@@ -105,6 +105,7 @@ impl CommandRegistry {
         r.register(ClaudecodeCommand);
         r.register(CodexCommand);
         r.register(TmuxCommand);
+        r.register(OtelCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
@@ -1141,6 +1142,30 @@ impl CliCommand for NotifydCommand {
     }
 }
 
+/// `ainb otel {setup,status,start}` — OpenTelemetry export to Grafana Cloud.
+/// See `crate::cli::otel` for the setup flow.
+pub struct OtelCommand;
+impl CliCommand for OtelCommand {
+    fn name(&self) -> &'static str {
+        "otel"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::otel::OtelCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Set up OpenTelemetry export to Grafana Cloud (Grafana Alloy pipeline)")
+                    .subcommand_required(true),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::otel::OtelCommands::from_arg_matches(matches) {
+            Ok(c) => Box::pin(async move { crate::cli::otel::execute(c, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -1581,14 +1606,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_seven_commands() {
+    fn built_ins_registers_twenty_eight_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // main's 26 (built-ins + doctor + reflect + claudecode + codex + tmux
-        // + abtop + plugin stub + fleet + hidden notifyd + hangar) + the mcp
-        // namespace = 27. The TUI is NOT in the registry — main.rs handles
+        // main's built-ins + doctor + reflect + claudecode + codex + tmux + otel
+        // + abtop + plugin stub + fleet + hidden notifyd + hangar + the mcp
+        // namespace = 28. The TUI is NOT in the registry — main.rs handles
         // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 27, "expected 27 entries, got {names:?}");
+        assert_eq!(names.len(), 28, "expected 28 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1610,6 +1635,7 @@ mod tests {
             "claudecode",
             "codex",
             "tmux",
+            "otel",
             "completion",
             "abtop",
             "plugin",
