@@ -2669,13 +2669,15 @@ mod tests {
     #[test]
     fn tab_cycles_focus_through_visible_rows() {
         let mut s = mk_state();
-        // Named preset, default mode = Boss → rows =
-        // [Preset, Mode, Yolo, Branch, Prompt, Launch].
+        // Named preset, default mode = Boss, Claude/Codex provider → rows =
+        // [Preset, Mode, Yolo, HeadroomProxy, Branch, Prompt, Launch].
         assert_eq!(s.focused_row, ConfigureRow::Preset);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Mode);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Yolo);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::HeadroomProxy);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Branch);
         s.cycle_focus(1);
