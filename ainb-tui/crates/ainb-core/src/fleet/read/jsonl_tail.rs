@@ -56,13 +56,38 @@ pub fn latest_transcript_for_cwd(cwd: &str) -> Option<PathBuf> {
     newest.map(|(_, p)| p)
 }
 
+/// Is this assistant row's `stop_reason` an end-of-turn signal?
+///
+/// TURN-END REALITY: Claude (>= 2.1.x) streams the assistant turn as JSONL rows
+/// that all carry `stop_reason: null` — the visible reply text lands in a
+/// `stop_reason: null` row, and the only `"end_turn"` (if any) rides a later
+/// metadata row that carries NO text. Code that gated on
+/// `stop_reason == "end_turn"` therefore never fired on 2.1.x: a finished turn
+/// was never recognised. We treat an absent/`null` `stop_reason` as a candidate
+/// end-of-turn too. Non-terminal reasons (`tool_use`, `max_tokens`, etc.) are
+/// still rejected — they mean the turn is mid-flight.
+///
+/// SAFETY: accepting `null` is only safe when the caller ALSO confirms the row
+/// carries visible assistant text (a streaming/tool-only row also has
+/// `stop_reason: null`). Every caller pairs this with such a gate:
+///   * `scan_for_turn_end` requires a non-empty `text` block on the row.
+///   * `transport.rs::scan_new_rows_for_turn_end` only records a reply when
+///     `assistant_text_from_row` yielded Some(text).
+///   * `needs.rs` IDLE additionally requires `!has_user_follow_up` and an
+///     `age_min >= idle_threshold_min` (default 5) window, so a 5-min-old
+///     assistant row is realistically finished.
+#[must_use]
+pub(crate) fn is_turn_end_stop_reason(stop_reason: Option<&str>) -> bool {
+    matches!(stop_reason, None | Some("end_turn"))
+}
+
 /// One JSONL row from Claude's transcript. Only the fields we need.
 #[derive(Debug, Deserialize)]
 struct TranscriptRow {
     /// "user" | "assistant" | "system" | "tool_use" | …
     #[serde(rename = "type")]
     row_type: Option<String>,
-    /// Sub-shape for assistant turns — `{ stop_reason: "end_turn" | … }`.
+    /// Sub-shape for assistant turns — `{ stop_reason, content }`.
     #[serde(default)]
     message: Option<TranscriptMessage>,
 }
@@ -71,10 +96,33 @@ struct TranscriptRow {
 struct TranscriptMessage {
     #[serde(default)]
     stop_reason: Option<String>,
+    /// `message.content` — an array of blocks (`text` / `tool_use` / …) or, on
+    /// rare rows, a plain string. Used for the text-presence gate that makes
+    /// accepting a `null` `stop_reason` safe (see `is_turn_end_stop_reason`).
+    #[serde(default)]
+    content: Option<Value>,
 }
 
-/// Block until the watched transcript shows a new `assistant`-role row whose
-/// `message.stop_reason` is `end_turn` (or until `timeout` elapses).
+impl TranscriptMessage {
+    /// Does this assistant message carry a non-empty visible `text` block?
+    /// A tool-only / streaming row has no such block, so a `null`-stop_reason
+    /// row that is merely mid-flight is not mistaken for a finished turn.
+    fn has_visible_text(&self) -> bool {
+        match &self.content {
+            Some(Value::Array(blocks)) => blocks.iter().any(|b| {
+                b.get("type").and_then(Value::as_str) == Some("text")
+                    && b.get("text").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty())
+            }),
+            Some(Value::String(s)) => !s.trim().is_empty(),
+            _ => false,
+        }
+    }
+}
+
+/// Block until the watched transcript shows a new `assistant`-role row that
+/// ends a turn — a row carrying visible text whose `message.stop_reason` is an
+/// end-of-turn signal (`null` or `"end_turn"`; see [`is_turn_end_stop_reason`])
+/// — or until `timeout` elapses.
 ///
 /// Returns `true` if we observed a turn-end before timing out.
 pub fn wait_for_turn_end(path: &Path, timeout: Duration) -> Result<bool> {
@@ -143,11 +191,20 @@ fn scan_for_turn_end(path: &Path, last_offset: &mut u64) -> Result<Option<bool>>
 
         if let Ok(row) = serde_json::from_str::<TranscriptRow>(buf.trim()) {
             let is_assistant = row.row_type.as_deref() == Some("assistant");
-            let ended =
-                row.message.as_ref().and_then(|m| m.stop_reason.as_deref()) == Some("end_turn");
-            if is_assistant && ended {
-                found_end = true;
-                break;
+            if is_assistant {
+                if let Some(msg) = row.message.as_ref() {
+                    // TEXT-GATE: a finished turn is an assistant row that BOTH
+                    // carries visible text AND has an end-of-turn stop_reason.
+                    // On 2.1.x the reply text lands on a `stop_reason: null`
+                    // row, so we accept null — but only when the row actually
+                    // has a text block, else a mid-stream/tool-only `null` row
+                    // would falsely signal turn-end.
+                    let ended = is_turn_end_stop_reason(msg.stop_reason.as_deref());
+                    if ended && msg.has_visible_text() {
+                        found_end = true;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -526,6 +583,91 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let (pattern, _) = hit.expect("should find an error in the JSONL tail");
         assert_eq!(pattern, "rate_limited");
+    }
+
+    // --- turn-end stop_reason helper -------------------------------------
+
+    #[test]
+    fn is_turn_end_accepts_null_and_end_turn() {
+        // 2.1.x stamps the finished text row with null; "end_turn" still works.
+        assert!(is_turn_end_stop_reason(None));
+        assert!(is_turn_end_stop_reason(Some("end_turn")));
+    }
+
+    #[test]
+    fn is_turn_end_rejects_non_terminal_reasons() {
+        assert!(!is_turn_end_stop_reason(Some("tool_use")));
+        assert!(!is_turn_end_stop_reason(Some("max_tokens")));
+        assert!(!is_turn_end_stop_reason(Some("stop_sequence")));
+    }
+
+    // --- scan_for_turn_end: text-gated null acceptance -------------------
+
+    /// Write `rows` (one JSONL object per element) to a fresh tmp file and run
+    /// `scan_for_turn_end` over the whole file. Returns whether turn-end fired.
+    fn scan_detects_turn_end(rows: &[&str]) -> bool {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "ainb-scan-turnend-{}-{:p}.jsonl",
+            std::process::id(),
+            rows
+        ));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for r in rows {
+                writeln!(f, "{r}").unwrap();
+            }
+        }
+        let mut offset = 0u64;
+        let found = scan_for_turn_end(&path, &mut offset).unwrap();
+        let _ = std::fs::remove_file(&path);
+        found == Some(true)
+    }
+
+    #[test]
+    fn scan_turn_end_null_stop_reason_with_text_is_turn_end() {
+        // 2.1.x reality: the finished reply lands on a `stop_reason: null` row.
+        assert!(scan_detects_turn_end(&[
+            r#"{"type":"user","message":{"content":"ping"}}"#,
+            r#"{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"PONG"}]}}"#,
+        ]));
+    }
+
+    #[test]
+    fn scan_turn_end_null_stop_reason_no_text_is_not_turn_end() {
+        // TEXT-GATE: a `null`-stop_reason row with only a tool_use block is
+        // mid-flight, NOT a finished turn.
+        assert!(!scan_detects_turn_end(&[
+            r#"{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#,
+        ]));
+        // Empty / whitespace-only text also fails the gate.
+        assert!(!scan_detects_turn_end(&[
+            r#"{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"   "}]}}"#,
+        ]));
+    }
+
+    #[test]
+    fn scan_turn_end_explicit_end_turn_still_detected() {
+        assert!(scan_detects_turn_end(&[
+            r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+        ]));
+    }
+
+    #[test]
+    fn scan_turn_end_non_terminal_reason_is_not_turn_end() {
+        assert!(!scan_detects_turn_end(&[
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"calling a tool"}]}}"#,
+        ]));
+        assert!(!scan_detects_turn_end(&[
+            r#"{"type":"assistant","message":{"stop_reason":"max_tokens","content":[{"type":"text","text":"truncated"}]}}"#,
+        ]));
+    }
+
+    #[test]
+    fn scan_turn_end_user_row_is_never_turn_end() {
+        assert!(!scan_detects_turn_end(&[
+            r#"{"type":"user","message":{"stop_reason":null,"content":[{"type":"text","text":"hi"}]}}"#,
+        ]));
     }
 
     #[test]
