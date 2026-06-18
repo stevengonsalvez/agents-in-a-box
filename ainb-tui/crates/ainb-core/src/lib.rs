@@ -15,6 +15,7 @@ pub mod docker;
 pub mod editors;
 pub mod fleet;
 pub mod git;
+pub mod headroom;
 pub mod interactive;
 pub mod mcp_pool;
 pub mod models;

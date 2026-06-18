@@ -1236,6 +1236,22 @@ impl InteractiveSessionManager {
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
+        // Ensure the shared Headroom proxy is running before we build the env
+        // that points the CLI at it. On error we log a warning and continue —
+        // the session still launches, just without working compression.
+        // TODO(P2-followup #951): respawn Claude Code daemon under proxy env
+        // TODO(idle-reap): reap proxy when no Headroom-enabled sessions remain
+        if headroom_enabled
+            && matches!(
+                agent_type,
+                SessionAgentType::Claude | SessionAgentType::Codex
+            )
+        {
+            if let Err(e) = crate::headroom::ensure_proxy_running().await {
+                warn!("headroom proxy unavailable — session will start without compression: {e}");
+            }
+        }
+
         // Build environment setup for API key injection
         let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_enabled);
 
@@ -1457,6 +1473,12 @@ mod tests {
     fn headroom_env_prefix_routes_claude_and_codex_only() {
         use crate::models::session::SessionAgentType;
 
+        // Hold the shared env lock + force the default port so the base URL is
+        // deterministic regardless of other tests mutating AINB_HEADROOM_PORT.
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let old = std::env::var_os("AINB_HEADROOM_PORT");
+        std::env::remove_var("AINB_HEADROOM_PORT");
+
         // Disabled → no injection for any provider.
         assert_eq!(headroom_env_prefix(SessionAgentType::Claude, false), "");
         assert_eq!(headroom_env_prefix(SessionAgentType::Codex, false), "");
@@ -1475,12 +1497,30 @@ mod tests {
         // Providers Headroom can't proxy → empty even when enabled (gating).
         assert_eq!(headroom_env_prefix(SessionAgentType::Gemini, true), "");
         assert_eq!(headroom_env_prefix(SessionAgentType::Copilot, true), "");
+
+        if let Some(v) = old {
+            std::env::set_var("AINB_HEADROOM_PORT", v);
+        }
     }
 
     #[test]
     fn headroom_base_url_honors_port_override() {
-        // Default port when unset is the documented 8787.
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let key = "AINB_HEADROOM_PORT";
+        let old = std::env::var_os(key);
+
+        // Unset → documented default 8787.
+        std::env::remove_var(key);
         assert!(headroom_base_url().ends_with(&HEADROOM_DEFAULT_PORT.to_string()));
+
+        // Override → reflected in the base URL.
+        std::env::set_var(key, "9191");
+        assert!(headroom_base_url().ends_with(":9191"));
+
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 
     #[test]

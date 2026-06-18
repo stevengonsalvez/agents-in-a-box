@@ -112,6 +112,7 @@ impl CommandRegistry {
         r.register(LearningsCommand); // headless KB search via the learnings plugin
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
+        r.register(HeadroomCommand);
         r.register(McpCommand);
         r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
@@ -1868,6 +1869,33 @@ impl CliCommand for FleetCommand {
     }
 }
 
+/// `ainb headroom {status,stop}` — inspect and control the ainb-managed
+/// Headroom compression proxy. `status` prints running / port / pid /
+/// tokens_saved (with `--format json` support). `stop` sends SIGTERM.
+pub struct HeadroomCommand;
+impl CliCommand for HeadroomCommand {
+    fn name(&self) -> &'static str {
+        "headroom"
+    }
+    fn build(&self, app: Command) -> Command {
+        let status = Command::new("status")
+            .about("Query the Headroom proxy (running, port, pid, tokens saved)");
+        let stop = Command::new("stop").about("Stop the ainb-managed Headroom proxy");
+        app.subcommand(
+            Command::new(self.name())
+                .about("Manage the ainb-managed Headroom compression proxy")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(status)
+                .subcommand(stop),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::headroom::execute(&matches, ctx.format).await })
+    }
+}
+
 pub struct McpCommand;
 impl CliCommand for McpCommand {
     fn name(&self) -> &'static str {
@@ -1993,14 +2021,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_thirty_commands() {
+    fn built_ins_registers_all_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // built-ins + doctor + reflect + claudecode + codex + tmux + otel +
-        // abtop + witr + learnings + plugin stub + fleet + mcp + hidden notifyd
-        // + hangar = 30. The TUI is NOT in the registry — main.rs handles `tui`
-        // / no-subcommand inline.
-        assert_eq!(names.len(), 30, "expected 30 entries, got {names:?}");
+        // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
+        // otel + abtop + witr + learnings + plugin stub + fleet + mcp + hidden
+        // notifyd + hangar) + the headroom namespace = 31. The TUI is NOT in the
+        // registry — main.rs handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 31, "expected 31 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -2032,6 +2060,7 @@ mod tests {
             "mcp",
             "notifyd",
             "hangar",
+            "headroom",
         ] {
             assert!(
                 names.contains(&required),
