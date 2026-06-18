@@ -35,7 +35,7 @@ use tokio::process::Command;
 use super::relay::FleetTransport;
 use super::routing::TargetSession;
 use crate::fleet::discover::discover_from_ainb;
-use crate::fleet::read::cwd_to_project_slug;
+use crate::fleet::read::{cwd_to_project_slug, is_turn_end_stop_reason};
 
 /// The live transport: discovery via `ainb list`, delivery via tmux send-keys,
 /// reply capture via the JSONL transcript tail. This is the production
@@ -197,24 +197,6 @@ fn assistant_text_from_row(obj: &Value) -> Option<(Option<String>, Option<String
     let text = parts.join("\n");
     let text = text.trim();
     Some((stop_reason, (!text.is_empty()).then(|| text.to_string())))
-}
-
-/// Is this assistant row's `stop_reason` an end-of-turn signal?
-///
-/// TURN-END REALITY: Claude (>= 2.1.x) streams the assistant turn as JSONL rows
-/// that all carry `stop_reason: null` — the visible reply text lands in a
-/// `stop_reason: null` row, and the only `"end_turn"` (if any) rides a later
-/// metadata row that carries NO text. The original scan accepted ONLY
-/// `stop_reason == "end_turn"`, so a real reply (e.g. `PONG`) whose text row is
-/// stamped `null` was never recognised and `wait_for_reply` timed out despite a
-/// delivered answer. We therefore treat an absent/`null` `stop_reason` as a
-/// candidate end-of-turn too. Non-terminal reasons (`tool_use`, `max_tokens`,
-/// etc.) are still rejected: a `tool_use` row means the turn is mid-flight, and
-/// `assistant_text_from_row` already drops rows with no `type:text` block, so a
-/// thinking-only or tool-only row never reaches here as a reply.
-#[must_use]
-fn is_turn_end_stop_reason(stop_reason: Option<&str>) -> bool {
-    matches!(stop_reason, None | Some("end_turn"))
 }
 
 /// Scan rows from `start_offset`; return `(new_offset, reply_text|None)`.
