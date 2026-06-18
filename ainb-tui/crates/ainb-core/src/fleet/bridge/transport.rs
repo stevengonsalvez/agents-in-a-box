@@ -59,20 +59,51 @@ impl FleetTransport for AinbTransport {
 }
 
 /// Discover running sessions via the shared fleet discovery (`ainb list`).
+///
+/// ROUTING-NAME RECOVERY: `ainb list --format json` does NOT expose the session
+/// `ainb run --name` as a distinct field — it only ships `workspace_name`,
+/// `tmux_session_name`, `worktree_path`, `session_id`. But the run-name IS
+/// recoverable: `ainb run --name X` builds the tmux session as
+/// `tmux_{sanitize(X)}` (see `tmux::sanitize_session_name`). Stripping the
+/// `tmux_` prefix recovers the sanitized run-name, which is what the user
+/// addresses via `default_target` / a `name:` prefix. We make that the PRIMARY
+/// routing key and keep `workspace_name` as a fallback alias so addressing by
+/// repo folder still works. Sanitisation is lossy (spaces/`.`/`/`/`:` collapse
+/// to `_`), so a run-name containing those separators is matched in its
+/// sanitised form — an acceptable, documented limitation.
 pub async fn discover() -> Vec<TargetSession> {
     let sessions = discover_from_ainb().await.unwrap_or_default();
     sessions
         .into_iter()
         .filter_map(|s| {
-            let name = s.workspace_name.unwrap_or_default();
+            let workspace = s.workspace_name.unwrap_or_default();
             let tmux = s.tmux_session.unwrap_or_default();
-            if name.is_empty() || tmux.is_empty() {
+            if workspace.is_empty() || tmux.is_empty() {
                 return None;
             }
+            // Recover the run-name from the tmux session name; fall back to the
+            // workspace name if the prefix is absent (e.g. a non-ainb tmux name).
+            let run_name = run_name_from_tmux(&tmux, &workspace);
             let cwd = s.worktree_path.unwrap_or(s.cwd);
-            Some(TargetSession::new(name, tmux, cwd, s.id))
+            Some(TargetSession::with_workspace(
+                run_name, workspace, tmux, cwd, s.id,
+            ))
         })
         .collect()
+}
+
+/// Recover the session `ainb run --name` from its `tmux_session` name.
+///
+/// `ainb run --name X` creates the tmux session as `tmux_{sanitize(X)}`, so
+/// stripping the `tmux_` prefix yields the (sanitised) run-name. Falls back to
+/// `workspace` when the prefix is absent or the stripped remainder is empty, so
+/// a non-ainb tmux name never produces an empty routing key.
+#[must_use]
+fn run_name_from_tmux(tmux: &str, workspace: &str) -> String {
+    match tmux.strip_prefix("tmux_") {
+        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        _ => workspace.to_string(),
+    }
 }
 
 /// Send `text` to a tmux session via literal send-keys + Enter.
@@ -438,5 +469,31 @@ mod tests {
     #[test]
     fn current_offset_of_none_is_zero() {
         assert_eq!(current_offset(None), 0);
+    }
+
+    #[test]
+    fn run_name_recovered_from_tmux_prefix() {
+        // `ainb run --name bridgetest` -> tmux `tmux_bridgetest`.
+        assert_eq!(
+            run_name_from_tmux("tmux_bridgetest", "agents-in-a-box"),
+            "bridgetest"
+        );
+    }
+
+    #[test]
+    fn run_name_falls_back_to_workspace_without_prefix() {
+        assert_eq!(
+            run_name_from_tmux("weird-name", "agents-in-a-box"),
+            "agents-in-a-box"
+        );
+    }
+
+    #[test]
+    fn run_name_falls_back_to_workspace_when_prefix_only() {
+        // A bare `tmux_` with nothing after it must not become an empty key.
+        assert_eq!(
+            run_name_from_tmux("tmux_", "agents-in-a-box"),
+            "agents-in-a-box"
+        );
     }
 }

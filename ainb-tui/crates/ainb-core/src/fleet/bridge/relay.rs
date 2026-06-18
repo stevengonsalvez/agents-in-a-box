@@ -9,7 +9,9 @@
 
 use std::time::Duration;
 
-use super::routing::{TargetSession, parse_target_prefix, resolve_target};
+use super::routing::{
+    TargetSession, best_match, default_target, parse_target_prefix, resolve_target,
+};
 
 /// The transport seam the relay drives. The real implementation shells out to
 /// `ainb`/tmux (`transport.rs`); tests substitute an in-memory fake so the
@@ -60,24 +62,31 @@ pub async fn relay<T: FleetTransport + ?Sized>(
         return "No running ainb sessions to relay to.".to_string();
     }
 
-    let names: Vec<String> = sessions.iter().map(|s| s.name.clone()).collect();
-    let (mut parsed_name, message) = parse_target_prefix(raw_text, &names);
+    let (parsed_name, message) = parse_target_prefix(raw_text, &sessions);
 
-    // No explicit prefix -> honour a configured default target name if present
-    // and actually running (case-insensitive).
-    if parsed_name.is_none() {
-        if let Some(default) = params.default_target {
-            if sessions.iter().any(|s| s.name.eq_ignore_ascii_case(default)) {
-                parsed_name = Some(default.to_string());
-            }
-        }
-    }
-
-    let Some(target) = resolve_target(parsed_name.as_deref(), &sessions) else {
-        return match parsed_name {
-            Some(name) => format!("No running session named {name:?}."),
-            None => "No target session available.".to_string(),
+    let target = if let Some(name) = parsed_name.as_deref() {
+        // Explicit `name:` prefix that already matched a real session.
+        let Some(target) = resolve_target(Some(name), &sessions) else {
+            return format!("No running session named {name:?}.");
         };
+        target
+    } else if let Some(default) = params.default_target {
+        // A default target IS configured. It MUST resolve to a running session
+        // (by run-name or workspace name). If it doesn't, refuse to relay —
+        // returning a clear error rather than silently falling through to the
+        // conductor/alphabetical default, which is how an un-prefixed message
+        // ended up in the user's active orchestrator session.
+        let Some(target) = best_match(default, &sessions) else {
+            return format!("No running session matches default target {default:?}.");
+        };
+        target
+    } else {
+        // No prefix AND no configured default — only here may we use the
+        // conductor-first / alphabetical default.
+        let Some(target) = default_target(&sessions) else {
+            return "No target session available.".to_string();
+        };
+        target
     };
 
     if message.is_empty() {
@@ -137,6 +146,20 @@ mod tests {
             format!("tmux-{name}"),
             format!("/cwd/{name}"),
             format!("id-{name}"),
+        )
+    }
+
+    /// A session built the way live discovery builds it: a run-name distinct
+    /// from the workspace/repo folder name. Exercising the relay through these
+    /// is what closes the gap the old unit tests left (they only ever used
+    /// `sess`, where run-name == workspace, hiding the mis-route).
+    fn sess_ws(run_name: &str, workspace: &str) -> TargetSession {
+        TargetSession::with_workspace(
+            run_name,
+            workspace,
+            format!("tmux_{run_name}"),
+            format!("/cwd/{workspace}"),
+            format!("id-{run_name}"),
         )
     }
 
@@ -222,5 +245,84 @@ mod tests {
             out,
             "Sent to backend, but no reply within 42s (it may still be working)."
         );
+    }
+
+    // --- Discovery->routing regression tests (the live mis-route) ------------
+    //
+    // These use `sess_ws` (run-name != workspace), reproducing what
+    // `transport::discover()` actually builds. The pre-fix relay matched
+    // `default_target` against the workspace name only, so a `default_target`
+    // set to a run-name fell through to the conductor/alphabetical default and
+    // landed in the wrong (often the user's active orchestrator) session.
+
+    /// (a) default_target set to a session's `ainb run --name` routes THERE,
+    /// even though the session's workspace folder name is something else.
+    #[tokio::test]
+    async fn default_target_matches_run_name_from_discovery() {
+        // Orchestrator session is alphabetically first by run-name AND workspace.
+        let orchestrator = sess_ws("agents-in-a-box", "agents-in-a-box");
+        let bridgetest = sess_ws("bridgetest", "tmp");
+        let t = FakeTransport::new(vec![orchestrator, bridgetest], Some("routed".into()));
+        let p = RelayParams {
+            default_target: Some("bridgetest"),
+            response_timeout: Duration::from_secs(5),
+        };
+        let out = relay(&t, &p, "hello there").await;
+        assert_eq!(out, "routed");
+        // Crucial: it went to bridgetest, NOT the alphabetical orchestrator.
+        assert_eq!(t.last_send.lock().unwrap().clone().unwrap().0, "bridgetest");
+    }
+
+    /// (b) default_target SET but matching NO running session -> hard error, and
+    /// nothing is sent. NEVER the alphabetical/conductor fallback.
+    #[tokio::test]
+    async fn unmatched_default_target_errors_instead_of_falling_back() {
+        let orchestrator = sess_ws("agents-in-a-box", "agents-in-a-box");
+        let other = sess_ws("integration-port", "integration-port");
+        let t = FakeTransport::new(vec![orchestrator, other], Some("should-not-send".into()));
+        let p = RelayParams {
+            default_target: Some("bridgetest"), // not running
+            response_timeout: Duration::from_secs(5),
+        };
+        let out = relay(&t, &p, "hello there").await;
+        assert_eq!(
+            out,
+            "No running session matches default target \"bridgetest\"."
+        );
+        assert!(
+            t.last_send.lock().unwrap().is_none(),
+            "must NOT relay to any session when the configured default is unmatched"
+        );
+    }
+
+    /// (c) no default_target AND no prefix -> the conductor/alphabetical default
+    /// still applies, unchanged. This is the only path that may fall back.
+    #[tokio::test]
+    async fn no_default_no_prefix_still_uses_conductor_default() {
+        let zebra = sess_ws("zebra", "repo-z");
+        let conductor = sess_ws("conductor", "repo-c");
+        let t = FakeTransport::new(vec![zebra, conductor], Some("done".into()));
+        let p = RelayParams {
+            default_target: None,
+            response_timeout: Duration::from_secs(5),
+        };
+        let out = relay(&t, &p, "status?").await;
+        assert_eq!(out, "done");
+        assert_eq!(t.last_send.lock().unwrap().clone().unwrap().0, "conductor");
+    }
+
+    /// default_target may also be addressed by the workspace name (fallback
+    /// alias), so the original pre-fix contract still holds.
+    #[tokio::test]
+    async fn default_target_matches_workspace_name_fallback() {
+        let bridgetest = sess_ws("bridgetest", "tmp");
+        let t = FakeTransport::new(vec![sess("other"), bridgetest], Some("ok".into()));
+        let p = RelayParams {
+            default_target: Some("tmp"), // the workspace, not the run-name
+            response_timeout: Duration::from_secs(5),
+        };
+        let out = relay(&t, &p, "go").await;
+        assert_eq!(out, "ok");
+        assert_eq!(t.last_send.lock().unwrap().clone().unwrap().0, "bridgetest");
     }
 }
