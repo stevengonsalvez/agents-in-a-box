@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ainb-reflect-memory"
+version = "0.1.0"
+description = "Postgres-backed GraphRAG memory substrate for agents-in-a-box (dumb searchable server; client keeps the LLM brain)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Steven Gonsalvez" },
+]
+keywords = [
+    "ai",
+    "agents",
+    "graphrag",
+    "memory",
+    "supabase",
+    "postgres",
+    "retrieval",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+# Base package is dependency-free on purpose. The typed helper layer
+# (models / normalize / sql builders) is pure Python so it imports and
+# unit-tests WITHOUT a database driver or live Supabase credentials. The
+# Postgres driver lives in the optional `[pg]` extra and is lazy-imported
+# only when you actually open a connection (see store.py).
+dependencies = []
+
+[project.optional-dependencies]
+# Real Postgres driver — only needed to talk to a live database (migrations,
+# integration tests, production use). psycopg 3 sync API.
+pg = [
+    "psycopg[binary]>=3.1",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+    "psycopg[binary]>=3.1",
+]
+# Postgres-backed nano-graphrag storage adapters (src/ainb_reflect_memory/
+# nanographrag/). nano-graphrag itself + its heavy client stack
+# (sentence-transformers, graspologic/numba) are PEER deps provided by the
+# CLIENT runtime (reflect-kb's `[graph]` extra) — the adapters plug INTO an
+# existing nano-graphrag install. They are deliberately NOT locked here so this
+# package doesn't drag the graspologic/numba/llvmlite chain into its resolution.
+# Only the light, always-resolvable pieces the adapters need directly are listed.
+nanographrag = [
+    "psycopg[binary]>=3.1",
+    "networkx>=3.0",
+    "numpy>=1.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ainb_reflect_memory"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require a live Postgres (auto-skip when none is reachable)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
