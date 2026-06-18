@@ -20,10 +20,13 @@
 //!     [--release-tag <tag>] [--out <path>]
 //!
 //! `--toolkit-root` (or env `AINB_TOOLKIT_DIR`) is the cloned ainb-toolkit root
-//! holding `skills/` + `external-dependencies.yaml`. `--release-tag` pins every
-//! owned `install_uri` (default `latest` for dev runs; the release workflow
-//! passes the real tag). `--out` overrides the output path (default
-//! `<repo>/catalog-index.json`).
+//! holding `skills/` + `external-dependencies.yaml`. `--release-tag` is the
+//! **ainb-toolkit** git ref pinned into every owned `install_uri`
+//! (`gh:stevengonsalvez/ainb-toolkit@<ref>/skills/<name>`) and used as the
+//! index's metadata label — so it MUST match the `ainb-toolkit@<ref>` the
+//! checkout was cloned at (default `latest` for dev runs; the release workflow
+//! passes the pinned ainb-toolkit tag). `--out` overrides the output path
+//! (default `<repo>/catalog-index.json`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
