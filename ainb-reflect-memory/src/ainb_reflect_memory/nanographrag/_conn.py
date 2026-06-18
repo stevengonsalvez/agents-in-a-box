@@ -48,8 +48,21 @@ def vector_literal(vec: Iterable[float]) -> str:
     """Encode a vector as a pgvector text literal: ``[0.1,0.2,...]``.
 
     Used with ``%s::vector`` so we depend only on psycopg, not pgvector-python.
+    Rejects non-finite components up front with a clear error — pgvector refuses
+    NaN/Inf, and without this guard one bad value aborts the whole upsert batch
+    with a cryptic ``invalid input syntax for type vector``.
     """
-    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+    import math
+
+    out = []
+    for i, x in enumerate(vec):
+        f = float(x)
+        if not math.isfinite(f):
+            raise ValueError(
+                f"vector component {i} is not finite ({f!r}); pgvector rejects NaN/Inf"
+            )
+        out.append(repr(f))
+    return "[" + ",".join(out) + "]"
 
 
 class PgBackend:
@@ -88,6 +101,18 @@ class PgBackend:
 
         if self._conn is None or self._conn.closed:
             self._conn = psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
+            # Bind the tenant for RLS so the adapter is correct under any role —
+            # not just owner/service_role (BYPASSRLS). On a raw psycopg
+            # connection there is no JWT, so the resolver uses this GUC; under
+            # service_role/owner RLS is bypassed and this is harmless. NOTE:
+            # writes still require a service_role/owner DSN (the `authenticated`
+            # grant is read-only) — see docs/setup.md. set_config is
+            # parameterized (no injection).
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "select set_config('app.current_workspace', %s, false)",
+                    (self.workspace_id,),
+                )
         return self._conn
 
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[dict]:
@@ -113,3 +138,22 @@ class PgBackend:
         with self._lock:
             with self._conn_open().cursor() as cur:
                 cur.executemany(sql, rows)
+
+    def run_tx(self, steps: Sequence[tuple]) -> None:
+        """Run several statements in ONE transaction (even under autocommit).
+
+        ``steps`` is a sequence of ``(sql, params_or_rows, many)`` — used by the
+        graph backend to delete-then-reinsert a namespace atomically, so a reader
+        never sees a half-written graph and stale rows can't survive a save.
+        """
+        with self._lock:
+            conn = self._conn_open()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    for sql, payload, many in steps:
+                        if many:
+                            cur.executemany(sql, payload)
+                        elif payload is None:
+                            cur.execute(sql)
+                        else:
+                            cur.execute(sql, payload)

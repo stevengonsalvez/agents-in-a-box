@@ -58,30 +58,50 @@ class PgGraphStorage(NetworkXStorage):
         self._save_graph_to_pg()
 
     def _save_graph_to_pg(self) -> None:
+        """Persist the in-memory graph as a FULL REPLACE of this (workspace,
+        namespace), atomically — mirroring NetworkXStorage's whole-file rewrite.
+
+        Upsert-only would leak: nodes/edges that nano-graphrag dropped (entity
+        merges, a re-index over a smaller corpus, stabilization) would survive as
+        stale rows and resurrect on the next load. Delete-then-insert in one
+        transaction makes the stored graph exactly the in-memory graph.
+        """
         from psycopg.types.json import Jsonb
 
         node_rows = [
             (self._ws, self.namespace, node_id, Jsonb(dict(data)))
             for node_id, data in self._graph.nodes(data=True)
         ]
-        self._pg.executemany(
-            f"insert into {_NODES} (workspace_id, namespace, node_id, attrs) "
-            "values (%s,%s,%s,%s) "
-            "on conflict (workspace_id, namespace, node_id) "
-            "do update set attrs = excluded.attrs, updated_at = now()",
-            node_rows,
-        )
-
         # Canonicalize undirected edges (source <= target) so one logical edge
         # is exactly one row regardless of insertion direction.
         edge_rows = []
         for s, t, data in self._graph.edges(data=True):
             src, tgt = (s, t) if s <= t else (t, s)
             edge_rows.append((self._ws, self.namespace, src, tgt, Jsonb(dict(data))))
-        self._pg.executemany(
-            f"insert into {_EDGES} (workspace_id, namespace, source, target, attrs) "
-            "values (%s,%s,%s,%s,%s) "
-            "on conflict (workspace_id, namespace, source, target) "
-            "do update set attrs = excluded.attrs, updated_at = now()",
-            edge_rows,
+
+        self._pg.run_tx(
+            [
+                (
+                    f"delete from {_EDGES} where workspace_id=%s and namespace=%s",
+                    (self._ws, self.namespace),
+                    False,
+                ),
+                (
+                    f"delete from {_NODES} where workspace_id=%s and namespace=%s",
+                    (self._ws, self.namespace),
+                    False,
+                ),
+                (
+                    f"insert into {_NODES} (workspace_id, namespace, node_id, attrs) "
+                    "values (%s,%s,%s,%s)",
+                    node_rows,
+                    True,
+                ),
+                (
+                    f"insert into {_EDGES} (workspace_id, namespace, source, target, attrs) "
+                    "values (%s,%s,%s,%s,%s)",
+                    edge_rows,
+                    True,
+                ),
+            ]
         )

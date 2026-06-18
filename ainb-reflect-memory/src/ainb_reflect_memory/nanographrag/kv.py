@@ -59,7 +59,9 @@ class PgKVStorage(BaseKVStorage):
             v = by_key.get(k)
             if v is None:
                 out.append(None)
-            elif fields is None:
+            elif fields is None or not isinstance(v, dict):
+                # Field projection only applies to dict values; a scalar/list
+                # JSON value is returned whole rather than raising on .items().
                 out.append(v)
             else:
                 out.append({fk: fv for fk, fv in v.items() if fk in fields})
