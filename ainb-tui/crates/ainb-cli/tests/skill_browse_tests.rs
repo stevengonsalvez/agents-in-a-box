@@ -141,7 +141,9 @@ fn cli_browse_empty_query_message() {
 #[test]
 fn cli_browse_curated_blank_lists_full_shelf() {
     use ainb_cli::catalog_curated::AinbCuratedCatalogBackend;
-    use ainb_skill_core::catalog_index::{CatalogIndex, CatalogIndexEntry, CatalogOrigin};
+    use ainb_skill_core::catalog_index::{
+        CatalogIndex, CatalogIndexEntry, CatalogOrigin, owned_install_uri,
+    };
 
     let home = tmp_home();
     let index = CatalogIndex::new(
@@ -150,10 +152,8 @@ fn cli_browse_curated_blank_lists_full_shelf() {
             CatalogIndexEntry {
                 name: "commit".to_string(),
                 description: "git commits".to_string(),
-                repo: "stevengonsalvez/agents-in-a-box".to_string(),
-                install_uri:
-                    "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit"
-                        .to_string(),
+                repo: "stevengonsalvez/ainb-toolkit".to_string(),
+                install_uri: owned_install_uri("v1.5.0", "commit"),
                 origin: CatalogOrigin::Owned,
                 stars: 0,
                 kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
@@ -193,7 +193,7 @@ fn cli_browse_curated_blank_lists_full_shelf() {
     // upstream install URIs — the success-criteria "BOTH" check.
     assert!(text.contains("commit"), "missing owned entry:\n{text}");
     assert!(
-        text.contains("gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit"),
+        text.contains(&owned_install_uri("v1.5.0", "commit")),
         "missing owned install_uri:\n{text}"
     );
     assert!(

@@ -32,15 +32,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{CatalogEntryKind, CatalogHit};
 
-/// `owner/repo` slug of the toolkit itself — the source for every owned
-/// (toolkit-authored) catalog entry.
-pub const OWNED_REPO: &str = "stevengonsalvez/agents-in-a-box";
+/// `owner/repo` slug of the standalone toolkit mirror — the source for every
+/// owned (toolkit-authored) catalog entry. The monorepo `toolkit/` folder is
+/// mirrored to this repo via `git subtree`, so the mirror's root *is* the
+/// toolkit contents.
+pub const OWNED_REPO: &str = "stevengonsalvez/ainb-toolkit";
 
-/// Repo-relative directory holding the toolkit's owned skills. The reorg
-/// only moved a handful of dev-tooling skills to repo-root `.claude/skills`;
-/// the curated user-facing set still lives here (matching
-/// `toolkit/bin/generate-catalog.sh`, which globs the same path).
-pub const OWNED_SKILLS_REPO_DIR: &str = "toolkit/packages/skills";
+/// Directory holding the toolkit's owned skills, relative to the
+/// [`OWNED_REPO`] mirror root. The mirror re-roots the toolkit's
+/// `packages/skills/` to a top-level `skills/` — the native external-skill
+/// repo layout that ainb's source adapter and sync engine consume
+/// (home-relative path == repo-relative path). This constant only builds
+/// install URIs; the generator's filesystem glob reads the in-monorepo
+/// `toolkit/packages/skills` independently.
+pub const OWNED_SKILLS_REPO_DIR: &str = "skills";
 
 /// Schema version of the published index. Bumped only on a breaking change
 /// to [`CatalogIndexEntry`] so an older `AinbCuratedCatalogBackend` can
@@ -195,7 +200,7 @@ fn origin_rank(o: CatalogOrigin) -> u8 {
 }
 
 /// Build the install URI for an owned skill, pinning the release `tag`:
-/// `gh:stevengonsalvez/agents-in-a-box@<tag>/toolkit/packages/skills/<name>`.
+/// `gh:stevengonsalvez/ainb-toolkit@<tag>/skills/<name>`.
 pub fn owned_install_uri(tag: &str, name: &str) -> String {
     format!("gh:{OWNED_REPO}@{tag}/{OWNED_SKILLS_REPO_DIR}/{name}")
 }
@@ -292,7 +297,7 @@ mod tests {
     fn owned_uri_pins_tag_and_skill_path() {
         assert_eq!(
             owned_install_uri("v1.4.0", "commit"),
-            "gh:stevengonsalvez/agents-in-a-box@v1.4.0/toolkit/packages/skills/commit"
+            "gh:stevengonsalvez/ainb-toolkit@v1.4.0/skills/commit"
         );
     }
 
