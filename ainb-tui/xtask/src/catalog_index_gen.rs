@@ -150,7 +150,11 @@ impl Options {
                 toolkit_root.display()
             );
         }
-        Ok(Self { release_tag, out, toolkit_root })
+        Ok(Self {
+            release_tag,
+            out,
+            toolkit_root,
+        })
     }
 }
 
