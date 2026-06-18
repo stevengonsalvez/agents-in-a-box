@@ -66,11 +66,12 @@ class LearningsGraphEngine:
         # vectors, and community reports live in shared Postgres instead of
         # per-machine local files, so the store is the same across machines.
         # Default (neither set) keeps the original local-file behavior.
-        self._pg_dsn = (
-            pg_dsn
-            or os.environ.get("REFLECT_PG_DSN")
-            or os.environ.get("DATABASE_URL")
-        )
+        #
+        # The trigger is the reflect-specific REFLECT_PG_DSN ONLY — deliberately
+        # NOT the generic DATABASE_URL, which is ubiquitous (Heroku/Supabase/PG
+        # tooling) and usually points at an unrelated database; using it as the
+        # enable trigger would silently switch reflect's KB to a foreign DB.
+        self._pg_dsn = pg_dsn or os.environ.get("REFLECT_PG_DSN")
         self._workspace_id = workspace_id or os.environ.get("REFLECT_WORKSPACE_ID")
 
     def _load_embedding_model(self):
