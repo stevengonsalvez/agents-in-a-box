@@ -1,20 +1,29 @@
 //! `cargo xtask gen-catalog-index` — emit the enriched curated-catalog index.
 //!
-//! Walks the toolkit's owned skills (`toolkit/packages/skills/*/SKILL.md`)
-//! and the vetted external skill sections of `external-dependencies.yaml`,
+//! Walks an **ainb-toolkit** checkout's owned skills (`<toolkit-root>/skills/*/SKILL.md`)
+//! and the vetted external skill sections of its `external-dependencies.yaml`,
 //! enriches each with a `description` + an installable `install_uri`, and
-//! writes a single deterministic JSON asset (`toolkit/catalog-index.json`)
-//! that `AinbCuratedCatalogBackend` fetches per GitHub release.
+//! writes a single deterministic JSON asset (default `<repo>/catalog-index.json`)
+//! that `AinbCuratedCatalogBackend` fetches per agents-in-a-box GitHub release.
+//!
+//! The curated skills live in the standalone `stevengonsalvez/ainb-toolkit`
+//! repo (flattened layout — `toolkit/` no longer exists here). Option B: the
+//! agents-in-a-box release CI clones `ainb-toolkit@<tag>` and points
+//! `--toolkit-root` at that checkout, then publishes the index as a release
+//! asset.
 //!
 //! All transforms (frontmatter parse, install-URI construction, sort) live in
 //! `ainb_skill_core::catalog_index`; this file is just the filesystem shell.
 //!
 //! Usage:
-//!   cargo xtask gen-catalog-index [--release-tag <tag>] [--out <path>]
+//!   cargo xtask gen-catalog-index --toolkit-root <ainb-toolkit-checkout> \
+//!     [--release-tag <tag>] [--out <path>]
 //!
-//! `--release-tag` pins every owned `install_uri` (default `latest` for dev
-//! runs; the release workflow passes the real tag). `--out` overrides the
-//! output path (default `toolkit/catalog-index.json`).
+//! `--toolkit-root` (or env `AINB_TOOLKIT_DIR`) is the cloned ainb-toolkit root
+//! holding `skills/` + `external-dependencies.yaml`. `--release-tag` pins every
+//! owned `install_uri` (default `latest` for dev runs; the release workflow
+//! passes the real tag). `--out` overrides the output path (default
+//! `<repo>/catalog-index.json`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,10 +54,11 @@ const COMMAND_SECTIONS: &[(&str, CatalogEntryKind, &str)] = &[
 pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let opts = Options::parse(args)?;
     let root = repo_root()?;
+    let toolkit_root = &opts.toolkit_root;
 
-    let owned = owned_entries(&root, &opts.release_tag)?;
-    let (external, mut skipped) = external_entries(&root)?;
-    let (commands, cmd_skipped) = command_entries(&root)?;
+    let owned = owned_entries(toolkit_root, &opts.release_tag)?;
+    let (external, mut skipped) = external_entries(toolkit_root)?;
+    let (commands, cmd_skipped) = command_entries(toolkit_root)?;
     skipped.extend(cmd_skipped);
 
     let owned_count = owned.len();
@@ -60,7 +70,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     entries.extend(commands);
     let index = CatalogIndex::new(&opts.release_tag, entries);
 
-    let out = opts.out.unwrap_or_else(|| root.join("toolkit").join("catalog-index.json"));
+    let out = opts.out.unwrap_or_else(|| root.join("catalog-index.json"));
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -88,12 +98,16 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
 struct Options {
     release_tag: String,
     out: Option<PathBuf>,
+    /// The cloned ainb-toolkit checkout root (holds `skills/` +
+    /// `external-dependencies.yaml`).
+    toolkit_root: PathBuf,
 }
 
 impl Options {
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut release_tag = "latest".to_string();
         let mut out = None;
+        let mut toolkit_root: Option<PathBuf> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--release-tag" => {
@@ -105,13 +119,35 @@ impl Options {
                         args.next().ok_or_else(|| anyhow!("--out needs a value"))?,
                     ));
                 }
+                "--toolkit-root" => {
+                    toolkit_root = Some(PathBuf::from(
+                        args.next().ok_or_else(|| anyhow!("--toolkit-root needs a value"))?,
+                    ));
+                }
                 other => bail!("unknown gen-catalog-index arg {other:?}"),
             }
         }
         if release_tag.trim().is_empty() {
             bail!("--release-tag must not be empty");
         }
-        Ok(Self { release_tag, out })
+        // Input root: --toolkit-root flag, else $AINB_TOOLKIT_DIR. The curated
+        // skills live in the standalone ainb-toolkit repo, so there is no local
+        // default — CI clones ainb-toolkit@<tag> and passes the checkout path.
+        let toolkit_root = toolkit_root
+            .or_else(|| std::env::var_os("AINB_TOOLKIT_DIR").map(PathBuf::from))
+            .ok_or_else(|| {
+                anyhow!(
+                    "no ainb-toolkit checkout: pass --toolkit-root <path> or set \
+                     AINB_TOOLKIT_DIR (clone stevengonsalvez/ainb-toolkit@<tag>)"
+                )
+            })?;
+        if !toolkit_root.is_dir() {
+            bail!(
+                "ainb-toolkit root `{}` does not exist or is not a directory",
+                toolkit_root.display()
+            );
+        }
+        Ok(Self { release_tag, out, toolkit_root })
     }
 }
 
@@ -126,9 +162,9 @@ fn repo_root() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("cannot resolve repo root from {}", manifest.display()))
 }
 
-/// Build owned entries from each `toolkit/packages/skills/<name>/SKILL.md`.
-fn owned_entries(root: &Path, tag: &str) -> Result<Vec<CatalogIndexEntry>> {
-    let skills_dir = root.join("toolkit").join("packages").join("skills");
+/// Build owned entries from each `<toolkit-root>/skills/<name>/SKILL.md`.
+fn owned_entries(toolkit_root: &Path, tag: &str) -> Result<Vec<CatalogIndexEntry>> {
+    let skills_dir = toolkit_root.join("skills");
     let mut dirs: Vec<PathBuf> = fs::read_dir(&skills_dir)
         .with_context(|| format!("read {}", skills_dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -167,8 +203,8 @@ fn owned_entries(root: &Path, tag: &str) -> Result<Vec<CatalogIndexEntry>> {
 /// `external-dependencies.yaml`. Returns `(entries, skipped_names)` so the
 /// caller can report what was dropped (no github repo, or no installable
 /// subpath) rather than silently truncating.
-fn external_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)> {
-    let path = root.join("toolkit").join("external-dependencies.yaml");
+fn external_entries(toolkit_root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)> {
+    let path = toolkit_root.join("external-dependencies.yaml");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let doc: Value =
         serde_yaml_ng::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
@@ -226,8 +262,8 @@ fn external_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)
 /// documented `install:` command (the install router shells out), so the
 /// `install_uri` carries that command — newlines collapsed to `; ` so it stays
 /// a single shell-runnable line. Returns `(entries, skipped_names)`.
-fn command_entries(root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)> {
-    let path = root.join("toolkit").join("external-dependencies.yaml");
+fn command_entries(toolkit_root: &Path) -> Result<(Vec<CatalogIndexEntry>, Vec<String>)> {
+    let path = toolkit_root.join("external-dependencies.yaml");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let doc: Value =
         serde_yaml_ng::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
