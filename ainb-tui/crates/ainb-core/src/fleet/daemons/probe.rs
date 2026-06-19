@@ -448,9 +448,15 @@ fn read_pid_file(path: &Path) -> Option<u32> {
 /// `path.exists()` only proves a socket FILE is present — a crashed daemon
 /// leaves a stale one behind. A `connect()` succeeds only when a listener is
 /// bound and accepting; a stale socket file refuses the connection
-/// (`ECONNREFUSED`). The connect is immediately dropped, so this is a cheap,
-/// non-blocking liveness probe of the listener itself, not a duplicate read of
+/// (`ECONNREFUSED`). The connect is immediately dropped, so this is a cheap
+/// liveness probe of the listener itself, not a duplicate read of
 /// `socket_path.exists()`.
+///
+/// H-D2: a `connect(2)` on an AF_UNIX socket returns at once (success or
+/// `ECONNREFUSED`) — there is no network round-trip to hang on — but the
+/// surrounding `collect` (this probe + the disk reads it sits beside) is run on a
+/// BACKGROUND tick, never the TUI render thread, so even a pathologically slow FS
+/// can never freeze the UI. See `components::daemons` for the background collector.
 fn socket_is_listening(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
