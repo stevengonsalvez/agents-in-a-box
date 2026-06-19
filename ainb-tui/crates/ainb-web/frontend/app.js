@@ -314,6 +314,12 @@
     return res.json();
   }
 
+  // After this many consecutive failed connection attempts with no successful
+  // open in between, we stop trusting EventSource's silent auto-reconnect and
+  // re-check auth posture (a rotated/expired token 401s the stream, which
+  // EventSource would otherwise retry against forever without re-prompting).
+  const SSE_MAX_FAILURES = 3;
+
   function startSSE() {
     // EventSource cannot set headers; pass the token via query string. The
     // server accepts it only on this route and we never persist it in the URL.
@@ -321,8 +327,10 @@
       ? `/api/events?token=${encodeURIComponent(token)}`
       : "/api/events";
     const es = new EventSource(sseUrl);
+    let failures = 0;
 
     es.addEventListener("snapshot", (e) => {
+      failures = 0; // a real frame proves the connection (and token) is good
       setConn("live");
       try {
         render(JSON.parse(e.data));
@@ -330,11 +338,47 @@
         /* ignore malformed frame */
       }
     });
-    es.onopen = () => setConn("live");
+    // The server emits an explicit `error` event (distinct from EventSource's
+    // own transport `onerror`) when it cannot serialize a snapshot frame. Mark
+    // the connection as not-live so the UI stops claiming fresh data.
+    es.addEventListener("error", (e) => {
+      // Only act on a server-sent `error` *message* (has data); the bare
+      // transport-error event has no `.data` and is handled by `onerror`.
+      if (e && typeof e.data === "string" && e.data.length) {
+        setConn("down");
+      }
+    });
+    es.onopen = () => {
+      failures = 0;
+      setConn("live");
+    };
     es.onerror = () => {
       setConn("down");
-      // EventSource auto-reconnects; nothing else to do.
+      failures += 1;
+      // A 401 (rotated/expired token) lands here as an error; EventSource would
+      // otherwise retry the stale token forever and never re-prompt. When the
+      // browser has given up (CLOSED) or we've failed repeatedly, stop the
+      // stream and re-verify auth posture so a fresh token can be supplied.
+      if (es.readyState === EventSource.CLOSED || failures >= SSE_MAX_FAILURES) {
+        es.close();
+        reauthOrReconnect();
+      }
     };
+  }
+
+  // Re-probe the auth posture after the SSE stream gives up. If the token is
+  // now rejected, surface the auth prompt; otherwise reboot the data path.
+  async function reauthOrReconnect() {
+    try {
+      const res = await fetch("/api/snapshot", { headers: authHeaders() });
+      if (res.status === 401) {
+        showAuthPrompt();
+        return;
+      }
+    } catch (_) {
+      /* network down — fall through to a delayed reboot */
+    }
+    setTimeout(boot, 3000);
   }
 
   async function learnPosture() {
