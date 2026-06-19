@@ -129,6 +129,34 @@ impl CurrentStateIndex {
     ///   hooks) and transient in-progress API errors.
     #[must_use]
     pub fn resolve(&self, session: &Session, now_ms: i64, stale_window_ms: i64) -> Resolution {
+        self.resolve_with_healthy_window(
+            session,
+            now_ms,
+            stale_window_ms,
+            effective_stale_window_ms(),
+        )
+    }
+
+    /// `resolve()` with the HEALTHY-suppressing-kind staleness window passed in
+    /// explicitly (instead of read from the env). Pure + deterministic, so the
+    /// staleness behaviour is unit-testable without mutating process env (the
+    /// crate's tests can't call the now-`unsafe` `set_var`).
+    #[must_use]
+    pub fn resolve_with_healthy_window(
+        &self,
+        session: &Session,
+        now_ms: i64,
+        stale_window_ms: i64,
+        healthy_window_ms: i64,
+    ) -> Resolution {
+        // An empty-cwd session cannot be safely correlated to a current_state
+        // row by cwd: two distinct empty-cwd sessions collapse onto the same
+        // `""` key in `by_cwd`, so any match here would be a mis-attribution.
+        // Never trust an empty-cwd current_state match — fall back to the live
+        // tmux/transcript scan (which keys on the real session, not the cwd).
+        if session.cwd.is_empty() {
+            return Resolution::Fallback;
+        }
         let Some(row) = self.by_cwd.get(&session.cwd) else {
             return Resolution::Fallback;
         };
@@ -138,14 +166,26 @@ impl CurrentStateIndex {
         if row.source != SOURCE_HOOK {
             return Resolution::Fallback;
         }
-        // Defensive staleness guard: when enabled (window > 0) a hook row whose
-        // newest event is older than the window is treated as unreliable (the
-        // daemon may have stopped materializing) and we fall back. Disabled by
-        // default (window = 0) because ASK/ERR/WAIT are *sticky* states — an
-        // interview can sit unanswered for an hour and still be the truth, so
-        // age alone is a poor staleness signal; only flip this on when a caller
-        // has an independent reason to distrust an old row.
-        if stale_window_ms > 0 && now_ms.saturating_sub(row.last_event_ts) > stale_window_ms {
+        // Staleness guard. ASK/ERR/WAIT are *sticky* needs — an interview can
+        // sit unanswered for an hour and still be the truth — so age is a poor
+        // staleness signal for them and the window stays OFF (a stale ASK is
+        // still a real need). The HEALTHY-suppressing kinds (RUNNING/DONE) are
+        // the dangerous case: a dead daemon that stopped materializing leaves a
+        // stale RUNNING/DONE row that would keep the session `Healthy` forever,
+        // SUPPRESSING the tmux fallback that would otherwise surface a real,
+        // newly-arrived need. So for RUNNING/DONE we apply `healthy_window_ms`
+        // even when the caller passed 0 — a stale healthy row then falls back to
+        // a live scan after the window.
+        let is_healthy_kind = matches!(row.kind.as_str(), "RUNNING" | "DONE");
+        let window = if is_healthy_kind {
+            // For healthy-suppressing kinds: honour an explicit caller window if
+            // larger, else the env/default floor. (Sticky kinds use the caller's
+            // window verbatim — 0 = off.)
+            stale_window_ms.max(healthy_window_ms)
+        } else {
+            stale_window_ms
+        };
+        if window > 0 && now_ms.saturating_sub(row.last_event_ts) > window {
             return Resolution::Fallback;
         }
         match needs_row_from_state(session.clone(), row) {
@@ -154,6 +194,25 @@ impl CurrentStateIndex {
             None => Resolution::Healthy,
         }
     }
+}
+
+/// Default staleness window (ms) applied ONLY to the HEALTHY-suppressing kinds
+/// (RUNNING/DONE) so a stale "healthy" row from a stopped daemon eventually
+/// falls back to a live tmux scan instead of masking a real need forever. A few
+/// minutes is long enough to outlast normal materializer latency but short
+/// enough that a dead daemon surfaces quickly. Overridable via
+/// `AINB_FLEET_STATE_STALE_MS` (a non-negative integer; 0 disables it).
+const DEFAULT_HEALTHY_STALE_WINDOW_MS: i64 = 5 * 60_000;
+
+/// The effective healthy-kind staleness window, honouring the
+/// `AINB_FLEET_STATE_STALE_MS` override (clamped to ≥ 0; unset/invalid → the
+/// default).
+fn effective_stale_window_ms() -> i64 {
+    std::env::var("AINB_FLEET_STATE_STALE_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .map(|v| v.max(0))
+        .unwrap_or(DEFAULT_HEALTHY_STALE_WINDOW_MS)
 }
 
 /// Outcome of resolving one session against `current_state`.
@@ -444,6 +503,91 @@ mod tests {
         // window disabled (0) → still authoritative even though old.
         assert!(matches!(
             idx.resolve(&mk_session("/p"), 10 * 60_000, 0),
+            Resolution::Hook(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_fallback_for_empty_cwd_session() {
+        // Two distinct empty-cwd sessions would collapse onto the "" key, so an
+        // empty-cwd match is never trustworthy — always fall back.
+        let idx = CurrentStateIndex::from_rows(vec![state(
+            "",
+            "ASK",
+            Some(r#"{"question":"q?","options":[]}"#),
+            SOURCE_HOOK,
+            100,
+        )]);
+        assert!(matches!(
+            idx.resolve(&mk_session(""), 200, 0),
+            Resolution::Fallback
+        ));
+    }
+
+    #[test]
+    fn stale_running_row_falls_back_even_with_caller_window_off() {
+        // A dead daemon left a stale RUNNING row. With the caller window OFF (0),
+        // the previous behaviour kept the session Healthy forever (masking any
+        // real need). Now the healthy-kind window kicks in: a RUNNING row older
+        // than the healthy window falls back to a live scan. (Uses the explicit
+        // healthy-window form so the test never touches process env.)
+        let idx = CurrentStateIndex::from_rows(vec![state("/p", "RUNNING", None, SOURCE_HOOK, 0)]);
+        // now = 10min > 5min healthy window → stale healthy row → fallback.
+        assert!(matches!(
+            idx.resolve_with_healthy_window(&mk_session("/p"), 10 * 60_000, 0, 5 * 60_000),
+            Resolution::Fallback
+        ));
+        // A FRESH RUNNING row (within the window) is still authoritatively Healthy.
+        let fresh = CurrentStateIndex::from_rows(vec![state(
+            "/p",
+            "RUNNING",
+            None,
+            SOURCE_HOOK,
+            10 * 60_000,
+        )]);
+        assert!(matches!(
+            fresh.resolve_with_healthy_window(
+                &mk_session("/p"),
+                10 * 60_000 + 1_000,
+                0,
+                5 * 60_000
+            ),
+            Resolution::Healthy
+        ));
+    }
+
+    #[test]
+    fn stale_done_row_falls_back_so_a_new_need_surfaces() {
+        // DONE is also a HEALTHY-suppressing kind: a stale DONE must fall back so
+        // a freshly-arrived need (post-completion) is not masked.
+        let idx = CurrentStateIndex::from_rows(vec![state(
+            "/p",
+            "DONE",
+            Some(r#"{"reason":"clear"}"#),
+            SOURCE_HOOK,
+            0,
+        )]);
+        assert!(matches!(
+            idx.resolve_with_healthy_window(&mk_session("/p"), 10 * 60_000, 0, 5 * 60_000),
+            Resolution::Fallback
+        ));
+    }
+
+    #[test]
+    fn stale_ask_row_stays_authoritative_with_caller_window_off() {
+        // ASK is sticky: a stale (old) ASK is still a real, unanswered need, so
+        // the healthy-kind window must NOT apply to it — window stays 0 (off)
+        // even though we pass a non-zero healthy window for the healthy kinds.
+        let idx = CurrentStateIndex::from_rows(vec![state(
+            "/p",
+            "ASK",
+            Some(r#"{"question":"q?","options":[]}"#),
+            SOURCE_HOOK,
+            0,
+        )]);
+        // Way past the healthy window, but ASK is sticky → still Hook.
+        assert!(matches!(
+            idx.resolve_with_healthy_window(&mk_session("/p"), 60 * 60_000, 0, 5 * 60_000),
             Resolution::Hook(_)
         ));
     }
