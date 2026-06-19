@@ -109,16 +109,28 @@
 
   function needDetail(row) {
     const ctx = row.context || {};
-    // NeedsContext is internally-tagged; the payload differs per kind. Surface
-    // the most useful human string we can find without coupling to one shape.
-    return (
-      ctx.question ||
-      ctx.message ||
-      ctx.marker ||
-      ctx.detail ||
-      row.enriched ||
-      ""
-    );
+    // NeedsContext is internally-tagged ({kind, context}); the payload shape
+    // differs per kind (see crates/ainb-core/src/fleet/read/needs.rs):
+    //   ASK  → { question, options, ... }
+    //   ERR  → { pattern, snippet }
+    //   WAIT → { marker, text }
+    //   IDLE → { idle_minutes, last_assistant_text? }
+    // Read the right field per kind so the detail line never renders blank.
+    switch (needKind(row)) {
+      case "ASK":
+        return ctx.question || "";
+      case "ERR":
+        return ctx.snippet || ctx.pattern || "";
+      case "WAIT":
+        return ctx.text || ctx.marker || "";
+      case "IDLE":
+        return (
+          ctx.last_assistant_text ||
+          (ctx.idle_minutes != null ? `idle ${ctx.idle_minutes}m` : "")
+        );
+      default:
+        return row.enriched || "";
+    }
   }
 
   function renderNeeds(needs) {
