@@ -2,8 +2,10 @@
 //
 // A two-pane (list + detail) screen that reads the SAME event-sourced
 // `current_state` table the fleet readers use (Wave 4), opening the
-// `ainb-plugin-notifyd` SQLite store READ-ONLY on the render tick exactly the
-// way `components/inbox.rs` does. The list shows one row per session that has a
+// `ainb-plugin-notifyd` SQLite store strictly READ-ONLY (`Store::open_readonly`
+// — SQLITE_OPEN_READ_ONLY, no migrate/create/WAL-write) on the render tick so
+// the panel can never mutate the daemon's DB. The list shows one row per
+// session that has a
 // materialized state (ASK/ERR/WAIT/IDLE/RUNNING/DONE); the detail pane expands
 // the selected row — for ASK it renders the full question + every option so the
 // human can pick one.
@@ -27,6 +29,7 @@
 // Style follows the ainb-tui guide (rounded borders, gold titles,
 // cornflower-blue panels, selection-green indicator), matching Inbox/Daemons.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use ainb_plugin_notifyd::{Paths, StateRow, Store};
@@ -37,7 +40,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-pub use crate::fleet::control::{ActionFeedback, dispatch_send};
+pub use crate::fleet::control::ActionFeedback;
 use crate::fleet::read::jsonl_tail::AskUserQuestionData;
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -82,6 +85,15 @@ pub struct FleetPanelState {
     /// the lock is held only for the microseconds it takes to read/replace the
     /// line — never across the actual send I/O.
     pub feedback: Arc<Mutex<ActionFeedback>>,
+    /// In-flight guard shared with the action worker: set while a send is
+    /// pending so a second Enter/`a`/`B` (key-repeat) is refused rather than
+    /// spawning another worker / double-delivering (C3). Cleared by the worker
+    /// on completion.
+    pub in_flight: Arc<AtomicBool>,
+    /// The last `(session_id, text)` dispatched, used to debounce a rapid
+    /// IDENTICAL re-send (e.g. holding Enter on the same option) once the prior
+    /// one is no longer in flight.
+    pub last_dispatch: Option<(String, String)>,
 }
 
 impl Default for FleetPanelState {
@@ -89,7 +101,9 @@ impl Default for FleetPanelState {
         let paths = Paths::from_home().ok();
         let db_path = paths.as_ref().map(|p| p.db.clone()).unwrap_or_default();
         let store = if db_path.exists() {
-            Store::open(&db_path)
+            // READ-ONLY: the panel only reads current_state on the render tick;
+            // it must never migrate/create/WAL-write the daemon's DB.
+            Store::open_readonly(&db_path)
                 .map_err(|e| {
                     tracing::warn!(error = ?e, path = %db_path.display(), "fleet panel: eager store open failed");
                 })
@@ -105,6 +119,8 @@ impl Default for FleetPanelState {
             db_path,
             tick: 0,
             feedback: Arc::new(Mutex::new(ActionFeedback::default())),
+            in_flight: Arc::new(AtomicBool::new(false)),
+            last_dispatch: None,
         }
     }
 }
@@ -126,7 +142,7 @@ impl FleetPanelState {
     /// Lazily open the store when the DB file exists. Idempotent.
     pub fn ensure_open(&mut self) {
         if self.store.is_none() && self.db_path.exists() {
-            match Store::open(&self.db_path) {
+            match Store::open_readonly(&self.db_path) {
                 Ok(s) => self.store = Some(s),
                 Err(e) => {
                     tracing::warn!(error = ?e, path = %self.db_path.display(), "fleet panel: store open failed");
@@ -240,6 +256,52 @@ impl FleetPanelState {
     #[must_use]
     pub fn feedback_line(&self) -> String {
         self.feedback.lock().map(|g| g.message.clone()).unwrap_or_default()
+    }
+
+    /// True when a send is currently in flight (a worker is running).
+    #[must_use]
+    pub fn is_sending(&self) -> bool {
+        self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Guarded dispatch shared by Answer + Broadcast: refuses a re-send while one
+    /// is in flight (C3) and debounces a rapid IDENTICAL `(session_id, text)`
+    /// re-send. Returns `true` if a send was actually dispatched.
+    ///
+    /// The actual in-flight CAS lives in [`dispatch_send`]; this method also
+    /// short-circuits BEFORE spawning so the feedback line and debounce memo are
+    /// updated coherently on the UI thread.
+    pub fn guarded_dispatch(
+        &mut self,
+        session_id: String,
+        cwd: String,
+        text: String,
+        kind_label: &'static str,
+        is_answer: bool,
+    ) -> bool {
+        if self.is_sending() {
+            self.set_feedback("send already in flight — wait for it to finish".to_string());
+            return false;
+        }
+        // Debounce an identical back-to-back re-send (same target + same text)
+        // that lands in the same idle gap — avoids accidentally double-answering
+        // an agent on a fast double-tap.
+        let key = (session_id.clone(), text.clone());
+        if self.last_dispatch.as_ref() == Some(&key) {
+            self.set_feedback("duplicate send ignored (same answer just sent)".to_string());
+            return false;
+        }
+        self.last_dispatch = Some(key);
+        crate::fleet::control::dispatch_send(
+            Arc::clone(&self.feedback),
+            Arc::clone(&self.in_flight),
+            session_id,
+            cwd,
+            text,
+            kind_label,
+            is_answer,
+        );
+        true
     }
 }
 

@@ -3920,16 +3920,21 @@ impl EventHandler {
             AppEvent::FleetPanelAnswer => {
                 // Answer the selected ASK by sending the highlighted option's
                 // label to the target session via the EXISTING fleet send path
-                // (tmux send-keys), dispatched off the UI thread.
+                // (tmux send-keys), dispatched off the UI thread. The dispatch is
+                // guarded: in-flight + identical-resend debounce (C3), and the
+                // worker refuses an ambiguous-cwd answer (C1, `is_answer = true`).
                 if let Some((row, answer)) = state.fleet_panel_state.pending_answer() {
-                    state.fleet_panel_state.set_feedback(format!("answering ask with '{answer}'…"));
-                    crate::components::fleet_panel::dispatch_send(
-                        std::sync::Arc::clone(&state.fleet_panel_state.feedback),
+                    if state.fleet_panel_state.guarded_dispatch(
                         row.session_id,
                         row.cwd,
-                        answer,
+                        answer.clone(),
                         "answered ask",
-                    );
+                        true,
+                    ) {
+                        state
+                            .fleet_panel_state
+                            .set_feedback(format!("answering ask with '{answer}'…"));
+                    }
                 } else {
                     state
                         .fleet_panel_state
@@ -3939,17 +3944,20 @@ impl EventHandler {
             AppEvent::FleetPanelBroadcast => {
                 // Broadcast a ping prompt to the selected session. v1 has no
                 // text-input widget on this screen, so the prompt is a fixed
-                // nudge; the send itself is real (same fleet send path).
+                // nudge; the send itself is real (same fleet send path). Same
+                // in-flight guard; `is_answer = false` (a ping is lower-harm but
+                // still refuses on an ambiguous cwd — the safe call).
                 if let Some(row) = state.fleet_panel_state.selected_row().cloned() {
                     let prompt = "ping from fleet control panel — status?";
-                    state.fleet_panel_state.set_feedback("broadcasting ping…".to_string());
-                    crate::components::fleet_panel::dispatch_send(
-                        std::sync::Arc::clone(&state.fleet_panel_state.feedback),
+                    if state.fleet_panel_state.guarded_dispatch(
                         row.session_id,
                         row.cwd,
                         prompt.to_string(),
                         "broadcast",
-                    );
+                        false,
+                    ) {
+                        state.fleet_panel_state.set_feedback("broadcasting ping…".to_string());
+                    }
                 } else {
                     state
                         .fleet_panel_state
