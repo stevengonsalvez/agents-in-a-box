@@ -807,3 +807,163 @@ fn atc_hook_self_registers_durable_parent_map_under_hook_observed_id() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Phase 5 (conservative exactly-once): the event store OBSERVES completions but
+/// is NOT the authoritative delivery channel. This proves two independent facts
+/// from a single child completion:
+///
+///   1. The proven inbox/drain exactly-once is UNCHANGED — drain #1 delivers the
+///      `{"decision":"block"}` completion, drain #2 returns nothing (no
+///      re-delivery). This is the authoritative parent/child completion path.
+///   2. The SAME completion is also visible in the event-sourced `current_state`
+///      table as `DONE` — derived by ingesting the hook's `events.jsonl` (the
+///      durable record) and running the notifyd materializer — WITHOUT the event
+///      store touching, gating, or otherwise affecting the inbox delivery in (1).
+///
+/// The two surfaces are decoupled: the inbox file is the delivery ledger; the
+/// event store is read-only observability. Migrating readers onto `current_state`
+/// (Wave 4) did not weaken the exactly-once guarantee.
+#[test]
+fn exactly_once_drain_unchanged_and_completion_observed_in_current_state() {
+    use ainb_plugin_notifyd::{Store, ingest, transition};
+
+    let home = std::env::temp_dir().join(format!("atc-p5-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+
+    // A child finishes: fire its Stop hook with a resolvable parent ("tower").
+    // This (a) commits a last-wins completion to tower's inbox and (b) appends a
+    // Stop line to events.jsonl — the two writes the rest of the test inspects.
+    let stop_payload = r#"{"hook_event_name":"Stop","last_assistant_message":"shipped the feature","transcript_path":"/t/worker-9.jsonl","cwd":"/repo/worker-9"}"#;
+    let mut child = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "Stop",
+            "--session-id",
+            "worker-9",
+            "--cwd",
+            "/repo/worker-9",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn Stop hook");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(stop_payload.as_bytes()).unwrap();
+    }
+    assert!(child.wait_with_output().expect("Stop hook").status.success());
+
+    // The session then ENDS — fire SessionEnd so the materialized lifecycle is
+    // the terminal DONE the readers/TUI surface for a finished session.
+    let end_payload = r#"{"hook_event_name":"SessionEnd","reason":"clear","cwd":"/repo/worker-9"}"#;
+    let mut ender = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
+        .args([
+            "fleet",
+            "atc",
+            "hook",
+            "--event",
+            "SessionEnd",
+            "--session-id",
+            "worker-9",
+            "--cwd",
+            "/repo/worker-9",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn SessionEnd hook");
+    {
+        use std::io::Write;
+        ender.stdin.take().unwrap().write_all(end_payload.as_bytes()).unwrap();
+    }
+    assert!(ender.wait().expect("SessionEnd hook").success());
+
+    // --- (2) The event store OBSERVES the completion as DONE --------------------
+    // Ingest the hook's durable events.jsonl into a fresh notifyd store and run
+    // the materializer — exactly what the notifyd daemon does in production. This
+    // is a pure READ of the same events.jsonl; it does not touch the inbox.
+    let events_jsonl = home.join("events.jsonl");
+    assert!(
+        events_jsonl.exists(),
+        "hook must have appended events.jsonl"
+    );
+    let db = home.join("notifications.db");
+    let store = Store::open(&db).expect("open notifyd store");
+    let summary = ingest::ingest_once(&store, &events_jsonl).expect("ingest events.jsonl");
+    assert!(
+        summary.events_ingested >= 2,
+        "Stop + SessionEnd must be ingested, got {summary:?}"
+    );
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    transition::materialize_at(&store, now_ms, 5).expect("materialize current_state");
+    let state = store
+        .get_current_state("worker-9", "/repo/worker-9")
+        .expect("query current_state")
+        .expect("worker-9 has a current_state row");
+    assert_eq!(
+        state.kind, "DONE",
+        "a completed session must materialize as DONE in current_state"
+    );
+    assert_eq!(state.source, "hook");
+
+    // --- (1) The inbox exactly-once delivery is UNCHANGED -----------------------
+    // drain #1 delivers the completion as the block decision.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "--format", "json", "fleet", "atc", "inbox", "drain", "tower",
+        ])
+        .output()
+        .expect("drain #1");
+    assert!(out.status.success(), "drain #1 failed");
+    let drained1: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        drained1["drained"].as_array().unwrap().len(),
+        1,
+        "drain #1 must deliver the single completion: {drained1}"
+    );
+    assert_eq!(drained1["decision"]["decision"], "block");
+    assert!(
+        drained1["decision"]["reason"].as_str().unwrap().contains("worker-9"),
+        "block reason must reference the finished child: {}",
+        drained1["decision"]["reason"]
+    );
+
+    // drain #2 returns nothing — exactly-once, no re-delivery. The event store
+    // showing DONE above did NOT cause a second delivery.
+    let out = Command::new(ainb_bin())
+        .env("AINB_HOME", &home)
+        .args([
+            "--format", "json", "fleet", "atc", "inbox", "drain", "tower",
+        ])
+        .output()
+        .expect("drain #2");
+    let drained2: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        drained2["drained"].as_array().unwrap().is_empty(),
+        "completion re-delivered on second drain — exactly-once regressed: {drained2}"
+    );
+    assert!(
+        drained2["decision"].is_null(),
+        "an empty inbox must not block"
+    );
+
+    // current_state is read-only observability: re-querying after both drains
+    // still shows DONE, and draining never mutated it.
+    let state_after = store
+        .get_current_state("worker-9", "/repo/worker-9")
+        .expect("query current_state after drains")
+        .expect("row still present");
+    assert_eq!(
+        state_after.kind, "DONE",
+        "the event store is independent of the inbox: DONE survives both drains"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
