@@ -33,8 +33,16 @@ OUT="$REPO_ROOT/docs/tui/cli.md"
 
 # Resolve the binary: explicit AINB_BIN, else build release.
 if [[ -n "${AINB_BIN:-}" ]]; then
-  BIN="$AINB_BIN"
-  [[ "$BIN" = /* ]] || BIN="$AINB_TUI_DIR/$BIN"
+  # Accept an absolute path, a path relative to the current dir, or a path
+  # relative to ainb-tui/ (the CI form: AINB_BIN=target/debug/ainb). Resolve in
+  # that order so a wrong cwd can't silently pick a stale binary.
+  if [[ "$AINB_BIN" = /* ]]; then
+    BIN="$AINB_BIN"
+  elif [[ -x "$AINB_BIN" ]]; then
+    BIN="$(cd "$(dirname "$AINB_BIN")" && pwd)/$(basename "$AINB_BIN")"
+  else
+    BIN="$AINB_TUI_DIR/$AINB_BIN"
+  fi
 else
   echo "[gen-cli-reference] building ainb (release)…" >&2
   ( cd "$AINB_TUI_DIR" && cargo build --release -p ainb >&2 )

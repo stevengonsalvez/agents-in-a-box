@@ -2160,6 +2160,10 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+
+EXAMPLES:
+  ainb headroom status    Is the proxy running? port / pid / tokens saved
+  ainb headroom stop      Stop the ainb-managed Headroom proxy
 ```
 
 ### `ainb headroom status`
@@ -3005,6 +3009,11 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+
+EXAMPLES:
+  ainb rtk status      Install state + total tokens saved
+  ainb rtk install     Install rtk + wire the Claude Code PreToolUse hook
+  ainb rtk uninstall   Remove the hook (keeps the rtk binary)
 ```
 
 ### `ainb rtk status`
