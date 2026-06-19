@@ -2932,6 +2932,9 @@ pub struct AppState {
     pub last_log_check: Option<std::time::Instant>,
     // Track the last time we checked for OAuth token refresh
     pub last_token_refresh_check: Option<std::time::Instant>,
+    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
+    // session is live but the proxy died).
+    pub last_headroom_watchdog: Option<std::time::Instant>,
     // Claude chat integration
     pub claude_chat_state: Option<ClaudeChatState>,
     // Live logs from Docker containers
@@ -3488,6 +3491,7 @@ impl Default for AppState {
             log_last_updated: HashMap::new(),
             last_log_check: None,
             last_token_refresh_check: None,
+            last_headroom_watchdog: None,
             claude_chat_state: None,
             live_logs: HashMap::new(),
             claude_manager: None,
@@ -4954,6 +4958,42 @@ impl AppState {
                 o.last_refreshed = Some(std::time::Instant::now());
             }
         }
+    }
+
+    /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
+    /// shared proxy went down, re-ensure it. Throttled to ~10s, async, and
+    /// best-effort so it never blocks the render loop. Self-healing: claude's
+    /// Anthropic SDK retries connection errors with backoff, so a respawn
+    /// inside the retry window is transparent to the session.
+    ///
+    /// In-loop tick, NOT a separate daemon — surfaced as the "watched" marker
+    /// on the Headroom row of the Daemons screen, per the daemons-screen rule.
+    pub fn headroom_watchdog(&mut self) {
+        const INTERVAL_SECS: u64 = 10;
+        let now = std::time::Instant::now();
+        let due = self
+            .last_headroom_watchdog
+            .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_headroom_watchdog = Some(now);
+
+        let has_headroom_session = crate::interactive::SessionStore::load()
+            .sessions
+            .values()
+            .any(|m| m.headroom_enabled);
+        if !has_headroom_session {
+            return;
+        }
+
+        tokio::spawn(async {
+            if !crate::headroom::is_healthy().await {
+                warn!("Headroom proxy down with a live session — watchdog respawning");
+                let _ = crate::headroom::ensure_proxy_running().await;
+            }
+        });
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from
@@ -10820,6 +10860,9 @@ impl App {
         self.state.check_mcp_overlay();
         // Drain completed daemons overlay fetch (no-op when closed).
         self.state.check_daemons_overlay();
+        // Re-ensure the Headroom proxy if a Headroom session is live but the
+        // proxy died (throttled, async, best-effort).
+        self.state.headroom_watchdog();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

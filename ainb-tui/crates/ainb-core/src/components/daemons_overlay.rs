@@ -132,8 +132,11 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
         .tokens_saved
         .map(|t| format!("saved {t} tokens"))
         .unwrap_or_else(|| "—".to_string());
+    // "watched" = a live Headroom session exists, so the in-loop watchdog is
+    // re-ensuring this proxy if it drops. Surfaced here, not as its own daemon.
+    let watched = state.headroom.running && !state.headroom_consumers.is_empty();
 
-    let headroom_line = Line::from(vec![
+    let mut headroom_spans = vec![
         Span::styled(
             format!("  Headroom :{port:<5}"),
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
@@ -143,7 +146,14 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
             format!("    {pid_str}   {tokens_str}"),
             Style::default().fg(MUTED_GRAY),
         ),
-    ]);
+    ];
+    if watched {
+        headroom_spans.push(Span::styled(
+            "  · watched",
+            Style::default().fg(SELECTION_GREEN),
+        ));
+    }
+    let headroom_line = Line::from(headroom_spans);
     frame.render_widget(Paragraph::new(headroom_line), rows[2]);
 
     // ── Headroom consumers ────────────────────────────────────────────────────
@@ -296,6 +306,11 @@ mod tests {
         assert!(
             text.contains("worktree-abc"),
             "missing consumer name in:\n{text}"
+        );
+        // A running proxy with a live consumer is watched by the in-loop watchdog.
+        assert!(
+            text.contains("watched"),
+            "missing 'watched' marker in:\n{text}"
         );
     }
 }
