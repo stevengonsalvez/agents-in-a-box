@@ -41,6 +41,32 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
+  # CLI reference freshness — docs/tui/cli.md is generated from `ainb --help`.
+  # Fails if it drifts, so the binary stays the single source of truth.
+  # ────────────────────────────────────────────────────────────────────────────
+  cli-docs:
+    name: CLI reference freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - name: Build ainb
+        run: cargo build -p ainb
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Regenerate CLI reference from the binary
+        run: AINB_BIN=target/debug/ainb bash scripts/gen-cli-reference.sh
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Assert docs/tui/cli.md is up to date
+        run: |
+          if ! git diff --exit-code -- docs/tui/cli.md; then
+            echo "::error::docs/tui/cli.md is stale — run ainb-tui/scripts/gen-cli-reference.sh and commit the result." >&2
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Tests — cross-platform with nextest
   # ────────────────────────────────────────────────────────────────────────────
   test:
