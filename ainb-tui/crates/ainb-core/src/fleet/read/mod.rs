@@ -1,11 +1,13 @@
 // ABOUTME: Read-side fleet primitives — tmux capture, errors regex, state merge, JSONL tail.
 
+pub mod current_state;
 pub mod errors;
 pub mod jsonl_tail;
 pub mod needs;
 pub mod state;
 pub mod tmux_pane;
 
+pub use current_state::{CurrentStateIndex, Resolution};
 pub use errors::{API_ERROR_PATTERNS, detect_error_signals};
 /// Canonical turn-end stop_reason helper — crate-internal (the bridge transport
 /// and the needs classifier both import it from here).
