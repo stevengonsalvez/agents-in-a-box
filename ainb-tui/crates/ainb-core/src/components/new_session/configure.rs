@@ -291,6 +291,10 @@ pub struct ConfigureState {
     /// Route this session's CLI through the local Headroom compression proxy.
     /// Only active for Claude and Codex agents.
     pub headroom_enabled: bool,
+    /// Whether the `headroom` binary was found on PATH when this screen opened.
+    /// Detected once at construction (cheap PATH lookup) — gates the toggle so
+    /// we never offer routing through a proxy that can't run.
+    pub headroom_available: bool,
 }
 
 impl ConfigureState {
@@ -383,6 +387,7 @@ impl ConfigureState {
             base_selection: None,
             branch_picker: None,
             headroom_enabled: false,
+            headroom_available: crate::headroom::is_installed(),
         }
     }
 
@@ -1084,6 +1089,20 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
 }
 
 fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    // Gate: if the headroom binary isn't on PATH, the toggle can't work — show
+    // a muted, non-interactive row with the install command instead of pills.
+    if !state.headroom_available {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Headroom: "),
+            Span::styled(
+                "unavailable \u{2014} install: uv tool install 'headroom-ai[proxy]'",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let current = if state.headroom_enabled {
         "on".to_string()
     } else {
@@ -1917,7 +1936,9 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         branch_override: state.branch_override.clone(),
         base: state.base_selection.clone(),
         prompt,
-        headroom_enabled: state.headroom_enabled,
+        // Defensive: never launch with Headroom on if the binary isn't there,
+        // even if some stale state slipped through.
+        headroom_enabled: state.headroom_enabled && state.headroom_available,
     })
 }
 
@@ -1947,7 +1968,10 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
             }
         }
         ConfigureRow::HeadroomProxy => {
-            state.headroom_enabled = !state.headroom_enabled;
+            // No-op when headroom isn't installed — the row is informational only.
+            if state.headroom_available {
+                state.headroom_enabled = !state.headroom_enabled;
+            }
         }
         ConfigureRow::Branch => {
             // ←/→ on the Branch row toggles the targeted segment
@@ -2332,6 +2356,7 @@ mod tests {
             base_selection: None,
             branch_picker: None,
             headroom_enabled: false,
+            headroom_available: true,
         }
     }
 
@@ -2670,6 +2695,29 @@ mod tests {
         // Still no overrides, still on Named(0).
         assert!(s.custom_overrides.is_none());
         assert!(matches!(s.preset_selection, PresetSelection::Named(0)));
+    }
+
+    #[test]
+    fn headroom_toggle_gated_when_unavailable() {
+        let mut s = mk_state();
+        s.headroom_available = false;
+        s.focused_row = ConfigureRow::HeadroomProxy;
+        // Cycling the row must NOT enable Headroom when the binary is absent.
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            !s.headroom_enabled,
+            "toggle must not flip when headroom unavailable"
+        );
+        cycle_value_in_focused_row(&mut s, -1);
+        assert!(!s.headroom_enabled);
+
+        // And when available it flips normally.
+        s.headroom_available = true;
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            s.headroom_enabled,
+            "toggle flips when headroom is available"
+        );
     }
 
     #[test]

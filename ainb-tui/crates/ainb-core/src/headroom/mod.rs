@@ -30,6 +30,15 @@ fn log_file() -> PathBuf {
     headroom_dir().join("proxy.log")
 }
 
+// ── Availability ───────────────────────────────────────────────────────────
+
+/// Whether the `headroom` binary is on `PATH`. Cheap (one PATH lookup) — call
+/// it once when a screen opens, not per render. Used to gate the per-session
+/// toggle: no point offering Headroom if it can't be run.
+pub fn is_installed() -> bool {
+    which::which("headroom").is_ok()
+}
+
 // ── Port resolution ──────────────────────────────────────────────────────────
 
 /// Effective port for the Headroom proxy.
