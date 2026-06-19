@@ -134,9 +134,17 @@ impl DaemonHeartbeat {
 
     /// Record an error: increments the counter, stores the message, and refreshes
     /// the liveness clock (the daemon is still alive, just unhappy).
+    ///
+    /// SECURITY (H-D1): the message is scrubbed of known secret shapes (bot
+    /// tokens, Slack/Discord tokens — see [`crate::fleet::bridge::redact::scrub`])
+    /// BEFORE it is stored. A `reqwest::Error`'s `Display` embeds the request URL,
+    /// and the Telegram Bot API carries the bot token in that URL path, so a raw
+    /// error string can leak a token into the on-disk `last_error` (which the CLI
+    /// and TUI render). Scrubbing here makes EVERY daemon's error sink safe by
+    /// default — the bridge's own pre-scrub then becomes a harmless double-scrub.
     pub fn record_error(&mut self, message: impl Into<String>) {
         self.error_count = self.error_count.saturating_add(1);
-        self.last_error = Some(message.into());
+        self.last_error = Some(crate::fleet::bridge::redact::scrub(&message.into()));
         self.last_heartbeat_at = now_ms();
     }
 
@@ -321,6 +329,48 @@ mod tests {
         hb.record_error("bang");
         assert_eq!(hb.error_count, 2);
         assert_eq!(hb.last_error.as_deref(), Some("bang"));
+    }
+
+    #[test]
+    fn record_error_scrubs_secrets_before_storing() {
+        // H-D1: a token-bearing error must never reach `last_error` verbatim.
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_error(
+            "error sending request for url \
+             (https://api.telegram.org/bot123456789:ABC-DEF_ghiJKLmnopqrstuvwxyz012345/getUpdates)",
+        );
+        let stored = hb.last_error.as_deref().unwrap();
+        assert!(
+            !stored.contains("ABC-DEF_ghiJKLmnopqrstuvwxyz012345"),
+            "token body leaked into last_error: {stored}"
+        );
+        assert!(
+            !stored.contains("bot123456789:"),
+            "token prefix leaked into last_error: {stored}"
+        );
+        assert!(
+            stored.contains("<redacted>"),
+            "expected redaction: {stored}"
+        );
+    }
+
+    #[test]
+    fn record_error_persists_redacted_last_error_on_disk() {
+        // H-D1 end-to-end: the on-disk heartbeat file (rendered by CLI/TUI) must
+        // carry a redacted last_error, not the raw token.
+        let home = TempDir::new().unwrap();
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_error("getUpdates: 123456789:ABCdefGHIjklMNOpqrstuvwx failed");
+        hb.write_in(home.path(), "bridge").unwrap();
+        let raw = std::fs::read_to_string(heartbeat_path_in(home.path(), "bridge")).unwrap();
+        assert!(
+            !raw.contains("ABCdefGHIjklMNOpqrstuvwx"),
+            "token leaked to disk: {raw}"
+        );
+        assert!(
+            raw.contains("<redacted>"),
+            "on-disk last_error not redacted: {raw}"
+        );
     }
 
     #[test]
