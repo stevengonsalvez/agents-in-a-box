@@ -6,10 +6,12 @@
 // This is the READ-time half of the Wave 4 migration. The notifyd transition
 // daemon materializes one `current_state` row per `(session_id, cwd)` from the
 // append-only `events` log (`source = "hook"`). Here we open that SQLite store
-// READ-ONLY — exactly the way the TUI Inbox screen does (`components/inbox.rs`)
-// — and fold the rows back into the `NeedsRow`/`NeedsContext` types the rest of
-// the fleet read-side already speaks. We do NOT re-implement SQLite access; we
-// reuse the notifyd `Store`.
+// strictly READ-ONLY via `Store::open_readonly` (SQLITE_OPEN_READ_ONLY: no
+// migrate, no create, no WAL pragma writes) so this reader path — `fleet needs`
+// and the heartbeat that shells it — can NEVER migrate or mutate the daemon's
+// DB. We fold the rows back into the `NeedsRow`/`NeedsContext` types the rest
+// of the fleet read-side already speaks. We do NOT re-implement SQLite access;
+// we reuse the notifyd `Store`.
 //
 // Mapping (kind → NeedsContext), mirroring the classifier's priorities and its
 // "healthy session ⇒ no row" rule:
@@ -73,7 +75,9 @@ impl CurrentStateIndex {
         if !db.exists() {
             return Self::default();
         }
-        match Store::open(&db) {
+        // READ-ONLY: never migrate/create/WAL-write the daemon's DB from the
+        // reader path (a `fleet needs`/heartbeat must not mutate notifyd state).
+        match Store::open_readonly(&db) {
             Ok(store) => match store.list_current_state() {
                 Ok(rows) => Self::from_rows(rows),
                 Err(e) => {
