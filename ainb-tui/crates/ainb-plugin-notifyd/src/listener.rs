@@ -39,6 +39,10 @@ pub struct RunConfig {
     /// daemon skips the native notify call entirely (used by tests
     /// and by users who opt out via config).
     pub os_notifications: bool,
+    /// How often the ingest tailer folds `events.jsonl` into the
+    /// `events` table. Short (agent-deck cadence) so event-sourced
+    /// state stays fresh; tests use a tiny value to converge fast.
+    pub ingest_interval: std::time::Duration,
 }
 
 impl RunConfig {
@@ -49,7 +53,20 @@ impl RunConfig {
             paths: Paths::from_home()?,
             retention: RetentionPolicy::default(),
             os_notifications: true,
+            ingest_interval: std::time::Duration::from_millis(1500),
         })
+    }
+}
+
+/// A `JoinHandle` that aborts its task on drop. Keeps the ingest tailer
+/// (and, in Wave 3, the materializer) bounded to the daemon's lifetime:
+/// when `run_daemon` returns and the handle drops, the background loop
+/// is cancelled rather than leaked.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -185,6 +202,44 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         Ok(_) => debug!("no fallback to replay"),
         Err(e) => warn!(error = ?e, "fallback replay failed"),
     }
+
+    // INGEST TAILER (Wave 2): fold the durable `events.jsonl` (appended
+    // by the lifecycle hook) into the SQLite `events` log. This is the
+    // event-sourcing intake — daemon-down-safe (the hook appends whether
+    // or not the daemon is up) and crash-safe (a persisted byte offset
+    // means a restart catches up the un-ingested suffix without
+    // re-reading already-offset bytes; a partial trailing line is left
+    // for the next pass). Runs on a short ticker like the
+    // `cli/fleet/daemon.rs` loop; SQLite is sync behind the store Mutex,
+    // so each pass runs on the blocking pool via `spawn_blocking`. The
+    // task is aborted on shutdown when this handle drops.
+    let _ingest_task = {
+        let store = Arc::clone(&store);
+        let events_jsonl = config.paths.events_jsonl.clone();
+        let interval = config.ingest_interval;
+        AbortOnDrop(tokio::spawn(async move {
+            loop {
+                let store = Arc::clone(&store);
+                let path = events_jsonl.clone();
+                match tokio::task::spawn_blocking(move || crate::ingest::ingest_once(&store, &path))
+                    .await
+                {
+                    Ok(Ok(summary)) if summary.events_ingested > 0 || summary.lines_corrupt > 0 => {
+                        debug!(
+                            ingested = summary.events_ingested,
+                            corrupt = summary.lines_corrupt,
+                            offset = summary.offset,
+                            "events.jsonl ingest pass"
+                        );
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = ?e, "events.jsonl ingest failed; will retry"),
+                    Err(e) => warn!(error = ?e, "ingest task panicked; will retry"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        }))
+    };
 
     let listener = UnixListener::bind(&config.paths.socket)
         .with_context(|| format!("binding unix socket {}", config.paths.socket.display()))?;
@@ -359,6 +414,9 @@ mod tests {
                 max_rows: 0,
             },
             os_notifications: false, // never spawn osascript in tests
+            // Tight ingest cadence so the daemon-level ingest test
+            // converges quickly without long sleeps.
+            ingest_interval: std::time::Duration::from_millis(20),
         }
     }
 
@@ -545,6 +603,50 @@ mod tests {
         assert_eq!(row.agent, "codex");
         assert_eq!(row.raw_event, "agent-turn-complete");
         assert_eq!(row.ts, 42);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn daemon_ingests_events_jsonl_into_event_log() {
+        // The running daemon's ingest tailer folds canonical lines from
+        // events.jsonl (what the lifecycle hook appends) into the SQLite
+        // `events` table on its short ticker.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_under(dir.path());
+        let socket = config.paths.socket.clone();
+        let db = config.paths.db.clone();
+        let events_jsonl = config.paths.events_jsonl.clone();
+        std::fs::create_dir_all(&config.paths.base).unwrap();
+        // Pre-seed one line; append another after the daemon is up.
+        std::fs::write(
+            &events_jsonl,
+            "{\"ts\":100,\"session_id\":\"s1\",\"cwd\":\"/tmp/p\",\"transcript_path\":\"/t/s1.jsonl\",\"agent\":\"claude\",\"event_type\":\"SessionStart\",\"matcher\":null,\"payload\":{}}\n",
+        )
+        .unwrap();
+
+        let handle = tokio::spawn(async move { run_daemon(config).await });
+        wait_for_socket(&socket).await;
+
+        // Append a second line while the daemon runs (offset-driven tail).
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&events_jsonl).unwrap();
+            f.write_all(b"{\"ts\":200,\"session_id\":\"s1\",\"cwd\":\"/tmp/p\",\"transcript_path\":\"/t/s1.jsonl\",\"agent\":\"claude\",\"event_type\":\"Stop\",\"matcher\":null,\"payload\":{}}\n").unwrap();
+        }
+
+        // Poll the event log (ingest_interval is 20ms in tests).
+        let mut ingested = 0;
+        for _ in 0..100 {
+            let store = Store::open(&db).unwrap();
+            ingested = store.events_since(0).unwrap().len();
+            if ingested >= 2 {
+                break;
+            }
+            drop(store);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(ingested, 2, "both canonical lines ingested into events");
 
         handle.abort();
     }
