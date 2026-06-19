@@ -670,10 +670,18 @@ fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<plumbing::StopDecisio
     let event = matches.get_one::<String>("event").cloned().unwrap_or_default();
     let session_id = matches.get_one::<String>("session-id").cloned().unwrap_or_default();
     let cwd = matches.get_one::<String>("cwd").cloned().unwrap_or_default();
+    // The matcher forwarded by notify.sh (e.g. the PreToolUse tool_name or the
+    // Notification notification_type). Empty → treated as absent. Authoritative
+    // when present; otherwise hook_core falls back to parsing it from the payload.
+    let matcher = matches
+        .get_one::<String>("matcher")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let home = plumbing::paths::ainb_home()?;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    // Read the raw payload from stdin (best-effort; used to extract a summary).
+    // Read the raw payload from stdin (best-effort; used to extract a summary,
+    // the transcript_path stamp, and the matcher fallback).
     let payload = read_stdin_to_string();
     let done_summary = extract_done_summary(&payload);
 
@@ -692,6 +700,8 @@ fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<plumbing::StopDecisio
         env_parent.as_deref(),
         done_summary,
         now_ms,
+        &payload,
+        matcher.as_deref(),
     )
 }
 
@@ -706,6 +716,8 @@ fn hook_core(
     env_parent: Option<&str>,
     done_summary: Option<String>,
     now_ms: i64,
+    payload: &str,
+    matcher: Option<&str>,
 ) -> Result<Option<plumbing::StopDecision>> {
     let base_event = event.split(':').next().unwrap_or(event);
     let inbox_dir = plumbing::paths::inbox_dir_in(home);
@@ -739,16 +751,35 @@ fn hook_core(
         (!session_id.is_empty()).then(|| plumbing::Inbox::open_in(&inbox_dir, session_id));
     let has_self_inbox = self_inbox.as_ref().is_some_and(|ib| !ib.is_empty());
 
-    // 1. Status file — GATED ON FLEET MEMBERSHIP (H1). The hooks are global, so
-    //    without a gate every unrelated host session would accrete an orphan
-    //    status/<id>.json that nothing reaps and pay the write on every event. A
-    //    session belongs to the fleet when it has a resolvable parent, owns a
-    //    non-empty inbox, or IS an ATC-managed session. A truly unrelated session
-    //    is a true no-op here.
+    // 1. Event log append — the durable record this session's lifecycle is
+    //    event-sourced from. Replaces the per-event status/<id>.json write: notifyd
+    //    ingests events.jsonl into the SQLite `events` table, and (Wave 3) folds it
+    //    into current_state. The append is O(1), best-effort, and NEVER fails the
+    //    hook (any error is swallowed) so a global Stop hook can't wedge any host
+    //    session.
+    //
+    //    GATED ON FLEET MEMBERSHIP (H1) — the CONSERVATIVE default. The hooks are
+    //    installed globally into ~/.claude/settings.json, so this verb runs on
+    //    EVERY Claude lifecycle event host-wide. To honour the host-wide-cheap
+    //    rule we append only for fleet members (a session with a resolvable
+    //    parent, a non-empty inbox, or an ATC-managed cwd); a truly unrelated host
+    //    session stays a true no-op. The appender below is trivially cheap, so if
+    //    Stevie wants broad event-sourcing coverage this gate can be dropped (or
+    //    relaxed to a lightweight lifecycle subset) by widening `is_fleet_member`
+    //    — the format + tables already accept any session.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
     if !session_id.is_empty() && is_fleet_member {
-        let rec = plumbing::StatusFile::from_event(session_id, event, now_ms, done_summary.clone());
-        let _ = plumbing::status::write_status_in(home, &rec);
+        let line = build_event_line(
+            now_ms,
+            session_id,
+            cwd,
+            event,
+            base_event,
+            matcher,
+            payload,
+            our_parent.as_deref(),
+        );
+        let _ = append_event_line(home, &line);
     }
 
     // Self-heal the durable child→parent map. `ainb run` seeds only the live
@@ -930,6 +961,106 @@ fn extract_done_summary(payload: &str) -> Option<String> {
     None
 }
 
+/// Max payload bytes embedded in an `events.jsonl` line. A hook payload is
+/// normally small, but a pathological transcript-bearing payload must not bloat
+/// the durable log — cap it so the append stays O(1)-ish and the file bounded.
+const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
+
+/// Extract the universal `transcript_path` field from a hook payload (every
+/// Claude Code 2.1.19 hook carries it). Empty when absent / unparseable.
+fn extract_transcript_path(payload: &str) -> String {
+    if payload.trim().is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("transcript_path").and_then(|x| x.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Resolve the event's `matcher` discriminator. Prefers the explicit value
+/// forwarded by notify.sh (`--matcher`); otherwise parses it from the payload
+/// per event type: PreToolUse → `tool_name`, Notification → `notification_type`,
+/// StopFailure → `error_type`. `None` when not applicable / absent.
+fn resolve_matcher(base_event: &str, explicit: Option<&str>, payload: &str) -> Option<String> {
+    if let Some(m) = explicit {
+        let m = m.trim();
+        if !m.is_empty() {
+            return Some(m.to_string());
+        }
+    }
+    if payload.trim().is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let key = match base_event {
+        "PreToolUse" => "tool_name",
+        "Notification" => "notification_type",
+        "StopFailure" => "error_type",
+        _ => return None,
+    };
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Build the canonical `events.jsonl` line for one hook fire. This is the exact
+/// shape the notifyd ingest tailer parses (`crate ainb-plugin-notifyd::ingest`)
+/// and the Wave 3 materializer consumes: ts, session_id, cwd, transcript_path,
+/// agent, event_type (the base event), matcher, and the bounded raw payload.
+/// Parent is folded into the payload so the materializer can set current_state.parent.
+#[allow(clippy::too_many_arguments)]
+fn build_event_line(
+    now_ms: i64,
+    session_id: &str,
+    cwd: &str,
+    event: &str,
+    base_event: &str,
+    matcher: Option<&str>,
+    payload: &str,
+    parent: Option<&str>,
+) -> serde_json::Value {
+    let _ = event; // base_event is the canonical event_type; raw `event` kept for callers.
+    let matcher_val = resolve_matcher(base_event, matcher, payload);
+    let transcript_path = extract_transcript_path(payload);
+    // Bounded raw payload: parse if it fits, else record a truncation marker so
+    // the line stays small and always valid JSON.
+    let payload_val: serde_json::Value = if payload.len() <= MAX_EVENT_PAYLOAD_BYTES {
+        serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({ "_truncated": true, "_bytes": payload.len() })
+    };
+    serde_json::json!({
+        "ts": now_ms,
+        "session_id": session_id,
+        "cwd": cwd,
+        "transcript_path": transcript_path,
+        "agent": "claude",
+        "event_type": base_event,
+        "matcher": matcher_val,
+        "parent": parent,
+        "payload": payload_val,
+    })
+}
+
+/// Append one canonical event line to `<home>/events.jsonl`. Best-effort and
+/// O(1): a single line write to an append-handle. NEVER propagates an error —
+/// the lifecycle hook must always exit 0, so a full disk / permission failure
+/// here is swallowed by the caller (`let _ = …`).
+fn append_event_line(home: &std::path::Path, line: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = home.join("events.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut s = serde_json::to_string(line).unwrap_or_default();
+    s.push('\n');
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    f.write_all(s.as_bytes())
+}
+
 // --- helpers ----------------------------------------------------------------
 
 /// Extract and SANITIZE the instance `<name>` at the CLI boundary. Sanitizing
@@ -1107,6 +1238,8 @@ mod tests {
             None,
             None,
             1,
+            "",
+            None,
         )
         .unwrap();
         let d = decision.expect("Stop-hook must block on the child completion");
@@ -1137,12 +1270,27 @@ mod tests {
         assert_eq!(hb_drained[0].child_id, "child-2");
     }
 
-    // --- H1: status write GATED on fleet membership --------------------------
+    // --- H1: events.jsonl append GATED on fleet membership -------------------
+
+    /// Read every canonical line from `<home>/events.jsonl` (empty when absent).
+    fn read_event_lines(home: &std::path::Path) -> Vec<serde_json::Value> {
+        let path = home.join("events.jsonl");
+        std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 
     #[test]
-    fn unrelated_session_writes_no_status_file() {
+    fn unrelated_session_appends_no_event_line() {
         let home = TempDir::new().unwrap();
-        // A session with NO parent, NO inbox, NOT an ATC cwd: a true no-op.
+        // A session with NO parent, NO inbox, NOT an ATC cwd: a true no-op (H1
+        // conservative default — the appender is gated on fleet membership).
         let decision = hook_core(
             home.path(),
             "Stop",
@@ -1151,40 +1299,91 @@ mod tests {
             None,
             None,
             1,
+            "",
+            None,
         )
         .unwrap();
         assert!(decision.is_none(), "unrelated session must not block");
-
-        let status = plumbing::status::status_path_in(home.path(), "random-unrelated-session");
         assert!(
-            !status.exists(),
-            "unrelated session must produce NO status file (H1)"
+            !home.path().join("events.jsonl").exists(),
+            "unrelated session must append NO event line (H1)"
         );
     }
 
     #[test]
-    fn atc_session_writes_a_status_file() {
+    fn atc_session_appends_a_well_formed_event_line() {
         let home = TempDir::new().unwrap();
         let cwd = provision_atc(home.path(), "tower");
-        // An ATC-managed session IS a fleet member → status file written.
+        // An ATC-managed session IS a fleet member → an event line is appended.
+        // Stamp a transcript_path + the PreToolUse matcher into the payload to
+        // assert they land in the canonical line.
+        let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"AskUserQuestion"}"#;
         hook_core(
+            home.path(),
+            "PreToolUse",
+            "atc-sid",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            7,
+            payload,
+            Some("AskUserQuestion"),
+        )
+        .unwrap();
+        let lines = read_event_lines(home.path());
+        assert_eq!(lines.len(), 1, "ATC session must append one event line");
+        let l = &lines[0];
+        assert_eq!(l["session_id"], "atc-sid");
+        assert_eq!(l["event_type"], "PreToolUse");
+        assert_eq!(l["matcher"], "AskUserQuestion");
+        assert_eq!(l["transcript_path"], "/t/atc.jsonl");
+        assert_eq!(l["agent"], "claude");
+        assert_eq!(l["ts"], 7);
+    }
+
+    #[test]
+    fn stop_event_appends_a_line_and_still_exits_ok_on_append_error() {
+        let home = TempDir::new().unwrap();
+        let name = "tower";
+        let cwd = provision_atc(home.path(), name);
+        // Happy path: a Stop on the ATC session appends one Stop line.
+        hook_core(
+            home.path(),
+            "Stop",
+            "atc-sid",
+            cwd.to_str().unwrap(),
+            None,
+            Some("done".into()),
+            1,
+            r#"{"transcript_path":"/t/atc.jsonl"}"#,
+            None,
+        )
+        .unwrap();
+        let lines = read_event_lines(home.path());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["event_type"], "Stop");
+
+        // Forced append error: make events.jsonl a DIRECTORY so the open fails.
+        // The append is best-effort (`let _ = …`), so hook_core still returns Ok
+        // and the hook exits 0.
+        std::fs::remove_file(home.path().join("events.jsonl")).unwrap();
+        std::fs::create_dir_all(home.path().join("events.jsonl")).unwrap();
+        let res = hook_core(
             home.path(),
             "SessionStart",
             "atc-sid",
             cwd.to_str().unwrap(),
             None,
             None,
-            1,
-        )
-        .unwrap();
-        assert!(
-            plumbing::status::read_status_in(home.path(), "atc-sid").is_some(),
-            "ATC session must write a status file"
+            2,
+            "{}",
+            None,
         );
+        assert!(res.is_ok(), "a forced append error must not fail the hook");
     }
 
     #[test]
-    fn child_with_parent_writes_a_status_file() {
+    fn child_with_parent_appends_a_line_and_routes_completion() {
         let home = TempDir::new().unwrap();
         // A child with a live env parent IS a fleet member.
         hook_core(
@@ -1195,12 +1394,14 @@ mod tests {
             Some("tower"),
             Some("finished".into()),
             1,
+            r#"{"transcript_path":"/t/child.jsonl"}"#,
+            None,
         )
         .unwrap();
-        assert!(
-            plumbing::status::read_status_in(home.path(), "child-sid").is_some(),
-            "a parented child must write a status file"
-        );
+        let lines = read_event_lines(home.path());
+        assert_eq!(lines.len(), 1, "a parented child must append an event line");
+        assert_eq!(lines[0]["session_id"], "child-sid");
+        assert_eq!(lines[0]["parent"], "tower", "parent folded into the line");
         // ...and its completion routes to the parent's inbox.
         assert_eq!(inbox_for(home.path(), "tower").peek().len(), 1);
     }
@@ -1216,6 +1417,7 @@ mod tests {
             .arg(clap::Arg::new("event").long("event"))
             .arg(clap::Arg::new("session-id").long("session-id").default_value(""))
             .arg(clap::Arg::new("cwd").long("cwd").default_value(""))
+            .arg(clap::Arg::new("matcher").long("matcher").default_value(""))
             .get_matches_from(vec!["hook", "--event", "Stop", "--session-id", "unrelated"]);
         assert!(
             hook(&m).await.is_ok(),
@@ -1253,6 +1455,8 @@ mod tests {
             None,
             None,
             1,
+            "{}",
+            None,
         );
         assert!(
             result.is_err(),

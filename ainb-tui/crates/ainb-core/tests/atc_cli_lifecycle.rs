@@ -556,20 +556,33 @@ fn atc_event_driven_inbox_drains_exactly_once() {
 }
 
 /// HOOK + DEAD-LETTER (success criterion 2): the `ainb fleet atc hook` verb —
-/// the Rust side of the installed hook script — writes the per-session status
-/// file on every event, routes a child's Stop completion to its parent's inbox,
-/// and dead-letters a Stop completion whose parent is unresolvable.
+/// the Rust side of the installed hook script — appends a canonical event line
+/// to `events.jsonl` on every (fleet-member) event, routes a child's Stop
+/// completion to its parent's inbox, and dead-letters a Stop completion whose
+/// parent is unresolvable.
 #[test]
 fn atc_hook_writes_status_and_routes_completion() {
     let home = std::env::temp_dir().join(format!("atc-hook-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
 
-    // A genuine user turn writes a "running" status file. The status write is
+    // Read every canonical line from <home>/events.jsonl (empty when absent).
+    let read_events = |home: &std::path::Path| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(home.join("events.jsonl"))
+            .ok()
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // A genuine user turn appends a UserPromptSubmit event line. The append is
     // now GATED on fleet membership (H1), so we pass the child's parent env —
     // exactly as `ainb run --parent tower` seeds it — which makes `child-a` a
-    // resolvable fleet member and a legitimate status writer. (An UNRELATED
-    // session with no parent / no inbox writes nothing; that is asserted
-    // separately in the H1 no-op regression below.)
+    // resolvable fleet member and a legitimate appender. (An UNRELATED session
+    // with no parent / no inbox appends nothing; asserted separately below.)
     let out = Command::new(ainb_bin())
         .env("AINB_HOME", &home)
         .env("AINB_PARENT_SESSION", "tower")
@@ -585,15 +598,19 @@ fn atc_hook_writes_status_and_routes_completion() {
         .output()
         .expect("hook");
     assert!(out.status.success(), "hook (UserPromptSubmit) failed");
-    let status: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(home.join("status").join("child-a.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(status["status"], "running");
+    let events = read_events(&home);
+    assert_eq!(
+        events.len(),
+        1,
+        "UserPromptSubmit must append one event line"
+    );
+    assert_eq!(events[0]["event_type"], "UserPromptSubmit");
+    assert_eq!(events[0]["session_id"], "child-a");
+    assert_eq!(events[0]["parent"], "tower");
 
     // A Stop with a parent (via AINB_PARENT_SESSION) routes a completion to the
-    // parent's inbox, and writes a "done" status (summary on stdin).
-    let payload = r#"{"hook_event_name":"Stop","last_assistant_message":"finished task"}"#;
+    // parent's inbox, and appends a Stop event line.
+    let payload = r#"{"hook_event_name":"Stop","last_assistant_message":"finished task","transcript_path":"/t/child-a.jsonl"}"#;
     let mut child = Command::new(ainb_bin())
         .env("AINB_HOME", &home)
         .env("AINB_PARENT_SESSION", "tower")
@@ -616,12 +633,11 @@ fn atc_hook_writes_status_and_routes_completion() {
     }
     let out = child.wait_with_output().expect("hook stop");
     assert!(out.status.success(), "hook (Stop) failed");
-    let status: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(home.join("status").join("child-a.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(status["status"], "done");
-    assert_eq!(status["done_summary"], "finished task");
+    let events = read_events(&home);
+    assert_eq!(events.len(), 2, "Stop must append a second event line");
+    let stop = events.iter().find(|e| e["event_type"] == "Stop").expect("Stop line present");
+    assert_eq!(stop["session_id"], "child-a");
+    assert_eq!(stop["transcript_path"], "/t/child-a.jsonl");
 
     // The completion landed in tower's inbox (drain it via the CLI).
     let out = Command::new(ainb_bin())

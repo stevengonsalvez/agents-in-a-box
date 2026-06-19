@@ -395,6 +395,7 @@ mod tests {
                 max_rows: 0,
             },
             os_notifications: false,
+            ingest_interval: std::time::Duration::from_millis(20),
         };
         let socket = paths.socket.clone();
         let daemon = tokio::spawn(async move { run_daemon(config).await });

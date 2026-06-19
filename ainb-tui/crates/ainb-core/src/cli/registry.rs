@@ -1693,7 +1693,13 @@ fn build_atc_command() -> Command {
                         .default_value("")
                         .help("Session that fired the hook"),
                 )
-                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd")),
+                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd"))
+                .arg(
+                    clap::Arg::new("matcher")
+                        .long("matcher")
+                        .default_value("")
+                        .help("Hook matcher (PreToolUse tool_name / Notification type / StopFailure error_type)"),
+                ),
         )
         .subcommand(
             Command::new("inbox")
