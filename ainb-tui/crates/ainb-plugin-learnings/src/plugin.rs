@@ -145,7 +145,8 @@ impl LearningsPlugin {
     /// Surface: `learnings search <query...> [--bm25] [-k N] [--format json]`.
     #[doc(hidden)]
     pub fn cli_dispatch_core(&self, namespace: &str, argv: &[String]) -> CliOutput {
-        const USAGE: &str = "usage: ainb learnings search <query...> [--bm25] [-k N] [--format json]\n";
+        const USAGE: &str =
+            "usage: ainb learnings search <query...> [--bm25] [-k N] [--format json]\n";
         if namespace != "learnings" {
             return CliOutput {
                 stdout: Vec::new(),
@@ -197,7 +198,11 @@ impl LearningsPlugin {
             };
         }
 
-        let mode = if bm25 { SearchMode::Bm25 } else { SearchMode::Semantic };
+        let mode = if bm25 {
+            SearchMode::Bm25
+        } else {
+            SearchMode::Semantic
+        };
         match search_cancellable(
             self.search_runner.as_ref(),
             &query,
@@ -687,8 +692,10 @@ mod tests {
                 _c: &str,
                 _i: &str,
             ) -> std::result::Result<String, DataError> {
-                Ok(r##"[{"docid":"#42","score":2.5,"title":"Redis pooling","file":"qmd://x"}]"##
-                    .to_string())
+                Ok(
+                    r##"[{"docid":"#42","score":2.5,"title":"Redis pooling","file":"qmd://x"}]"##
+                        .to_string(),
+                )
             }
         }
         let p = LearningsPlugin::with_search_runner(Arc::new(Fake));

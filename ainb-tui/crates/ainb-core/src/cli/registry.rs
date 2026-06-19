@@ -328,10 +328,12 @@ impl CliCommand for AuthCommand {
         "auth"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(Command::new(self.name()).about("Set up authentication").after_help(
-            "EXAMPLES:\n  \
+        app.subcommand(
+            Command::new(self.name()).about("Set up authentication").after_help(
+                "EXAMPLES:\n  \
              ainb auth                        Interactive authentication setup",
-        ))
+            ),
+        )
     }
     fn run(&self, _matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move { crate::cli::auth::run_auth_setup().await })
@@ -1555,7 +1557,11 @@ impl CliCommand for LearningsCommand {
 /// execs an external binary synchronously). Exits 2 with an install hint
 /// when the plugin isn't staged, so an agent gets a clear message instead
 /// of a panic.
-async fn dispatch_to_plugin(plugin_id: &'static str, namespace: &'static str, argv: Vec<String>) -> ! {
+async fn dispatch_to_plugin(
+    plugin_id: &'static str,
+    namespace: &'static str,
+    argv: Vec<String>,
+) -> ! {
     let code = match run_dispatch_to_plugin(plugin_id, namespace, argv).await {
         Ok(c) => c,
         Err(e) => {
@@ -1578,10 +1584,9 @@ async fn run_dispatch_to_plugin(
     let id = PluginId::from(plugin_id);
     let registered = handle.registered_plugins();
     let dispatch = if registered.iter().any(|p| p.id == id) {
-        handle
-            .dispatch_cli(&id, namespace, argv)
-            .await
-            .map_err(|e| anyhow::anyhow!("{plugin_id} plugin task disconnected before replying: {e}"))
+        handle.dispatch_cli(&id, namespace, argv).await.map_err(|e| {
+            anyhow::anyhow!("{plugin_id} plugin task disconnected before replying: {e}")
+        })
     } else {
         Err(anyhow::anyhow!(
             "error: the `{plugin_id}` plugin is not installed \
@@ -1636,7 +1641,9 @@ impl CliCommand for PluginCommand {
                     .help("skip the capability approval prompt"),
             );
         let update = Command::new("update")
-            .about("Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)")
+            .about(
+                "Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)",
+            )
             .arg(clap::Arg::new("plugin").required(true))
             .arg(
                 clap::Arg::new("yes")
@@ -1957,9 +1964,7 @@ impl CliCommand for HangarCommand {
         // `.about()` AFTER augment so it wins over the `HangarCommand` doc-comment
         // ("The `hangar` subcommand tree.").
         let hangar = <crate::cli::hangar::HangarCommand as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .subcommand_required(true)
-                .arg_required_else_help(true),
+            Command::new(self.name()).subcommand_required(true).arg_required_else_help(true),
         )
         .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
         .after_help(

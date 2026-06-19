@@ -172,9 +172,15 @@ pub fn cmd_list(
     } else if rows.is_empty() {
         println!("no notifications");
     } else {
-        println!("{:<14} {:<8} {:<22} {}", "ts(ms)", "agent", "project", "event");
+        println!(
+            "{:<14} {:<8} {:<22} {}",
+            "ts(ms)", "agent", "project", "event"
+        );
         for r in &rows {
-            println!("{:<14} {:<8} {:<22} {}", r.ts, r.agent, r.project, r.raw_event);
+            println!(
+                "{:<14} {:<8} {:<22} {}",
+                r.ts, r.agent, r.project, r.raw_event
+            );
         }
     }
     Ok(())

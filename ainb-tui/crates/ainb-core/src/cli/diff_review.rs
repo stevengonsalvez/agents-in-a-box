@@ -71,7 +71,10 @@ struct DiffRowJson {
 }
 
 impl DiffJson {
-    fn from_model(path: &std::path::Path, m: &crate::components::code_review::model::ReviewModel) -> Self {
+    fn from_model(
+        path: &std::path::Path,
+        m: &crate::components::code_review::model::ReviewModel,
+    ) -> Self {
         use crate::components::code_review::model::RowKind;
         Self {
             path: path.display().to_string(),
