@@ -1206,10 +1206,37 @@ impl CliCommand for NotifydCommand {
                 .subcommand(agent_flags(
                     Command::new("uninstall").about("Uninstall the ainb-hooks hook"),
                 ))
-                .subcommand(Command::new("status").about("Report install + daemon status")),
+                .subcommand(Command::new("status").about("Report install + daemon status"))
+                .subcommand(
+                    Command::new("list")
+                        .about("List persisted notifications (most recent first)")
+                        .arg(
+                            clap::Arg::new("dismissed")
+                                .long("dismissed")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include dismissed notifications"),
+                        )
+                        .arg(
+                            clap::Arg::new("agent")
+                                .long("agent")
+                                .help("Filter by agent (claude|codex|copilot)"),
+                        )
+                        .arg(
+                            clap::Arg::new("project")
+                                .long("project")
+                                .help("Filter by project (basename of cwd)"),
+                        )
+                        .arg(
+                            clap::Arg::new("limit")
+                                .long("limit")
+                                .value_parser(clap::value_parser!(u32))
+                                .default_value("50")
+                                .help("Max rows to show"),
+                        ),
+                ),
         )
     }
-    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         use ainb_plugin_notifyd::cli;
 
         // The verb (and, for install/uninstall, the resolved agent set)
@@ -1224,6 +1251,13 @@ impl CliCommand for NotifydCommand {
             Install(Vec<ainb_plugin_notifyd::Agent>),
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
             Status,
+            List {
+                dismissed: bool,
+                agent: Option<String>,
+                project: Option<String>,
+                limit: u32,
+                json: bool,
+            },
         }
         let agents = |m: &ArgMatches| {
             cli::agents_from_flags(
@@ -1241,6 +1275,13 @@ impl CliCommand for NotifydCommand {
             Some(("install", m)) => Verb::Install(agents(m)),
             Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
             Some(("status", _)) => Verb::Status,
+            Some(("list", m)) => Verb::List {
+                dismissed: m.get_flag("dismissed"),
+                agent: m.get_one::<String>("agent").cloned(),
+                project: m.get_one::<String>("project").cloned(),
+                limit: m.get_one::<u32>("limit").copied().unwrap_or(50),
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some((other, _)) => {
                 let other = other.to_string();
                 return Box::pin(async move {
@@ -1255,6 +1296,13 @@ impl CliCommand for NotifydCommand {
                 Verb::Install(a) => cli::cmd_install(&a),
                 Verb::Uninstall(a) => cli::cmd_uninstall(&a),
                 Verb::Status => cli::cmd_status(),
+                Verb::List {
+                    dismissed,
+                    agent,
+                    project,
+                    limit,
+                    json,
+                } => cli::cmd_list(dismissed, agent.as_deref(), project.as_deref(), limit, json),
             }
         })
     }
