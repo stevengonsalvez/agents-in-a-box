@@ -107,6 +107,7 @@ impl CommandRegistry {
         r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
+        r.register(WitrCommand); // headless process-trace via the witr plugin
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(McpCommand);
@@ -1366,6 +1367,125 @@ impl CliCommand for AbtopCommand {
     }
 }
 
+/// `ainb witr <target>` — headless process-causality trace. Forwards its
+/// argv verbatim to the witr plugin's `cli_dispatch` (namespace `witr`),
+/// which execs the external `witr --json` binary and re-emits text/json.
+/// Mirrors the verbatim-forwarder shape of [`AbtopCommand`], but the work
+/// happens inside the subprocess plugin rather than a direct exec.
+pub struct WitrCommand;
+impl CliCommand for WitrCommand {
+    fn name(&self) -> &'static str {
+        "witr"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Trace a running process's causality chain (via the witr plugin)")
+                .arg(
+                    clap::Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true)
+                        .help(
+                            "witr target + flags, forwarded verbatim: \
+                             <name> | --pid <pid> | --port <p> | --file <path> | \
+                             --container <id>  [--tree|--warnings|--short]",
+                        ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb witr node                   Trace a process by name\n  \
+                     ainb witr --pid 1234             Trace a process by PID\n  \
+                     ainb witr --port 3000            Trace whatever listens on a port\n  \
+                     ainb witr node --tree            Show the ancestry chain as a tree\n  \
+                     ainb witr node --format json     Machine-readable snapshot",
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        // Prepend the host-global `--format` so the witr plugin's
+        // `extract_format` sees it (clap strips global args from the
+        // residual argv before the subcommand does), then forward the
+        // rest verbatim — the plugin owns the witr-specific surface.
+        let format_token = output_format_to_token(ctx.format);
+        let mut argv: Vec<String> = vec!["--format".to_string(), format_token.to_string()];
+        if let Some(vals) = matches.get_many::<String>("args") {
+            argv.extend(vals.cloned());
+        }
+        Box::pin(async move {
+            dispatch_to_plugin("witr", "witr", argv).await;
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }
+}
+
+/// Generic one-shot dispatch of `argv` to a plugin's `cli_dispatch`
+/// (`namespace` is usually the plugin command name). Boots the subprocess
+/// plugin runtime, sends the RPC, writes the plugin's captured stdout/stderr
+/// verbatim, and exits with its reported code. Never returns.
+///
+/// Unlike [`dispatch_usage_via_plugin`] there is no data-wait/retry loop —
+/// this is for plugins whose `cli_dispatch` is self-contained (e.g. witr
+/// execs an external binary synchronously). Exits 2 with an install hint
+/// when the plugin isn't staged, so an agent gets a clear message instead
+/// of a panic.
+async fn dispatch_to_plugin(plugin_id: &'static str, namespace: &'static str, argv: Vec<String>) -> ! {
+    let code = match run_dispatch_to_plugin(plugin_id, namespace, argv).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+async fn run_dispatch_to_plugin(
+    plugin_id: &str,
+    namespace: &str,
+    argv: Vec<String>,
+) -> anyhow::Result<i32> {
+    use ainb_plugin_runtime::{CliOutcome, PluginId};
+
+    let (runtime, handle, _outcome) = crate::plugins::init_plugin_runtime()
+        .map_err(|e| anyhow::anyhow!("plugin runtime init failed: {e}"))?;
+    let id = PluginId::from(plugin_id);
+    let registered = handle.registered_plugins();
+    let dispatch = if registered.iter().any(|p| p.id == id) {
+        handle
+            .dispatch_cli(&id, namespace, argv)
+            .await
+            .map_err(|e| anyhow::anyhow!("{plugin_id} plugin task disconnected before replying: {e}"))
+    } else {
+        Err(anyhow::anyhow!(
+            "error: the `{plugin_id}` plugin is not installed \
+             (no staged plugin found under dist/plugins/{plugin_id})"
+        ))
+    };
+    // Drop the owning runtime off the async context (see the
+    // spawn_blocking note on `run_usage_via_plugin`).
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
+
+    let exit = match dispatch? {
+        CliOutcome::Ok(result) => {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&result.stdout);
+            let _ = std::io::stderr().write_all(&result.stderr);
+            result.exit_code
+        }
+        CliOutcome::PluginError { code, message } => {
+            eprintln!("error: {plugin_id} plugin error {code}: {message}");
+            1
+        }
+        CliOutcome::RuntimeError(msg) => {
+            eprintln!("error: plugin runtime: {msg}");
+            1
+        }
+    };
+    Ok(exit)
+}
+
 /// `ainb plugin {marketplace,install,update,remove,list,search}` — Phase 4
 /// marketplace + installer. Argument shapes nailed down in Phase 2b so plugin
 /// authors could target them today; Phase 4 wires the real handlers in
@@ -1743,14 +1863,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_seven_commands() {
+    fn built_ins_registers_twenty_eight_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // main's 26 (built-ins + doctor + reflect + claudecode + codex + tmux
-        // + abtop + plugin stub + fleet + hidden notifyd + hangar) + the mcp
-        // namespace = 27. The TUI is NOT in the registry — main.rs handles
-        // `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 27, "expected 27 entries, got {names:?}");
+        // built-ins + doctor + reflect + claudecode + codex + tmux + abtop +
+        // witr + plugin stub + fleet + mcp + hidden notifyd + hangar = 28. The
+        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
+        // inline.
+        assert_eq!(names.len(), 28, "expected 28 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1774,6 +1894,7 @@ mod tests {
             "tmux",
             "completion",
             "abtop",
+            "witr",
             "plugin",
             "fleet",
             "mcp",
