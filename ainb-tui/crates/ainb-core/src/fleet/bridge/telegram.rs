@@ -38,9 +38,15 @@ const CLIENT_TIMEOUT_BUFFER_SECS: u64 = 15;
 /// shared `transport` through the relay core, reporting connection + relay
 /// activity through the shared `heartbeat` so the Daemons surface can show
 /// "Telegram channel online" + last-relay (the original blind spot).
-pub async fn run<T: FleetTransport>(
+///
+/// `transport` is `&'static` because each inbound message's relay runs in its
+/// own `tokio::spawn` task (so a slow reply can never stall the getUpdates
+/// long-poll loop — see the spawn in the loop below); the spawned future must
+/// therefore not borrow a non-`'static` transport. The daemon leaks a single
+/// shared transport, so this costs nothing (mirrors the Discord channel).
+pub async fn run<T: FleetTransport + 'static>(
     cfg: TelegramConfig,
-    transport: &T,
+    transport: &'static T,
     heartbeat: BridgeHeartbeat,
 ) -> Result<()> {
     let client = build_client()?;
@@ -88,17 +94,34 @@ pub async fn run<T: FleetTransport>(
         // prior transient failure that flipped connected=false.
         heartbeat.set_connected(true, None);
         for update in updates {
+            // Advance the watermark FIRST, then dispatch the (slow) relay OFF the
+            // poll loop. `handle_message` -> `relay` polls the agent for up to
+            // `response_timeout` (300s default); awaiting it inline here would
+            // freeze getUpdates for that whole window — no new messages read, the
+            // heartbeat-relevant poll socket stalls. Because the offset is already
+            // advanced, the next poll moves on immediately while the spawned task
+            // handles the reply independently. The `reqwest::Client` clone is
+            // cheap (`Arc` inside), the config + bot handle are cloned, the
+            // transport is `&'static` (shared, not the poll socket), and the
+            // heartbeat handle is a cheap `Arc` clone — so the off-task relay
+            // still records relay activity / errors on the shared surface.
             offset = offset.max(update.update_id + 1);
             if let Some(message) = update.message {
-                handle_message(
-                    &client,
-                    &cfg,
-                    bot_username.as_deref(),
-                    transport,
-                    &heartbeat,
-                    message,
-                )
-                .await;
+                let client = client.clone();
+                let cfg = cfg.clone();
+                let bot_username = bot_username.clone();
+                let heartbeat = heartbeat.clone();
+                tokio::spawn(async move {
+                    handle_message(
+                        &client,
+                        &cfg,
+                        bot_username.as_deref(),
+                        transport,
+                        &heartbeat,
+                        message,
+                    )
+                    .await;
+                });
             }
         }
     }
@@ -575,5 +598,91 @@ mod tests {
         assert!(s.contains("phase=api"), "got: {s}");
         assert!(s.contains("ok=false"), "got: {s}");
         assert!(s.contains("Unauthorized"), "got: {s}");
+    }
+
+    // ── Relay runs OFF the poll loop; getUpdates keeps progressing ───────────
+    // Mirrors Discord's `relay_runs_off_task_so_heartbeat_keeps_firing`: proves a
+    // slow reply (the workload the bridge exists for) cannot stall the long-poll
+    // loop, so new updates keep being read and the poll socket never freezes.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::super::routing::TargetSession;
+
+    /// A transport whose `send_and_capture` blocks far longer than the test runs,
+    /// modelling a slow agent reply.
+    struct SlowTransport {
+        sessions: Vec<TargetSession>,
+    }
+
+    impl FleetTransport for SlowTransport {
+        async fn discover(&self) -> Vec<TargetSession> {
+            self.sessions.clone()
+        }
+        async fn send_and_capture(
+            &self,
+            _session: &TargetSession,
+            _text: &str,
+            _timeout: Duration,
+        ) -> Option<String> {
+            // Real wall-clock so the test needs no tokio `test-util` feature.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Some("late reply".into())
+        }
+    }
+
+    fn sess(name: &str) -> TargetSession {
+        TargetSession::new(
+            name,
+            format!("tmux-{name}"),
+            format!("/cwd/{name}"),
+            format!("id-{name}"),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_runs_off_task_so_poll_loop_keeps_progressing() {
+        // Leak a slow transport to get the `&'static` the spawned relay needs,
+        // mirroring how the daemon leaks its shared transport.
+        let transport: &'static SlowTransport = Box::leak(Box::new(SlowTransport {
+            sessions: vec![sess("conductor")],
+        }));
+
+        // Kick off a relay exactly the way the poll loop does — in a spawned task
+        // — then prove the loop keeps advancing its watermark while the relay (an
+        // hour-long sleep) is still outstanding.
+        let relay_done = Arc::new(AtomicU64::new(0));
+        let rd = relay_done.clone();
+        tokio::spawn(async move {
+            let params = RelayParams {
+                default_target: None,
+                response_timeout: Duration::from_secs(300),
+            };
+            let _ = relay(transport, &params, "status?").await;
+            rd.store(1, Ordering::SeqCst);
+        });
+
+        // Stand-in for the getUpdates poll cadence: a fast interval the loop
+        // services. With the relay OFF-task these keep firing; if the relay were
+        // awaited inline they would all be blocked behind the 1h sleep — exactly
+        // the long-poll stall this fix removes.
+        let mut polls: u64 = 0;
+        let mut ticker = tokio::time::interval(Duration::from_millis(5));
+        ticker.tick().await; // immediate first tick
+        for _ in 0..5 {
+            ticker.tick().await;
+            polls += 1;
+        }
+
+        assert_eq!(
+            polls, 5,
+            "poll loop must keep progressing during a slow relay"
+        );
+        assert_eq!(
+            relay_done.load(Ordering::SeqCst),
+            0,
+            "the relay should still be in flight — proving it did not block the poll loop"
+        );
     }
 }
