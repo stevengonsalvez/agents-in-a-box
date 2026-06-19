@@ -384,8 +384,6 @@ impl LayoutComponent {
             sep(),
             key("u", MUTED_GRAY),
             desc(" re-auth "),
-            key("H", MUTED_GRAY),
-            desc(" headroom off"),
         ];
 
         // Line 4: Panels + System. Every panel screen mirrors its
@@ -525,8 +523,6 @@ impl LayoutComponent {
                 cleanup_desc,
                 key("u", MUTED_GRAY),
                 desc(" re-auth  "),
-                key("H", MUTED_GRAY),
-                desc(" headroom off"),
             ]),
         ];
 
