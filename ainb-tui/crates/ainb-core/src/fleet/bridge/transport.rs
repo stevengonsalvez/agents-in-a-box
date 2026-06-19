@@ -79,6 +79,16 @@ pub async fn discover() -> Vec<TargetSession> {
             let workspace = s.workspace_name.unwrap_or_default();
             let tmux = s.tmux_session.unwrap_or_default();
             if workspace.is_empty() || tmux.is_empty() {
+                // A session with no workspace or no tmux name can't be routed to,
+                // so it's dropped — but log it so a misconfigured session that
+                // silently vanishes from routing is diagnosable instead of being
+                // an invisible blind spot.
+                tracing::debug!(
+                    session_id = %s.id,
+                    workspace_empty = workspace.is_empty(),
+                    tmux_empty = tmux.is_empty(),
+                    "bridge discover: dropping session with empty workspace/tmux (not routable)"
+                );
                 return None;
             }
             // Recover the run-name from the tmux session name; fall back to the
@@ -250,7 +260,16 @@ pub fn scan_new_rows_for_turn_end(
             if let Some(text) = text {
                 if let Some(min_ts) = min_ts_ms {
                     match row_timestamp_ms(&obj) {
-                        Some(row_ts) if row_ts > min_ts => {}
+                        // `>=`, NOT `>`: the JSONL `timestamp` is millisecond
+                        // resolution, and the send physically PRECEDES the row
+                        // write. A reply whose timestamp truncates to the SAME
+                        // millisecond as the send instant is therefore the reply,
+                        // not backlog — a strict `>` dropped fast PONGs that
+                        // answered within the send millisecond ("no reply within
+                        // Ns" despite a live reply). The offset + visible-text
+                        // gates already exclude the pre-send rolled-up row in the
+                        // common case, so equality here is safe.
+                        Some(row_ts) if row_ts >= min_ts => {}
                         // Backlog (or unprovable) row — predates the send, skip.
                         _ => continue,
                     }
@@ -431,6 +450,34 @@ mod tests {
         let (_, reply) = scan_new_rows_for_turn_end(&path, 0, Some(send_ms));
         let _ = std::fs::remove_file(&path);
         assert_eq!(reply.as_deref(), Some("fresh answer"));
+    }
+
+    #[test]
+    fn send_time_guard_accepts_same_millisecond_row() {
+        // BOUNDARY (live bug): a fast reply whose JSONL timestamp truncates to the
+        // SAME millisecond as the send instant must be ACCEPTED. The send
+        // physically precedes the row write, so equality is the reply, not
+        // backlog. A strict `>` rejected it and surfaced "no reply within Ns"
+        // despite a live PONG.
+        let path = tmp_jsonl("same-ms");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:52.500Z","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"PONG"}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        // Send watermark == the reply row's millisecond exactly.
+        let send_ms = chrono::DateTime::parse_from_rfc3339("2026-06-18T22:01:52.500Z")
+            .unwrap()
+            .timestamp_millis();
+        let (_, reply) = scan_new_rows_for_turn_end(&path, 0, Some(send_ms));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            reply.as_deref(),
+            Some("PONG"),
+            "a reply written in the same millisecond as the send must be accepted"
+        );
     }
 
     #[test]
