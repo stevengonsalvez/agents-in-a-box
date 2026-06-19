@@ -18,8 +18,8 @@ use std::sync::mpsc::{self, Receiver};
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    Cell, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext, KeyCode,
-    MouseButton, MouseKind, Plugin, RenderParams, Result, WireBuffer, topics,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext,
+    KeyCode, MouseButton, MouseKind, Plugin, RenderParams, Result, WireBuffer, topics,
 };
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -134,6 +134,99 @@ impl LearningsPlugin {
             search_cancel: None,
             communities_loaded: false,
             generation: 0,
+        }
+    }
+
+    /// Host-free body of the `learnings` CLI namespace. Synchronous — it
+    /// shells `qmd` once (no two-stage worker / cancellation; this is a
+    /// one-shot process). Public (doc-hidden) so tests can drive it with a
+    /// fake [`QmdSearch`] runner.
+    ///
+    /// Surface: `learnings search <query...> [--bm25] [-k N] [--format json]`.
+    #[doc(hidden)]
+    pub fn cli_dispatch_core(&self, namespace: &str, argv: &[String]) -> CliOutput {
+        const USAGE: &str = "usage: ainb learnings search <query...> [--bm25] [-k N] [--format json]\n";
+        if namespace != "learnings" {
+            return CliOutput {
+                stdout: Vec::new(),
+                stderr: format!("learnings: unknown namespace `{namespace}`\n").into_bytes(),
+                exit_code: 2,
+            };
+        }
+
+        let mut json = false;
+        let mut bm25 = false;
+        let mut limit = 10usize;
+        let mut rest: Vec<&str> = Vec::new();
+        let mut it = argv.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--format" => {
+                    json = it.next().map(String::as_str) == Some("json");
+                }
+                "--bm25" => bm25 = true,
+                "-k" | "--limit" => {
+                    if let Some(n) = it.next().and_then(|s| s.parse().ok()) {
+                        limit = n;
+                    }
+                }
+                "-h" | "--help" => return CliOutput::ok(USAGE),
+                other => rest.push(other),
+            }
+        }
+
+        if rest.first().copied() != Some("search") {
+            return CliOutput {
+                stdout: Vec::new(),
+                stderr: USAGE.as_bytes().to_vec(),
+                exit_code: 2,
+            };
+        }
+        let query = rest[1..].join(" ");
+        if query.trim().is_empty() {
+            return CliOutput {
+                stdout: Vec::new(),
+                stderr: USAGE.as_bytes().to_vec(),
+                exit_code: 2,
+            };
+        }
+
+        let mode = if bm25 { SearchMode::Bm25 } else { SearchMode::Semantic };
+        match search_cancellable(
+            self.search_runner.as_ref(),
+            &query,
+            &self.config.qmd_collection,
+            &self.config.qmd_index,
+            mode,
+            &SearchCancel::new(),
+        ) {
+            Ok(hits) => {
+                let hits: Vec<SearchHit> = hits.into_iter().take(limit).collect();
+                if json {
+                    let arr: Vec<_> = hits
+                        .iter()
+                        .map(|h| {
+                            serde_json::json!({
+                                "id": h.id,
+                                "score": h.score,
+                                "title": h.title,
+                                "file": h.file,
+                            })
+                        })
+                        .collect();
+                    let body = serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "[]".into());
+                    CliOutput::ok(format!("{body}\n").into_bytes())
+                } else if hits.is_empty() {
+                    CliOutput::ok(b"no results\n".to_vec())
+                } else {
+                    let mut out = String::new();
+                    for h in &hits {
+                        out.push_str(&format!("{:>7.2}  {}  {}\n", h.score, h.id, h.title));
+                    }
+                    CliOutput::ok(out.into_bytes())
+                }
+            }
+            Err(e) => CliOutput::err(format!("learnings search failed: {e}\n").into_bytes()),
         }
     }
 
@@ -358,6 +451,17 @@ impl Plugin for LearningsPlugin {
         Ok(())
     }
 
+    /// Headless `ainb learnings search <query>` — runs the same `qmd` search
+    /// the TUI Search tab uses and prints ranked hits as text or JSON.
+    async fn cli_dispatch(
+        &mut self,
+        _host: &HostClient,
+        namespace: &str,
+        argv: &[String],
+    ) -> Result<CliOutput> {
+        Ok(self.cli_dispatch_core(namespace, argv))
+    }
+
     async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
         // Poll the search worker + enforce its timeout BEFORE painting so a
         // settled (or timed-out) search shows on THIS frame, not the next. The
@@ -564,6 +668,41 @@ mod tests {
         let mut p = LearningsPlugin::default();
         p.apply_init_config(&serde_json::json!({ "learnings_dir": "/kb" }));
         assert_eq!(p.config().learnings_dir, "/kb");
+    }
+
+    #[test]
+    fn cli_dispatch_core_search_text_json_and_errors() {
+        // Fake runner returns a canned `qmd query --json` payload.
+        struct Fake;
+        impl QmdSearch for Fake {
+            fn run_query(
+                &self,
+                _q: &str,
+                _c: &str,
+                _i: &str,
+            ) -> std::result::Result<String, DataError> {
+                Ok(r##"[{"docid":"#42","score":2.5,"title":"Redis pooling","file":"qmd://x"}]"##
+                    .to_string())
+            }
+        }
+        let p = LearningsPlugin::with_search_runner(Arc::new(Fake));
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+
+        // text mode → title line, exit 0
+        let out = p.cli_dispatch_core("learnings", &args("search redis pooling"));
+        assert_eq!(out.exit_code, 0);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Redis pooling"));
+
+        // json mode → parseable array carrying the docid, exit 0
+        let out = p.cli_dispatch_core("learnings", &args("search redis --format json"));
+        assert_eq!(out.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+        assert_eq!(v[0]["id"], "#42");
+
+        // missing verb → usage error, exit 2
+        assert_eq!(p.cli_dispatch_core("learnings", &args("")).exit_code, 2);
+        // wrong namespace → exit 2
+        assert_eq!(p.cli_dispatch_core("nope", &args("search x")).exit_code, 2);
     }
 
     // ---- qmd child kill: timeout + kill-before-spawn ----

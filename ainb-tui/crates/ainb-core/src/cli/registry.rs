@@ -108,6 +108,7 @@ impl CommandRegistry {
         r.register(CompletionCommand);
         r.register(AbtopCommand);
         r.register(WitrCommand); // headless process-trace via the witr plugin
+        r.register(LearningsCommand); // headless KB search via the learnings plugin
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(McpCommand);
@@ -1420,6 +1421,49 @@ impl CliCommand for WitrCommand {
     }
 }
 
+/// `ainb learnings search <query>` — headless search over the reflect
+/// knowledge base. Forwards argv (plus host-global `--format`) to the
+/// learnings plugin's `cli_dispatch` (namespace `learnings`), which shells
+/// `qmd` and prints ranked hits. Same verbatim-forwarder shape as witr.
+pub struct LearningsCommand;
+impl CliCommand for LearningsCommand {
+    fn name(&self) -> &'static str {
+        "learnings"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Search your learnings knowledge base (via the learnings plugin)")
+                .arg(
+                    clap::Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true)
+                        .help("subcommand + flags, forwarded verbatim: search <query...> [--bm25] [-k N]"),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb learnings search \"redis connection pooling\"   Semantic search\n  \
+                     ainb learnings search rust async --bm25            Fast BM25 (no LLM rerank)\n  \
+                     ainb learnings search clap -k 5                    Top 5 hits\n  \
+                     ainb learnings search clap --format json           Machine-readable hits",
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let format_token = output_format_to_token(ctx.format);
+        let mut argv: Vec<String> = vec!["--format".to_string(), format_token.to_string()];
+        if let Some(vals) = matches.get_many::<String>("args") {
+            argv.extend(vals.cloned());
+        }
+        Box::pin(async move {
+            dispatch_to_plugin("learnings", "learnings", argv).await;
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }
+}
+
 /// Generic one-shot dispatch of `argv` to a plugin's `cli_dispatch`
 /// (`namespace` is usually the plugin command name). Boots the subprocess
 /// plugin runtime, sends the RPC, writes the plugin's captured stdout/stderr
@@ -1863,14 +1907,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_eight_commands() {
+    fn built_ins_registers_twenty_nine_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // built-ins + doctor + reflect + claudecode + codex + tmux + abtop +
-        // witr + plugin stub + fleet + mcp + hidden notifyd + hangar = 28. The
-        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
-        // inline.
-        assert_eq!(names.len(), 28, "expected 28 entries, got {names:?}");
+        // witr + learnings + plugin stub + fleet + mcp + hidden notifyd +
+        // hangar = 29. The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 29, "expected 29 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1895,6 +1939,7 @@ mod tests {
             "completion",
             "abtop",
             "witr",
+            "learnings",
             "plugin",
             "fleet",
             "mcp",
