@@ -8,9 +8,18 @@
 use serde::Deserialize;
 use std::time::Duration;
 
-/// Caveman multiplier: fraction of output tokens estimated as savings.
-/// 74 % is a modelled potential, NOT measured throughput. Rendered
-/// explicitly as `(est)` so users understand it is an approximation.
+/// Caveman multiplier: fraction of output tokens modelled as savings.
+///
+/// This is a BLANKET MODEL, not a measurement, and cannot be made into one:
+/// caveman savings are counterfactual (the tokens the model *would* have
+/// emitted without terse mode) so there is nothing to measure against in
+/// production. It also can't be scoped to only the turns where caveman was
+/// active — no caveman marker is recorded in the session/JSONL data the
+/// reader sees. So the figure is `total_output_tokens * 0.74` across all
+/// output, rendered explicitly as `(est)` so it reads as an upper-bound
+/// model, never as realised savings. A true per-session caveman metric would
+/// require instrumenting the caveman skill to emit an on/off signal per turn
+/// — tracked as a separate follow-up, not bodged in here.
 pub const CAVEMAN_OUTPUT_RATIO: f64 = 0.74;
 
 /// Aggregated savings figures fetched by the plugin.
