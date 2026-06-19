@@ -184,8 +184,39 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the database at `path` READ-ONLY (`SQLITE_OPEN_READ_ONLY`): no
+    /// create, no migrate, no schema mutation. For reader paths (the ainb-core
+    /// readers / TUI) that must never write to or create the daemon-owned db —
+    /// a missing file is an error rather than being silently created, and the
+    /// connection physically cannot issue writes.
+    ///
+    /// Unlike [`Self::open`] this does NOT run [`Self::migrate`]; a read-only
+    /// handle would fail to create tables anyway, and a reader has no business
+    /// migrating a writer-owned schema. Callers therefore must point at a db the
+    /// daemon has already initialised. `busy_timeout` is still set so a reader
+    /// transparently waits out the writer's brief WAL write-lock windows.
+    pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Lock the connection mutex, RECOVERING from poisoning rather than
+    /// panicking. A panic in any prior lock holder poisons the `Mutex`; the
+    /// stock `.expect()` would then make EVERY future `conn()` panic, silently
+    /// killing ingestion AND notification persistence while the daemon still
+    /// serves the socket — an invisible task death. A poisoned SQLite
+    /// connection is almost always still usable (the poison reflects the
+    /// panicking task, not corrupt connection state), so we take the inner
+    /// guard and carry on. See [`StoreError`] / the listener's
+    /// consecutive-failure escalation for the loud-failure half of the fix.
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().expect("store mutex poisoned")
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Apply the schema. Each statement is `CREATE ... IF NOT
@@ -1247,6 +1278,60 @@ mod tests {
         store.upsert_current_state(&other).unwrap();
         assert_eq!(store.list_current_state().unwrap().len(), 2);
         assert!(store.get_current_state("missing", "/x").unwrap().is_none());
+    }
+
+    #[test]
+    fn poisoned_store_mutex_is_recovered_not_fatal() {
+        // Finding 4: a panic while holding the connection lock poisons the
+        // Mutex. The stock `.expect()` would then panic on EVERY future access,
+        // silently killing ingestion + persistence. We recover the inner guard
+        // instead, so the store keeps working after a poisoning panic.
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("a.db")).unwrap());
+        store.insert(&env("claude", "Stop", 1)).unwrap();
+
+        // Poison the mutex: take the lock in a thread that then panics.
+        let s2 = Arc::clone(&store);
+        let poisoner = std::thread::spawn(move || {
+            let _guard = s2.conn.lock().unwrap();
+            panic!("intentional panic while holding the store lock");
+        });
+        assert!(poisoner.join().is_err(), "the poisoning thread panicked");
+        assert!(store.conn.is_poisoned(), "mutex is now poisoned");
+
+        // The store must still serve reads + writes (recovers the inner guard).
+        assert_eq!(store.count().unwrap(), 1, "reads work after poisoning");
+        store.insert(&env("claude", "Stop", 2)).unwrap();
+        assert_eq!(store.count().unwrap(), 2, "writes work after poisoning");
+    }
+
+    #[test]
+    fn open_readonly_opens_existing_and_errors_on_missing() {
+        // An existing db opens read-only and reads round-trip.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.db");
+        {
+            let rw = Store::open(&path).unwrap();
+            rw.insert(&env("claude", "Stop", 1)).unwrap();
+        }
+        let ro = Store::open_readonly(&path).unwrap();
+        assert_eq!(ro.count().unwrap(), 1, "reads work read-only");
+
+        // A read-only handle physically cannot write (no create, RO flags).
+        let err = ro.insert(&env("claude", "Stop", 2)).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Sqlite(_)),
+            "writes through a read-only handle fail"
+        );
+
+        // A MISSING db errors cleanly (does NOT silently create it).
+        let missing = dir.path().join("does-not-exist.db");
+        assert!(
+            Store::open_readonly(&missing).is_err(),
+            "opening a missing db read-only is an error, not a create"
+        );
+        assert!(!missing.exists(), "read-only open must not create the file");
     }
 
     #[test]

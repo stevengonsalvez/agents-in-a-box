@@ -28,6 +28,33 @@ use crate::paths::Paths;
 use crate::pid::PidFile;
 use crate::store::{RetentionPolicy, Store};
 
+/// After this many consecutive failures of a background loop, escalate the log
+/// from `warn!` to `error!` — a single transient blip is expected and retried
+/// quietly, but a sustained streak means the loop is effectively dead (poisoned
+/// store, gone disk) and must be loud enough for a supervisor / operator to
+/// restart the daemon rather than the failure being invisible.
+const ESCALATE_AFTER_CONSECUTIVE: u32 = 5;
+
+/// Run the events-log prune every N ingest ticks (not every tick — pruning is
+/// pure overhead when the log is under the cap). At the 1.5s production cadence
+/// this is roughly every ~5 minutes.
+const EVENTS_PRUNE_EVERY_TICKS: u32 = 200;
+
+/// Log a background-loop failure, escalating to `error!` once the consecutive
+/// streak crosses [`ESCALATE_AFTER_CONSECUTIVE`]. Below the threshold it is a
+/// `warn!`; at/after it, an `error!` carrying the streak length so the loud
+/// line is unmistakable to a supervisor scraping logs.
+fn escalate(consecutive: u32, what: &str, error: &str) {
+    if consecutive >= ESCALATE_AFTER_CONSECUTIVE {
+        error!(
+            consecutive_failures = consecutive,
+            what, error, "background loop failing repeatedly; daemon may need restart"
+        );
+    } else {
+        warn!(what, error, "background loop failed; will retry");
+    }
+}
+
 /// Runtime configuration for [`run_daemon`].
 #[derive(Debug, Clone)]
 pub struct RunConfig {
@@ -222,25 +249,74 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         let store = Arc::clone(&store);
         let events_jsonl = config.paths.events_jsonl.clone();
         let interval = config.ingest_interval;
+        let retention = config.retention;
         AbortOnDrop(tokio::spawn(async move {
+            // Consecutive-failure counter: a single transient failure is a
+            // `warn!` + retry, but a SUSTAINED failure streak (e.g. the store
+            // mutex was poisoned and recovery is also failing, or the disk is
+            // gone) is escalated to `error!` so it is loud enough for a
+            // supervisor / operator to act on rather than dying invisibly while
+            // the socket keeps accepting. The mutex poison itself is recovered
+            // in `Store::conn`, so this guards the residual "still broken" case.
+            let mut consecutive_failures: u32 = 0;
+            // Prune the events log occasionally (not every tick) to bound its
+            // growth, mirroring the notifications retention sweep.
+            let mut ticks_since_prune: u32 = 0;
             loop {
-                let store = Arc::clone(&store);
+                let store_pass = Arc::clone(&store);
                 let path = events_jsonl.clone();
-                match tokio::task::spawn_blocking(move || crate::ingest::ingest_once(&store, &path))
-                    .await
+                match tokio::task::spawn_blocking(move || {
+                    crate::ingest::ingest_once(&store_pass, &path)
+                })
+                .await
                 {
-                    Ok(Ok(summary)) if summary.events_ingested > 0 || summary.lines_corrupt > 0 => {
-                        debug!(
-                            ingested = summary.events_ingested,
-                            corrupt = summary.lines_corrupt,
-                            offset = summary.offset,
-                            "events.jsonl ingest pass"
+                    Ok(Ok(summary)) => {
+                        consecutive_failures = 0;
+                        if summary.events_ingested > 0
+                            || summary.lines_corrupt > 0
+                            || summary.reset_for_rotation
+                        {
+                            debug!(
+                                ingested = summary.events_ingested,
+                                corrupt = summary.lines_corrupt,
+                                offset = summary.offset,
+                                more_pending = summary.more_pending,
+                                reset_for_rotation = summary.reset_for_rotation,
+                                "events.jsonl ingest pass"
+                            );
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        consecutive_failures += 1;
+                        escalate(
+                            consecutive_failures,
+                            "events.jsonl ingest",
+                            &format!("{e:?}"),
                         );
                     }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => warn!(error = ?e, "events.jsonl ingest failed; will retry"),
-                    Err(e) => warn!(error = ?e, "ingest task panicked; will retry"),
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        escalate(consecutive_failures, "ingest task", &format!("{e:?}"));
+                    }
                 }
+
+                // Periodic events-log prune. Cheap when under the cap.
+                ticks_since_prune += 1;
+                if ticks_since_prune >= EVENTS_PRUNE_EVERY_TICKS {
+                    ticks_since_prune = 0;
+                    let store_prune = Arc::clone(&store);
+                    match tokio::task::spawn_blocking(move || {
+                        crate::ingest::prune_events(&store_prune, &retention)
+                    })
+                    .await
+                    {
+                        Ok(Ok(n)) if n > 0 => debug!(pruned = n, "events log prune"),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => warn!(error = ?e, "events prune failed; will retry"),
+                        Err(e) => warn!(error = ?e, "events prune task panicked; will retry"),
+                    }
+                }
+
                 tokio::time::sleep(interval).await;
             }
         }))
@@ -260,17 +336,28 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         let store = Arc::clone(&store);
         let interval = config.materialize_interval;
         AbortOnDrop(tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
             loop {
-                let store = Arc::clone(&store);
-                match tokio::task::spawn_blocking(move || crate::transition::materialize(&store))
-                    .await
+                let store_pass = Arc::clone(&store);
+                match tokio::task::spawn_blocking(move || {
+                    crate::transition::materialize(&store_pass)
+                })
+                .await
                 {
-                    Ok(Ok(upserted)) if upserted > 0 => {
-                        debug!(upserted, "current_state materialize pass");
+                    Ok(Ok(upserted)) => {
+                        consecutive_failures = 0;
+                        if upserted > 0 {
+                            debug!(upserted, "current_state materialize pass");
+                        }
                     }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => warn!(error = ?e, "materialize failed; will retry"),
-                    Err(e) => warn!(error = ?e, "materialize task panicked; will retry"),
+                    Ok(Err(e)) => {
+                        consecutive_failures += 1;
+                        escalate(consecutive_failures, "materialize", &format!("{e:?}"));
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        escalate(consecutive_failures, "materialize task", &format!("{e:?}"));
+                    }
                 }
                 tokio::time::sleep(interval).await;
             }
