@@ -255,6 +255,18 @@ impl Store {
                 byte_offset INTEGER NOT NULL
             );
 
+            -- File-identity fingerprint for events.jsonl, so the ingest tailer
+            -- can detect a truncate-then-regrow (the file replaced / rotated out
+            -- from under a stale offset). Single row pinned at id=0: the inode
+            -- the offset was taken against + a length checkpoint. When the inode
+            -- changes (rotation) or the on-disk length drops below the
+            -- checkpoint (truncation), the offset is stale and reset to 0.
+            CREATE TABLE IF NOT EXISTS ingest_fileid (
+                id     INTEGER PRIMARY KEY CHECK (id = 0),
+                inode  INTEGER NOT NULL,
+                len    INTEGER NOT NULL
+            );
+
             -- Durable materialize cursor (Wave 3): the highest events.seq the
             -- transition loop has folded into current_state. Mirrors
             -- ingest_offset's single-pinned-row shape so a daemon restart
@@ -789,6 +801,105 @@ impl Store {
         Ok(())
     }
 
+    /// Commit a whole ingest pass ATOMICALLY: every event in `rows` is inserted
+    /// AND the ingest offset is advanced to `new_offset` inside ONE SQLite
+    /// transaction. Either the entire pass lands or none of it does.
+    ///
+    /// This closes the dup-on-crash window: with separate autocommits (one per
+    /// `append_event` plus a final `write_ingest_offset`), a crash AFTER the
+    /// inserts but BEFORE the offset write would, on restart, re-read the same
+    /// suffix and re-insert every row — duplicate `events` seqs. Under one tx a
+    /// crash rolls the suffix back (re-read on restart, no dups) or commits it
+    /// all (offset matches rows). `seq` is still SQLite-assigned per insert.
+    pub fn ingest_batch(&self, rows: &[EventRow], new_offset: u64) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO events
+                    (ts, session_id, cwd, transcript_path, agent, event_type, matcher, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for row in rows {
+                stmt.execute(params![
+                    row.ts,
+                    &row.session_id,
+                    &row.cwd,
+                    &row.transcript_path,
+                    &row.agent,
+                    &row.event_type,
+                    &row.matcher,
+                    &row.payload,
+                ])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO ingest_offset (id, byte_offset) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET byte_offset = excluded.byte_offset",
+            params![new_offset as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Prune the append-only `events` log to the same retention shape the
+    /// notifications table uses: drop rows older than `retention_days` and cap
+    /// the table at `max_rows` (oldest `seq` first). Returns rows deleted.
+    /// Idempotent; a `0` field disables that axis. Bounds unbounded `events`
+    /// growth on a long-lived daemon (the materialize cursor only moves forward,
+    /// so already-folded rows are safe to drop once aged out).
+    pub fn prune_events(&self, policy: &RetentionPolicy) -> Result<u64, StoreError> {
+        let conn = self.conn();
+        let mut deleted: u64 = 0;
+        if policy.retention_days > 0 {
+            let cutoff_ms = (Utc::now().timestamp_millis())
+                .saturating_sub((policy.retention_days as i64) * 86_400_000);
+            let n = conn.execute("DELETE FROM events WHERE ts < ?1", params![cutoff_ms])?;
+            deleted += n as u64;
+        }
+        if policy.max_rows > 0 {
+            let total: u64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+            if total > policy.max_rows {
+                let over = total - policy.max_rows;
+                let n = conn.execute(
+                    "DELETE FROM events
+                     WHERE seq IN (SELECT seq FROM events ORDER BY seq ASC LIMIT ?1)",
+                    params![over as i64],
+                )?;
+                deleted += n as u64;
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Read the persisted events.jsonl file-identity fingerprint (`inode`, the
+    /// length checkpoint). `None` when nothing has been ingested yet (no
+    /// fingerprint recorded), so the first pass establishes it.
+    pub fn read_ingest_fileid(&self) -> Result<Option<(u64, u64)>, StoreError> {
+        let conn = self.conn();
+        let row: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT inode, len FROM ingest_fileid WHERE id = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(i, l)| (i.max(0) as u64, l.max(0) as u64)))
+    }
+
+    /// Persist the events.jsonl file-identity fingerprint. Single pinned row at
+    /// `id = 0`. Written alongside the offset each pass so a restart can detect
+    /// a rotate / truncate-regrow.
+    pub fn write_ingest_fileid(&self, inode: u64, len: u64) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO ingest_fileid (id, inode, len) VALUES (0, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET inode = excluded.inode, len = excluded.len",
+            params![inode as i64, len as i64],
+        )?;
+        Ok(())
+    }
+
     /// Read the durable materialize cursor (the highest `events.seq` already
     /// folded into `current_state`). `0` when nothing has been folded yet, so
     /// the first pass replays the whole log via [`Self::events_since`]`(0)`.
@@ -1212,6 +1323,68 @@ mod tests {
         let pending = store.list_stop_pending_running().unwrap();
         assert_eq!(pending.len(), 1, "only RUNNING + stopped_ts marker matches");
         assert_eq!(pending[0].session_id, "pending");
+    }
+
+    #[test]
+    fn ingest_batch_commits_rows_and_offset_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let rows = vec![
+            event(0, 100, "SessionStart", None),
+            event(0, 200, "Stop", None),
+        ];
+        store.ingest_batch(&rows, 4096).unwrap();
+        assert_eq!(store.events_since(0).unwrap().len(), 2);
+        assert_eq!(
+            store.read_ingest_offset().unwrap(),
+            4096,
+            "offset advanced in the same tx as the inserts"
+        );
+        // An empty batch still moves the offset (e.g. a corrupt-only pass).
+        store.ingest_batch(&[], 8192).unwrap();
+        assert_eq!(store.events_since(0).unwrap().len(), 2);
+        assert_eq!(store.read_ingest_offset().unwrap(), 8192);
+    }
+
+    #[test]
+    fn prune_events_trims_by_max_rows_and_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        for i in 0..5 {
+            store.append_event(&event(0, i, "Stop", None)).unwrap();
+        }
+        let deleted = store
+            .prune_events(&RetentionPolicy {
+                retention_days: 0,
+                max_rows: 3,
+            })
+            .unwrap();
+        assert_eq!(deleted, 2, "oldest two over the cap removed");
+        let remaining = store.events_since(0).unwrap();
+        assert_eq!(remaining.len(), 3);
+        // Survivors are the newest (highest ts/seq).
+        let ts: Vec<i64> = remaining.iter().map(|r| r.ts).collect();
+        assert_eq!(ts, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn ingest_fileid_persists_and_defaults_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.db");
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.read_ingest_fileid().unwrap(), None);
+            store.write_ingest_fileid(12345, 678).unwrap();
+            assert_eq!(store.read_ingest_fileid().unwrap(), Some((12345, 678)));
+            store.write_ingest_fileid(999, 1000).unwrap();
+            assert_eq!(store.read_ingest_fileid().unwrap(), Some((999, 1000)));
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.read_ingest_fileid().unwrap(),
+            Some((999, 1000)),
+            "fingerprint survives reopen"
+        );
     }
 
     #[test]
