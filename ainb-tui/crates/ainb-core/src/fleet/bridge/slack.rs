@@ -31,9 +31,15 @@ const SLACK_MAX_LENGTH: usize = 3900;
 
 /// Run the Slack channel forever (reconnecting on disconnect). Reports
 /// connection + relay activity through the shared `heartbeat`.
-pub async fn run<T: FleetTransport>(
+///
+/// `transport` is `&'static` because each inbound event's relay runs in its own
+/// `tokio::spawn` task (so a slow reply can never block the socket read loop —
+/// see `connect_and_serve`); the spawned future must therefore not borrow a
+/// non-`'static` transport. The daemon leaks a single shared transport, so this
+/// costs nothing (mirrors the Discord channel).
+pub async fn run<T: FleetTransport + 'static>(
     cfg: SlackConfig,
-    transport: &T,
+    transport: &'static T,
     heartbeat: BridgeHeartbeat,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
@@ -76,11 +82,11 @@ pub async fn run<T: FleetTransport>(
     }
 }
 
-async fn connect_and_serve<T: FleetTransport>(
+async fn connect_and_serve<T: FleetTransport + 'static>(
     client: &reqwest::Client,
     cfg: &SlackConfig,
     self_user_id: Option<&str>,
-    transport: &T,
+    transport: &'static T,
     heartbeat: &BridgeHeartbeat,
 ) -> Result<()> {
     let ws_url = open_connection(client, &cfg.app_token).await?;
@@ -120,7 +126,32 @@ async fn connect_and_serve<T: FleetTransport>(
             }
             Some("events_api") => {
                 if let Some(event) = envelope.payload.and_then(|p| p.event) {
-                    handle_event(client, cfg, self_user_id, transport, heartbeat, event).await;
+                    // Dispatch the relay OFF the socket read loop. `handle_event`
+                    // -> `relay` polls the agent for up to `response_timeout`
+                    // (300s default); awaiting it inline here would block the read
+                    // loop for that whole window — so it could not pong a `Ping`
+                    // (Slack then drops the conn), process a `disconnect` refresh
+                    // envelope, or read further events. The envelope is already
+                    // ACKed above, so spawning the handler keeps the read loop free
+                    // to service pings/acks/disconnects. The `reqwest::Client`
+                    // clone is cheap (`Arc` inside), the config + self-id are
+                    // cloned, the transport is `&'static` (shared, not the WSS
+                    // socket), and the heartbeat handle is a cheap `Arc` clone.
+                    let client = client.clone();
+                    let cfg = cfg.clone();
+                    let self_user_id = self_user_id.map(str::to_string);
+                    let heartbeat = heartbeat.clone();
+                    tokio::spawn(async move {
+                        handle_event(
+                            &client,
+                            &cfg,
+                            self_user_id.as_deref(),
+                            transport,
+                            &heartbeat,
+                            event,
+                        )
+                        .await;
+                    });
                 }
             }
             _ => {}
@@ -452,5 +483,88 @@ mod tests {
         let event = env.payload.unwrap().event.unwrap();
         assert_eq!(event.event_type.as_deref(), Some("app_mention"));
         assert_eq!(event.channel.as_deref(), Some("C9"));
+    }
+
+    // ── Relay runs OFF the socket read loop; pings/acks keep being serviced ───
+    // Mirrors Discord's off-task test: proves a slow reply cannot block the read
+    // loop, so the loop stays free to pong pings, ack envelopes, and handle a
+    // disconnect refresh — none of which can happen if the relay is awaited inline.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::super::routing::TargetSession;
+
+    /// A transport whose `send_and_capture` blocks far longer than the test runs,
+    /// modelling a slow agent reply.
+    struct SlowTransport {
+        sessions: Vec<TargetSession>,
+    }
+
+    impl FleetTransport for SlowTransport {
+        async fn discover(&self) -> Vec<TargetSession> {
+            self.sessions.clone()
+        }
+        async fn send_and_capture(
+            &self,
+            _session: &TargetSession,
+            _text: &str,
+            _timeout: Duration,
+        ) -> Option<String> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Some("late reply".into())
+        }
+    }
+
+    fn sess(name: &str) -> TargetSession {
+        TargetSession::new(
+            name,
+            format!("tmux-{name}"),
+            format!("/cwd/{name}"),
+            format!("id-{name}"),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_runs_off_task_so_read_loop_keeps_servicing() {
+        let transport: &'static SlowTransport = Box::leak(Box::new(SlowTransport {
+            sessions: vec![sess("conductor")],
+        }));
+
+        // Kick off a relay exactly the way the read loop does — in a spawned task
+        // — then prove the loop keeps servicing frames (its ping/ack cadence)
+        // while the relay (an hour-long sleep) is still outstanding.
+        let relay_done = Arc::new(AtomicU64::new(0));
+        let rd = relay_done.clone();
+        tokio::spawn(async move {
+            let params = RelayParams {
+                default_target: None,
+                response_timeout: Duration::from_secs(300),
+            };
+            let _ = relay(transport, &params, "status?").await;
+            rd.store(1, Ordering::SeqCst);
+        });
+
+        // Stand-in for the socket read cadence (pings to pong / envelopes to ack):
+        // a fast interval the loop services. With the relay OFF-task these keep
+        // firing; awaited inline they would all block behind the 1h sleep — the
+        // dropped-connection failure this fix removes.
+        let mut serviced: u64 = 0;
+        let mut ticker = tokio::time::interval(Duration::from_millis(5));
+        ticker.tick().await; // immediate first tick
+        for _ in 0..5 {
+            ticker.tick().await;
+            serviced += 1;
+        }
+
+        assert_eq!(
+            serviced, 5,
+            "read loop must keep servicing frames during a slow relay"
+        );
+        assert_eq!(
+            relay_done.load(Ordering::SeqCst),
+            0,
+            "the relay should still be in flight — proving it did not block the read loop"
+        );
     }
 }
