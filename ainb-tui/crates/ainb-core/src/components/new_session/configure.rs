@@ -1090,7 +1090,13 @@ fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focuse
         "off".to_string()
     };
     let options = vec!["on".to_string(), "off".to_string()];
-    let line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
+    let mut line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
+    // Brief muted explainer + link. Terminals auto-linkify the bare URL, so a
+    // cmd/ctrl-click opens it — no OSC-8 escape juggling needed.
+    line.spans.push(Span::styled(
+        "  \u{2014} proxy that trims token usage \u{00b7} github.com/chopratejas/headroom",
+        Style::default().fg(MUTED_GRAY),
+    ));
     f.render_widget(Paragraph::new(line), area);
 }
 
