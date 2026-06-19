@@ -782,7 +782,6 @@ fn hook_core(
             now_ms,
             session_id,
             cwd,
-            event,
             base_event,
             matcher,
             payload,
@@ -970,38 +969,48 @@ fn extract_done_summary(payload: &str) -> Option<String> {
     None
 }
 
-/// Max payload bytes embedded in an `events.jsonl` line. A hook payload is
-/// normally small, but a pathological transcript-bearing payload must not bloat
-/// the durable log — cap it so the append stays O(1)-ish and the file bounded.
-const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
+/// Max payload bytes embedded in an `events.jsonl` line.
+///
+/// CRITICAL (PIPE_BUF atomicity): `events.jsonl` is appended concurrently by
+/// every host Claude session's Stop/PreToolUse hook via a single `write()` of
+/// one line. POSIX guarantees a `write()` is atomic (no interleaving / torn
+/// lines) only when it is `≤ PIPE_BUF` (4096 bytes, the portable floor). A line
+/// larger than that can tear under concurrent host-wide fires, corrupting the
+/// log the notifyd ingest tailer parses. So the WHOLE canonical line — envelope
+/// fields (ts, session_id, cwd, transcript_path, agent, event_type, matcher,
+/// parent) + the embedded payload + the trailing `\n` — must stay ≤ 4096 bytes.
+/// We cap the payload at 3 KiB, leaving ~1 KiB of headroom for the envelope; a
+/// larger payload is replaced by a `_truncated` marker so the line stays small
+/// and always-valid JSON. This also keeps the durable log bounded.
+const MAX_EVENT_PAYLOAD_BYTES: usize = 3 * 1024;
 
-/// Extract the universal `transcript_path` field from a hook payload (every
-/// Claude Code 2.1.19 hook carries it). Empty when absent / unparseable.
-fn extract_transcript_path(payload: &str) -> String {
-    if payload.trim().is_empty() {
-        return String::new();
-    }
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
+/// Extract the universal `transcript_path` field from an already-parsed hook
+/// payload (every Claude Code 2.1.19 hook carries it). Empty when absent. Takes
+/// the parsed `Value` so the host-hot-path doesn't re-parse the payload per
+/// field (it is parsed ONCE in `build_event_line`).
+fn extract_transcript_path(payload: Option<&serde_json::Value>) -> String {
+    payload
         .and_then(|v| v.get("transcript_path").and_then(|x| x.as_str()).map(str::to_string))
         .unwrap_or_default()
 }
 
 /// Resolve the event's `matcher` discriminator. Prefers the explicit value
-/// forwarded by notify.sh (`--matcher`); otherwise parses it from the payload
-/// per event type: PreToolUse → `tool_name`, Notification → `notification_type`,
-/// StopFailure → `error_type`. `None` when not applicable / absent.
-fn resolve_matcher(base_event: &str, explicit: Option<&str>, payload: &str) -> Option<String> {
+/// forwarded by notify.sh (`--matcher`); otherwise reads it from the
+/// already-parsed payload per event type: PreToolUse → `tool_name`,
+/// Notification → `notification_type`, StopFailure → `error_type`. `None` when
+/// not applicable / absent. Takes the parsed `Value` (parsed ONCE upstream).
+fn resolve_matcher(
+    base_event: &str,
+    explicit: Option<&str>,
+    payload: Option<&serde_json::Value>,
+) -> Option<String> {
     if let Some(m) = explicit {
         let m = m.trim();
         if !m.is_empty() {
             return Some(m.to_string());
         }
     }
-    if payload.trim().is_empty() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let v = payload?;
     let key = match base_event {
         "PreToolUse" => "tool_name",
         "Notification" => "notification_type",
@@ -1020,24 +1029,36 @@ fn resolve_matcher(base_event: &str, explicit: Option<&str>, payload: &str) -> O
 /// and the Wave 3 materializer consumes: ts, session_id, cwd, transcript_path,
 /// agent, event_type (the base event), matcher, and the bounded raw payload.
 /// Parent is folded into the payload so the materializer can set current_state.parent.
+///
+/// The raw payload is parsed exactly ONCE here (host-hot-path: this runs on
+/// every Claude lifecycle event for a fleet member) and the parsed `Value` is
+/// reused for the matcher + transcript_path fields and the embedded payload.
 #[allow(clippy::too_many_arguments)]
 fn build_event_line(
     now_ms: i64,
     session_id: &str,
     cwd: &str,
-    event: &str,
     base_event: &str,
     matcher: Option<&str>,
     payload: &str,
     parent: Option<&str>,
 ) -> serde_json::Value {
-    let _ = event; // base_event is the canonical event_type; raw `event` kept for callers.
-    let matcher_val = resolve_matcher(base_event, matcher, payload);
-    let transcript_path = extract_transcript_path(payload);
-    // Bounded raw payload: parse if it fits, else record a truncation marker so
-    // the line stays small and always valid JSON.
+    // Parse the raw payload ONCE; reuse the parsed Value for every derived
+    // field. Bounded by MAX_EVENT_PAYLOAD_BYTES so the whole canonical line
+    // stays ≤ PIPE_BUF (atomic cross-process append). An over-cap or
+    // unparseable payload yields None here and a `_truncated`/`{}` embedded
+    // payload below.
+    let parsed: Option<serde_json::Value> = if payload.len() <= MAX_EVENT_PAYLOAD_BYTES {
+        serde_json::from_str(payload).ok()
+    } else {
+        None
+    };
+    let matcher_val = resolve_matcher(base_event, matcher, parsed.as_ref());
+    let transcript_path = extract_transcript_path(parsed.as_ref());
+    // Bounded raw payload: embed the parsed value if it fit, else a truncation
+    // marker so the line stays small and always valid JSON.
     let payload_val: serde_json::Value = if payload.len() <= MAX_EVENT_PAYLOAD_BYTES {
-        serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}))
+        parsed.clone().unwrap_or_else(|| serde_json::json!({}))
     } else {
         serde_json::json!({ "_truncated": true, "_bytes": payload.len() })
     };
@@ -1413,6 +1434,81 @@ mod tests {
         assert_eq!(lines[0]["parent"], "tower", "parent folded into the line");
         // ...and its completion routes to the parent's inbox.
         assert_eq!(inbox_for(home.path(), "tower").peek().len(), 1);
+    }
+
+    // --- PIPE_BUF: the canonical event line stays atomically appendable -------
+
+    /// POSIX guarantees an atomic (no torn lines under concurrent host-wide
+    /// appends) `write()` only when it is ≤ PIPE_BUF. Use the portable floor.
+    const PIPE_BUF: usize = 4096;
+
+    /// Serialize the canonical line exactly as `append_event_line` does (line +
+    /// trailing newline) and return its byte length.
+    fn line_bytes(line: &serde_json::Value) -> usize {
+        let mut s = serde_json::to_string(line).unwrap();
+        s.push('\n');
+        s.len()
+    }
+
+    #[test]
+    fn oversized_payload_is_truncated_and_line_stays_under_pipe_buf() {
+        // A pathological transcript-bearing payload far over the cap.
+        let big = format!(
+            r#"{{"transcript_path":"/t/x.jsonl","blob":"{}"}}"#,
+            "x".repeat(64 * 1024)
+        );
+        assert!(big.len() > MAX_EVENT_PAYLOAD_BYTES);
+        let line = build_event_line(
+            1,
+            "session-with-a-realistically-long-claude-id-0123456789abcdef",
+            "/Users/someone/very/deep/nested/work/tree/path/that/is/long",
+            "Stop",
+            None,
+            &big,
+            Some("some-parent-instance-name"),
+        );
+        // Over-cap payloads embed only the truncation marker (not the blob).
+        assert_eq!(line["payload"]["_truncated"], true);
+        assert_eq!(line["payload"]["_bytes"], big.len() as u64);
+        // The WHOLE canonical line + newline must fit in one atomic write.
+        assert!(
+            line_bytes(&line) <= PIPE_BUF,
+            "canonical line must stay ≤ PIPE_BUF for atomic host-wide append (got {})",
+            line_bytes(&line)
+        );
+    }
+
+    #[test]
+    fn max_sized_payload_plus_envelope_fits_pipe_buf() {
+        // A payload exactly at the cap, with the largest plausible envelope
+        // fields, must still leave the whole line ≤ PIPE_BUF.
+        let filler = "a".repeat(MAX_EVENT_PAYLOAD_BYTES - 40);
+        let payload = format!(r#"{{"transcript_path":"/t","x":"{filler}"}}"#);
+        assert!(payload.len() <= MAX_EVENT_PAYLOAD_BYTES);
+        let line = build_event_line(
+            i64::MAX,
+            &"s".repeat(64),
+            &"/".repeat(256),
+            "PreToolUse",
+            Some("AskUserQuestion"),
+            &payload,
+            Some(&"p".repeat(64)),
+        );
+        assert!(
+            line_bytes(&line) <= PIPE_BUF,
+            "max-cap payload + envelope must fit PIPE_BUF (got {})",
+            line_bytes(&line)
+        );
+    }
+
+    #[test]
+    fn small_payload_round_trips_matcher_and_transcript() {
+        // The parse-once refactor must still surface matcher + transcript_path.
+        let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"AskUserQuestion"}"#;
+        let line = build_event_line(7, "sid", "/cwd", "PreToolUse", None, payload, None);
+        assert_eq!(line["matcher"], "AskUserQuestion");
+        assert_eq!(line["transcript_path"], "/t/atc.jsonl");
+        assert_eq!(line["payload"]["tool_name"], "AskUserQuestion");
     }
 
     // --- H-A1: the hook NEVER returns Err (always exit 0) --------------------
