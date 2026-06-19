@@ -419,7 +419,13 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     let tmux = meta.tmux_session();
 
     // Pull the LLM-free needs read. Shelling the verb keeps ATC poll-mode and
-    // reuses the exact same classifier the operator sees.
+    // reuses the exact same reader the operator sees. As of Wave 4 that reader
+    // is event-sourced: `fleet needs` reads the materialized `current_state`
+    // table (hook-backed sessions) and falls back to a live tmux/transcript
+    // `classify()` only for sessions absent from / tmux-sourced in
+    // `current_state` (non-Claude agents, transient errors). So the heartbeat's
+    // coarse session state is now `current_state`-backed without any direct
+    // SQLite access here — and the exactly-once inbox drain below is UNCHANGED.
     let rows = fetch_needs().await.unwrap_or_default();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -601,7 +607,10 @@ async fn fetch_needs() -> Result<Vec<NeedsRow>> {
 /// `--event` / `--session-id` / `--cwd` and the original hook payload on stdin.
 /// It does the durable work the shell can't:
 ///
-///   1. Write the session's atomic status file for this event.
+///   1. Append the event to `<home>/events.jsonl` (the durable, daemon-down-safe
+///      record notifyd ingests into the event log + materializes into
+///      `current_state`). This REPLACED the retired per-event
+///      `status/<session_id>.json` write.
 ///   2. On `UserPromptSubmit` (a genuine user turn) reset this session's
 ///      Stop-drain block budget.
 ///   3. On `Stop`: (a) if the session has a parent, commit a last-wins
@@ -610,7 +619,7 @@ async fn fetch_needs() -> Result<Vec<NeedsRow>> {
 ///      the block budget allows, print `{"decision":"block","reason":...}` to
 ///      stdout so the completions become this session's next turn.
 ///
-/// Empty inbox = no block + no writes beyond the status file (the leaf fast
+/// Empty inbox = no block + no writes beyond the event-log append (the leaf fast
 /// path). Always exits 0 with at most the decision JSON on stdout so a failure
 /// never wedges the host agent.
 ///
