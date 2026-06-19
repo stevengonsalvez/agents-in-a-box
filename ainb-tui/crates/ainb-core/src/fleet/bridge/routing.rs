@@ -2,8 +2,9 @@
 //
 // Ported verbatim from the Python `ainb_phone_bridge.routing` (the verified
 // behavioral spec). Two concerns, both pure:
-//   1. `parse_target_prefix("name: hello", names)` -> `(Some("name"), "hello")`.
-//      Bare text (no recognised "name:" prefix) -> `(None, text)`.
+//   1. `parse_target_prefix("name: hello", sessions)` -> `(Some("name"), "hello")`.
+//      A leading `<name>:` matches a session by its `ainb run --name` first, then
+//      its workspace name (case-insensitive). Bare/unmatched -> `(None, text)`.
 //   2. `resolve_target(parsed_name, sessions)` -> the session to relay to.
 //      Conductor-first when present; degrades to any named session otherwise so
 //      the bridge is useful BEFORE the separate ATC/conductor track lands.
@@ -25,8 +26,15 @@ static PREFIX_RE: LazyLock<Regex> =
 /// A relay target resolved from `ainb list --format json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetSession {
-    /// `workspace_name` — the human-facing routing key.
+    /// The session's `ainb run --name` (recovered from `tmux_session`), or the
+    /// workspace name when no distinct run-name exists. This is the PRIMARY
+    /// routing key — what the user typed at `ainb run --name X` and what they
+    /// address in `default_target` / a `name:` prefix.
     pub name: String,
+    /// The workspace/repo folder name (`workspace_name` from discovery). Kept as
+    /// a FALLBACK routing alias so addressing a session by its repo folder still
+    /// works, preserving the original (pre-fix) behaviour.
+    pub workspace_name: String,
     /// tmux session name used by send-keys.
     pub tmux_session: String,
     /// `worktree_path` — locates the JSONL transcript.
@@ -37,10 +45,24 @@ pub struct TargetSession {
     pub is_conductor: bool,
 }
 
+/// How strongly a `TargetSession` matched a routing candidate. Used to break
+/// ties when several sessions answer to the same string: an exact run-name
+/// match always beats a workspace-name match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NameMatch {
+    /// Matched the session's run-name (`name`). Strongest.
+    SessionName,
+    /// Matched only the workspace/repo folder name. Weaker fallback.
+    WorkspaceName,
+}
+
 impl TargetSession {
+    /// Construct with an explicit run-name and workspace-name. The run-name is
+    /// the primary routing key; the workspace-name is the fallback alias.
     #[must_use]
-    pub fn new(
+    pub fn with_workspace(
         name: impl Into<String>,
+        workspace_name: impl Into<String>,
         tmux_session: impl Into<String>,
         cwd: impl Into<String>,
         session_id: impl Into<String>,
@@ -49,24 +71,65 @@ impl TargetSession {
         let is_conductor = is_conductor_name(&name);
         Self {
             name,
+            workspace_name: workspace_name.into(),
             tmux_session: tmux_session.into(),
             cwd: cwd.into(),
             session_id: session_id.into(),
             is_conductor,
         }
     }
+
+    /// Back-compat constructor: the routing name and workspace name are the
+    /// same string. Retained so existing call sites / tests that pre-date the
+    /// run-name routing fix keep compiling and behaving identically.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        tmux_session: impl Into<String>,
+        cwd: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let workspace_name = name.clone();
+        Self::with_workspace(name, workspace_name, tmux_session, cwd, session_id)
+    }
+
+    /// Does `candidate` address this session, and how strongly?
+    ///
+    /// Matches the run-name first (case-insensitive), then the workspace name.
+    /// Returns `None` when neither matches. Comparing the run-name first means
+    /// an exact `ainb run --name` always wins over a coincidental workspace
+    /// collision.
+    #[must_use]
+    pub fn match_strength(&self, candidate: &str) -> Option<NameMatch> {
+        if self.name.eq_ignore_ascii_case(candidate) {
+            Some(NameMatch::SessionName)
+        } else if self.workspace_name.eq_ignore_ascii_case(candidate) {
+            Some(NameMatch::WorkspaceName)
+        } else {
+            None
+        }
+    }
 }
 
-/// Split an inbound message into `(target_name, message)`.
+/// Split an inbound message into `(matched_session, message)`.
 ///
-/// A leading `"<name>:"` selects a named session ONLY when `<name>` matches one
-/// of `known_names` (case-insensitive). Otherwise the whole string is the
-/// message and the target is `None` (caller falls back to the default).
+/// A leading `"<name>:"` selects a session ONLY when `<name>` addresses one of
+/// `sessions` — by run-name OR workspace name, case-insensitive (see
+/// [`TargetSession::match_strength`]). On a match the returned name is the
+/// session's canonical run-name (`name`) so downstream routing/logging stays
+/// consistent regardless of how it was typed or which alias matched. Otherwise
+/// the whole string is the message and the target is `None` (caller falls back
+/// to the default).
 ///
-/// The known-names guard is what stops a normal sentence like `"note: fix this"`
-/// from being mis-routed to a session called `note`.
+/// The known-sessions guard is what stops a normal sentence like
+/// `"note: fix this"` from being mis-routed to a session called `note`.
+///
+/// When several sessions answer to the same prefix, the strongest match wins
+/// (run-name beats workspace-name); ties within the same strength resolve to
+/// the first session in `sessions` for determinism.
 #[must_use]
-pub fn parse_target_prefix(text: &str, known_names: &[String]) -> (Option<String>, String) {
+pub fn parse_target_prefix(text: &str, sessions: &[TargetSession]) -> (Option<String>, String) {
     if text.is_empty() {
         return (None, String::new());
     }
@@ -75,15 +138,25 @@ pub fn parse_target_prefix(text: &str, known_names: &[String]) -> (Option<String
     };
     let candidate = caps.get(1).map_or("", |m| m.as_str());
     let rest = caps.get(2).map_or("", |m| m.as_str());
-    // Match case-insensitively but return the session's canonical name so
-    // downstream routing/logging stays consistent regardless of how it was typed.
-    for name in known_names {
-        if name.eq_ignore_ascii_case(candidate) {
-            return (Some(name.clone()), rest.trim().to_string());
-        }
+    match best_match(candidate, sessions) {
+        Some(session) => (Some(session.name.clone()), rest.trim().to_string()),
+        // Looks like a prefix but isn't a real session — treat as plain text.
+        None => (None, text.to_string()),
     }
-    // Looks like a prefix but isn't a real session — treat as plain text.
-    (None, text.to_string())
+}
+
+/// Find the session `candidate` most strongly addresses, or `None`.
+///
+/// Picks the strongest [`NameMatch`] (run-name beats workspace-name); among
+/// equally-strong matches the first in `sessions` wins so the choice is
+/// deterministic across discovery orderings.
+#[must_use]
+pub fn best_match<'a>(candidate: &str, sessions: &'a [TargetSession]) -> Option<&'a TargetSession> {
+    sessions
+        .iter()
+        .filter_map(|s| s.match_strength(candidate).map(|m| (m, s)))
+        .min_by_key(|(m, _)| *m)
+        .map(|(_, s)| s)
 }
 
 /// True if a session name looks like a conductor/ATC session.
@@ -111,9 +184,9 @@ pub fn default_target(sessions: &[TargetSession]) -> Option<&TargetSession> {
 
 /// Resolve a relay target from an optional name + the live session list.
 ///
-/// - `parsed_name` given: exact (case-insensitive) match on `name`; if no such
-///   session is running, returns `None` (caller reports "no such session"
-///   rather than silently relaying to the wrong place).
+/// - `parsed_name` given: the best (run-name-first, then workspace-name) match;
+///   if no session answers to it, returns `None` (caller reports "no such
+///   session" rather than silently relaying to the wrong place).
 /// - `parsed_name` absent: the conductor-first default (degrades to any named
 ///   session).
 #[must_use]
@@ -122,7 +195,7 @@ pub fn resolve_target<'a>(
     sessions: &'a [TargetSession],
 ) -> Option<&'a TargetSession> {
     if let Some(wanted) = parsed_name {
-        return sessions.iter().find(|s| s.name.eq_ignore_ascii_case(wanted));
+        return best_match(wanted, sessions);
     }
     default_target(sessions)
 }
@@ -131,8 +204,8 @@ pub fn resolve_target<'a>(
 mod tests {
     use super::*;
 
-    fn names(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| (*s).to_string()).collect()
+    fn sessions(v: &[&str]) -> Vec<TargetSession> {
+        v.iter().map(|s| sess(s)).collect()
     }
 
     fn sess(name: &str) -> TargetSession {
@@ -144,9 +217,22 @@ mod tests {
         )
     }
 
+    /// A session whose run-name differs from its workspace — mirrors the real
+    /// discovery shape (run-name recovered from `tmux_session`, workspace from
+    /// the repo folder). This is the case the bridge mis-routed live.
+    fn sess_ws(run_name: &str, workspace: &str) -> TargetSession {
+        TargetSession::with_workspace(
+            run_name,
+            workspace,
+            format!("tmux_{run_name}"),
+            format!("/cwd/{workspace}"),
+            format!("id-{run_name}"),
+        )
+    }
+
     #[test]
     fn parses_named_prefix_case_insensitively() {
-        let known = names(&["Backend", "frontend"]);
+        let known = sessions(&["Backend", "frontend"]);
         let (target, msg) = parse_target_prefix("backend: run the tests", &known);
         assert_eq!(target.as_deref(), Some("Backend")); // canonical casing returned
         assert_eq!(msg, "run the tests");
@@ -154,7 +240,7 @@ mod tests {
 
     #[test]
     fn bare_text_has_no_target() {
-        let known = names(&["backend"]);
+        let known = sessions(&["backend"]);
         let (target, msg) = parse_target_prefix("just do it", &known);
         assert_eq!(target, None);
         assert_eq!(msg, "just do it");
@@ -163,7 +249,7 @@ mod tests {
     #[test]
     fn unknown_prefix_is_treated_as_plain_text() {
         // "note:" is NOT a session — the whole string stays the message.
-        let known = names(&["backend"]);
+        let known = sessions(&["backend"]);
         let (target, msg) = parse_target_prefix("note: fix this bug", &known);
         assert_eq!(target, None);
         assert_eq!(msg, "note: fix this bug");
@@ -171,7 +257,7 @@ mod tests {
 
     #[test]
     fn multiline_body_survives_prefix_split() {
-        let known = names(&["worker"]);
+        let known = sessions(&["worker"]);
         let (target, msg) = parse_target_prefix("worker: line one\nline two", &known);
         assert_eq!(target.as_deref(), Some("worker"));
         assert_eq!(msg, "line one\nline two");
@@ -180,9 +266,46 @@ mod tests {
     #[test]
     fn empty_text_yields_none_and_empty() {
         assert_eq!(
-            parse_target_prefix("", &names(&["x"])),
+            parse_target_prefix("", &sessions(&["x"])),
             (None, String::new())
         );
+    }
+
+    #[test]
+    fn prefix_matches_run_name_not_just_workspace() {
+        // Run-name `bridgetest`, workspace `agents-in-a-box` — the real shape.
+        let known = vec![sess_ws("bridgetest", "agents-in-a-box")];
+        let (target, msg) = parse_target_prefix("bridgetest: ship it", &known);
+        assert_eq!(target.as_deref(), Some("bridgetest"));
+        assert_eq!(msg, "ship it");
+    }
+
+    #[test]
+    fn prefix_still_matches_workspace_name_as_fallback() {
+        let known = vec![sess_ws("bridgetest", "agents-in-a-box")];
+        let (target, msg) = parse_target_prefix("agents-in-a-box: status?", &known);
+        // Matched via workspace fallback but returns the canonical run-name.
+        assert_eq!(target.as_deref(), Some("bridgetest"));
+        assert_eq!(msg, "status?");
+    }
+
+    #[test]
+    fn run_name_match_beats_workspace_collision() {
+        // Two sessions; the candidate is `beta`. Session A's workspace is `beta`
+        // (weak match), session B's run-name is `beta` (strong match). B wins.
+        let a = sess_ws("alpha", "beta");
+        let b = sess_ws("beta", "repo-x");
+        let known = vec![a, b];
+        let (target, _) = parse_target_prefix("beta: go", &known);
+        assert_eq!(target.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn best_match_prefers_run_name_over_workspace() {
+        let a = sess_ws("alpha", "shared");
+        let b = sess_ws("shared", "repo-x");
+        let known = vec![a, b];
+        assert_eq!(best_match("shared", &known).unwrap().name, "shared");
     }
 
     #[test]

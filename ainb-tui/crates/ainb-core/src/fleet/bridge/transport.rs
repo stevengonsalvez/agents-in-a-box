@@ -35,7 +35,7 @@ use tokio::process::Command;
 use super::relay::FleetTransport;
 use super::routing::TargetSession;
 use crate::fleet::discover::discover_from_ainb;
-use crate::fleet::read::cwd_to_project_slug;
+use crate::fleet::read::{cwd_to_project_slug, is_turn_end_stop_reason};
 
 /// The live transport: discovery via `ainb list`, delivery via tmux send-keys,
 /// reply capture via the JSONL transcript tail. This is the production
@@ -59,20 +59,51 @@ impl FleetTransport for AinbTransport {
 }
 
 /// Discover running sessions via the shared fleet discovery (`ainb list`).
+///
+/// ROUTING-NAME RECOVERY: `ainb list --format json` does NOT expose the session
+/// `ainb run --name` as a distinct field — it only ships `workspace_name`,
+/// `tmux_session_name`, `worktree_path`, `session_id`. But the run-name IS
+/// recoverable: `ainb run --name X` builds the tmux session as
+/// `tmux_{sanitize(X)}` (see `tmux::sanitize_session_name`). Stripping the
+/// `tmux_` prefix recovers the sanitized run-name, which is what the user
+/// addresses via `default_target` / a `name:` prefix. We make that the PRIMARY
+/// routing key and keep `workspace_name` as a fallback alias so addressing by
+/// repo folder still works. Sanitisation is lossy (spaces/`.`/`/`/`:` collapse
+/// to `_`), so a run-name containing those separators is matched in its
+/// sanitised form — an acceptable, documented limitation.
 pub async fn discover() -> Vec<TargetSession> {
     let sessions = discover_from_ainb().await.unwrap_or_default();
     sessions
         .into_iter()
         .filter_map(|s| {
-            let name = s.workspace_name.unwrap_or_default();
+            let workspace = s.workspace_name.unwrap_or_default();
             let tmux = s.tmux_session.unwrap_or_default();
-            if name.is_empty() || tmux.is_empty() {
+            if workspace.is_empty() || tmux.is_empty() {
                 return None;
             }
+            // Recover the run-name from the tmux session name; fall back to the
+            // workspace name if the prefix is absent (e.g. a non-ainb tmux name).
+            let run_name = run_name_from_tmux(&tmux, &workspace);
             let cwd = s.worktree_path.unwrap_or(s.cwd);
-            Some(TargetSession::new(name, tmux, cwd, s.id))
+            Some(TargetSession::with_workspace(
+                run_name, workspace, tmux, cwd, s.id,
+            ))
         })
         .collect()
+}
+
+/// Recover the session `ainb run --name` from its `tmux_session` name.
+///
+/// `ainb run --name X` creates the tmux session as `tmux_{sanitize(X)}`, so
+/// stripping the `tmux_` prefix yields the (sanitised) run-name. Falls back to
+/// `workspace` when the prefix is absent or the stripped remainder is empty, so
+/// a non-ainb tmux name never produces an empty routing key.
+#[must_use]
+fn run_name_from_tmux(tmux: &str, workspace: &str) -> String {
+    match tmux.strip_prefix("tmux_") {
+        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        _ => workspace.to_string(),
+    }
 }
 
 /// Send `text` to a tmux session via literal send-keys + Enter.
@@ -170,12 +201,12 @@ fn assistant_text_from_row(obj: &Value) -> Option<(Option<String>, Option<String
 
 /// Scan rows from `start_offset`; return `(new_offset, reply_text|None)`.
 ///
-/// `reply_text` is set only when an assistant row with
-/// `stop_reason == "end_turn"` is found in the new region; the LAST such turn
-/// wins. When `min_ts_ms` is given, only rows whose JSONL `timestamp` is
-/// strictly AFTER it are accepted (the send-time backlog guard). Only
-/// COMPLETE (newline-terminated) lines are consumed — a trailing partial write
-/// is left for the next poll.
+/// `reply_text` is set only when an assistant row that BOTH carries visible
+/// text AND has an end-of-turn `stop_reason` (see [`is_turn_end_stop_reason`])
+/// is found in the new region; the LAST such turn wins. When `min_ts_ms` is
+/// given, only rows whose JSONL `timestamp` is strictly AFTER it are accepted
+/// (the send-time backlog guard). Only COMPLETE (newline-terminated) lines are
+/// consumed — a trailing partial write is left for the next poll.
 pub fn scan_new_rows_for_turn_end(
     path: &Path,
     start_offset: u64,
@@ -215,7 +246,7 @@ pub fn scan_new_rows_for_turn_end(
         let Some((stop_reason, text)) = assistant_text_from_row(&obj) else {
             continue;
         };
-        if stop_reason.as_deref() == Some("end_turn") {
+        if is_turn_end_stop_reason(stop_reason.as_deref()) {
             if let Some(text) = text {
                 if let Some(min_ts) = min_ts_ms {
                     match row_timestamp_ms(&obj) {
@@ -421,6 +452,61 @@ mod tests {
     }
 
     #[test]
+    fn captures_null_stop_reason_text_reply() {
+        // REGRESSION (PR #293): real Claude >= 2.1.x transcripts stamp the
+        // visible-text assistant row with `stop_reason: null`, not "end_turn".
+        // Rows below are trimmed verbatim from the live `bridgetest` transcript
+        // that replied PONG yet produced "no reply within 120s": a thinking row
+        // and the PONG text row, BOTH `stop_reason:null`, dated AFTER the send.
+        // Before the fix the scan required "end_turn" and returned None here.
+        let path = tmp_jsonl("null-stopreason");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.109Z","message":{{"model":"claude-sonnet-4-6","stop_reason":null,"content":[{{"type":"thinking","thinking":"Discord ping; respond."}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.121Z","message":{{"model":"claude-sonnet-4-6","stop_reason":null,"content":[{{"type":"text","text":"PONG"}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        // Send watermark just before the reply rows.
+        let send_ms = chrono::DateTime::parse_from_rfc3339("2026-06-18T22:01:52Z")
+            .unwrap()
+            .timestamp_millis();
+        let (_, reply) = scan_new_rows_for_turn_end(&path, 0, Some(send_ms));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            reply.as_deref(),
+            Some("PONG"),
+            "a null-stop_reason text reply (real transcript shape) must be captured"
+        );
+    }
+
+    #[test]
+    fn tool_use_row_is_not_a_reply() {
+        // A mid-turn `tool_use` row is NOT end-of-turn: the turn is still in
+        // flight. It must never be surfaced as the reply even though it may
+        // carry a leading text block.
+        let path = tmp_jsonl("tooluse-midturn");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-06-18T22:01:58.000Z","message":{{"stop_reason":"tool_use","content":[{{"type":"text","text":"let me check"}},{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        let (_, reply) = scan_new_rows_for_turn_end(&path, 0, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            reply.is_none(),
+            "a tool_use (mid-turn) row must not be a reply"
+        );
+    }
+
+    #[test]
     fn concatenates_multiple_text_blocks() {
         let path = tmp_jsonl("multiblock");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -438,5 +524,31 @@ mod tests {
     #[test]
     fn current_offset_of_none_is_zero() {
         assert_eq!(current_offset(None), 0);
+    }
+
+    #[test]
+    fn run_name_recovered_from_tmux_prefix() {
+        // `ainb run --name bridgetest` -> tmux `tmux_bridgetest`.
+        assert_eq!(
+            run_name_from_tmux("tmux_bridgetest", "agents-in-a-box"),
+            "bridgetest"
+        );
+    }
+
+    #[test]
+    fn run_name_falls_back_to_workspace_without_prefix() {
+        assert_eq!(
+            run_name_from_tmux("weird-name", "agents-in-a-box"),
+            "agents-in-a-box"
+        );
+    }
+
+    #[test]
+    fn run_name_falls_back_to_workspace_when_prefix_only() {
+        // A bare `tmux_` with nothing after it must not become an empty key.
+        assert_eq!(
+            run_name_from_tmux("tmux_", "agents-in-a-box"),
+            "agents-in-a-box"
+        );
     }
 }
