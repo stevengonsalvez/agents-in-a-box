@@ -8,12 +8,9 @@ uv run generate_image.py --prompt "..." --filename out.png \
 ```
 
 ```text
-The character in the reference image is Alex, the trademarked Sport Head mascot for ShotClubhouse. Draw THIS exact character with full likeness — a confident young person whose HEAD is a glossy golden-yellow and black soccer ball (classic pentagon panels), gold-tinted aviator sunglasses across the front of the ball, a black baseball cap worn forward with a small gold emblem, a black t-shirt with thin gold sleeve trim, brown-skinned arms, relaxed purple jogger sweatpants, and yellow-and-black high-top sneakers. Keep every anchor exact. Do NOT copy the reference's background or pose — only the character design.
+The character in the reference image is Alex, the trademarked Sport Head mascot for ShotClubhouse. Use the reference ONLY for his character design and proportions — NOT its colours, background, or rendering. Alex: a soccer-ball head with classic pentagon panels and ABSOLUTELY NO glasses or sunglasses (plain ball), a black baseball cap worn forward, a simple t-shirt, brown-skinned arms, relaxed jogger sweatpants, simple sneakers, often a small football at his feet. Do NOT put glasses on him.
 
-Art style: bold comic-book / graphic-novel illustration. Thick confident black ink outlines, flat cel-shaded color with crisp shadow shapes, vibrant saturated palette (gold, black, purple with electric accent lighting), dynamic streetwear energy, urban-meets-stadium mood. Clean and readable, not photorealistic, not 3D, not pencil-sketch. Confident deadpan-cool street-hero attitude — never goofy.
-
-Register:
-{faithful comic for hero/social/marketing  OR  clean comic explainer for articles/how-it-works}
+Art style: crude, wobbly HAND-DRAWN pen line art on a soft flat pastel {cream|mint|lavender|blush} background. Slightly uneven sketchy lines, sketchbook feel, lots of calm empty white space, only a few short handwritten labels. Cute but deadpan, charming like a witty napkin sketch. NOT a polished comic, NOT bold-ink graphic-novel, NOT cel-shaded, NOT 3D, NOT photorealistic. Draw Alex with simple, slightly rounded cute proportions; he is the most saturated thing in the frame, his soccer-ball head kept gold-and-black. Deadpan-absurd humour from the situation, never goofy faces.
 
 Aspect:
 the canvas MUST be {16:9 / 1:1 / 4:5 / 21:9}
@@ -30,14 +27,14 @@ Composition:
 Suggested elements:
 {element 1} / {element 2} / {element 3}
 
-Labels (bold comic/graffiti hand):
-{label 1} / {label 2} / {optional tagline: TAKE YOUR SHOT / OWN IT / MAKE IMPACT}
+Handwritten labels:
+{label 1} / {label 2} / {optional tagline: take your shot}
 
 Color use:
-Gold for Alex's head and hero accents. Black for ink/kit/structure. Purple as signature accent. Electric rim-light for drama. Green for pitch/verified when needed.
+Gold for Alex's soccer-ball head and key highlights. Green for flow/paths/success. Soft coral for warnings only. Sky blue for system/secondary notes. Soft graphite for line work. Restrained overall.
 
 Constraints:
-One clear focal action. Alex is the actor/hero, not decoration. Keep ShotClubhouse colorways (gold/black/purple). For explainers keep it readable — few elements, breathing room, bold labels. No title in the top-left. Do not copy the bundled examples; invent a fresh composition.
+One core idea. Alex is the actor, not decoration. Keep generous calm white space, subject 40–60% of canvas, at most 5–8 short handwritten labels. No title in the top-left. Do not copy the bundled examples; invent a fresh composition. Crude hand-drawn pastel — cute but deadpan, never bold-comic.
 ```
 
 ## Edit prompts
@@ -45,11 +42,11 @@ One clear focal action. Alex is the actor/hero, not decoration. Keep ShotClubhou
 Fix an anchor:
 
 ```text
-Edit the provided image. Alex is missing/wrong: {the gold aviators / black cap / purple joggers / yellow-black sneakers / soccer-ball head colors}. Correct it in the same bold comic style without changing anything else: composition, labels, colors, line style, aspect ratio.
+Edit the provided image in the same crude hand-drawn pastel style. Alex is missing/wrong: {glasses must be removed / black cap / gold-black ball head / football at feet}. Correct it without changing anything else: composition, labels, colours, line style, aspect ratio.
 ```
 
-Push the energy:
+Make Alex matter more:
 
 ```text
-Regenerate with the same idea and layout but make Alex more heroic and intentional — stronger silhouette, more dynamic stance, bolder rim-light. Keep it clean comic, on-brand gold/black/purple, deadpan-cool not goofy.
+Regenerate with the same idea and layout but make Alex the one performing the central action, not standing beside the scene. Keep it crude hand-drawn pastel, deadpan, sparse, no glasses.
 ```
