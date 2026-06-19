@@ -201,4 +201,20 @@ mod tests {
         assert_eq!(query_token(Some("foo=1")), None);
         assert_eq!(query_token(None), None);
     }
+
+    #[test]
+    fn query_token_decodes_trailing_escape() {
+        // A complete trailing `%XX` at the very end must decode (here `%20` →
+        // space). This locks the `i + 2 < len` boundary against off-by-one
+        // regressions that would drop or corrupt the last decoded byte.
+        assert_eq!(query_token(Some("token=ab%20")), Some("ab ".into()));
+    }
+
+    #[test]
+    fn query_token_passes_through_truncated_trailing_escape() {
+        // A truncated `%X` (or bare `%`) at the end has no full hex pair, so the
+        // decoder must emit the `%` literally rather than panic or eat bytes.
+        assert_eq!(query_token(Some("token=ab%2")), Some("ab%2".into()));
+        assert_eq!(query_token(Some("token=ab%")), Some("ab%".into()));
+    }
 }
