@@ -1262,19 +1262,26 @@ impl InteractiveSessionManager {
         //
         // Idle-reap is handled in `remove_session()` (stops the shared proxy
         // when the last Headroom session closes).
-        if headroom_enabled
+        // The toggle being on is *intent*; routing only happens if the proxy is
+        // actually healthy. If ensure fails (binary missing, port 8787 taken,
+        // crash), DEGRADE to direct — do NOT inject a base URL pointing at a
+        // dead port, which would brick the session with connection-refused.
+        let mut headroom_active = headroom_enabled
             && matches!(
                 agent_type,
                 SessionAgentType::Claude | SessionAgentType::Codex
-            )
-        {
+            );
+        if headroom_active {
             if let Err(e) = crate::headroom::ensure_proxy_running().await {
-                warn!("headroom proxy unavailable — session will start without compression: {e}");
+                warn!("headroom proxy unavailable — running DIRECT, no compression: {e}");
+                headroom_active = false;
             }
         }
 
-        // Build environment setup for API key injection
-        let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_enabled);
+        // Build environment setup for API key injection. `headroom_active`
+        // (not the raw toggle) decides injection, so a failed proxy degrades to
+        // direct rather than a dead-port URL.
+        let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_active);
 
         // Build the CLI command with appropriate flags
         let mut cmd_parts = vec![provider.command().to_string()];
