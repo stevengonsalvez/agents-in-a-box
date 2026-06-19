@@ -19,7 +19,7 @@ The **+fixes** config adds two additive, env-gated, **zero-new-API-key** knobs: 
 
 ### vs other memory systems
 
-![LOCOMO leaderboard — reflect vs Mem0 / Zep / Hindsight](../../reflect-kb/tests/eval/locomo/results/locomo_comparison.png)
+![LOCOMO leaderboard — reflect vs ByteRover / Honcho / Hindsight / Mem0 / Zep](../../reflect-kb/tests/eval/locomo/results/locomo_positioning.png)
 
 reflect's tuned 4-category mean (**77.5**) lands mid-field — on par with **Memobase / Zep**, above **Mem0** — while the newest systems (**ByteRover ~96, Honcho ~90, Hindsight ~90**) sit higher but are self-reported on their own harnesses. Judges/harnesses differ across the field (the same Zep reads 75 on one harness, 66 on another — that gap *is* the cross-harness noise), so this is **directional placement, not a strict ranking**. Full methodology, per-fix ablation, and the judge calibration: [`reflect-kb/tests/eval/locomo/REPORT.md`](../../reflect-kb/tests/eval/locomo/REPORT.md).
 

@@ -24,7 +24,7 @@ The **+fixes** knobs are additive, env-gated, and need **no new API key**:
 (HyDE, reusing reflect's `claude -p`). The R7 OOD gate (`REFLECT_RECALL_MIN_OVERLAP`)
 over-suppressed at 0.15 and was dropped.
 
-![LOCOMO leaderboard](./results/locomo_comparison.png)
+![LOCOMO leaderboard](./results/locomo_positioning.png)
 
 ## Pipeline
 

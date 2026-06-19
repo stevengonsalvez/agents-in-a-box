@@ -43,7 +43,7 @@ The **+fixes** config adds two additive, env-gated, **zero-new-API-key** knobs: 
 (`REFLECT_EMBED_MODEL=BAAI/bge-base-en-v1.5`, local) and **HyDE** query-expansion (`REFLECT_RECALL_HYDE=1`,
 reusing reflect's own `claude -p`). Both default off — shipped behavior is unchanged.
 
-![LOCOMO leaderboard](./tests/eval/locomo/results/locomo_comparison.png)
+![LOCOMO leaderboard](./tests/eval/locomo/results/locomo_positioning.png)
 
 reflect's tuned 4-category mean (**77.5**) lands mid-field — on par with **Memobase / Zep**, above
 **Mem0** — while the newest systems (**ByteRover ~96, Honcho ~90, Hindsight ~90**) sit higher but are
