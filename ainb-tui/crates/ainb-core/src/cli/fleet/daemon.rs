@@ -72,11 +72,33 @@ fn write_heartbeat(heartbeat: &DaemonHeartbeat) {
     }
 }
 
+/// The de-dup key for an auto-continue: `<session-id>::<pattern>::<raw-tail>`.
+/// `seen` holds these so the same error on the same session is continued once.
+/// Built here (not inline) so [`prune_seen`] can recover the session id from a
+/// key without re-deriving the format in two places.
+fn dedup_key(session_id: &str, pattern: &str, raw_tail: &str) -> String {
+    format!("{session_id}::{pattern}::{raw_tail}")
+}
+
+/// Evict `seen` entries whose session is no longer present in the fleet, bounding
+/// the set to the live sessions (LOW-6). Without this, `seen` grows unbounded for
+/// the daemon's whole lifetime: every session that ever errored leaves its keys
+/// behind forever. A key belongs to a live session iff its `<session-id>::`
+/// prefix matches a currently-discovered session id.
+fn prune_seen(seen: &mut HashSet<String>, live_ids: &HashSet<String>) {
+    seen.retain(|key| key.split_once("::").is_some_and(|(id, _)| live_ids.contains(id)));
+}
+
 /// Run one scan. Returns `true` when at least one session was auto-continued
 /// this tick (a real unit of work), `false` when the scan found nothing to do.
 async fn tick(seen: &mut HashSet<String>, verbose: bool) -> Result<bool> {
     let (ainb, peers) = tokio::join!(discover_from_ainb(), async { discover_from_peers() });
     let merged = merge_sessions(vec![ainb.unwrap_or_default(), peers.unwrap_or_default()]);
+
+    // Bound `seen`: drop keys for sessions that have vanished from the fleet so
+    // the set tracks only live sessions, never the whole-lifetime history (LOW-6).
+    let live_ids: HashSet<String> = merged.iter().map(|s| s.id.clone()).collect();
+    prune_seen(seen, &live_ids);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut acted = false;
@@ -92,7 +114,7 @@ async fn tick(seen: &mut HashSet<String>, verbose: bool) -> Result<bool> {
         };
         let raw_tail: String =
             raw.chars().rev().take(40).collect::<String>().chars().rev().collect();
-        let key = format!("{}::{pattern}::{raw_tail}", s.id);
+        let key = dedup_key(&s.id, &pattern, &raw_tail);
         if seen.contains(&key) {
             continue;
         }
@@ -105,4 +127,36 @@ async fn tick(seen: &mut HashSet<String>, verbose: bool) -> Result<bool> {
         acted = true;
     }
     Ok(acted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_seen_evicts_keys_for_vanished_sessions() {
+        // LOW-6: a key whose session id is no longer live must be evicted, while
+        // keys for still-present sessions survive — bounding the set.
+        let mut seen: HashSet<String> = [
+            dedup_key("alive", "api-error", "tail-a"),
+            dedup_key("alive", "rate-limit", "tail-b"),
+            dedup_key("gone", "api-error", "tail-c"),
+        ]
+        .into_iter()
+        .collect();
+        let live: HashSet<String> = ["alive".to_string()].into_iter().collect();
+        prune_seen(&mut seen, &live);
+        assert_eq!(seen.len(), 2, "only the two live-session keys survive");
+        assert!(seen.contains(&dedup_key("alive", "api-error", "tail-a")));
+        assert!(seen.contains(&dedup_key("alive", "rate-limit", "tail-b")));
+        assert!(!seen.iter().any(|k| k.starts_with("gone::")));
+    }
+
+    #[test]
+    fn prune_seen_empties_when_no_sessions_are_live() {
+        let mut seen: HashSet<String> =
+            [dedup_key("a", "p", "t"), dedup_key("b", "p", "t")].into_iter().collect();
+        prune_seen(&mut seen, &HashSet::new());
+        assert!(seen.is_empty(), "no live sessions → seen fully drained");
+    }
 }
