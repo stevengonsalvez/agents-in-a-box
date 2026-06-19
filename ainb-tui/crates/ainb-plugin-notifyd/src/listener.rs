@@ -43,6 +43,10 @@ pub struct RunConfig {
     /// `events` table. Short (agent-deck cadence) so event-sourced
     /// state stays fresh; tests use a tiny value to converge fast.
     pub ingest_interval: std::time::Duration,
+    /// How often the transition loop materializes `current_state` from
+    /// the `events` log. Same short agent-deck cadence as `ingest_interval`
+    /// so a freshly-ingested event becomes queryable state within ~2 ticks.
+    pub materialize_interval: std::time::Duration,
 }
 
 impl RunConfig {
@@ -54,6 +58,7 @@ impl RunConfig {
             retention: RetentionPolicy::default(),
             os_notifications: true,
             ingest_interval: std::time::Duration::from_millis(1500),
+            materialize_interval: std::time::Duration::from_millis(1500),
         })
     }
 }
@@ -241,6 +246,37 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         }))
     };
 
+    // TRANSITION LOOP (Wave 3): fold the `events` log into the materialized
+    // `current_state` read model, agent-deck style. Runs AFTER the ingest task
+    // is spawned so freshly-tailed lines are in `events` before the next fold
+    // tick (a missed tick simply catches up on the following one — the
+    // materialize cursor is durable). Like the ingest task it runs each pass on
+    // the blocking pool (rusqlite is sync behind the store Mutex) and is
+    // aborted on shutdown when this handle drops. This materializes ONLY
+    // hook-sourced state (`source = "hook"`); the tmux / non-Claude / transient
+    // ERR fold is merged at READ time in Wave 4 (notifyd has no `ainb-core`
+    // dependency, so the heavy `classify()` path stays in the reader layer).
+    let _materialize_task = {
+        let store = Arc::clone(&store);
+        let interval = config.materialize_interval;
+        AbortOnDrop(tokio::spawn(async move {
+            loop {
+                let store = Arc::clone(&store);
+                match tokio::task::spawn_blocking(move || crate::transition::materialize(&store))
+                    .await
+                {
+                    Ok(Ok(upserted)) if upserted > 0 => {
+                        debug!(upserted, "current_state materialize pass");
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = ?e, "materialize failed; will retry"),
+                    Err(e) => warn!(error = ?e, "materialize task panicked; will retry"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        }))
+    };
+
     let listener = UnixListener::bind(&config.paths.socket)
         .with_context(|| format!("binding unix socket {}", config.paths.socket.display()))?;
     // chmod 0600 — only the owner can write.
@@ -417,6 +453,8 @@ mod tests {
             // Tight ingest cadence so the daemon-level ingest test
             // converges quickly without long sleeps.
             ingest_interval: std::time::Duration::from_millis(20),
+            // Same tight cadence for the transition loop.
+            materialize_interval: std::time::Duration::from_millis(20),
         }
     }
 
@@ -647,6 +685,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(ingested, 2, "both canonical lines ingested into events");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn daemon_materializes_current_state_from_events_jsonl() {
+        // End-to-end through the daemon's two background loops: a canonical
+        // PreToolUse(AskUserQuestion) line appended to events.jsonl is ingested
+        // into `events` AND folded into `current_state` as an ASK row carrying
+        // the question — no transcript scan, no socket round-trip.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_under(dir.path());
+        let socket = config.paths.socket.clone();
+        let db = config.paths.db.clone();
+        let events_jsonl = config.paths.events_jsonl.clone();
+        std::fs::create_dir_all(&config.paths.base).unwrap();
+        std::fs::write(
+            &events_jsonl,
+            "{\"ts\":100,\"session_id\":\"s1\",\"cwd\":\"/tmp/p\",\"transcript_path\":\"/t/s1.jsonl\",\"agent\":\"claude\",\"event_type\":\"PreToolUse\",\"matcher\":\"AskUserQuestion\",\"parent\":\"par-1\",\"payload\":{\"tool_input\":{\"questions\":[{\"question\":\"Pick one\",\"options\":[{\"label\":\"yes\"}]}]}}}\n",
+        )
+        .unwrap();
+
+        let handle = tokio::spawn(async move { run_daemon(config).await });
+        wait_for_socket(&socket).await;
+
+        // Poll current_state (both loops run at 20ms in tests).
+        let mut got = None;
+        for _ in 0..150 {
+            let store = Store::open(&db).unwrap();
+            if let Some(row) = store.get_current_state("s1", "/tmp/p").unwrap() {
+                got = Some(row);
+                break;
+            }
+            drop(store);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let row = got.expect("ASK row materialized into current_state");
+        assert_eq!(row.kind, "ASK");
+        assert_eq!(row.source, "hook");
+        assert_eq!(row.parent.as_deref(), Some("par-1"));
+        assert!(
+            row.context.as_deref().unwrap().contains("Pick one"),
+            "ASK context carries the question text"
+        );
 
         handle.abort();
     }

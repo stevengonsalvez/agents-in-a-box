@@ -254,6 +254,15 @@ impl Store {
                 id          INTEGER PRIMARY KEY CHECK (id = 0),
                 byte_offset INTEGER NOT NULL
             );
+
+            -- Durable materialize cursor (Wave 3): the highest events.seq the
+            -- transition loop has folded into current_state. Mirrors
+            -- ingest_offset's single-pinned-row shape so a daemon restart
+            -- resumes the fold without re-applying already-folded events.
+            CREATE TABLE IF NOT EXISTS materialize_offset (
+                id   INTEGER PRIMARY KEY CHECK (id = 0),
+                seq  INTEGER NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -740,6 +749,30 @@ impl Store {
             "INSERT INTO ingest_offset (id, byte_offset) VALUES (0, ?1)
              ON CONFLICT(id) DO UPDATE SET byte_offset = excluded.byte_offset",
             params![byte_offset as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Read the durable materialize cursor (the highest `events.seq` already
+    /// folded into `current_state`). `0` when nothing has been folded yet, so
+    /// the first pass replays the whole log via [`Self::events_since`]`(0)`.
+    pub fn read_materialize_seq(&self) -> Result<i64, StoreError> {
+        let conn = self.conn();
+        let seq: Option<i64> = conn
+            .query_row("SELECT seq FROM materialize_offset WHERE id = 0", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(seq.unwrap_or(0).max(0))
+    }
+
+    /// Persist the materialize cursor. Single pinned row at `id = 0`.
+    pub fn write_materialize_seq(&self, seq: i64) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO materialize_offset (id, seq) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET seq = excluded.seq",
+            params![seq],
         )?;
         Ok(())
     }

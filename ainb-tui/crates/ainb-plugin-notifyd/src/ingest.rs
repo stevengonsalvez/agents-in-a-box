@@ -46,6 +46,10 @@ pub struct EventLine {
     /// Discriminator parsed from the payload (nullable).
     #[serde(default)]
     pub matcher: Option<String>,
+    /// Parent session id for a fleet child, carried at the canonical line's
+    /// top level by the hook appender. `None` for a top-level session.
+    #[serde(default)]
+    pub parent: Option<String>,
     /// The raw (bounded) hook stdin payload.
     #[serde(default)]
     pub payload: Value,
@@ -58,7 +62,21 @@ fn default_agent() -> String {
 impl EventLine {
     /// Convert into the row shape the store persists. `seq = 0` (SQLite
     /// assigns it on insert). The payload is re-serialized to a string.
+    ///
+    /// The canonical line's top-level `parent` is folded INTO the stored
+    /// payload object (`payload.parent`) so the materializer can read it
+    /// without a dedicated column — the `events` schema stays unchanged and
+    /// the Wave 3 transition loop reads `payload.parent`. An explicit top-level
+    /// `parent` wins over any pre-existing key in the raw payload.
     fn into_row(self) -> EventRow {
+        let mut payload = self.payload;
+        if let Some(parent) = self.parent {
+            if let Value::Object(map) = &mut payload {
+                map.insert("parent".to_string(), Value::String(parent));
+            } else if payload.is_null() {
+                payload = serde_json::json!({ "parent": parent });
+            }
+        }
         EventRow {
             seq: 0,
             ts: self.ts,
@@ -68,7 +86,7 @@ impl EventLine {
             agent: self.agent,
             event_type: self.event_type,
             matcher: self.matcher,
-            payload: self.payload.to_string(),
+            payload: payload.to_string(),
         }
     }
 }
@@ -286,6 +304,26 @@ mod tests {
         let s = ingest_once(&store, &jsonl).unwrap();
         assert_eq!(s.events_ingested, 1, "only the new suffix is ingested");
         assert_eq!(store.events_since(0).unwrap().len(), 3, "no re-ingest");
+    }
+
+    #[test]
+    fn top_level_parent_is_folded_into_stored_payload() {
+        // The canonical line carries `parent` at the top level; ingest folds it
+        // into the stored payload object so the Wave 3 materializer can read
+        // `payload.parent` without a dedicated column.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let jsonl = dir.path().join("events.jsonl");
+        append(
+            &jsonl,
+            "{\"ts\":100,\"session_id\":\"child\",\"cwd\":\"/p\",\"transcript_path\":\"/t/c.jsonl\",\"agent\":\"claude\",\"event_type\":\"Stop\",\"matcher\":null,\"parent\":\"par-1\",\"payload\":{\"x\":1}}\n",
+        );
+        ingest_once(&store, &jsonl).unwrap();
+        let rows = store.events_since(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&rows[0].payload).unwrap();
+        assert_eq!(payload["parent"], "par-1", "top-level parent folded in");
+        assert_eq!(payload["x"], 1, "original payload keys preserved");
     }
 
     #[test]
