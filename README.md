@@ -125,7 +125,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 20 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
+- **Scriptable CLI** — 30+ commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …) with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
 
 ### Feature Showcase
 
