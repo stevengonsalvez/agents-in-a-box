@@ -24,6 +24,96 @@ use crate::components::git_view::GitViewState;
 /// Lines scrolled per mouse-wheel tick.
 const WHEEL_LINES: usize = 3;
 
+/// Headless emit of the structured diff as JSON (no TUI). Any non-`text`
+/// `--format` lands here.
+// ponytail: JSON only — the nested files->hunks->rows shape doesn't tabulate,
+// so csv/markdown reuse the JSON. Add real csv/markdown when something needs it.
+pub fn run_headless(path: PathBuf, _format: crate::cli::OutputFormat) -> Result<()> {
+    let model = crate::components::code_review::parse::build_review_model(&path)?;
+    let out = DiffJson::from_model(&path, &model);
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DiffJson {
+    path: String,
+    total_insertions: usize,
+    total_deletions: usize,
+    files: Vec<DiffFileJson>,
+}
+
+#[derive(serde::Serialize)]
+struct DiffFileJson {
+    path: String,
+    status: &'static str,
+    insertions: usize,
+    deletions: usize,
+    binary: bool,
+    language: Option<&'static str>,
+    hunks: Vec<DiffHunkJson>,
+}
+
+#[derive(serde::Serialize)]
+struct DiffHunkJson {
+    old_start: usize,
+    new_start: usize,
+    rows: Vec<DiffRowJson>,
+}
+
+#[derive(serde::Serialize)]
+struct DiffRowJson {
+    kind: &'static str,
+    old_lineno: Option<usize>,
+    new_lineno: Option<usize>,
+    text: String,
+}
+
+impl DiffJson {
+    fn from_model(path: &std::path::Path, m: &crate::components::code_review::model::ReviewModel) -> Self {
+        use crate::components::code_review::model::RowKind;
+        DiffJson {
+            path: path.display().to_string(),
+            total_insertions: m.total_insertions(),
+            total_deletions: m.total_deletions(),
+            files: m
+                .files
+                .iter()
+                .map(|f| DiffFileJson {
+                    path: f.path.clone(),
+                    status: f.status.symbol(),
+                    insertions: f.insertions,
+                    deletions: f.deletions,
+                    binary: f.binary,
+                    language: f.language,
+                    hunks: f
+                        .hunks
+                        .iter()
+                        .map(|h| DiffHunkJson {
+                            old_start: h.old_start,
+                            new_start: h.new_start,
+                            rows: h
+                                .rows
+                                .iter()
+                                .map(|r| DiffRowJson {
+                                    kind: match r.kind {
+                                        RowKind::Context => "context",
+                                        RowKind::Added => "added",
+                                        RowKind::Removed => "removed",
+                                    },
+                                    old_lineno: r.old_lineno,
+                                    new_lineno: r.new_lineno,
+                                    text: r.raw.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Launch the interactive Code Review surface for `path`.
 pub fn run(path: PathBuf) -> Result<()> {
     let mut state = GitViewState::new(path);
