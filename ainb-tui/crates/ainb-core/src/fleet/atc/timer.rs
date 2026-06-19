@@ -151,6 +151,10 @@ ExecStart={argv}\n",
 #[must_use]
 pub fn build_systemd_timer(meta: &AtcMeta) -> String {
     let stem = unit_stem(&meta.name);
+    // `Persistent=true` makes systemd fire one catch-up run immediately if a
+    // scheduled tick was MISSED while the machine was asleep/off (M-A1), so a
+    // laptop that slept through several intervals gets a heartbeat on wake rather
+    // than silently skipping until the next on-active tick.
     format!(
         "[Unit]\n\
 Description=ATC heartbeat timer for fleet instance {name}\n\
@@ -158,6 +162,7 @@ Description=ATC heartbeat timer for fleet instance {name}\n\
 [Timer]\n\
 OnBootSec={interval}\n\
 OnUnitActiveSec={interval}\n\
+Persistent=true\n\
 Unit={stem}.service\n\
 \n\
 [Install]\n\
@@ -330,6 +335,8 @@ mod tests {
         assert!(timer.contains("OnUnitActiveSec=900"));
         assert!(timer.contains("Unit=com.agentsinabox.atc.tower.service"));
         assert!(timer.contains("WantedBy=timers.target"));
+        // M-A1: missed-tick catch-up on wake from sleep.
+        assert!(timer.contains("Persistent=true"));
     }
 
     #[test]
