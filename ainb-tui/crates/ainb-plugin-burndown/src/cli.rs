@@ -675,11 +675,21 @@ fn print_savings_with_data(data: &UsageData, format: OutputFormat) -> Result<()>
     // synchronous once we're inside capture_stdout. We spawn a one-shot
     // runtime for the fetch rather than holding the async mutex.
     let output_tokens = data.grand_total.output_tokens;
-    let sd = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map(|rt| rt.block_on(fetch_savings(output_tokens)))
-        .unwrap_or_default();
+    // Run on a DEDICATED OS thread with its own runtime. cli_dispatch already
+    // runs on the plugin's tokio runtime, so a nested current-thread runtime
+    // here deadlocks `tokio::process` child-reaping (rtk gain never returns).
+    // A fresh runtime on its own thread owns its I/O+signal driver, so the
+    // subprocess fetch completes. ponytail: own thread, the standard
+    // block-on-from-within-async escape hatch.
+    let sd = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| rt.block_on(fetch_savings(output_tokens)))
+            .unwrap_or_default()
+    })
+    .join()
+    .unwrap_or_default();
 
     match format {
         OutputFormat::Json => {
