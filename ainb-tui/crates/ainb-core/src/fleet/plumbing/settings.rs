@@ -29,9 +29,16 @@ pub fn settings_lock_path(home: &Path) -> PathBuf {
 }
 
 /// Acquire an exclusive advisory lock guarding the settings.json
-/// read-merge-write window. Other tools that touch the same file (reflect /
-/// notifyd) take the same lock, so a concurrent rewrite cannot silently drop the
-/// other's hooks (lost update). Mirrors the inbox lock pattern.
+/// read-merge-write window.
+///
+/// HONEST SCOPE (H2): this lock only serialises concurrent **ATC installs**
+/// (`install_claude_hooks` / `uninstall_claude_hooks` racing each other). It is
+/// NOT a cross-tool lock — `settings.json.lock` is referenced only here; reflect
+/// and notifyd write `settings.json` WITHOUT taking it. So cross-tool safety
+/// (an ATC install not clobbering a concurrent reflect/notifyd rewrite) relies
+/// on those installs not overlapping in time, not on this lock. (A shared
+/// cross-tool lock or a marketplace-path rearchitecture is a deferred follow-up;
+/// do not assume this lock provides it.) Mirrors the inbox lock mechanism.
 fn lock_settings(home: &Path) -> Result<std::fs::File> {
     let path = settings_lock_path(home);
     if let Some(parent) = path.parent() {
@@ -51,8 +58,8 @@ fn lock_settings(home: &Path) -> Result<std::fs::File> {
 /// Install the ATC lifecycle hooks into `<home>/.claude/settings.json`, pointing
 /// every managed event at `hook_script`. Preserves all existing hooks. Returns
 /// the settings path written. Idempotent. The read-merge-write is performed
-/// under an advisory lock so it never clobbers a concurrent rewrite by another
-/// tool.
+/// under an advisory lock that serialises concurrent ATC installs (NOT a
+/// cross-tool lock — see [`lock_settings`]).
 pub fn install_claude_hooks(home: &Path, hook_script: &Path) -> Result<PathBuf> {
     let _guard = lock_settings(home)?;
     let path = claude_settings_path(home);
@@ -204,10 +211,11 @@ mod tests {
         uninstall_claude_hooks(home.path()).unwrap(); // must not error
     }
 
-    /// Regression (M3): the read-merge-write window is guarded by an advisory
-    /// lock so a concurrent rewrite by another tool (reflect / notifyd) cannot
-    /// silently drop the other's hooks. We assert the lock file is created and
-    /// used by install — the marker that the locked path was actually taken.
+    /// Regression: the read-merge-write window is guarded by an advisory lock so
+    /// two concurrent ATC installs cannot silently drop each other's merge. (It
+    /// is NOT a cross-tool lock — reflect/notifyd don't take it; see
+    /// `lock_settings`.) We assert the lock file is created and used by install —
+    /// the marker that the locked path was actually taken.
     #[test]
     fn install_takes_the_settings_lock() {
         let home = TempDir::new().unwrap();
@@ -220,11 +228,12 @@ mod tests {
         );
     }
 
-    /// The settings lock serialises concurrent installs: two threads racing
+    /// The settings lock serialises concurrent ATC installs: two threads racing
     /// `install_claude_hooks` against the same settings.json both complete and
     /// the result is a single coherent file with the ATC hooks present (no torn
     /// write, no lost merge). With the advisory lock the read-merge-write is
-    /// mutually exclusive.
+    /// mutually exclusive. (Cross-tool serialisation with reflect/notifyd is NOT
+    /// provided — see `lock_settings`.)
     #[test]
     fn concurrent_installs_serialise_under_the_lock() {
         use std::sync::Arc;
