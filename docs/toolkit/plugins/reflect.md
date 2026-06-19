@@ -42,48 +42,43 @@ Retrieval closes the loop: `/reflect:recall` (the same engine the SessionStart a
 
 ## Install
 
-Reflect is two layers: the plugin (hooks + skills) and the `reflect-kb` CLI (recall/search + qmd + nano-graphrag). `claude plugin install` only does the first, so install both — the one-step path uses `ainb`:
+Reflect is two layers: the plugin (hooks + skills) and the `reflect-kb` CLI (recall/search + qmd + nano-graphrag). Both now ship from the standalone [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) repo (the CLI flattened at the repo root, the plugin under `plugin/`) — they are no longer in the agents-in-a-box monorepo, so `claude plugin install reflect@agents-in-a-box` no longer resolves. The one-step path uses `ainb`:
 
 ```bash
-# 1. plugin: skills — install NATIVELY per harness.
-#    All three read the same plugins/reflect/ dir (distinct manifests, no conflict).
-# Claude Code (hooks + skills via plugin manifest):
-claude plugin marketplace add stevengonsalvez/agents-in-a-box
-claude plugin install reflect@agents-in-a-box
-# GitHub Copilot CLI (skills only — hook auto-wiring is coming soon in Copilot's plugin system):
-copilot plugin install stevengonsalvez/agents-in-a-box:plugins/reflect
-# Then add hooks via the adapter (until Copilot plugin hook support ships):
-uv run plugins/reflect/adapters/copilot/copilot_adapter.py install
-# OpenAI Codex CLI:
-codex plugin marketplace add stevengonsalvez/agents-in-a-box
-codex plugin add reflect@agents-in-a-box
+# 1. CLI engine (recall/search + qmd + nano-graphrag) — no subdirectory:
+uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'
 
-# 2. everything else in one shot — auto-installs reflect-kb[graph] via uv,
-#    and prints any missing system tools (bash>=4, coreutils, jq) for you to run
+# 2. plugin: skills + hooks — install NATIVELY per harness from the new repo's
+#    plugin/ dir (distinct manifests, no conflict). Install per your harness's
+#    plugin runtime / the adapters under plugin/adapters/ (see the repo README).
+
+# 3. everything else in one shot — `ainb reflect bootstrap` auto-installs the
+#    reflect-kb[graph] engine via uv (from the new repo URL above) and prints
+#    any missing system tools (bash>=4, coreutils, jq) for you to run
 ainb reflect bootstrap
 
-# 3. verify — dependency check classified by what needs each tool
+# 4. verify — dependency check classified by what needs each tool
 ainb doctor
 ```
 
-`ainb reflect bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]`) and only *prints* the `brew`/`apt` commands for system tools, so it never mutates your OS or PATH. The manual equivalent (with annotated commands + the nano-graphrag `--no-deps` caveat) lives in [`plugins/reflect/README.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/README.md#install).
+`ainb reflect bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]`, now from ainb-reflect-memory) and only *prints* the `brew`/`apt` commands for system tools, so it never mutates your OS or PATH. The manual equivalent (with annotated commands + the nano-graphrag `--no-deps` caveat) lives in the [ainb-reflect-memory plugin README](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/README.md#install).
 
 ### One plugin dir, three native installs
 
-All three harnesses now have native plugin runtimes, and `plugins/reflect/` is a valid plugin for each — the manifests live at distinct paths and reference distinct hooks files, so they coexist without conflict:
+All three harnesses have native plugin runtimes, and the new repo's `plugin/` dir is a valid plugin for each — the manifests live at distinct paths and reference distinct hooks files, so they coexist without conflict:
 
 | Harness | Manifest | Hooks file | Hook shape | Install |
 |---|---|---|---|---|
-| Claude Code | `.claude-plugin/plugin.json` | inline in manifest | PascalCase, `${CLAUDE_PLUGIN_ROOT}` | `claude plugin install reflect@agents-in-a-box` |
+| Claude Code | `.claude-plugin/plugin.json` | inline in manifest | PascalCase, `${CLAUDE_PLUGIN_ROOT}` | from the ainb-reflect-memory `plugin/` dir |
 | GitHub Copilot | `plugin.json` (root) | `copilot-hooks.json` | camelCase + `version:1`, `${PLUGIN_ROOT}` | `copilot plugin install` installs skills; hooks via adapter until Copilot plugin hook support ships |
-| OpenAI Codex | `.codex-plugin/plugin.json` | `codex-hooks.json` | PascalCase, `${PLUGIN_ROOT}` | `codex plugin add reflect@agents-in-a-box` |
+| OpenAI Codex | `.codex-plugin/plugin.json` | `codex-hooks.json` | PascalCase, `${PLUGIN_ROOT}` | from the ainb-reflect-memory `plugin/` dir |
 
-Shared (read-only) across all three: `skills/`, `hooks/` scripts, `scripts/`. No default-discovery hooks file (`hooks.json` / `hooks/hooks.json`) exists, so no harness auto-loads the wrong-format file.
+(All paths above are relative to the new repo's `plugin/` directory.) Shared (read-only) across all three: `skills/`, `hooks/` scripts, `scripts/`. No default-discovery hooks file (`hooks.json` / `hooks/hooks.json`) exists, so no harness auto-loads the wrong-format file.
 
 Hook status per harness:
-- **Claude Code**: hooks registered via `.claude-plugin/plugin.json` — fully auto-wired on `claude plugin install`.
+- **Claude Code**: hooks registered via `.claude-plugin/plugin.json` — fully auto-wired when the plugin is installed.
 - **GitHub Copilot**: `plugin.json` `hooks` field is scaffolded for future use; Copilot's plugin system currently installs skills only (hooks listed as "coming soon" in the `github/copilot-plugins` marketplace). Hooks are wired via the Python adapter (`adapters/copilot/copilot_adapter.py install`), which writes `~/.copilot/hooks/reflect.json` with the correct `version:1` camelCase format. Once Copilot ships hook support, the `copilot-hooks.json` and `${PLUGIN_ROOT}` will be used automatically.
-- **OpenAI Codex**: hooks registered via `.codex-plugin/plugin.json` — auto-wired on `codex plugin add`.
+- **OpenAI Codex**: hooks registered via `.codex-plugin/plugin.json` — auto-wired on install.
 
 Copilot does not auto-inject `sessionStart` `additionalContext` into the model context in headless `-p` mode, so on Copilot recall is surfaced via manual `/recall`.
 
@@ -100,4 +95,4 @@ Copilot does not auto-inject `sessionStart` `additionalContext` into the model c
 
 ## Source
 
-`plugins/reflect/` — Claude Code plugin (skills + lifecycle hooks) backed by the `reflect-kb` GraphRAG + qmd library. Diagram generated via /fireworks-tech-graph.
+[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) — Claude Code plugin (skills + lifecycle hooks, under `plugin/`) backed by the `reflect-kb` GraphRAG + qmd library (flattened at the repo root). Extracted out of the agents-in-a-box monorepo into its own repo. Diagram generated via /fireworks-tech-graph.

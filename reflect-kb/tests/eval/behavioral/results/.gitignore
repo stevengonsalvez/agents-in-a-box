@@ -1,4 +1,0 @@
-# Ignore everything in results/ except the committed verdict matrix.
-*
-!.gitignore
-!matrix.json

@@ -15,7 +15,7 @@ use serde::Serialize;
 /// The `[graph]` extra pulls qmd (BM25) + nano-graphrag (GraphRAG) +
 /// sentence-transformers. `--force --upgrade` makes re-runs idempotent.
 pub const REFLECT_KB_INSTALL: &str = "uv tool install --force --upgrade \
-'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'";
+'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'";
 
 /// Which feature needs a given dependency. A dep may have several consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

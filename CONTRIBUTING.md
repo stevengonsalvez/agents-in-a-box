@@ -18,9 +18,15 @@ cd ainb-tui && cargo build --release
 |------|---------|
 | `ainb-tui/` | The `ainb` binary (Rust) — TUI plus `source`, `skill`, `migrate`, `doctor`, `usage` CLI subcommands. This is the canonical deploy / update / sync surface. |
 | `ainb-tui/plans/skill-manager/spec.md` | Full design + acceptance criteria for the unit manager. |
-| `plugins/reflect/` | The `reflect` plugin — installable via `claude plugin install reflect@agents-in-a-box` |
-| `reflect-kb/` | Python library (root-level) — `reflect` CLI engine; installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'` |
 | `.claude-plugin/marketplace.json` | This repo's Claude plugin marketplace manifest |
+
+The `reflect` long-term-memory system (engine + plugin) was extracted from
+this monorepo into its own public repo,
+**[`stevengonsalvez/ainb-reflect-memory`](https://github.com/stevengonsalvez/ainb-reflect-memory)**.
+The engine installs via
+`uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`
+and its Claude plugin ships from that repo's `plugin/` dir. `ainb reflect
+bootstrap` (in `ainb-tui/`) installs the engine from that URL.
 
 The portable skills, agents, workflows, utilities, per-tool rule layouts
 (`cursor/cline/roo/copilot/amazonq/…`), the `bootstrap.js` installer, the
@@ -63,8 +69,7 @@ Never hardcode `~/.claude` — agent-agnostic skills must use placeholders. `ain
 
 ## Adding a new plugin
 
-Claude Code plugins live at the repo root under `plugins/<name>/` (e.g.
-`plugins/reflect/`):
+Claude Code plugins live at the repo root under `plugins/<name>/`:
 
 1. Create `plugins/<name>/.claude-plugin/plugin.json`
 2. Add the skills under `plugins/<name>/skills/`

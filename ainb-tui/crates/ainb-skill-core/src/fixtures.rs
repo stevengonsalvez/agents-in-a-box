@@ -495,7 +495,7 @@ updated: "2026-06-01"
 
 external-packages:
   - name: reflect-kb
-    source: https://github.com/stevengonsalvez/reflect-kb.git
+    source: https://github.com/stevengonsalvez/ainb-reflect-memory.git
     install: "uv tool install --force '{source}[graph]'"
     cli: reflect
     version-pin: main

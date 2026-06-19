@@ -16,10 +16,12 @@ use clap::Subcommand;
 use super::OutputFormat;
 use crate::cli::deps::{self, DepKind, RealEnv};
 
-/// `git+...#subdirectory=reflect-kb[graph]` — passed as ONE argv element to uv
-/// (no shell), so the `[graph]` extra and `#` fragment need no quoting.
+/// `git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]` —
+/// passed as ONE argv element to uv (no shell), so the `[graph]` extra needs no
+/// quoting. reflect-kb was extracted to its own (flattened) repo, so the install
+/// target is the repo root with no `#subdirectory`.
 const REFLECT_KB_URL: &str =
-    "git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]";
+    "git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]";
 
 #[derive(Subcommand)]
 pub enum ReflectCommands {
