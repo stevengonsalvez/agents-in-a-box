@@ -61,15 +61,28 @@ from temporal_extraction import (  # noqa: E402
 
 # --- Config --------------------------------------------------------------
 
+def _env_num(name: str, default, cast):
+    """Parse a numeric env override, falling back to ``default`` on a missing or
+    malformed value. recall.py is the always-on recall path, so a typo'd env var
+    must never crash it at import time."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return cast(raw)
+    except (ValueError, TypeError):
+        return default
+
+
 # Retrieval depth + inject budget. The historical 10/2000 defaults inject only
 # ~700 tokens of memory, which starves multi-hop QA (benchmark: raising these
 # lifted multi-hop 0.10 -> 0.50). Env-overridable so callers can widen the
 # budget without code change; defaults stay modest for the always-on session
 # inject path.
-DEFAULT_LIMIT = int(os.environ.get("REFLECT_RECALL_LIMIT", "10"))
+DEFAULT_LIMIT = _env_num("REFLECT_RECALL_LIMIT", 10, int)
 DEFAULT_MODE = "naive"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
-DEFAULT_MAX_CHARS = int(os.environ.get("REFLECT_RECALL_MAX_CHARS", "2000"))
+DEFAULT_MAX_CHARS = _env_num("REFLECT_RECALL_MAX_CHARS", 2000, int)
 # Canonical CLI name (reflect-kb). Resolved via `shutil.which("reflect")` so
 # we honour whatever install path `uv tool install reflect-kb` produced
 # (typically ~/.local/bin/reflect). Legacy `~/.learnings/cli/learnings` is
@@ -3021,8 +3034,6 @@ def _hyde_expand(query: str) -> str:
     embeds answer-shaped text. Gated by ``REFLECT_RECALL_HYDE``; any failure
     (no claude, timeout, error) falls back to the raw query so recall never breaks.
     """
-    import subprocess
-
     model = os.environ.get("REFLECT_DRAIN_MODEL", "sonnet")
     sys_p = (
         "You expand a search query for a memory database. Write ONE short "
@@ -3089,7 +3100,7 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=0,
                     help="R4: bound results by estimated tokens (0 = no budget)")
     ap.add_argument("--min-overlap", type=float,
-                    default=float(os.environ.get("REFLECT_RECALL_MIN_OVERLAP", "0.0")),
+                    default=_env_num("REFLECT_RECALL_MIN_OVERLAP", 0.0, float),
                     help="R7: OOD gate — suppress results when the best hit's "
                          "query-term coverage is below this (0 = off; env "
                          "REFLECT_RECALL_MIN_OVERLAP sets the default)")

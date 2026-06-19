@@ -106,8 +106,11 @@ class LearningsGraphEngine:
 
         # Derive the embedding dimension from the loaded model so a swapped
         # REFLECT_EMBED_MODEL (e.g. bge-large = 1024-d) indexes correctly
-        # instead of being forced into mpnet's 768.
-        dim = engine._load_embedding_model().get_sentence_embedding_dimension()
+        # instead of being forced into mpnet's 768. The getter was renamed in
+        # newer sentence-transformers, so fall back across both names.
+        _m = engine._load_embedding_model()
+        _get_dim = getattr(_m, "get_sentence_embedding_dimension", None) or _m.get_embedding_dimension
+        dim = _get_dim()
 
         @wrap_embedding_func_with_attrs(embedding_dim=dim, max_token_size=8192)
         async def embedding_func(texts: list[str]) -> np.ndarray:
