@@ -1,0 +1,14 @@
+{
+  "tag": "pilot50_v2",
+  "n": 100,
+  "judges": [
+    "haiku",
+    "sonnet",
+    "opus"
+  ],
+  "overall_J": {
+    "haiku": 0.53,
+    "sonnet": 0.65,
+    "opus": 0.73
+  }
+}

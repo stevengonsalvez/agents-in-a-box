@@ -1,0 +1,16 @@
+# R12: per-arm calibrated OOD floors derived by `reflect calibrate-thresholds`.
+# sampled docs=40 percentile=10.0 (vector n=800, bm25 n=0)
+[recall.arm.vector]
+min_score = 0.167
+[recall.arm.bm25]
+min_score = 0.15
+[recall.arm.graph]
+min_score = 0.0  # entity-neighbourhood arm — open
+[recall.arm.temporal]
+min_score = 0.05  # date-window scoped — light floor
+
+# env-var form (recall.py reads these directly):
+# export RECALL_ARM_VECTOR_MIN_SCORE=0.167
+# export RECALL_ARM_BM25_MIN_SCORE=0.15
+# export RECALL_ARM_GRAPH_MIN_SCORE=0.0
+# export RECALL_ARM_TEMPORAL_MIN_SCORE=0.05

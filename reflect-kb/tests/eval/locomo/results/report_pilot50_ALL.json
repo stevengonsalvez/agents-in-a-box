@@ -1,0 +1,82 @@
+{
+  "model": "sonnet",
+  "samples": [
+    {
+      "sample_id": "conv-26",
+      "n_notes": 635,
+      "n_selected": 50,
+      "by_config": {
+        "arms_on": {
+          "n_qa": 50,
+          "j_score": 0.44,
+          "per_category": {
+            "adversarial": {
+              "n": 10,
+              "j_score": 1.0
+            },
+            "multi_hop": {
+              "n": 10,
+              "j_score": 0.0
+            },
+            "open_domain": {
+              "n": 10,
+              "j_score": 0.2
+            },
+            "single_hop": {
+              "n": 10,
+              "j_score": 0.3
+            },
+            "temporal": {
+              "n": 10,
+              "j_score": 0.7
+            }
+          },
+          "recall_latency_p50_s": 380.927,
+          "recall_latency_p95_s": 670.478,
+          "answer_latency_p50_s": 3.309,
+          "answer_latency_p95_s": 6.21,
+          "total_tokens": 1023625,
+          "total_cost_usd": 8.3742,
+          "memory_notes": 635
+        },
+        "arms_off": {
+          "n_qa": 50,
+          "j_score": 0.4,
+          "per_category": {
+            "adversarial": {
+              "n": 10,
+              "j_score": 0.9
+            },
+            "multi_hop": {
+              "n": 10,
+              "j_score": 0.0
+            },
+            "open_domain": {
+              "n": 10,
+              "j_score": 0.2
+            },
+            "single_hop": {
+              "n": 10,
+              "j_score": 0.2
+            },
+            "temporal": {
+              "n": 10,
+              "j_score": 0.7
+            }
+          },
+          "recall_latency_p50_s": 357.868,
+          "recall_latency_p95_s": 640.441,
+          "answer_latency_p50_s": 3.234,
+          "answer_latency_p95_s": 7.436,
+          "total_tokens": 777289,
+          "total_cost_usd": 6.3057,
+          "memory_notes": 635
+        }
+      }
+    }
+  ],
+  "configs": [
+    "arms_on",
+    "arms_off"
+  ]
+}
