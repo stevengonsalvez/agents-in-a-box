@@ -280,14 +280,20 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         };
     }
 
-    // Pid is alive. Connection health = the socket is bound AND the DB exists.
+    // Pid is alive. Connection health = the socket is bound AND the DB file is
+    // present. M-D1: we deliberately say "db file present", NOT "db reachable" —
+    // `db_path.exists()` only proves the FILE is there, not that it opens and
+    // accepts writes. A truncated/corrupt `notifications.db` still `exists()`, so
+    // claiming "reachable" would show green while every insert silently fails into
+    // the fallback file. Honest cheap wording avoids a real (blocking) DB open on
+    // this code path.
     let connected = socket_ok && db_ok;
     let reason = if connected {
-        "running + connected (socket bound, db reachable)".to_string()
+        "running + connected (socket bound, db file present)".to_string()
     } else if !socket_ok {
         "running but socket not bound yet".to_string()
     } else {
-        "running but db not reachable".to_string()
+        "running but db file missing".to_string()
     };
     DaemonStatus {
         kind,
