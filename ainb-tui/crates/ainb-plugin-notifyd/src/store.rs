@@ -80,6 +80,63 @@ pub struct NotificationRecord {
     pub dismissed: bool,
 }
 
+/// One row in the append-only `events` log. The event store's source
+/// of truth: every managed hook fire is recorded here verbatim
+/// (bounded), then folded into [`StateRow`] by the materializer.
+///
+/// `seq` is assigned by SQLite (`AUTOINCREMENT`) on insert, so
+/// [`EventRow`]s handed to [`Store::append_event`] carry `seq = 0`
+/// (ignored); rows returned by [`Store::events_since`] carry the real
+/// monotonic `seq` a materializer pages through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventRow {
+    /// Monotonic sequence (SQLite rowid). `0` on rows being inserted.
+    pub seq: i64,
+    /// Epoch milliseconds — when the hook fired.
+    pub ts: i64,
+    /// Host agent's session id (universal hook field).
+    pub session_id: String,
+    /// Working directory at hook-fire time (universal hook field).
+    pub cwd: String,
+    /// Path to the session transcript (universal hook field). Stamped
+    /// so a reader/materializer never recomputes `cwd→slug`.
+    pub transcript_path: String,
+    /// Host agent: `claude` | `codex` | … Defaults to `claude`.
+    pub agent: String,
+    /// Raw hook event name: `Stop` | `SessionStart` | `PreToolUse` | …
+    pub event_type: String,
+    /// Discriminator parsed from the payload (e.g. `AskUserQuestion`
+    /// for `PreToolUse`, `idle_prompt` for `Notification`, the
+    /// `error_type` for `StopFailure`). `None` when not applicable.
+    pub matcher: Option<String>,
+    /// The raw hook stdin JSON (bounded), serialized as a string.
+    pub payload: String,
+}
+
+/// One materialized `current_state` row — the latest folded state for a
+/// `(session_id, cwd)` pair. Written by the Wave 3 transition loop and
+/// read by every reader; defined here so the schema + round-trip ship
+/// in Wave 2 exactly as a materializer will consume them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateRow {
+    /// Host agent's session id.
+    pub session_id: String,
+    /// Working directory.
+    pub cwd: String,
+    /// Folded classification: `ASK` | `ERR` | `WAIT` | `IDLE` |
+    /// `RUNNING` | `DONE`.
+    pub kind: String,
+    /// JSON context (ASK question+options, ERR error_type, …). `None`
+    /// when the kind carries no detail.
+    pub context: Option<String>,
+    /// Parent session id, when this session is a fleet child.
+    pub parent: Option<String>,
+    /// `ts` of the newest event that produced this state.
+    pub last_event_ts: i64,
+    /// Provenance: `hook` (event-sourced) | `tmux` (fallback scan).
+    pub source: String,
+}
+
 /// Thin handle around a SQLite connection. Cheap to drop and reopen,
 /// but the daemon keeps one open for the process lifetime.
 ///
@@ -113,6 +170,13 @@ impl Store {
         // blocking each other.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A second writer is coming: the daemon's accept-loop persists
+        // notifications while the ingest tailer (and, in Wave 3, the
+        // materializer) writes the event log + current_state. WAL lets
+        // them not block, but a brief window where both hold the write
+        // lock can still surface SQLITE_BUSY — give writers up to 5s to
+        // retry transparently rather than erroring out.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -152,6 +216,44 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_notifications_unread
                 ON notifications(read, dismissed)
                 WHERE read = 0 AND dismissed = 0;
+
+            -- Event-sourcing tables (Wave 2). Additive `IF NOT EXISTS`
+            -- so this migration is safe on an existing notifications.db
+            -- without a version bump.
+
+            -- Append-only event log: every managed hook fire, verbatim.
+            CREATE TABLE IF NOT EXISTS events (
+                seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              INTEGER NOT NULL,
+                session_id      TEXT NOT NULL,
+                cwd             TEXT NOT NULL,
+                transcript_path TEXT NOT NULL DEFAULT '',
+                agent           TEXT NOT NULL DEFAULT 'claude',
+                event_type      TEXT NOT NULL,
+                matcher         TEXT,
+                payload         TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_session
+                ON events(session_id, seq);
+
+            -- Materialized read model: latest folded state per session.
+            CREATE TABLE IF NOT EXISTS current_state (
+                session_id     TEXT NOT NULL,
+                cwd            TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                context        TEXT,
+                parent         TEXT,
+                last_event_ts  INTEGER NOT NULL,
+                source         TEXT NOT NULL,
+                PRIMARY KEY (session_id, cwd)
+            );
+
+            -- Durable ingest cursor: byte offset already consumed from
+            -- events.jsonl. Single row pinned at id=0.
+            CREATE TABLE IF NOT EXISTS ingest_offset (
+                id          INTEGER PRIMARY KEY CHECK (id = 0),
+                byte_offset INTEGER NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -479,6 +581,168 @@ impl Store {
         }
         Ok(out)
     }
+
+    // --- event-sourcing (Wave 2) --------------------------------------------
+
+    /// Append one event to the append-only `events` log. `row.seq` is
+    /// ignored — SQLite assigns the monotonic `seq`. Returns it.
+    pub fn append_event(&self, row: &EventRow) -> Result<i64, StoreError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO events
+                (ts, session_id, cwd, transcript_path, agent, event_type, matcher, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.ts,
+                &row.session_id,
+                &row.cwd,
+                &row.transcript_path,
+                &row.agent,
+                &row.event_type,
+                &row.matcher,
+                &row.payload,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Every event with `seq > after_seq`, ascending. The materializer
+    /// pages through the log by passing the highest `seq` it has folded.
+    pub fn events_since(&self, after_seq: i64) -> Result<Vec<EventRow>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, session_id, cwd, transcript_path, agent, event_type, matcher, payload
+             FROM events
+             WHERE seq > ?1
+             ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![after_seq], |r| {
+            Ok(EventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                session_id: r.get(2)?,
+                cwd: r.get(3)?,
+                transcript_path: r.get(4)?,
+                agent: r.get(5)?,
+                event_type: r.get(6)?,
+                matcher: r.get(7)?,
+                payload: r.get(8)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Upsert one materialized state row, keyed on `(session_id, cwd)`.
+    /// Last-write-wins on the whole row (the materializer always carries
+    /// the freshest fold).
+    pub fn upsert_current_state(&self, row: &StateRow) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO current_state
+                (session_id, cwd, kind, context, parent, last_event_ts, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(session_id, cwd) DO UPDATE SET
+                kind          = excluded.kind,
+                context       = excluded.context,
+                parent        = excluded.parent,
+                last_event_ts = excluded.last_event_ts,
+                source        = excluded.source",
+            params![
+                &row.session_id,
+                &row.cwd,
+                &row.kind,
+                &row.context,
+                &row.parent,
+                row.last_event_ts,
+                &row.source,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Look up one materialized state row.
+    pub fn get_current_state(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<Option<StateRow>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, cwd, kind, context, parent, last_event_ts, source
+             FROM current_state
+             WHERE session_id = ?1 AND cwd = ?2",
+        )?;
+        let row = stmt
+            .query_row(params![session_id, cwd], |r| {
+                Ok(StateRow {
+                    session_id: r.get(0)?,
+                    cwd: r.get(1)?,
+                    kind: r.get(2)?,
+                    context: r.get(3)?,
+                    parent: r.get(4)?,
+                    last_event_ts: r.get(5)?,
+                    source: r.get(6)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Every materialized state row. Backs the readers' `current_state`
+    /// query (Wave 4).
+    pub fn list_current_state(&self) -> Result<Vec<StateRow>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, cwd, kind, context, parent, last_event_ts, source
+             FROM current_state
+             ORDER BY last_event_ts DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StateRow {
+                session_id: r.get(0)?,
+                cwd: r.get(1)?,
+                kind: r.get(2)?,
+                context: r.get(3)?,
+                parent: r.get(4)?,
+                last_event_ts: r.get(5)?,
+                source: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Read the durable ingest cursor (byte offset already consumed from
+    /// `events.jsonl`). `0` when nothing has been ingested yet.
+    pub fn read_ingest_offset(&self) -> Result<u64, StoreError> {
+        let conn = self.conn();
+        let off: Option<i64> = conn
+            .query_row(
+                "SELECT byte_offset FROM ingest_offset WHERE id = 0",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(off.unwrap_or(0).max(0) as u64)
+    }
+
+    /// Persist the ingest cursor. Single pinned row at `id = 0`.
+    pub fn write_ingest_offset(&self, byte_offset: u64) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO ingest_offset (id, byte_offset) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET byte_offset = excluded.byte_offset",
+            params![byte_offset as i64],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -685,5 +949,141 @@ mod tests {
 
         let nope = store.latest_by_cwd("/tmp/does-not-exist").unwrap();
         assert!(nope.is_none());
+    }
+
+    // --- event-sourcing (Wave 2) --------------------------------------------
+
+    fn event(seq: i64, ts: i64, kind: &str, matcher: Option<&str>) -> EventRow {
+        EventRow {
+            seq,
+            ts,
+            session_id: "sess-1".into(),
+            cwd: "/tmp/proj".into(),
+            transcript_path: "/t/sess-1.jsonl".into(),
+            agent: "claude".into(),
+            event_type: kind.into(),
+            matcher: matcher.map(str::to_string),
+            payload: r#"{"k":"v"}"#.into(),
+        }
+    }
+
+    #[test]
+    fn event_tables_create_on_fresh_db() {
+        // A brand-new db gets the events/current_state/ingest_offset
+        // tables via migrate(); all event APIs work immediately.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("fresh.db")).unwrap();
+        assert_eq!(store.events_since(0).unwrap().len(), 0);
+        assert_eq!(store.read_ingest_offset().unwrap(), 0);
+        assert!(store.list_current_state().unwrap().is_empty());
+    }
+
+    #[test]
+    fn event_tables_create_on_preexisting_notifications_db() {
+        // Open once (creates only the notifications table in the "old"
+        // world), insert a notification, drop, then re-open: the new
+        // event tables must be added without disturbing existing data.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.insert(&env("claude", "Stop", 1)).unwrap();
+            assert_eq!(store.count().unwrap(), 1);
+        }
+        // Re-open: migrate() is idempotent and additive.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.count().unwrap(), 1, "existing rows preserved");
+        // And the event tables are now usable.
+        let seq = store.append_event(&event(0, 100, "Stop", None)).unwrap();
+        assert!(seq > 0);
+        assert_eq!(store.events_since(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn append_event_and_events_since_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let s1 = store.append_event(&event(0, 100, "SessionStart", None)).unwrap();
+        let s2 = store
+            .append_event(&event(0, 200, "PreToolUse", Some("AskUserQuestion")))
+            .unwrap();
+        let s3 = store.append_event(&event(0, 300, "Stop", None)).unwrap();
+        assert!(s1 < s2 && s2 < s3, "seq is monotonic");
+
+        // events_since(0) returns all, ascending, with fields intact.
+        let all = store.events_since(0).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].event_type, "SessionStart");
+        assert_eq!(all[0].seq, s1);
+        assert_eq!(all[1].event_type, "PreToolUse");
+        assert_eq!(all[1].matcher.as_deref(), Some("AskUserQuestion"));
+        assert_eq!(all[1].transcript_path, "/t/sess-1.jsonl");
+        assert_eq!(all[1].payload, r#"{"k":"v"}"#);
+
+        // Paging: only events after a given seq.
+        let tail = store.events_since(s2).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].event_type, "Stop");
+        assert_eq!(tail[0].seq, s3);
+    }
+
+    #[test]
+    fn current_state_upsert_get_and_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let row = StateRow {
+            session_id: "s".into(),
+            cwd: "/tmp/p".into(),
+            kind: "ASK".into(),
+            context: Some(r#"{"header":"pick"}"#.into()),
+            parent: Some("parent-1".into()),
+            last_event_ts: 100,
+            source: "hook".into(),
+        };
+        store.upsert_current_state(&row).unwrap();
+        assert_eq!(
+            store.get_current_state("s", "/tmp/p").unwrap().unwrap(),
+            row
+        );
+
+        // Upsert on the same key overwrites (last-write-wins).
+        let updated = StateRow {
+            kind: "DONE".into(),
+            context: None,
+            last_event_ts: 200,
+            ..row.clone()
+        };
+        store.upsert_current_state(&updated).unwrap();
+        let got = store.get_current_state("s", "/tmp/p").unwrap().unwrap();
+        assert_eq!(got.kind, "DONE");
+        assert_eq!(got.context, None);
+        assert_eq!(got.last_event_ts, 200);
+
+        // Distinct (session,cwd) is a separate row.
+        let other = StateRow {
+            session_id: "s2".into(),
+            ..row.clone()
+        };
+        store.upsert_current_state(&other).unwrap();
+        assert_eq!(store.list_current_state().unwrap().len(), 2);
+        assert!(store.get_current_state("missing", "/x").unwrap().is_none());
+    }
+
+    #[test]
+    fn ingest_offset_persists_and_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.db");
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.read_ingest_offset().unwrap(), 0);
+            store.write_ingest_offset(4096).unwrap();
+            assert_eq!(store.read_ingest_offset().unwrap(), 4096);
+            // Overwrite the single pinned row.
+            store.write_ingest_offset(8192).unwrap();
+            assert_eq!(store.read_ingest_offset().unwrap(), 8192);
+        }
+        // Survives a reopen (durable cursor).
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.read_ingest_offset().unwrap(), 8192);
     }
 }
