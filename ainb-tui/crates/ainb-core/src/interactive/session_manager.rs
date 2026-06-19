@@ -1656,4 +1656,54 @@ mod tests {
         let manager = InteractiveSessionManager::new();
         assert!(manager.is_ok(), "Should create manager without Docker");
     }
+
+    /// Verify the SessionStore headroom flip: if a session has headroom_enabled=true,
+    /// mutating the field to false and saving results in false when re-loaded.
+    /// This covers the pure store-manipulation leg of `downgrade_headroom_session`
+    /// without requiring tmux.
+    #[test]
+    fn session_store_headroom_flip_persists() {
+        use crate::models::session::SessionAgentType;
+        use chrono::Utc;
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        // Point AINB_HOME at our temp dir so SessionStore::storage_path() uses it.
+        std::env::set_var("AINB_HOME", dir.path());
+
+        let tmux_name = "ainb-test-headroom-flip".to_string();
+        let session_id = uuid::Uuid::new_v4();
+
+        // Seed: headroom_enabled = true
+        let mut store = SessionStore::load();
+        store.upsert(SessionMetadata {
+            session_id,
+            tmux_session_name: tmux_name.clone(),
+            worktree_path: PathBuf::from("/tmp/fake"),
+            workspace_name: "test".to_string(),
+            created_at: Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: true,
+        });
+        store.save().expect("save");
+
+        // Flip: headroom_enabled = false (mirrors downgrade_headroom_session step 3)
+        let mut store2 = SessionStore::load();
+        let meta = store2.sessions.get(&tmux_name).expect("meta present");
+        assert!(meta.headroom_enabled, "precondition: headroom was on");
+        store2.sessions.get_mut(&tmux_name).unwrap().headroom_enabled = false;
+        store2.save().expect("save after flip");
+
+        // Reload and verify persistence
+        let store3 = SessionStore::load();
+        let reloaded = store3.sessions.get(&tmux_name).expect("still present");
+        assert!(
+            !reloaded.headroom_enabled,
+            "headroom should be off after flip"
+        );
+
+        // Cleanup env
+        std::env::remove_var("AINB_HOME");
+    }
 }

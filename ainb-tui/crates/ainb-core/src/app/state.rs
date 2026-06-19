@@ -3423,8 +3423,13 @@ pub enum AsyncAction {
     AuthSetupApiKey,                       // Save API key authentication
     ReauthenticateCredentials,             // Re-authenticate Claude credentials
     RestartSession(Uuid),                  // Restart a stopped session with new container
-    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
+    /// Flip headroom off in the SessionStore, then respawn the session's CLI
+    /// process with `tmux respawn-pane -k` (no proxy env) so the running
+    /// process is replaced. Claude gets `--continue` to preserve the
+    /// conversation; Codex restarts fresh (no continue flag exists).
+    DowngradeHeadroom(Uuid),
+    CleanupOrphaned,           // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
     AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
     SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
@@ -9143,6 +9148,16 @@ impl AppState {
                         error!("Failed to restart session: {}", e);
                     }
                 }
+                AsyncAction::DowngradeHeadroom(session_id) => {
+                    info!("Downgrading Headroom for session {}", session_id);
+                    if let Err(e) = self.downgrade_headroom_session(session_id).await {
+                        error!(
+                            "Failed to downgrade Headroom for session {}: {}",
+                            session_id, e
+                        );
+                        self.add_error_notification(format!("Failed to downgrade Headroom: {}", e));
+                    }
+                }
                 AsyncAction::CleanupOrphaned => {
                     info!("Starting cleanup of orphaned containers");
                     if let Err(e) = self.cleanup_orphaned_containers().await {
@@ -10355,6 +10370,167 @@ impl AppState {
             tmux_session_name
         );
         Ok(provider.display_name().to_string())
+    }
+
+    /// Flip headroom off for a running session and replace its CLI process.
+    ///
+    /// Steps:
+    /// 1. Resolve the session and validate it is Claude or Codex.
+    /// 2. Load the SessionStore; check that headroom_enabled is true.
+    /// 3. Set headroom_enabled = false and save the store.
+    /// 4. Build the resume command: `[provider] [--skip-perms] [--continue for Claude]`.
+    ///    No env prefix (headroom is now off → `headroom_env_prefix(…, false)` == "").
+    /// 5. Replace the running CLI with `tmux respawn-pane -k` using the same
+    ///    `sh -c '…exec cli …'` shape as `start_cli_in_tmux`.
+    ///    `respawn-pane -k` kills the running process and starts fresh in-place,
+    ///    which is the only way to clear env vars from a running process.
+    ///    Codex has no `--continue` flag — it restarts fresh (noted in notification).
+    async fn downgrade_headroom_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        use crate::config::CliProvider;
+        use crate::models::session::SessionAgentType;
+        use anyhow::Context;
+        use tokio::process::Command;
+
+        // --- 1. Resolve session ---
+        let session = self
+            .find_session(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+
+        let tmux_session_name = session
+            .tmux_session_name
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No tmux session associated with this session"))?
+            .clone();
+
+        let agent_type = session.agent_type;
+        let skip_permissions = session.skip_permissions;
+
+        // --- 1a. Only Claude/Codex are Headroom-capable ---
+        let provider = match agent_type {
+            SessionAgentType::Claude => CliProvider::Claude,
+            SessionAgentType::Codex => CliProvider::Codex,
+            other => {
+                self.add_warning_notification(format!(
+                    "Headroom is Claude/Codex only — {:?} does not use the proxy",
+                    other
+                ));
+                return Ok(());
+            }
+        };
+
+        // --- 2. Check and flip headroom_enabled in SessionStore ---
+        let mut store = crate::interactive::SessionStore::load();
+        match store.sessions.get(&tmux_session_name) {
+            None => {
+                self.add_warning_notification(
+                    "Session not found in store — Headroom state unknown".to_string(),
+                );
+                return Ok(());
+            }
+            Some(meta) if !meta.headroom_enabled => {
+                self.add_info_notification("Session is already direct (Headroom off)".to_string());
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // --- 3. Persist headroom_enabled = false ---
+        if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
+            meta.headroom_enabled = false;
+        }
+        if let Err(e) = store.save() {
+            // Non-fatal: we still attempt the respawn; the flag will be
+            // re-read from a stale store on the next restart, so log clearly.
+            warn!(
+                "Failed to persist headroom_enabled=false for {}: {}",
+                tmux_session_name, e
+            );
+        }
+
+        // --- 4. Build the resume command (no env prefix — headroom is off) ---
+        //
+        // env_setup is intentionally empty: `headroom_env_prefix(…, false)` == ""
+        // and we are not injecting an API key here (the original launch path
+        // already injected it into the pane's environment; `respawn-pane -k`
+        // inherits from the ainb-tui process which has the correct key).
+        let mut cmd_parts: Vec<String> = vec![provider.command().to_string()];
+        if skip_permissions {
+            cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+        // Claude: `--continue` (-c) resumes the most recent conversation in the cwd.
+        // Codex: no continue/resume flag exists — restarts fresh.
+        let codex_fresh_note = if agent_type == SessionAgentType::Claude {
+            cmd_parts.push("--continue".to_string());
+            ""
+        } else {
+            " (Codex restarted fresh — no --continue flag)"
+        };
+
+        let cli_cmd = cmd_parts.join(" ");
+
+        info!(
+            "Downgrading Headroom for {} in '{}': cmd={}",
+            provider.display_name(),
+            tmux_session_name,
+            cli_cmd
+        );
+
+        // --- 5. Replace the running CLI via tmux respawn-pane -k ---
+        //
+        // Mirrors `start_cli_in_tmux` exactly:
+        //   - `remain-on-exit on` first so any startup error stays visible.
+        //   - `respawn-pane -k -t <name> sh -c 'exec <cmd>'`
+        //     The `exec` replaces `sh` itself; the pane ends up running only
+        //     the CLI binary (same as the original launch). Because env_setup
+        //     is empty we could use the argv path, but wrapping in `sh -c 'exec …'`
+        //     is consistent with start_cli_in_tmux and future-proof.
+        let target = tmux_session_name.clone();
+
+        // Set remain-on-exit so startup errors stay visible (best-effort).
+        let _ = Command::new("tmux")
+            .args(["set-option", "-w", "-t", &target, "remain-on-exit", "on"])
+            .output()
+            .await;
+
+        let full_line = format!("exec {cli_cmd}");
+        let output = Command::new("tmux")
+            .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
+            .output()
+            .await
+            .context("Failed to invoke tmux respawn-pane for Headroom downgrade")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Restore the headroom flag in the store so the next manual
+            // restart picks it back up (best-effort).
+            let mut store2 = crate::interactive::SessionStore::load();
+            if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
+                meta.headroom_enabled = true;
+            }
+            let _ = store2.save();
+            anyhow::bail!(
+                "tmux respawn-pane failed for {}: {}",
+                tmux_session_name,
+                stderr
+            );
+        }
+
+        // Update in-memory status.
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(crate::models::SessionStatus::Running);
+        }
+
+        self.add_success_notification(format!(
+            "Headroom OFF for this session — resumed direct (no compression){}",
+            codex_fresh_note
+        ));
+
+        info!(
+            "Headroom downgraded for {} in tmux session '{}'",
+            provider.display_name(),
+            tmux_session_name
+        );
+        Ok(())
     }
 
     /// Helper to find a session by ID across all workspaces
