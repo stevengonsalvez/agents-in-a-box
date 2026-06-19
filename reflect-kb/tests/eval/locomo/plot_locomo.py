@@ -10,14 +10,16 @@ OAT="#E3DACC"; GRAY="#B9B7AD"; GRAY7="#3D3D3A"
 
 # Overall LOCOMO J% — Hindsight repo leaderboard (its judge, full locomo10,
 # adversarial excluded). reflect = our tuned config, Opus judge, 1 convo / 50 QA,
-# 4-cat mean (single 0.80 / multi 0.80 / temporal 0.80 / open 0.70) = 76.2.
+# 4-cat mean (single 0.80 / multi 0.80 / temporal 0.80 / open 0.70) = 77.5.
 overall = [
+    ("ByteRover 2.0", 96.10, "other"),
     ("Backboard", 90.00, "other"),
+    ("Honcho", 89.90, "other"),
     ("Hindsight (Gemini-3)", 89.61, "hind"),
     ("Hindsight (OSS-120B)", 85.67, "hind"),
     ("Hindsight (OSS-20B)", 83.18, "hind"),
     ("Memobase", 75.78, "other"),
-    ("reflect 4.1.0+fixes (pilot)", 76.25, "reflect"),
+    ("reflect 4.1.0+fixes (pilot)", 77.5, "reflect"),
     ("Zep", 75.14, "other"),
     ("Mem0-Graph", 68.44, "other"),
     ("Mem0", 66.88, "other"),
