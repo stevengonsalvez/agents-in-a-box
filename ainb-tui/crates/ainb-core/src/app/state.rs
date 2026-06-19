@@ -988,6 +988,44 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 }
 
 // ============================================================================
+// Daemons overlay (MCP pool + Headroom proxy — read-only status)
+// ============================================================================
+
+/// Fetched snapshot delivered through the daemons overlay channel.
+#[derive(Debug, Clone)]
+pub struct DaemonsFetchResult {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+}
+
+/// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
+/// the overlay is open; dropping it stops all refresh activity.
+#[derive(Debug)]
+pub struct DaemonsOverlayState {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Receiver for the in-flight fetch (None = no fetch pending).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+}
+
+/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read.
+/// These are sync calls so they run on the blocking thread pool.
+pub(crate) fn daemons_sync_probe() -> (bool, Vec<String>) {
+    let mcp_alive = crate::mcp_pool::client::daemon_alive();
+    let headroom_consumers = crate::interactive::SessionStore::load()
+        .sessions
+        .into_values()
+        .filter(|m| m.headroom_enabled)
+        .map(|m| m.tmux_session_name.clone())
+        .collect::<Vec<_>>();
+    (mcp_alive, headroom_consumers)
+}
+
+// ============================================================================
 // Home Screen State
 // ============================================================================
 
@@ -2848,6 +2886,8 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
+    // Daemons status overlay (MCP pool + Headroom proxy, read-only).
+    pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -2892,6 +2932,9 @@ pub struct AppState {
     pub last_log_check: Option<std::time::Instant>,
     // Track the last time we checked for OAuth token refresh
     pub last_token_refresh_check: Option<std::time::Instant>,
+    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
+    // session is live but the proxy died).
+    pub last_headroom_watchdog: Option<std::time::Instant>,
     // Claude chat integration
     pub claude_chat_state: Option<ClaudeChatState>,
     // Live logs from Docker containers
@@ -3333,6 +3376,8 @@ struct ConfigureLaunchSnapshot {
     /// The base-branch popup pick (2026-06). `None` = legacy base policy:
     /// HEAD for local repos, origin/HEAD for remote/star launches.
     base: Option<crate::components::new_session::configure::BaseSelection>,
+    headroom_enabled: bool,
+    rtk_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3379,8 +3424,13 @@ pub enum AsyncAction {
     AuthSetupApiKey,                       // Save API key authentication
     ReauthenticateCredentials,             // Re-authenticate Claude credentials
     RestartSession(Uuid),                  // Restart a stopped session with new container
-    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
+    /// Flip headroom off in the SessionStore, then respawn the session's CLI
+    /// process with `tmux respawn-pane -k` (no proxy env) so the running
+    /// process is replaced. Claude gets `--continue` to preserve the
+    /// conversation; Codex restarts fresh (no continue flag exists).
+    DowngradeHeadroom(Uuid),
+    CleanupOrphaned,           // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
     AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
     SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
@@ -3432,6 +3482,7 @@ impl Default for AppState {
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
+            daemons_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -3446,6 +3497,7 @@ impl Default for AppState {
             log_last_updated: HashMap::new(),
             last_log_check: None,
             last_token_refresh_check: None,
+            last_headroom_watchdog: None,
             claude_chat_state: None,
             live_logs: HashMap::new(),
             claude_manager: None,
@@ -4837,6 +4889,121 @@ impl AppState {
                     }
                 });
             let _ = tx.send(result);
+        });
+    }
+
+    // ── Daemons overlay ──────────────────────────────────────────────────────
+
+    /// Open the Daemons overlay and fire the first fetch; idempotent (toggle).
+    pub fn toggle_daemons_overlay(&mut self) {
+        if self.daemons_overlay.is_some() {
+            self.daemons_overlay = None;
+            return;
+        }
+        self.daemons_overlay = Some(DaemonsOverlayState {
+            mcp_alive: false,
+            headroom: crate::headroom::ProxyStatus {
+                running: false,
+                port: crate::headroom::proxy_port(),
+                pid: None,
+                tokens_saved: None,
+            },
+            headroom_consumers: Vec::new(),
+            loading: true,
+            last_refreshed: None,
+            fetch_rx: None,
+        });
+        self.spawn_daemons_fetch();
+    }
+
+    pub fn close_daemons_overlay(&mut self) {
+        self.daemons_overlay = None;
+    }
+
+    /// Spawn one off-thread fetch of both daemon statuses (one-outstanding guard).
+    /// Runs MCP + SessionStore probes on the blocking pool; headroom::status()
+    /// is async so it runs directly in the spawned task.
+    pub fn spawn_daemons_fetch(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            // Blocking I/O (control socket + file read) on the blocking pool.
+            let (mcp_alive, headroom_consumers) = tokio::task::spawn_blocking(daemons_sync_probe)
+                .await
+                .unwrap_or((false, Vec::new()));
+            // Async HTTP probe of the Headroom /health + /stats endpoints.
+            let headroom = crate::headroom::status().await;
+            let result = DaemonsFetchResult {
+                mcp_alive,
+                headroom,
+                headroom_consumers,
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed daemons fetch. Called from the 250ms app tick.
+    pub fn check_daemons_overlay(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.mcp_alive = result.mcp_alive;
+                o.headroom = result.headroom;
+                o.headroom_consumers = result.headroom_consumers;
+                o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
+    /// shared proxy went down, re-ensure it. Throttled to ~10s, async, and
+    /// best-effort so it never blocks the render loop.
+    ///
+    /// This is a self-heal, not a zero-loss guarantee: a request a session
+    /// makes while the proxy is down (before the next ~10s tick respawns it)
+    /// fails at the CLI and is retried by the agent/user — recovery is "the
+    /// next request succeeds", not "the in-flight request is rescued". The
+    /// statusline reflects actual routing, so an outage surfaces rather than
+    /// silently dropping compression.
+    ///
+    /// In-loop tick, NOT a separate daemon — surfaced as the "watched" marker
+    /// on the Headroom row of the Daemons screen, per the daemons-screen rule.
+    pub fn headroom_watchdog(&mut self) {
+        const INTERVAL_SECS: u64 = 10;
+        let now = std::time::Instant::now();
+        let due = self
+            .last_headroom_watchdog
+            .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_headroom_watchdog = Some(now);
+
+        let has_headroom_session = crate::interactive::SessionStore::load()
+            .sessions
+            .values()
+            .any(|m| m.headroom_enabled);
+        if !has_headroom_session {
+            return;
+        }
+
+        tokio::spawn(async {
+            if !crate::headroom::is_healthy().await {
+                warn!("Headroom proxy down with a live session — watchdog respawning");
+                let _ = crate::headroom::ensure_proxy_running().await;
+            }
         });
     }
 
@@ -7047,6 +7214,8 @@ impl AppState {
             session_model,
             codex_model,
             base: spec.base.clone(),
+            headroom_enabled: spec.headroom_enabled,
+            rtk_enabled: spec.rtk_enabled,
         };
 
         // Boss mode builds its own Docker workspace from `repo_path` and
@@ -7201,6 +7370,8 @@ impl AppState {
                 snapshot.codex_model,
                 existing_worktree,
                 base_start_point,
+                snapshot.headroom_enabled,
+                snapshot.rtk_enabled,
             )
             .await;
 
@@ -7823,6 +7994,8 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -7837,6 +8010,8 @@ impl AppState {
                     codex_model,
                     existing_worktree,
                     base_start_point,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
             }
@@ -7877,6 +8052,8 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -7936,6 +8113,8 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         } else {
@@ -7952,6 +8131,8 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         };
@@ -8654,6 +8835,7 @@ impl AppState {
                     codex_model,
                     metadata.agent_type,
                     transcript.clone(),
+                    metadata.headroom_enabled,
                 )
                 .await?;
 
@@ -8977,6 +9159,16 @@ impl AppState {
                     info!("Starting session restart for session {}", session_id);
                     if let Err(e) = self.handle_restart_session(session_id).await {
                         error!("Failed to restart session: {}", e);
+                    }
+                }
+                AsyncAction::DowngradeHeadroom(session_id) => {
+                    info!("Downgrading Headroom for session {}", session_id);
+                    if let Err(e) = self.downgrade_headroom_session(session_id).await {
+                        error!(
+                            "Failed to downgrade Headroom for session {}: {}",
+                            session_id, e
+                        );
+                        self.add_error_notification(format!("Failed to downgrade Headroom: {}", e));
                     }
                 }
                 AsyncAction::CleanupOrphaned => {
@@ -10147,7 +10339,39 @@ impl AppState {
         if skip_permissions {
             cmd_parts.push(provider.skip_permissions_flag().to_string());
         }
-        let cli_cmd = cmd_parts.join(" ");
+        // Preserve per-session Headroom routing across restart. `send-keys`
+        // bypasses build_env_setup_for_provider, so re-derive the proxy export
+        // from the persisted SessionMetadata (keyed by tmux name) and prepend
+        // it — otherwise a restarted HR session would silently stop routing
+        // through the proxy.
+        //
+        // Mirror the launch path (`start_cli_in_tmux`): the stored flag is
+        // *intent*; only inject the base URL when the proxy is actually
+        // healthy. Injecting a dead-port URL would brick the restarted CLI on
+        // connection-refused. Ensure the proxy first; degrade to direct on
+        // failure rather than pointing the session at a closed port.
+        let mut headroom_active = crate::interactive::SessionStore::load()
+            .sessions
+            .get(&tmux_session_name)
+            .map(|m| m.headroom_enabled)
+            .unwrap_or(false)
+            && matches!(
+                agent_type,
+                SessionAgentType::Claude | SessionAgentType::Codex
+            );
+        if headroom_active {
+            if let Err(e) = crate::headroom::ensure_proxy_running().await {
+                warn!(
+                    "headroom proxy unavailable on restart — running DIRECT, no compression: {e}"
+                );
+                headroom_active = false;
+            }
+        }
+        let cli_cmd = format!(
+            "{}{}",
+            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_active),
+            cmd_parts.join(" ")
+        );
 
         info!(
             "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",
@@ -10177,6 +10401,167 @@ impl AppState {
             tmux_session_name
         );
         Ok(provider.display_name().to_string())
+    }
+
+    /// Flip headroom off for a running session and replace its CLI process.
+    ///
+    /// Steps:
+    /// 1. Resolve the session and validate it is Claude or Codex.
+    /// 2. Load the SessionStore; check that headroom_enabled is true.
+    /// 3. Set headroom_enabled = false and save the store.
+    /// 4. Build the resume command: `[provider] [--skip-perms] [--continue for Claude]`.
+    ///    No env prefix (headroom is now off → `headroom_env_prefix(…, false)` == "").
+    /// 5. Replace the running CLI with `tmux respawn-pane -k` using the same
+    ///    `sh -c '…exec cli …'` shape as `start_cli_in_tmux`.
+    ///    `respawn-pane -k` kills the running process and starts fresh in-place,
+    ///    which is the only way to clear env vars from a running process.
+    ///    Codex has no `--continue` flag — it restarts fresh (noted in notification).
+    async fn downgrade_headroom_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        use crate::config::CliProvider;
+        use crate::models::session::SessionAgentType;
+        use anyhow::Context;
+        use tokio::process::Command;
+
+        // --- 1. Resolve session ---
+        let session = self
+            .find_session(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+
+        let tmux_session_name = session
+            .tmux_session_name
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No tmux session associated with this session"))?
+            .clone();
+
+        let agent_type = session.agent_type;
+        let skip_permissions = session.skip_permissions;
+
+        // --- 1a. Only Claude/Codex are Headroom-capable ---
+        let provider = match agent_type {
+            SessionAgentType::Claude => CliProvider::Claude,
+            SessionAgentType::Codex => CliProvider::Codex,
+            other => {
+                self.add_warning_notification(format!(
+                    "Headroom is Claude/Codex only — {:?} does not use the proxy",
+                    other
+                ));
+                return Ok(());
+            }
+        };
+
+        // --- 2. Check and flip headroom_enabled in SessionStore ---
+        let mut store = crate::interactive::SessionStore::load();
+        match store.sessions.get(&tmux_session_name) {
+            None => {
+                self.add_warning_notification(
+                    "Session not found in store — Headroom state unknown".to_string(),
+                );
+                return Ok(());
+            }
+            Some(meta) if !meta.headroom_enabled => {
+                self.add_info_notification("Session is already direct (Headroom off)".to_string());
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // --- 3. Persist headroom_enabled = false ---
+        if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
+            meta.headroom_enabled = false;
+        }
+        if let Err(e) = store.save() {
+            // Non-fatal: we still attempt the respawn; the flag will be
+            // re-read from a stale store on the next restart, so log clearly.
+            warn!(
+                "Failed to persist headroom_enabled=false for {}: {}",
+                tmux_session_name, e
+            );
+        }
+
+        // --- 4. Build the resume command (no env prefix — headroom is off) ---
+        //
+        // env_setup is intentionally empty: `headroom_env_prefix(…, false)` == ""
+        // and we are not injecting an API key here (the original launch path
+        // already injected it into the pane's environment; `respawn-pane -k`
+        // inherits from the ainb-tui process which has the correct key).
+        let mut cmd_parts: Vec<String> = vec![provider.command().to_string()];
+        if skip_permissions {
+            cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+        // Claude: `--continue` (-c) resumes the most recent conversation in the cwd.
+        // Codex: no continue/resume flag exists — restarts fresh.
+        let codex_fresh_note = if agent_type == SessionAgentType::Claude {
+            cmd_parts.push("--continue".to_string());
+            ""
+        } else {
+            " (Codex restarted fresh — no --continue flag)"
+        };
+
+        let cli_cmd = cmd_parts.join(" ");
+
+        info!(
+            "Downgrading Headroom for {} in '{}': cmd={}",
+            provider.display_name(),
+            tmux_session_name,
+            cli_cmd
+        );
+
+        // --- 5. Replace the running CLI via tmux respawn-pane -k ---
+        //
+        // Mirrors `start_cli_in_tmux` exactly:
+        //   - `remain-on-exit on` first so any startup error stays visible.
+        //   - `respawn-pane -k -t <name> sh -c 'exec <cmd>'`
+        //     The `exec` replaces `sh` itself; the pane ends up running only
+        //     the CLI binary (same as the original launch). Because env_setup
+        //     is empty we could use the argv path, but wrapping in `sh -c 'exec …'`
+        //     is consistent with start_cli_in_tmux and future-proof.
+        let target = tmux_session_name.clone();
+
+        // Set remain-on-exit so startup errors stay visible (best-effort).
+        let _ = Command::new("tmux")
+            .args(["set-option", "-w", "-t", &target, "remain-on-exit", "on"])
+            .output()
+            .await;
+
+        let full_line = format!("exec {cli_cmd}");
+        let output = Command::new("tmux")
+            .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
+            .output()
+            .await
+            .context("Failed to invoke tmux respawn-pane for Headroom downgrade")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Restore the headroom flag in the store so the next manual
+            // restart picks it back up (best-effort).
+            let mut store2 = crate::interactive::SessionStore::load();
+            if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
+                meta.headroom_enabled = true;
+            }
+            let _ = store2.save();
+            anyhow::bail!(
+                "tmux respawn-pane failed for {}: {}",
+                tmux_session_name,
+                stderr
+            );
+        }
+
+        // Update in-memory status.
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(crate::models::SessionStatus::Running);
+        }
+
+        self.add_success_notification(format!(
+            "Headroom OFF for this session — resumed direct (no compression){}",
+            codex_fresh_note
+        ));
+
+        info!(
+            "Headroom downgraded for {} in tmux session '{}'",
+            provider.display_name(),
+            tmux_session_name
+        );
+        Ok(())
     }
 
     /// Helper to find a session by ID across all workspaces
@@ -10680,6 +11065,11 @@ impl App {
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
         self.state.check_mcp_overlay();
+        // Drain completed daemons overlay fetch (no-op when closed).
+        self.state.check_daemons_overlay();
+        // Re-ensure the Headroom proxy if a Headroom session is live but the
+        // proxy died (throttled, async, best-effort).
+        self.state.headroom_watchdog();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

@@ -53,6 +53,8 @@ async fn test_remove_orphaned_session_purges_store_record() -> Result<()> {
         workspace_name: "orphan-workspace".to_string(),
         created_at: Utc::now(),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
+        rtk_enabled: false,
     });
     store.upsert(SessionMetadata {
         session_id: keep_id,
@@ -61,6 +63,8 @@ async fn test_remove_orphaned_session_purges_store_record() -> Result<()> {
         workspace_name: "keep-workspace".to_string(),
         created_at: Utc::now(),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
+        rtk_enabled: false,
     });
     store.save()?;
     assert_eq!(SessionStore::load().sessions().len(), 2);

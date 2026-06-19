@@ -212,6 +212,8 @@ pub enum ConfigureRow {
     Model,
     Mode,
     Yolo,
+    HeadroomProxy,
+    Rtk,
     Host,
     User,
     Port,
@@ -287,6 +289,19 @@ pub struct ConfigureState {
     pub base_selection: Option<BaseSelection>,
     /// Base-branch popup state — `Some` while the popup is open.
     pub branch_picker: Option<BranchPickerState>,
+    /// Route this session's CLI through the local Headroom compression proxy.
+    /// Only active for Claude and Codex agents.
+    pub headroom_enabled: bool,
+    /// Whether the `headroom` binary was found on PATH when this screen opened.
+    /// Detected once at construction (cheap PATH lookup) — gates the toggle so
+    /// we never offer routing through a proxy that can't run.
+    pub headroom_available: bool,
+    /// Wire RTK as a project-local Claude Code PreToolUse hook in the session's
+    /// worktree. Claude only (Codex path is AGENTS.md prompt-injection, out of
+    /// scope for this phase).
+    pub rtk_enabled: bool,
+    /// Whether the `rtk` binary was found on PATH when this screen opened.
+    pub rtk_available: bool,
 }
 
 impl ConfigureState {
@@ -378,6 +393,10 @@ impl ConfigureState {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
+            headroom_available: crate::headroom::is_installed(),
+            rtk_enabled: false,
+            rtk_available: crate::rtk::is_installed(),
         }
     }
 
@@ -546,6 +565,14 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
+                    rows.push(ConfigureRow::Rtk);
+                }
             }
         } else {
             // Real preset — Mode/Yolo are shown locked, but only when the
@@ -553,6 +580,14 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
+                    rows.push(ConfigureRow::Rtk);
+                }
             }
         }
         // Branch row visible for everything that isn't SSH.
@@ -626,6 +661,9 @@ pub struct LaunchSpec {
     /// (HEAD for local repos, origin/HEAD for remote/star launches).
     pub base: Option<BaseSelection>,
     pub prompt: Option<String>,
+    pub headroom_enabled: bool,
+    /// Wire RTK project-local PreToolUse hook in this session's worktree.
+    pub rtk_enabled: bool,
 }
 
 impl LaunchSpec {
@@ -709,6 +747,12 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             ConfigureRow::Yolo => {
                 render_yolo_row(f, state, area_for_row, focused);
             }
+            ConfigureRow::HeadroomProxy => {
+                render_headroom_row(f, state, area_for_row, focused);
+            }
+            ConfigureRow::Rtk => {
+                render_rtk_row(f, state, area_for_row, focused);
+            }
             ConfigureRow::Host | ConfigureRow::User | ConfigureRow::Port | ConfigureRow::Key => {
                 render_ssh_field(f, state, area_for_row, *row);
             }
@@ -716,6 +760,16 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             ConfigureRow::Prompt => render_prompt_row(f, state, area_for_row, focused),
             ConfigureRow::Launch => render_launch_row(f, area_for_row, focused),
         }
+    }
+
+    // Contextual help in the filler space (the Min(1) chunk between the rows
+    // and the help bar), keyed to the focused row. Headroom card for now — the
+    // pattern extends to other rows when they need it.
+    let filler_chunk = chunks[rows.len()];
+    if state.focused_row == ConfigureRow::HeadroomProxy && state.headroom_available {
+        render_headroom_guide(f, filler_chunk);
+    } else if state.focused_row == ConfigureRow::Rtk && state.rtk_available {
+        render_rtk_guide(f, filler_chunk);
     }
 
     // Help bar — always last chunk.
@@ -1066,6 +1120,124 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
     let options = vec!["ON".to_string(), "OFF".to_string()];
     let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    // Gate: if the headroom binary isn't on PATH, the toggle can't work — show
+    // a muted, non-interactive row with the install command instead of pills.
+    if !state.headroom_available {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Headroom: "),
+            Span::styled(
+                "unavailable \u{2014} install: uv tool install 'headroom-ai[proxy]'",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let current = if state.headroom_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    let options = vec!["on".to_string(), "off".to_string()];
+    let mut line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
+    // Brief muted explainer + link. Terminals auto-linkify the bare URL, so a
+    // cmd/ctrl-click opens it — no OSC-8 escape juggling needed.
+    line.spans.push(Span::styled(
+        "  \u{2014} proxy that trims token usage \u{00b7} github.com/chopratejas/headroom",
+        Style::default().fg(MUTED_GRAY),
+    ));
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Contextual "when to use Headroom" card, shown in the new-session filler
+/// space while the Headroom row is focused. Honest pros/cons at the point of
+/// choice — token savings vs. latency + a proxy dependency that auto-degrades.
+fn render_headroom_guide(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "  Headroom \u{00b7} local compression proxy",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Use when token budget matters more than speed.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} trims context \u{2192} fewer tokens billed",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} ~100ms latency per call",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} proxy dependency \u{2014} auto-degrades to direct on failure",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "  Off = straight to the provider \u{00b7} fastest \u{00b7} no savings",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_rtk_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    if !state.rtk_available {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("RTK:      "),
+            Span::styled(
+                "unavailable \u{2014} install: brew install rtk",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let current = if state.rtk_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    let options = vec!["on".to_string(), "off".to_string()];
+    let mut line = build_pills_line("RTK:      ", &options, &current, focused, &[], area.width);
+    line.spans.push(Span::styled(
+        "  \u{2014} compress tool output via hooks \u{00b7} Claude only \u{00b7} github.com/rtk-ai/rtk",
+        Style::default().fg(MUTED_GRAY),
+    ));
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Contextual RTK guide card, shown while the RTK row is focused.
+fn render_rtk_guide(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "  RTK \u{00b7} project-local Claude Code hook",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Wires a PreToolUse hook into this session's worktree .claude/settings.json.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} compresses Bash/test/diff output \u{2192} fewer tokens",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} hook-based \u{2014} zero latency overhead",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} Claude only \u{2014} Codex hook path out of scope for this phase",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Inline marker + guidance sub-line for a Branch-row problem. Returns
@@ -1885,6 +2057,11 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         branch_override: state.branch_override.clone(),
         base: state.base_selection.clone(),
         prompt,
+        // Defensive: never launch with Headroom on if the binary isn't there,
+        // even if some stale state slipped through.
+        headroom_enabled: state.headroom_enabled && state.headroom_available,
+        // Same guard for RTK.
+        rtk_enabled: state.rtk_enabled && state.rtk_available,
     })
 }
 
@@ -1911,6 +2088,18 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
         ConfigureRow::Yolo => {
             if state.preset_selection == PresetSelection::Custom {
                 cycle_yolo(state);
+            }
+        }
+        ConfigureRow::HeadroomProxy => {
+            // No-op when headroom isn't installed — the row is informational only.
+            if state.headroom_available {
+                state.headroom_enabled = !state.headroom_enabled;
+            }
+        }
+        ConfigureRow::Rtk => {
+            // No-op when rtk isn't installed — the row is informational only.
+            if state.rtk_available {
+                state.rtk_enabled = !state.rtk_enabled;
             }
         }
         ConfigureRow::Branch => {
@@ -2295,6 +2484,10 @@ mod tests {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
+            headroom_available: true,
+            rtk_enabled: false,
+            rtk_available: true,
         }
     }
 
@@ -2636,15 +2829,59 @@ mod tests {
     }
 
     #[test]
+    fn headroom_toggle_gated_when_unavailable() {
+        let mut s = mk_state();
+        s.headroom_available = false;
+        s.focused_row = ConfigureRow::HeadroomProxy;
+        // Cycling the row must NOT enable Headroom when the binary is absent.
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            !s.headroom_enabled,
+            "toggle must not flip when headroom unavailable"
+        );
+        cycle_value_in_focused_row(&mut s, -1);
+        assert!(!s.headroom_enabled);
+
+        // And when available it flips normally.
+        s.headroom_available = true;
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            s.headroom_enabled,
+            "toggle flips when headroom is available"
+        );
+    }
+
+    #[test]
+    fn rtk_toggle_gated_when_unavailable() {
+        let mut s = mk_state();
+        s.rtk_available = false;
+        s.focused_row = ConfigureRow::Rtk;
+        // Cycling the row must NOT enable RTK when the binary is absent.
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(!s.rtk_enabled, "toggle must not flip when rtk unavailable");
+        cycle_value_in_focused_row(&mut s, -1);
+        assert!(!s.rtk_enabled);
+
+        // And when available it flips normally.
+        s.rtk_available = true;
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(s.rtk_enabled, "toggle flips when rtk is available");
+    }
+
+    #[test]
     fn tab_cycles_focus_through_visible_rows() {
         let mut s = mk_state();
-        // Named preset, default mode = Boss → rows =
-        // [Preset, Mode, Yolo, Branch, Prompt, Launch].
+        // Named preset, default mode = Boss, Claude/Codex provider → rows =
+        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Branch, Prompt, Launch].
         assert_eq!(s.focused_row, ConfigureRow::Preset);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Mode);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Yolo);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::HeadroomProxy);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::Rtk);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Branch);
         s.cycle_focus(1);

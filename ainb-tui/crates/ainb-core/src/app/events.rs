@@ -48,7 +48,11 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    RefreshWorkspaces, // Manual refresh of workspace data
+    // Daemons overlay (MCP pool + Headroom, read-only)
+    DaemonsOverlayOpen,
+    DaemonsOverlayClose,
+    DaemonsOverlayRefresh,
+    RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
@@ -58,6 +62,10 @@ pub enum AppEvent {
     KillContainer,
     ReauthenticateCredentials,
     RestartSession,
+    /// Flip headroom off for the selected running session and respawn its CLI
+    /// process directly (no proxy env). Only valid for Claude/Codex sessions
+    /// that currently have headroom_enabled=true in the SessionStore.
+    DowngradeHeadroom,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
     ResumeSelectedSessions(String), // Resume all multi-selected Stopped interactive sessions (carries trigger key)
@@ -1234,6 +1242,17 @@ impl EventHandler {
             };
         }
 
+        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        if state.daemons_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
+                    Some(AppEvent::DaemonsOverlayClose)
+                }
+                KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+                _ => None,
+            };
+        }
+
         // Handle "Other tmux" rename mode (high priority)
         if state.other_tmux_rename_mode {
             match key_event.code {
@@ -1319,6 +1338,30 @@ impl EventHandler {
         }
 
         if !in_text_input {
+            // Session-list-specific intercept for `H`: downgrade Headroom
+            // routing on the selected running session. Must be checked before
+            // the global `H` → ToggleHelp handler below because the global
+            // handler fires first and the session-list has no early-return
+            // path of its own. Only intercepts on the SESSION_LIST screen when
+            // the selected session is a Headroom-capable agent (Claude/Codex).
+            if matches!(key_event.code, KeyCode::Char('H'))
+                && state.current_screen == screen_ids::SESSION_LIST
+            {
+                use crate::models::session::SessionAgentType;
+                let is_headroom_capable = state
+                    .selected_session()
+                    .map(|s| {
+                        matches!(
+                            s.agent_type,
+                            SessionAgentType::Claude | SessionAgentType::Codex
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_headroom_capable {
+                    return Some(AppEvent::DowngradeHeadroom);
+                }
+            }
+
             // Global help toggle: `?` or `Shift+H` from any non-text view.
             if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
                 return Some(AppEvent::ToggleHelp);
@@ -2630,6 +2673,8 @@ impl EventHandler {
             // overlay. `m` is taken by the learnings/Memory browser, so the
             // pool tile + global keybind use `p` instead.
             KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
+            // `d` for "daemons" — opens the MCP pool + Headroom status overlay.
+            KeyCode::Char('d') => return Some(AppEvent::DaemonsOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2899,6 +2944,9 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
+            AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
+            AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
+            AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -3260,6 +3308,11 @@ impl EventHandler {
             AppEvent::RestartSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
                     state.pending_async_action = Some(AsyncAction::RestartSession(session_id));
+                }
+            }
+            AppEvent::DowngradeHeadroom => {
+                if let Some(session_id) = state.get_selected_session_id() {
+                    state.pending_async_action = Some(AsyncAction::DowngradeHeadroom(session_id));
                 }
             }
             AppEvent::DeleteSession => {
@@ -4127,6 +4180,9 @@ impl EventHandler {
                         // Opens the overlay on top of the current screen (not a
                         // screen switch) and fires the first lazy fetch.
                         state.toggle_mcp_overlay();
+                    }
+                    SidebarItem::Daemons => {
+                        state.toggle_daemons_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory

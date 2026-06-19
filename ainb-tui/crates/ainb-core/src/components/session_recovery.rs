@@ -817,6 +817,8 @@ impl SessionRecoveryState {
             workspace_name: worktree.source_repo.clone().unwrap_or_else(|| worktree.name.clone()),
             created_at: chrono::Utc::now(),
             agent_type,
+            headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let mut store = SessionStore::load();

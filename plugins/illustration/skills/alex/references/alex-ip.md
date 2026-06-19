@@ -1,44 +1,47 @@
 # Alex IP
 
-Alex is the trademarked "Sport Head" mascot of ShotClubhouse / SHOT. Source art lives in `assets/alex-ref/` (the likeness reference — character reference, not background reference).
+Alex is the trademarked "Sport Head" mascot of ShotClubhouse / SHOT, drawn in the Popa-family hand-drawn pastel style. Source art lives in `assets/alex-ref/` (character reference only — for the design, not the colour/render).
 
-`sporthead` /ˈspɔːthɛd/ — *a person obsessed with sport: every swing, every hit, every save, every kick, every catch, every rep.* Alex is the face of that idea.
+`sporthead` /ˈspɔːthɛd/ — *a person obsessed with sport: every swing, every save, every kick, every rep.* Alex is the face of that idea.
 
 ## Non-negotiable identity anchors (every image)
 
-1. **Golden + black soccer-ball head** — glossy, classic pentagon panels, gold and black. This replaces a face; expression is read through posture, not features.
-2. **Gold-tinted aviator sunglasses** across the front of the ball.
-3. **Black baseball cap** worn forward, with a small gold emblem.
-4. **Black t-shirt with thin gold trim** on the sleeve cuffs.
-5. **Brown skin** on the arms/hands.
-6. **Relaxed purple jogger sweatpants.**
-7. **Yellow-and-black high-top sneakers.**
+1. **Gold-and-black soccer-ball head** — classic pentagon panels; this is his face and his one pop of colour. Expression is read through posture, not features.
+2. **NO glasses or sunglasses** — ever. Plain ball surface.
+3. **Black baseball cap** worn forward.
+4. **Simple t-shirt** and **relaxed jogger sweatpants**.
+5. **Brown-skinned arms/hands.**
+6. **Simple sneakers.**
+7. Often a **small football at his feet** (his prop, the way Popa has a notepad).
 
-If any anchor is missing or recolored, regenerate or edit. Pass the reference image so these hold.
+Drawn with simple, slightly rounded, cute hand-drawn proportions — charming, not a polished comic hero.
+
+## Likeness rule (MANDATORY)
+
+Pass `assets/alex-ref/alex-source.png` into the image backend every time, instructing: "this is Alex; use the reference ONLY for his character design, NOT its colours/background/render; draw him in crude hand-drawn pastel style; no glasses." Words alone drift the character.
 
 ## Personality
 
-- Confident, purposeful, aspirational. A street-hero who has earned his cool.
-- Calm swagger, not arrogance. Moves with intent.
-- Inclusive and grounded — grassroots roots, stadium dreams. For clubs, coaches, athletes, parents alike.
-- Expression comes from body language: a stride, a planted stance, a raised ID, a ball controlled at the feet.
+- Deadpan-cool and earnest, with dry humour — the Popa family's deadpan, wearing the Sport Head.
+- Confident but understated; purpose without showing off.
+- Inclusive and grounded: grassroots roots, stadium dreams; for clubs, coaches, athletes, parents.
+- Humour comes from the situation and quiet swagger, never from goofy faces.
 
 ## Brand beats Alex can carry
 
-- **Street-to-stadium arc** — walking from a terraced backstreet/cage-pitch into a floodlit stadium.
-- **Sport Head ID** — holding/presenting the verified identity card with a green tick.
-- **Four pillars** — connecting CLUB / COACH / ATHLETE / PARENT.
-- **The ball at his feet** — control, ownership, "make impact".
-- Taglines (use sparingly, one per image): **TAKE YOUR SHOT · OWN IT · MAKE IMPACT**.
+- Street-to-stadium arc (small doodled stadium in the distance).
+- Sport Head ID — holding the verified identity card.
+- Four pillars — connecting CLUB / COACH / ATHLETE / PARENT.
+- The ball at his feet — control, ownership.
+- Taglines, sparingly, one per image: TAKE YOUR SHOT · OWN IT · MAKE IMPACT.
 
 ## Forbidden
 
-- No goofy/cute faces, sweat-drops, cartoon panic — Alex is deadpan-cool, never silly.
-- Don't recolor the kit (gold/black/purple is fixed) or drop an anchor.
-- No photorealism, no 3D-render look, no pencil-sketch look — he's a bold comic character.
-- Don't bury Alex as decoration; he is the actor and the hero of the frame.
-- Don't add other branded logos; only ShotClubhouse / SHOT / Sport Head marks when relevant.
+- No glasses/sunglasses. No goofy or panicked faces.
+- No bold-comic / cel-shaded / 3D / photoreal rendering.
+- Don't recolour the kit beyond the soft palette; keep the gold-black ball.
+- Don't bury Alex as decoration — he is the actor of the frame.
 
 ## Litmus test
 
-Remove Alex from the frame. If the message still lands without him, he was decoration — rebuild so Alex performs or embodies the core idea.
+Remove Alex; if the idea still lands without him, he was decoration — rebuild so Alex performs or embodies it.

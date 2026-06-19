@@ -41,6 +41,8 @@ pub enum UsageCommands {
     ModelAlias(UsageModelAliasArgs),
     /// Show read-only optimization findings
     Optimize(UsageReportArgs),
+    /// Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+    Savings(UsageReportArgs),
     /// Compare models
     Compare(UsageReportArgs),
     /// Estimate usage yield from session signals
@@ -282,6 +284,7 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
         | UsageCommands::Month(_)
         | UsageCommands::Export(_)
         | UsageCommands::Optimize(_)
+        | UsageCommands::Savings(_)
         | UsageCommands::Compare(_)
         | UsageCommands::Yield(_)
         | UsageCommands::ModelAlias(_)

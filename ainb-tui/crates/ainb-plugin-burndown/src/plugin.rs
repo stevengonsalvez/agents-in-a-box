@@ -21,6 +21,7 @@ use ratatui::layout::Rect as RRect;
 use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::cli::{UsageCommands, execute_for_plugin};
+use crate::data::savings::{SavingsData, fetch_savings};
 use crate::data::usage::UsageData;
 use crate::output_format::OutputFormat;
 use crate::ui::{UsageTab, UsageViewState, render as render_ui};
@@ -114,6 +115,10 @@ pub struct BurndownPlugin {
     /// wall-clock compute was fast enough that the only visible
     /// change is a few panel numbers.
     pivot_seq: u64,
+    /// Latest token-savings snapshot. Populated asynchronously after
+    /// each `sessions.usage_data` finalise — the Savings tab renders
+    /// whatever is here (or a "fetching" placeholder while `None`).
+    savings_data: Option<SavingsData>,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
@@ -391,6 +396,7 @@ impl Plugin for BurndownPlugin {
             ui.data = self.data.clone();
             ui.scan_progress = self.scan_progress.clone();
             ui.cached_filtered = cached_filtered;
+            ui.savings_data = self.savings_data.clone();
             // True iff `cached_filtered` ran an actual recompute this
             // frame (cache miss). The chip strip uses this to flash a
             // brief `↻ updated` badge so the user sees confirmation
@@ -531,15 +537,31 @@ impl BurndownPlugin {
     /// (follow-on chunk with no in-flight publish); calls into the
     /// pure [`Self::apply_chunk_pure`] for the actual state transition
     /// so unit tests can hit every branch without a `HostClient`.
+    ///
+    /// On `Finalised`, kicks off an async savings fetch so the Savings
+    /// tab has fresh data shortly after each usage snapshot lands.
     async fn apply_chunk(&mut self, event: UsageDataEvent, host: &HostClient) {
         let chunk_index = event.chunk_index;
         let outcome = self.apply_chunk_pure(event);
-        if matches!(outcome, ChunkOutcome::DroppedFollowOn) {
-            let _ = host
-                .log_info(format!(
-                    "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
-                ))
-                .await;
+        match outcome {
+            ChunkOutcome::DroppedFollowOn => {
+                let _ = host
+                    .log_info(format!(
+                        "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
+                    ))
+                    .await;
+            }
+            ChunkOutcome::Finalised => {
+                // Refresh the savings snapshot from all three sources.
+                // The output_tokens total lives on grand_total after
+                // the wire→local conversion has completed; safe to read
+                // here because apply_chunk_pure already moved the
+                // assembled data into self.data.
+                let output_tokens =
+                    self.data.as_ref().map(|d| d.grand_total.output_tokens).unwrap_or(0);
+                self.savings_data = Some(fetch_savings(output_tokens).await);
+            }
+            ChunkOutcome::Buffered => {}
         }
     }
 

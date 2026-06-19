@@ -21,6 +21,8 @@ fn create_session_metadata(
         workspace_name: workspace_name.to_string(),
         created_at: Utc::now(),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
+        rtk_enabled: false,
     }
 }
 
@@ -38,6 +40,8 @@ fn create_session_metadata_with_id(
         workspace_name: workspace_name.to_string(),
         created_at: Utc::now(),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
+        rtk_enabled: false,
     }
 }
 

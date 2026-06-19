@@ -12,6 +12,7 @@ use ratatui::{
 
 use ainb_plugin_types_sessions::ScanProgressEvent;
 
+use crate::data::savings::SavingsData;
 use crate::data::usage::{
     BranchUsage, current_quarter, first_of_month, next_month_first, next_quarter,
     previous_month_first, previous_quarter,
@@ -54,6 +55,7 @@ pub enum UsageTab {
     Weekly,
     Projects,
     Optimize,
+    Savings,
 }
 
 impl UsageTab {
@@ -64,6 +66,7 @@ impl UsageTab {
             UsageTab::Weekly,
             UsageTab::Projects,
             UsageTab::Optimize,
+            UsageTab::Savings,
         ]
     }
 
@@ -74,6 +77,7 @@ impl UsageTab {
             UsageTab::Weekly => "Weekly",
             UsageTab::Projects => "By Project",
             UsageTab::Optimize => "Optimize",
+            UsageTab::Savings => "Savings",
         }
     }
 
@@ -83,17 +87,19 @@ impl UsageTab {
             UsageTab::Daily => UsageTab::Weekly,
             UsageTab::Weekly => UsageTab::Projects,
             UsageTab::Projects => UsageTab::Optimize,
-            UsageTab::Optimize => UsageTab::Burndown,
+            UsageTab::Optimize => UsageTab::Savings,
+            UsageTab::Savings => UsageTab::Burndown,
         }
     }
 
     fn prev(&self) -> Self {
         match self {
-            UsageTab::Burndown => UsageTab::Optimize,
+            UsageTab::Burndown => UsageTab::Savings,
             UsageTab::Daily => UsageTab::Burndown,
             UsageTab::Weekly => UsageTab::Daily,
             UsageTab::Projects => UsageTab::Weekly,
             UsageTab::Optimize => UsageTab::Projects,
+            UsageTab::Savings => UsageTab::Optimize,
         }
     }
 }
@@ -316,6 +322,12 @@ pub struct UsageViewState {
     /// behind a confirm because a hard refresh re-parses ALL session
     /// history from source — the CPU-heavy path.
     pub confirm_hard: bool,
+    /// Latest token-savings snapshot, populated asynchronously whenever
+    /// a new `sessions.usage_data` chunk finalises. `None` until the
+    /// first fetch completes. The renderer shows a brief loading state
+    /// while this is absent; after that it renders the last-known figures
+    /// (the fetch runs off the render path so stale data is fine).
+    pub savings_data: Option<SavingsData>,
 }
 
 /// Per-column width step applied by `<` / `>` in the zoom table.
@@ -353,6 +365,7 @@ impl Default for UsageViewState {
             zoom_cols_panel: None,
             copy_flash: None,
             confirm_hard: false,
+            savings_data: None,
         }
     }
 }
@@ -507,6 +520,8 @@ impl UsageViewState {
                         + data.models.len()
                 }
                 UsageTab::Optimize => optimize_usage(data).findings.len(),
+                // Savings renders a fixed 4-row summary card (3 sources + net).
+                UsageTab::Savings => 4,
             },
         }
     }
@@ -1009,6 +1024,9 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
                 }
                 UsageTab::Burndown => render_burndown(buf, layout[content_idx], data, state),
                 UsageTab::Optimize => render_optimize(buf, layout[content_idx], data),
+                UsageTab::Savings => {
+                    render_savings(buf, layout[content_idx], state.savings_data.as_ref())
+                }
             }
         }
     }
@@ -3887,6 +3905,177 @@ fn render_optimize(buf: &mut Buffer, area: Rect, data: &UsageData) {
         }
     }
     render_panel(buf, area, "Optimize Findings", lines);
+}
+
+/// Render the Savings tab.
+///
+/// Three source rows (Headroom, RTK, Caveman) plus a NET total line.
+/// Each row shows: source name, saved token count, and a status badge.
+/// The Caveman row is always marked `(est)` — it is a modelled
+/// potential, not a measured figure.
+///
+/// When `savings_data` is `None` the panel shows a single "Fetching…"
+/// line — this is only visible for the brief window before the first
+/// async fetch completes after a data load.
+fn render_savings(
+    buf: &mut Buffer,
+    area: Rect,
+    savings: Option<&crate::data::savings::SavingsData>,
+) {
+    use crate::data::savings::CAVEMAN_OUTPUT_RATIO;
+
+    let block = ratatui::widgets::Block::default()
+        .title(ratatui::text::Span::styled(
+            " Token Savings ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    ratatui::widgets::Widget::render(block, area, buf);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let Some(sd) = savings else {
+        let fetching = Line::from(Span::styled(
+            "  ⏳ Fetching savings data…",
+            Style::default().fg(MUTED_GRAY),
+        ));
+        ratatui::widgets::Widget::render(Paragraph::new(fetching), inner, buf);
+        return;
+    };
+
+    // ── Row builders ──────────────────────────────────────────────────────
+
+    // Status dot: ● (live/installed) or ○ (down/not installed)
+    let headroom_dot = if sd.headroom_running {
+        Span::styled(
+            "● ",
+            Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("○ ", Style::default().fg(MUTED_GRAY))
+    };
+    let headroom_status = if sd.headroom_running {
+        Span::styled("live", Style::default().fg(TERMINAL_GOOD))
+    } else {
+        Span::styled("proxy down", Style::default().fg(MUTED_GRAY))
+    };
+
+    let rtk_dot = if sd.rtk_installed {
+        Span::styled(
+            "● ",
+            Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("○ ", Style::default().fg(MUTED_GRAY))
+    };
+    let rtk_status = if sd.rtk_installed {
+        Span::styled("installed", Style::default().fg(TERMINAL_GOOD))
+    } else {
+        Span::styled("not installed", Style::default().fg(MUTED_GRAY))
+    };
+
+    let pct_label = format!("×{:.2}", CAVEMAN_OUTPUT_RATIO);
+
+    // Column widths: source(14) + tokens(16) + status
+    let src_w = 14_usize;
+
+    let pad_source = |s: &str| -> String {
+        let mut out = s.to_string();
+        while out.len() < src_w {
+            out.push(' ');
+        }
+        out
+    };
+
+    let lines: Vec<Line> = vec![
+        // ── Header ────────────────────────────────────────────────────────
+        Line::from(vec![
+            Span::styled(
+                format!("  {:<src_w$}", "Source"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<16}", "Tokens Saved"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Status",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {}", "─".repeat((inner.width.saturating_sub(2)) as usize)),
+            Style::default().fg(CORNFLOWER_BLUE),
+        )),
+        // ── Headroom row ──────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            headroom_dot,
+            Span::styled(pad_source("Headroom"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.headroom_tokens_saved)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            headroom_status,
+        ]),
+        // ── RTK row ───────────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            rtk_dot,
+            Span::styled(pad_source("RTK"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.rtk_total_saved)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            rtk_status,
+        ]),
+        // ── Caveman row ───────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("~ ", Style::default().fg(TERMINAL_ACCENT)),
+            Span::styled(pad_source("Caveman (est)"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.caveman_est)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("modelled {pct_label}"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {}", "─".repeat((inner.width.saturating_sub(2)) as usize)),
+            Style::default().fg(CORNFLOWER_BLUE),
+        )),
+        // ── NET (real sources only) ───────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("  {}", pad_source("NET (measured)")),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.net_real())),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Headroom + RTK", Style::default().fg(MUTED_GRAY)),
+        ]),
+        Line::from(""),
+        // ── Caveman disclaimer ────────────────────────────────────────────
+        Line::from(Span::styled(
+            "  (est) = modelled potential, not measured. Install Headroom/RTK for real data.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    ratatui::widgets::Widget::render(Paragraph::new(lines), inner, buf);
 }
 
 fn render_panel(buf: &mut Buffer, area: Rect, title: &str, rows: Vec<String>) {

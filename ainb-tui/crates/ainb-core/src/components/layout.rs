@@ -111,6 +111,10 @@ impl LayoutComponent {
             if let Some(ref overlay) = state.mcp_overlay {
                 crate::components::mcp_overlay::render(frame, frame_size, overlay);
             }
+            // Daemons overlay (read-only; same z-order as MCP overlay).
+            if let Some(ref overlay) = state.daemons_overlay {
+                crate::components::daemons_overlay::render(frame, frame_size, overlay);
+            }
             if state.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
@@ -211,6 +215,10 @@ impl LayoutComponent {
         // MCP pool overlay (above the screen, below the confirmation dialog).
         if let Some(ref overlay) = state.mcp_overlay {
             crate::components::mcp_overlay::render(frame, frame.size(), overlay);
+        }
+        // Daemons overlay (read-only; same z-order as MCP overlay).
+        if let Some(ref overlay) = state.daemons_overlay {
+            crate::components::daemons_overlay::render(frame, frame.size(), overlay);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
@@ -375,7 +383,7 @@ impl LayoutComponent {
             desc(" cleanup"),
             sep(),
             key("u", MUTED_GRAY),
-            desc(" re-auth"),
+            desc(" re-auth "),
         ];
 
         // Line 4: Panels + System. Every panel screen mirrors its
@@ -514,7 +522,7 @@ impl LayoutComponent {
                 cleanup_key,
                 cleanup_desc,
                 key("u", MUTED_GRAY),
-                desc(" re-auth"),
+                desc(" re-auth  "),
             ]),
         ];
 

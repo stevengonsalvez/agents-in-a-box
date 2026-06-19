@@ -3,36 +3,36 @@
 ## Must pass
 
 - Correct aspect for the format preset (verify dimensions, don't eyeball).
-- Bold comic / cel-shaded streetwear style — not 3D, not photoreal, not pencil-sketch.
-- All seven identity anchors present and correctly colored: golden+black soccer-ball head, gold aviators, black cap, black tee with gold trim, brown arms, purple joggers, yellow/black sneakers.
-- Alex is the actor/hero, not decoration (litmus: remove Alex, the message should collapse).
-- ShotClubhouse colorway intact: gold/black/purple spine + electric accent.
+- Crude hand-drawn pen line art on a soft flat pastel background — NOT bold-comic, NOT cel-shaded, NOT 3D, NOT photoreal.
+- Identity anchors present and right: gold-and-black soccer-ball head, **no glasses**, black forward cap, simple tee + joggers, brown arms, simple sneakers; football at feet where it fits.
+- Alex is the actor, not decoration (litmus: remove Alex, the idea should collapse).
+- Gold soccer-ball head is the saturated pop; rest of palette soft and restrained.
+- Generous calm white space; subject ~40–60% of frame.
+- Labels: ≤8, short, readable handwritten.
+- Cute but deadpan — humour from the situation, never goofy faces.
 - Fresh composition — no bundled-example reuse.
-- For explainers: readable — one clear focal action, few elements, breathing room.
-- At most one tagline; labels legible and on-brand.
-- Confident deadpan-cool tone — not goofy, not cute.
 
 ## Failure signals
 
 Regenerate or locally edit when:
 
-- Aspect drifted from the preset.
-- Style went 3D/photoreal/sketch or muddy/desaturated.
-- An anchor is missing or recolored (kit must stay gold/black/purple).
-- Alex looks goofy, panicked, or cartoon-cute.
-- Frame is an over-stuffed diagram (too many nodes/arrows).
-- Looks like a corporate vector infographic or PPT slide.
-- Wrong/illegible label text, or more than one tagline.
-- Alex is standing aside as decoration.
+- Glasses/sunglasses appeared on Alex (most common drift — always remove).
+- Style went bold-comic / cel-shaded / 3D / photoreal / vector-flat.
+- Background got busy, gradient-heavy, or textured (keep flat pastel).
+- An anchor missing or recoloured (kit soft; ball stays gold-black).
+- Alex looks goofy or mascot-poster cute.
+- Over-stuffed frame (too many elements/labels).
+- Top-left type-title appeared.
+- Too similar to a bundled example.
 
 ## How to iterate
 
-- Off-model: pass the reference image again and restate the seven anchors explicitly.
-- Too flat/dull: add electric rim-light and stronger cel shadows; push gold/purple.
-- Too busy (explainer): cut to one focal action + 3–5 elements + bold labels.
-- Too static (hero): stronger silhouette, dynamic stance, low/heroic angle.
-- Too goofy: emphasize deadpan-cool posture; expression is body language, the ball-head has no face.
+- Glasses crept in: edit them out, restate "no glasses" and pass the reference again.
+- Too polished/comic: emphasise crude wobbly hand-drawn lines + flat pastel.
+- Too busy: cut to one idea + 3–5 elements + ≤5 labels, more calm space.
+- Too cute/sugary: emphasise deadpan posture; the ball-head has no face, so swagger comes from the body.
+- Off-model: pass the reference image again and restate the anchors.
 
 ## Delivery judgment
 
-A strong Alex image hits the "take your shot" feeling instantly, reads its point within a second, and looks like it belongs on ShotClubhouse. If it reads as a generic infographic or a cute mascot ad, it fails.
+A strong Alex image reads as a witty hand-drawn pastel sketch that makes you smile, then lands its point in a second — clearly the Sport Head, clearly the Popa family, never a polished comic.
