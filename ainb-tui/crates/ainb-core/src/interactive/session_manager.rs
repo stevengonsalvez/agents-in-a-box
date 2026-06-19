@@ -292,8 +292,11 @@ impl InteractiveSessionManager {
 
         info!("Created worktree at: {}", worktree_info.path.display());
 
-        // Step 1b: Wire RTK project-local hook (best-effort — failure is non-fatal).
-        if rtk_enabled {
+        // Step 1b: Wire RTK project-local hook (best-effort — failure is
+        // non-fatal). Claude only: the hook lives in `.claude/settings.json`,
+        // which Codex/Gemini/Copilot never read — wiring it for them writes a
+        // file nothing consumes.
+        if rtk_enabled && agent_type == SessionAgentType::Claude {
             if let Err(e) = wire_rtk_project_hook(&worktree_info.path) {
                 warn!(
                     "Failed to wire RTK hook in worktree: {} — session launches without RTK",
@@ -455,8 +458,10 @@ impl InteractiveSessionManager {
             std::os::unix::fs::symlink(&existing_worktree_path, &session_path).ok();
         }
 
-        // Step 0b: Wire RTK project-local hook (best-effort — failure is non-fatal).
-        if rtk_enabled {
+        // Step 0b: Wire RTK project-local hook (best-effort — failure is
+        // non-fatal). Claude only: see create_session — `.claude/settings.json`
+        // is a Claude Code surface, ignored by other agents.
+        if rtk_enabled && agent_type == SessionAgentType::Claude {
             if let Err(e) = wire_rtk_project_hook(&existing_worktree_path) {
                 warn!(
                     "Failed to wire RTK hook in worktree: {} — session launches without RTK",
@@ -1530,12 +1535,17 @@ impl InteractiveSession {
 /// is already present, and preserves all other settings (never clobbers).
 /// Best-effort — call sites log warn on error but must not propagate it.
 fn wire_rtk_project_hook(worktree: &std::path::Path) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-
     let Some(cmd) = crate::rtk::project_hook_command() else {
         warn!("rtk binary not found — skipping project hook wiring");
         return Ok(());
     };
+    wire_rtk_project_hook_with_cmd(worktree, &cmd)
+}
+
+/// Inner merge, parameterised on the resolved hook `cmd` so tests can exercise
+/// the real read-merge-write path without rtk on PATH.
+fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
 
     let claude_dir = worktree.join(".claude");
     let settings_path = claude_dir.join("settings.json");
@@ -1543,7 +1553,19 @@ fn wire_rtk_project_hook(worktree: &std::path::Path) -> anyhow::Result<()> {
     let mut root: serde_json::Value = if settings_path.exists() {
         let raw = std::fs::read_to_string(&settings_path)
             .with_context(|| format!("read {}", settings_path.display()))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            // Never overwrite a settings.json we couldn't parse — it may hold
+            // the user's own hooks/config. Leave it untouched; the session
+            // just launches without the rtk hook.
+            Err(e) => {
+                warn!(
+                    "{} is not valid JSON ({e}) — leaving it untouched, session launches without rtk hook",
+                    settings_path.display()
+                );
+                return Ok(());
+            }
+        }
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
@@ -1561,30 +1583,44 @@ fn wire_rtk_project_hook(worktree: &std::path::Path) -> anyhow::Result<()> {
 
     let arr = pre_tool_use.as_array_mut().context("PreToolUse is not an array")?;
 
-    // Idempotent: only append if no existing rtk hook command is present.
+    // Idempotent: skip if an rtk hook is already wired. Match the exact command
+    // or any command containing `rtk hook claude` (the install path may differ)
+    // — tighter than a bare "hook claude" substring, which would false-match
+    // unrelated user commands.
     let already_present = arr.iter().any(|entry| {
         entry.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .map_or(false, |c| c.contains("hook claude"))
+                    .map_or(false, |c| c == cmd || c.contains("rtk hook claude"))
             })
         })
     });
 
-    if !already_present {
-        arr.push(serde_json::json!({
-            "matcher": "Bash",
-            "hooks": [{"type": "command", "command": cmd}]
-        }));
+    // Nothing to add → don't touch the file (avoids mtime churn / reformatting
+    // a user's compact JSON on every launch).
+    if already_present {
+        return Ok(());
     }
+
+    arr.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": cmd}]
+    }));
 
     std::fs::create_dir_all(&claude_dir)
         .with_context(|| format!("create dir {}", claude_dir.display()))?;
 
     let content = serde_json::to_string_pretty(&root).context("serialize settings.json")?;
 
-    if let Err(e) = std::fs::write(&settings_path, &content) {
+    // Atomic write: tmp in the same dir + rename, so a crash / full disk
+    // mid-write can't truncate a settings.json that may hold unrelated user
+    // hooks. rename(2) is atomic on POSIX within a filesystem.
+    let tmp = settings_path.with_extension("json.tmp");
+    if let Err(e) =
+        std::fs::write(&tmp, &content).and_then(|_| std::fs::rename(&tmp, &settings_path))
+    {
+        let _ = std::fs::remove_file(&tmp);
         warn!(
             "failed to write {}: {} — session launches without rtk hook",
             settings_path.display(),
@@ -1809,61 +1845,25 @@ mod tests {
         std::env::remove_var("AINB_HOME");
     }
 
-    /// wire_rtk_project_hook is idempotent: calling twice yields exactly one hook entry.
+    /// Two wires yield exactly one rtk entry — exercises the real function.
     #[test]
     fn wire_rtk_project_hook_merges_idempotently() {
         use tempfile::TempDir;
         let dir = TempDir::new().expect("tempdir");
+        let cmd = "/usr/local/bin/rtk hook claude";
 
-        // First call — creates .claude/settings.json with one entry.
-        // wire_rtk_project_hook degrades gracefully when rtk not on PATH, so we
-        // pre-seed settings.json with a synthetic hook to test the idempotency
-        // logic directly.
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let settings_path = claude_dir.join("settings.json");
-        let initial = serde_json::json!({
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash",
-                        "hooks": [{"type": "command", "command": "/usr/local/bin/rtk hook claude"}]
-                    }
-                ]
-            }
-        });
-        std::fs::write(
-            &settings_path,
-            serde_json::to_string_pretty(&initial).unwrap(),
-        )
-        .unwrap();
+        wire_rtk_project_hook_with_cmd(dir.path(), cmd).expect("first wire");
+        wire_rtk_project_hook_with_cmd(dir.path(), cmd).expect("second wire");
 
-        // Manually invoke the merge logic by calling wire_rtk_project_hook.
-        // Since rtk may not be installed in CI, we patch the path inline by
-        // verifying the idempotency guard in isolation: read back the file and
-        // assert still one entry.
+        let settings_path = dir.path().join(".claude/settings.json");
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
         let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "should have exactly one PreToolUse entry");
-
-        // Simulate a second wire call: re-parse + check already_present guard.
-        let already_present = arr.iter().any(|entry| {
-            entry.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
-                hooks.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .map_or(false, |c| c.contains("hook claude"))
-                })
-            })
-        });
-        assert!(
-            already_present,
-            "idempotency guard must fire on second call"
-        );
+        assert_eq!(arr.len(), 1, "two wires must produce exactly one rtk entry");
+        assert_eq!(arr[0]["hooks"][0]["command"], cmd);
     }
 
-    /// wire_rtk_project_hook preserves unrelated hooks already in settings.json.
+    /// The real function appends rtk while preserving unrelated hooks + settings.
     #[test]
     fn wire_rtk_project_hook_merge_preserves_existing() {
         use tempfile::TempDir;
@@ -1872,7 +1872,6 @@ mod tests {
         std::fs::create_dir_all(&claude_dir).unwrap();
         let settings_path = claude_dir.join("settings.json");
 
-        // Pre-seed an unrelated hook.
         let initial = serde_json::json!({
             "hooks": {
                 "PreToolUse": [
@@ -1890,12 +1889,36 @@ mod tests {
         )
         .unwrap();
 
-        // Verify existing hook is intact after reading back.
+        wire_rtk_project_hook_with_cmd(dir.path(), "/opt/rtk hook claude").expect("wire");
+
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
         assert_eq!(root["someOtherSetting"], serde_json::Value::Bool(true));
         let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "one pre-existing hook");
+        assert_eq!(arr.len(), 2, "pre-existing hook kept + rtk appended");
         assert_eq!(arr[0]["matcher"], "Read");
+        assert_eq!(arr[1]["matcher"], "Bash");
+    }
+
+    /// A settings.json we can't parse is left byte-for-byte untouched — we must
+    /// never clobber a file that may hold the user's own hooks/config.
+    #[test]
+    fn wire_rtk_project_hook_preserves_unparseable_settings() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
+
+        let garbage = "{ not valid json, // with a comment\n";
+        std::fs::write(&settings_path, garbage).unwrap();
+
+        wire_rtk_project_hook_with_cmd(dir.path(), "/opt/rtk hook claude").expect("must not error");
+
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(
+            after, garbage,
+            "unparseable settings must be left untouched"
+        );
     }
 }
