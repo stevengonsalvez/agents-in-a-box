@@ -24,11 +24,12 @@ use crate::components::git_view::GitViewState;
 /// Lines scrolled per mouse-wheel tick.
 const WHEEL_LINES: usize = 3;
 
-/// Headless emit of the structured diff as JSON (no TUI). Any non-`text`
-/// `--format` lands here.
+/// Headless emit of the structured diff as JSON (no TUI). main.rs routes any
+/// non-`text` `--format` here.
 // ponytail: JSON only — the nested files->hunks->rows shape doesn't tabulate,
-// so csv/markdown reuse the JSON. Add real csv/markdown when something needs it.
-pub fn run_headless(path: PathBuf, _format: crate::cli::OutputFormat) -> Result<()> {
+// so csv/markdown reuse the JSON. Add a `format` param + branch here if csv/
+// markdown ever need a distinct rendering.
+pub fn run_headless(path: PathBuf) -> Result<()> {
     let model = crate::components::code_review::parse::build_review_model(&path)?;
     let out = DiffJson::from_model(&path, &model);
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -72,7 +73,7 @@ struct DiffRowJson {
 impl DiffJson {
     fn from_model(path: &std::path::Path, m: &crate::components::code_review::model::ReviewModel) -> Self {
         use crate::components::code_review::model::RowKind;
-        DiffJson {
+        Self {
             path: path.display().to_string(),
             total_insertions: m.total_insertions(),
             total_deletions: m.total_deletions(),

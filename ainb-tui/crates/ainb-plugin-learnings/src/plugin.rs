@@ -165,11 +165,17 @@ impl LearningsPlugin {
                     json = it.next().map(String::as_str) == Some("json");
                 }
                 "--bm25" => bm25 = true,
-                "-k" | "--limit" => {
-                    if let Some(n) = it.next().and_then(|s| s.parse().ok()) {
-                        limit = n;
+                "-k" | "--limit" => match it.next().map(|s| s.parse::<usize>()) {
+                    Some(Ok(n)) => limit = n,
+                    _ => {
+                        return CliOutput {
+                            stdout: Vec::new(),
+                            stderr: format!("learnings: -k/--limit needs a number\n{USAGE}")
+                                .into_bytes(),
+                            exit_code: 2,
+                        };
                     }
-                }
+                },
                 "-h" | "--help" => return CliOutput::ok(USAGE),
                 other => rest.push(other),
             }

@@ -1416,11 +1416,12 @@ impl CliCommand for AbtopCommand {
     }
 }
 
-/// `ainb witr <target>` — headless process-causality trace. Forwards its
-/// argv verbatim to the witr plugin's `cli_dispatch` (namespace `witr`),
-/// which execs the external `witr --json` binary and re-emits text/json.
-/// Mirrors the verbatim-forwarder shape of [`AbtopCommand`], but the work
-/// happens inside the subprocess plugin rather than a direct exec.
+/// `ainb witr <target>` — headless process-causality trace.
+///
+/// Forwards its argv verbatim to the witr plugin's `cli_dispatch` (namespace
+/// `witr`), which execs the external `witr --json` binary and re-emits
+/// text/json. Mirrors the verbatim-forwarder shape of [`AbtopCommand`], but
+/// the work happens inside the subprocess plugin rather than a direct exec.
 pub struct WitrCommand;
 impl CliCommand for WitrCommand {
     fn name(&self) -> &'static str {
@@ -1469,10 +1470,11 @@ impl CliCommand for WitrCommand {
     }
 }
 
-/// `ainb learnings search <query>` — headless search over the reflect
-/// knowledge base. Forwards argv (plus host-global `--format`) to the
-/// learnings plugin's `cli_dispatch` (namespace `learnings`), which shells
-/// `qmd` and prints ranked hits. Same verbatim-forwarder shape as witr.
+/// `ainb learnings search <query>` — headless search over the reflect KB.
+///
+/// Forwards argv (plus host-global `--format`) to the learnings plugin's
+/// `cli_dispatch` (namespace `learnings`), which shells `qmd` and prints
+/// ranked hits. Same verbatim-forwarder shape as witr.
 pub struct LearningsCommand;
 impl CliCommand for LearningsCommand {
     fn name(&self) -> &'static str {

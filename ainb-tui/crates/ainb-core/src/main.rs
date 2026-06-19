@@ -273,7 +273,7 @@ async fn tokio_main() -> Result<()> {
                 entered_tui = true;
                 cli::diff_review::run(path)
             } else {
-                cli::diff_review::run_headless(path, format)
+                cli::diff_review::run_headless(path)
             }
         }
 
