@@ -69,6 +69,11 @@ fn resolve_secret_with(value: &str, env: impl Fn(&str) -> Option<String>) -> Str
 fn resolve_keychain(service: &str) -> String {
     let service_owned = service.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
+    // Detached on purpose: on a timeout we stop waiting on `rx` and return, but
+    // this thread is NOT joined. It self-reaps — `security` is bounded by its own
+    // 5s wall-clock (KEYCHAIN_TIMEOUT mirrors it), so the thread finishes shortly
+    // after and `tx.send` into the dropped channel is a harmless no-op. A bounded,
+    // intentional leak, not an unbounded one.
     std::thread::spawn(move || {
         let out = Command::new("/usr/bin/security")
             .args(["find-generic-password", "-s", &service_owned, "-w"])
