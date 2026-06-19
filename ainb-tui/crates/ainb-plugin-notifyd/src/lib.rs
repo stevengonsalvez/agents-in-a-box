@@ -26,6 +26,7 @@
 pub mod cli;
 pub mod envelope;
 pub mod fallback;
+pub mod ingest;
 pub mod install;
 pub mod osnotify;
 pub mod paths;
