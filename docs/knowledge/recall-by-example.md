@@ -126,4 +126,4 @@ Each card is one retrieval feature: a concrete **example**, **why it matters**, 
 
 ---
 
-Every feature above is verified by a behavioural proof under [`reflect-kb/tests/eval/behavioral/proofs/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/reflect-kb/tests/eval/behavioral/proofs) that demonstrates the exact behaviour with the knob on **and** off. See the [`reflect` CLI reference](/knowledge/reflect-cli/) for how to drive recall directly.
+Every feature above is verified by a behavioural proof under [`tests/eval/behavioral/proofs/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/tests/eval/behavioral/proofs) (in ainb-reflect-memory) that demonstrates the exact behaviour with the knob on **and** off. See the [`reflect` CLI reference](/knowledge/reflect-cli/) for how to drive recall directly.

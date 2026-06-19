@@ -9,15 +9,16 @@ The repo publishes them through `.claude-plugin/marketplace.json` at the repo ro
 
 ```bash
 claude plugin marketplace add stevengonsalvez/agents-in-a-box
-claude plugin install reflect@agents-in-a-box
 claude plugin install ainb-fleet@agents-in-a-box
 ```
+
+> `reflect` is no longer in this marketplace — it was extracted to [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) and ships from that repo's `plugin/` dir (or run `ainb reflect bootstrap`).
 
 ## The plugins
 
 | Plugin | What it does | Install |
 |---|---|---|
-| [reflect](./reflect.md) | Agent self-improvement + retrieval — captures learnings and auto-injects relevant prior ones at session start. | `claude plugin install reflect@agents-in-a-box` |
+| [reflect](./reflect.md) | Agent self-improvement + retrieval — captures learnings and auto-injects relevant prior ones at session start. **(extracted → [ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory))** | `ainb reflect bootstrap` |
 | [ainb-fleet](./ainb-fleet.md) | LLM-facing skill bundle teaching agents to drive `ainb fleet …` multi-session orchestration (broadcast, sequence, needs, daemon). | `claude plugin install ainb-fleet@agents-in-a-box` |
 | [ainb-hooks](./ainb-hooks.md) | Emits Claude Code / Codex lifecycle events to the ainb notification inbox (consumed by the [Inbox & notifications](../../tui/inbox-notifications.md) daemon — host code, not a plugin). | `ainb-notifyd install --claude --codex` |
 

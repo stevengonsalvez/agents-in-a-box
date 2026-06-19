@@ -26,7 +26,7 @@ One canonical source tree, many AI tools. Author a skill, agent, or workflow onc
 | `packages/workflows/single-agent/` | Guided plan -> implement -> validate flows |
 | `packages/knowledge/` | Knowledge/docs templates |
 
-The `reflect` Claude Code plugin lives at root-level `plugins/reflect/` (beside its companion library), not under `toolkit/packages/`. The reflect/recall knowledge-base CLI lives at root-level `reflect-kb/` and is installed via `uv tool install` by `bootstrap.js`.
+The `reflect` Claude Code plugin and its companion knowledge-base CLI were extracted into their own repo, [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) — the CLI flattened at that repo's root, the plugin under `plugin/`. They are no longer in this monorepo (or under `toolkit/packages/`). The reflect/recall CLI is installed via `uv tool install` (`uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`) by `bootstrap.js`.
 
 ## Supported tools
 

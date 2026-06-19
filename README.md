@@ -53,7 +53,8 @@ separate, standalone repo — `ainb` consumes it as a pinned external source.
 
 | Repo | What it holds |
 |---|---|
-| **stevengonsalvez/agents-in-a-box** (this repo) | The `ainb` TUI/CLI unit manager (Rust workspace), the v2 plugin system, the `reflect` knowledge plugin + `reflect-kb`, and the docs. |
+| **stevengonsalvez/agents-in-a-box** (this repo) | The `ainb` TUI/CLI unit manager (Rust workspace), the v2 plugin system, and the docs. |
+| **[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory)** | `reflect` — the long-term memory engine (GraphRAG + QMD) + its Claude Code plugin, extracted from this monorepo. Engine install: `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`. |
 | **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 91 curated skills, 37 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
 
 <p align="center">
@@ -430,7 +431,7 @@ A two-tier learning system that captures insights during development and retriev
 | **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
 | **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
 
-The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect-kb/`](reflect-kb/) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in this monorepo and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'`.
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect`](https://github.com/stevengonsalvez/ainb-reflect-memory) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in its own repo, [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory), and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`.
 
 **[How the knowledge system works →](docs/knowledge/overview.md)**
 
@@ -460,13 +461,11 @@ agents-in-a-box/
 │   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
 │
-├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
-│   ├── src/                    #   Package source (installed via `uv tool install`)
-│   ├── tests/                  #   Unit + integration tests
-│   └── pyproject.toml          #   Workspace member
-│
-├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
-│   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+# reflect (the `reflect` CLI + GraphRAG/QMD engine and its Claude Code plugin)
+# now lives in a SEPARATE repo: github.com/stevengonsalvez/ainb-reflect-memory
+# — flattened, with the engine at its repo root and the plugin under plugin/.
+#
+├── plugins/                    # Claude Code plugins (root-level)
 │   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
 │   └── ainb-hooks/             #   ainb lifecycle hooks
 │

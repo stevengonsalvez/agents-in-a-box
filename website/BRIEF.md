@@ -38,9 +38,9 @@ A **terminal-native ecosystem for managing AI coding agents**. Three components,
 
 A fourth, supporting component:
 
-4. **Knowledge system (`reflect` / `recall`).** Two-tier learning capture and retrieval — fast QMD vector search + nano-graphrag entity graph. The `reflect` CLI lives in `reflect-kb/` and is installed via `uv tool install`.
+4. **Knowledge system (`reflect` / `recall`).** Two-tier learning capture and retrieval — fast QMD vector search + nano-graphrag entity graph. The `reflect` CLI and its companion Claude Code plugin now live in their own repo, **[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory)** (engine flattened at the repo root, plugin under `plugin/`), and the CLI is installed via `uv tool install`.
 
-The monorepo also hosts a **Claude Code plugin** (`plugins/reflect/`) distributed via `.claude-plugin/marketplace.json` — distinct from ainb v2 plugins; same name, different runtime. The website **must** disambiguate.
+That repo also ships a **Claude Code plugin** (under `plugin/`) — distinct from ainb v2 plugins; same name, different runtime. The website **must** disambiguate.
 
 ---
 
@@ -429,8 +429,8 @@ A single ASCII box diagram:
            └────────────────────────────────────┘
 
            ┌────────────────────────────────────┐
-           │  Knowledge: reflect-kb (GraphRAG)  │
-           │  /reflect  /recall  /ingest        │
+           │  Knowledge: ainb-reflect-memory    │
+           │  (GraphRAG) /reflect /recall /ingest│
            └────────────────────────────────────┘
 ```
 

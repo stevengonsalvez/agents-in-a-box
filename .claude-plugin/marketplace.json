@@ -10,20 +10,6 @@
   },
   "plugins": [
     {
-      "name": "reflect",
-      "source": "./plugins/reflect",
-      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect:cost, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
-      "strict": false,
-      "keywords": [
-        "self-improvement",
-        "learnings",
-        "graphrag",
-        "memory",
-        "recall",
-        "retrieval"
-      ]
-    },
-    {
       "name": "ainb-fleet",
       "source": "./plugins/ainb-fleet",
       "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, and the auto-continue daemon. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
