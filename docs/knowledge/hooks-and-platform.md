@@ -3,13 +3,18 @@ title: "Hooks & Platform · how reflect captures and recalls across Claude + Cod
 description: "Visual deep-dive into the reflect plugin's hook architecture, recall flows, capture flows, status line integration, and cross-tool drain — across Claude Code and Codex CLI."
 ---
 
-> **The short version** — Two harnesses (Claude Code, Codex CLI) wire the same hook scripts
-> into different config files (`~/.claude/settings.json` vs `~/.codex/hooks.json`) and share
-> one on-disk knowledge base (`~/.reflect/` queue + `~/.learnings/` documents + GraphRAG
-> index). **SessionStart** fires the baseline recall + the bg-drainer; **UserPromptSubmit**
-> fires the intent-sharp recall with per-session dedupe; **PreCompact**, **Stop**, and
-> **PostToolUse** capture learnings into the shared store. A codex session can enqueue a
-> reflection that a later Claude session drains — and vice versa.
+> **The short version** — Three harnesses (Claude Code, Codex CLI, GitHub Copilot) wire the same
+> hook scripts into different config files (`~/.claude/settings.json` vs `~/.codex/hooks.json` vs
+> `~/.copilot/hooks/reflect.json`) and share one on-disk knowledge base (`~/.reflect/` queue +
+> `~/.learnings/` documents + GraphRAG index). **SessionStart** fires the baseline recall + the
+> bg-drainer; **UserPromptSubmit** fires the intent-sharp recall with per-session dedupe;
+> **PreCompact**, **Stop**, and **PostToolUse** capture learnings into the shared store. A codex
+> session can enqueue a reflection that a later Claude session drains — and vice versa.
+>
+> **No extra LLM/embedding config** on any harness — recall/index use a local model (no key);
+> capture reuses the harness LLM (`claude -p`), so Codex/Copilot need the `claude` CLI on PATH for
+> the drain. Copilot drops `userPromptSubmitted` hook output, so per-prompt recall there is manual
+> `/recall` (SessionStart auto-recall works).
 
 ---
 
