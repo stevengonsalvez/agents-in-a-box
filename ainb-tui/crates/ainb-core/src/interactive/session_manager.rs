@@ -949,6 +949,16 @@ impl InteractiveSessionManager {
             // Continue anyway - removal was successful
         }
 
+        // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
+        // proxy so it doesn't linger after the last consumer is gone.
+        // `headroom::stop()` is a no-op when the proxy wasn't ainb-spawned (no
+        // pid file), so a user's own `headroom proxy` is never touched.
+        let remaining_headroom = store.sessions.values().filter(|m| m.headroom_enabled).count();
+        if remaining_headroom == 0 {
+            info!("No Headroom sessions remain — reaping shared proxy");
+            crate::headroom::stop();
+        }
+
         info!(
             "<<< InteractiveSessionManager::remove_session() COMPLETE: {}",
             session_id
@@ -1239,8 +1249,19 @@ impl InteractiveSessionManager {
         // Ensure the shared Headroom proxy is running before we build the env
         // that points the CLI at it. On error we log a warning and continue —
         // the session still launches, just without working compression.
-        // TODO(P2-followup #951): respawn Claude Code daemon under proxy env
-        // TODO(idle-reap): reap proxy when no Headroom-enabled sessions remain
+        //
+        // #951 (Claude Code daemon bypass): NOT reproduced in ainb's launch
+        // model. We respawn the pane with `export ANTHROPIC_BASE_URL=… && exec
+        // claude`, so the CLI process inherits the override directly. Live-
+        // verified 2026-06-19: routing a call through the proxy incremented its
+        // request counter, so the env reaches the upstream request. The
+        // headroom-issue fix (killing Claude Code's global daemon) is
+        // deliberately NOT done here — it would disrupt unrelated sessions to
+        // solve a problem we cannot reproduce. The statusline reflects ACTUAL
+        // routing, so any real bypass would surface there rather than silently.
+        //
+        // Idle-reap is handled in `remove_session()` (stops the shared proxy
+        // when the last Headroom session closes).
         if headroom_enabled
             && matches!(
                 agent_type,
