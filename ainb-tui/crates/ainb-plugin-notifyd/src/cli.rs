@@ -137,6 +137,55 @@ pub fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+/// `list` — print persisted notifications (most recent first) straight from
+/// the SQLite store.
+// ponytail: DB read only — a live daemon's not-yet-persisted in-memory events
+// won't appear. Add a daemon control-socket query if that ever matters.
+pub fn cmd_list(
+    include_dismissed: bool,
+    agent: Option<&str>,
+    project: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> Result<()> {
+    let paths = Paths::from_home()?;
+    let store = crate::store::Store::open(&paths.db).context("open notifications store")?;
+    let rows = store.list(include_dismissed, agent, project, limit)?;
+    if json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "ts": r.ts,
+                    "agent": r.agent,
+                    "session_id": r.session_id,
+                    "cwd": r.cwd,
+                    "project": r.project,
+                    "raw_event": r.raw_event,
+                    "read": r.read,
+                    "dismissed": r.dismissed,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+    } else if rows.is_empty() {
+        println!("no notifications");
+    } else {
+        println!(
+            "{:<14} {:<8} {:<22} {}",
+            "ts(ms)", "agent", "project", "event"
+        );
+        for r in &rows {
+            println!(
+                "{:<14} {:<8} {:<22} {}",
+                r.ts, r.agent, r.project, r.raw_event
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

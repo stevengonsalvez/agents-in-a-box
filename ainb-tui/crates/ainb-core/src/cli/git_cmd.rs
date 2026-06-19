@@ -18,7 +18,7 @@ use crate::cli::util::find_session;
 use crate::git::{WorktreeInfo, WorktreeManager};
 use crate::interactive::session_manager::SessionStore;
 
-/// Subcommands for the `git` command
+/// Manage git worktrees + inspect session changes. Description set in `cli/registry.rs`.
 #[derive(Subcommand)]
 pub enum GitCommands {
     /// List all managed worktrees and their session association

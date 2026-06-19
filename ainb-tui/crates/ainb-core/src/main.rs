@@ -137,6 +137,12 @@ async fn tokio_main() -> Result<()> {
                 clap::Arg::new("path")
                     .help("Repository path (default: current directory)")
                     .default_value("."),
+            )
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb diff-review                 Review uncommitted changes in the current repo\n  \
+                 ainb diff-review ~/code/proj     Review a specific repo\n  \
+                 ainb diff-review --format json   Emit the structured diff as JSON (headless)",
             ),
     );
     app = registry.build_clap(app);
@@ -259,11 +265,17 @@ async fn tokio_main() -> Result<()> {
         // diff-review: interactive Code Review surface for a repo path (owns the
         // alternate screen, so it is handled inline rather than via the registry).
         Some(("diff-review", sub)) => {
-            entered_tui = true;
             let path = sub
                 .get_one::<String>("path")
                 .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
-            cli::diff_review::run(path)
+            // `--format text` (default) opens the interactive surface; any
+            // machine format emits the diff as JSON headless.
+            if matches!(format, cli::OutputFormat::Text) {
+                entered_tui = true;
+                cli::diff_review::run(path)
+            } else {
+                cli::diff_review::run_headless(path)
+            }
         }
 
         // Every other subcommand routes through the registry.

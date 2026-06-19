@@ -59,11 +59,13 @@ const DEFAULT_CREATOR_ID: &str = "stevie";
 /// Lifecycle state a freshly-created issue lands in.
 const DEFAULT_ISSUE_STATE: &str = "open";
 
-/// The `hangar` subcommand tree.
-///
-/// The single derive enum the registry's [`HangarCommand`](crate::cli::registry)
-/// augments onto the root `ainb` command. Each variant is a noun group whose
-/// inner enum carries the verbs.
+// The single derive enum the registry's `HangarCommand` augments onto the root
+// `ainb` command. Each variant is a noun group whose inner enum carries the
+// verbs. The user-facing `about` is set in `cli/registry.rs` (`.about()` after
+// `augment_subcommands`). Keep the doc-comment below a SINGLE line — a
+// multi-line doc also becomes clap `long_about` and would leak into
+// `ainb hangar --help`.
+/// Hangar managed-agents control plane.
 #[derive(Subcommand, Debug)]
 pub enum HangarCommand {
     /// Manage Hangar issues.
