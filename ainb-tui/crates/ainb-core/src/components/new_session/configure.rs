@@ -738,6 +738,14 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
         }
     }
 
+    // Contextual help in the filler space (the Min(1) chunk between the rows
+    // and the help bar), keyed to the focused row. Headroom card for now — the
+    // pattern extends to other rows when they need it.
+    let filler_chunk = chunks[rows.len()];
+    if state.focused_row == ConfigureRow::HeadroomProxy && state.headroom_available {
+        render_headroom_guide(f, filler_chunk);
+    }
+
     // Help bar — always last chunk.
     let help_chunk = *chunks.last().expect("layout always emits help row");
     let in_prompt =
@@ -1117,6 +1125,39 @@ fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focuse
         Style::default().fg(MUTED_GRAY),
     ));
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Contextual "when to use Headroom" card, shown in the new-session filler
+/// space while the Headroom row is focused. Honest pros/cons at the point of
+/// choice — token savings vs. latency + a proxy dependency that auto-degrades.
+fn render_headroom_guide(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "  Headroom \u{00b7} local compression proxy",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Use when token budget matters more than speed.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} trims context \u{2192} fewer tokens billed",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} ~100ms latency per call",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} proxy dependency \u{2014} auto-degrades to direct on failure",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "  Off = straight to the provider \u{00b7} fastest \u{00b7} no savings",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Inline marker + guidance sub-line for a Branch-row problem. Returns
