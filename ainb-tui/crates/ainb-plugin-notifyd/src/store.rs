@@ -647,7 +647,12 @@ impl Store {
 
     /// Upsert one materialized state row, keyed on `(session_id, cwd)`.
     /// Last-write-wins on the whole row (the materializer always carries
-    /// the freshest fold).
+    /// the freshest fold), EXCEPT `parent`, which is sticky across the session
+    /// lifetime: `COALESCE(excluded.parent, parent)` keeps a previously-recorded
+    /// parentage when a later batch's events omit it. Parentage is established
+    /// once (the first event that carries it) and never legitimately cleared, so
+    /// a NULL in a later fold must not clobber it — without the COALESCE a
+    /// session's `parent` would flicker to NULL on any event that lacks it.
     pub fn upsert_current_state(&self, row: &StateRow) -> Result<(), StoreError> {
         let conn = self.conn();
         conn.execute(
@@ -657,7 +662,7 @@ impl Store {
              ON CONFLICT(session_id, cwd) DO UPDATE SET
                 kind          = excluded.kind,
                 context       = excluded.context,
-                parent        = excluded.parent,
+                parent        = COALESCE(excluded.parent, parent),
                 last_event_ts = excluded.last_event_ts,
                 source        = excluded.source",
             params![
@@ -1131,6 +1136,53 @@ mod tests {
         store.upsert_current_state(&other).unwrap();
         assert_eq!(store.list_current_state().unwrap().len(), 2);
         assert!(store.get_current_state("missing", "/x").unwrap().is_none());
+    }
+
+    #[test]
+    fn parent_is_sticky_across_upserts_when_a_later_row_omits_it() {
+        // Finding 5: parent established once must survive a later upsert that
+        // carries parent=None (a batch whose events lacked the parent field).
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let base = StateRow {
+            session_id: "child".into(),
+            cwd: "/p".into(),
+            kind: "RUNNING".into(),
+            context: None,
+            parent: Some("par-1".into()),
+            last_event_ts: 100,
+            source: "hook".into(),
+        };
+        store.upsert_current_state(&base).unwrap();
+
+        // Later upsert with parent = None must NOT clobber the established one.
+        let later = StateRow {
+            kind: "ASK".into(),
+            parent: None,
+            last_event_ts: 200,
+            ..base.clone()
+        };
+        store.upsert_current_state(&later).unwrap();
+        let got = store.get_current_state("child", "/p").unwrap().unwrap();
+        assert_eq!(got.kind, "ASK", "non-parent fields still last-write-wins");
+        assert_eq!(
+            got.parent.as_deref(),
+            Some("par-1"),
+            "parent is sticky across batches (COALESCE)"
+        );
+
+        // A NEW non-null parent still updates it (re-parenting is allowed).
+        let reparent = StateRow {
+            parent: Some("par-2".into()),
+            last_event_ts: 300,
+            ..base.clone()
+        };
+        store.upsert_current_state(&reparent).unwrap();
+        assert_eq!(
+            store.get_current_state("child", "/p").unwrap().unwrap().parent.as_deref(),
+            Some("par-2"),
+            "a fresh non-null parent overrides"
+        );
     }
 
     #[test]
