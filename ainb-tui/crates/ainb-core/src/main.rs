@@ -136,6 +136,11 @@ async fn tokio_main() -> Result<()> {
                 clap::Arg::new("path")
                     .help("Repository path (default: current directory)")
                     .default_value("."),
+            )
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb diff-review                 Review uncommitted changes in the current repo\n  \
+                 ainb diff-review ~/code/proj     Review a specific repo",
             ),
     );
     app = registry.build_clap(app);

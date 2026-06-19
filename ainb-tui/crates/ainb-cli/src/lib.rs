@@ -54,6 +54,10 @@ pub enum Command {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(after_help = "\
+EXAMPLES:
+  ainb doctor                      Health-check skill manifest/lockfile/deployed files
+  ainb doctor --offline            Skip source-reachability network checks")]
 pub struct DoctorArgs {
     /// Skip the source-reachability check (avoid hitting the
     /// network / re-running fetchers).

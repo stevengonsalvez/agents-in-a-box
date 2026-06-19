@@ -179,9 +179,13 @@ impl CliCommand for RunCommand {
         "run"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::RunArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("Spawn a new AI coding session"),
-        ))
+        // `.about()` is applied AFTER `augment_args` so it wins: the derive
+        // macro otherwise overwrites the command description with the
+        // `RunArgs` doc-comment ("Arguments for the run command").
+        app.subcommand(
+            <crate::cli::RunArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Spawn a new AI coding session"),
+        )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::RunArgs::from_arg_matches(matches) {
@@ -197,9 +201,17 @@ impl CliCommand for ListCommand {
         "list"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::ListArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("List all sessions"),
-        ))
+        app.subcommand(
+            <crate::cli::ListArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("List all sessions (running + idle)")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb list                        List all sessions\n  \
+                     ainb list --running              Only running sessions\n  \
+                     ainb list --workspace my-proj    Sessions for one workspace\n  \
+                     ainb list --format json          Machine-readable output",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::ListArgs::from_arg_matches(matches) {
@@ -215,9 +227,16 @@ impl CliCommand for LogsCommand {
         "logs"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::LogsArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("View session output/logs"),
-        ))
+        app.subcommand(
+            <crate::cli::LogsArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("View session output/logs")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb logs my-project             Last 100 lines for a session\n  \
+                     ainb logs my-project -f          Follow live (like tail -f)\n  \
+                     ainb logs my-project -l 500      Last 500 lines",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::LogsArgs::from_arg_matches(matches) {
@@ -233,9 +252,14 @@ impl CliCommand for AttachCommand {
         "attach"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::AttachArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("Attach to a session (drops into tmux)"),
-        ))
+        app.subcommand(
+            <crate::cli::AttachArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Attach to a session (drops into tmux)")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb attach my-project           Drop into the session's tmux",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::AttachArgs::from_arg_matches(matches) {
@@ -251,9 +275,15 @@ impl CliCommand for StatusCommand {
         "status"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::StatusArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("Check session status"),
-        ))
+        app.subcommand(
+            <crate::cli::StatusArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Show a session's status/health")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb status my-project           Show status/health\n  \
+                     ainb status my-project --format json",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::StatusArgs::from_arg_matches(matches) {
@@ -271,9 +301,15 @@ impl CliCommand for KillCommand {
         "kill"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::KillArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("Kill a session"),
-        ))
+        app.subcommand(
+            <crate::cli::KillArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Terminate a session")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb kill my-project             Kill (with confirmation)\n  \
+                     ainb kill my-project --force     Kill without prompting",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::KillArgs::from_arg_matches(matches) {
@@ -289,7 +325,10 @@ impl CliCommand for AuthCommand {
         "auth"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(Command::new(self.name()).about("Set up authentication"))
+        app.subcommand(Command::new(self.name()).about("Set up authentication").after_help(
+            "EXAMPLES:\n  \
+             ainb auth                        Interactive authentication setup",
+        ))
     }
     fn run(&self, _matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move { crate::cli::auth::run_auth_setup().await })
@@ -303,10 +342,16 @@ impl CliCommand for RecoverCommand {
     }
     fn build(&self, app: Command) -> Command {
         app.subcommand(
+            // `.about()` AFTER augment so it wins over the enum doc-comment.
             <crate::cli::recover::RecoverCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Recover orphaned or crashed sessions")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Recover orphaned or crashed sessions")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb recover list                Find orphaned sessions + broken worktrees\n  \
+                 ainb recover resume <id>         Re-register an orphaned session\n  \
+                 ainb recover cleanup             Remove orphans + broken worktrees",
             ),
         )
     }
@@ -326,9 +371,17 @@ impl CliCommand for ConfigCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             <crate::cli::config_cmd::ConfigCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Manage configuration")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Manage configuration")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb config show                                Merged config from all sources\n  \
+                 ainb config get authentication.default_model    Read one value (dot notation)\n  \
+                 ainb config set ui_preferences.show_git_status true\n  \
+                 ainb config path                                Where config files live\n  \
+                 ainb config edit                                Open user config in $EDITOR\n  \
+                 ainb config reset                               Restore defaults",
             ),
         )
     }
@@ -347,10 +400,16 @@ impl CliCommand for GitCommand {
     }
     fn build(&self, app: Command) -> Command {
         app.subcommand(
+            // `.about()` AFTER augment so it wins over the enum doc-comment.
             <crate::cli::git_cmd::GitCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Git worktree operations")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Manage git worktrees + inspect session changes")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb git worktrees               List managed worktrees + session links\n  \
+                 ainb git status my-project       Git status for a session's worktree\n  \
+                 ainb git cleanup                 Remove orphaned worktrees",
             ),
         )
     }
@@ -370,9 +429,15 @@ impl CliCommand for FavoritesCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             <crate::cli::favorites::FavoritesCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Manage favorite repositories")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Manage favorite repositories")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb favorites list                       Favorites ranked by usage\n  \
+                 ainb favorites add --alias <alias> <src>  Add a favorite (alias + path/URL)\n  \
+                 ainb favorites use <alias>                Record a use (bumps ranking)\n  \
+                 ainb favorites remove <alias>             Delete a favorite",
             ),
         )
     }
@@ -390,9 +455,17 @@ impl CliCommand for InitCommand {
         "init"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::init::InitArgs as clap::Args>::augment_args(
-            Command::new(self.name()).about("First-time setup and prerequisite checking"),
-        ))
+        app.subcommand(
+            <crate::cli::init::InitArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("First-time setup and prerequisite checking")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb init                        First-time setup (interactive)\n  \
+                     ainb init --check                Only check prerequisites, change nothing\n  \
+                     ainb init --status               Show onboarding completion status\n  \
+                     ainb init --reset --force        Factory reset ~/.agents-in-a-box (non-interactive)",
+                ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::init::InitArgs::from_arg_matches(matches) {
@@ -409,10 +482,21 @@ impl CliCommand for DoctorCommand {
     }
     fn build(&self, app: Command) -> Command {
         app.subcommand(
-            <crate::cli::doctor::DoctorArgs as clap::Args>::augment_args(
-                Command::new(self.name())
-                    .about("Classified dependency check for the reflect / statusline toolchain"),
-            ),
+            // `.about()` + `.after_help()` are applied AFTER `augment_args` so
+            // they win: the derive macro otherwise overwrites the command
+            // description + help with the `DoctorArgs` doc-comment.
+            // `ainb doctor` is intercepted before clap (main.rs
+            // SKILL_MANAGER_CLI_COMMANDS) and runs the skill-manager doctor; this
+            // registry entry only labels the root `--help` list + feeds shell
+            // completions, so its description must match what actually runs. The
+            // reflect/statusline dependency check lives at `ainb reflect check`.
+            <crate::cli::doctor::DoctorArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Health-check the skill manifest, lockfile, deployed files + sources")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb doctor                      Health-check skill manifest/lockfile/deployed files\n  \
+                     ainb doctor --offline            Skip source-reachability network checks",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -433,9 +517,14 @@ impl CliCommand for ReflectCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             <crate::cli::reflect::ReflectCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Reflect plugin lifecycle: bootstrap installer + dependency check")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Reflect plugin lifecycle: bootstrap installer + dependency check")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb reflect bootstrap           One-step install of reflect-kb[graph]\n  \
+                 ainb reflect bootstrap --yes     Non-interactive install\n  \
+                 ainb reflect check               Classified dependency report",
             ),
         )
     }
@@ -455,9 +544,14 @@ impl CliCommand for PresetsCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             <crate::cli::presets::PresetsCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Manage session presets")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Manage session presets")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb presets list                Built-in + custom presets\n  \
+                 ainb presets show <name>         Full preset details\n  \
+                 ainb presets apply <name>        Write .agents-box/preset.toml in this repo",
             ),
         )
     }
@@ -477,9 +571,16 @@ impl CliCommand for UsageCommand {
     fn build(&self, app: Command) -> Command {
         app.subcommand(
             <crate::cli::usage::UsageCommands as Subcommand>::augment_subcommands(
-                Command::new(self.name())
-                    .about("Usage analytics, reports, export, and optimization")
-                    .subcommand_required(true),
+                Command::new(self.name()).subcommand_required(true),
+            )
+            .about("Usage analytics, reports, export, and optimization")
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb usage today                 Today's usage  (needs the burndown plugin)\n  \
+                 ainb usage month                 Current month\n  \
+                 ainb usage report                Compact burndown report\n  \
+                 ainb usage export --format csv   Export usage data\n  \
+                 ainb usage models                Per-model rollup",
             ),
         )
     }
@@ -996,7 +1097,12 @@ impl CliCommand for TmuxCommand {
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(install)
-                .subcommand(status),
+                .subcommand(status)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb tmux status                 Is ~/.tmux.conf current vs the bundled conf?\n  \
+                     ainb tmux install                Install/upgrade bundled tmux.conf (backs up existing)",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1154,7 +1260,13 @@ impl CliCommand for CompletionCommand {
         app.subcommand(
             Command::new(self.name())
                 .about("Generate shell completions (bash, zsh, fish, powershell, elvish)")
-                .arg(shell_arg),
+                .arg(shell_arg)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb completion zsh > ~/.zsh/completions/_ainb\n  \
+                     ainb completion bash > /usr/local/etc/bash_completion.d/ainb\n  \
+                     ainb completion fish > ~/.config/fish/completions/ainb.fish",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1202,6 +1314,11 @@ impl CliCommand for AbtopCommand {
                         .help(
                             "Extra flags forwarded verbatim to `abtop --once` (e.g. --theme <name>)",
                         ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb abtop                       Snapshot running AI agents\n  \
+                     ainb abtop --theme dracula       Forward flags to `abtop --once`",
                 ),
         )
     }
@@ -1249,7 +1366,7 @@ impl CliCommand for PluginCommand {
     }
     fn build(&self, app: Command) -> Command {
         let install = Command::new("install")
-            .about("Install a plugin from a marketplace")
+            .about("Install a plugin from a marketplace (NOT YET IMPLEMENTED)")
             .arg(
                 clap::Arg::new("plugin")
                     .required(true)
@@ -1263,7 +1380,7 @@ impl CliCommand for PluginCommand {
                     .help("skip the capability approval prompt"),
             );
         let update = Command::new("update")
-            .about("Update an installed plugin to the latest matching version")
+            .about("Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)")
             .arg(clap::Arg::new("plugin").required(true))
             .arg(
                 clap::Arg::new("yes")
@@ -1273,7 +1390,7 @@ impl CliCommand for PluginCommand {
                     .help("skip prompts when new capabilities are requested"),
             );
         let remove_cmd = Command::new("remove")
-            .about("Remove an installed plugin")
+            .about("Remove an installed plugin (NOT YET IMPLEMENTED)")
             .arg(clap::Arg::new("plugin").required(true))
             .arg(
                 clap::Arg::new("yes")
@@ -1284,22 +1401,24 @@ impl CliCommand for PluginCommand {
             );
         let list = Command::new("list").about("List installed plugins");
         let search = Command::new("search")
-            .about("Search registered marketplaces by plugin name")
+            .about("Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)")
             .arg(clap::Arg::new("query").required(true));
         let marketplace = Command::new("marketplace")
-            .about("Manage marketplace registries")
+            .about("Manage marketplace registries (NOT YET IMPLEMENTED)")
             .subcommand_required(true)
             .subcommand(
                 Command::new("add")
-                    .about("Register a marketplace by URL or local path")
+                    .about("Register a marketplace by URL or local path (NOT YET IMPLEMENTED)")
                     .arg(clap::Arg::new("url").required(true)),
             )
             .subcommand(
                 Command::new("remove")
-                    .about("Unregister a marketplace by name")
+                    .about("Unregister a marketplace by name (NOT YET IMPLEMENTED)")
                     .arg(clap::Arg::new("name").required(true)),
             )
-            .subcommand(Command::new("list").about("List registered marketplaces"));
+            .subcommand(
+                Command::new("list").about("List registered marketplaces (NOT YET IMPLEMENTED)"),
+            );
         // Phase 7d-cli — DevX subcommands for the subprocess plugin runtime.
         let lint_cmd = Command::new("lint")
             .about("Validate a plugin manifest + binary (ABI 2.0 sanity checks)")
@@ -1356,7 +1475,14 @@ impl CliCommand for PluginCommand {
                 .subcommand(marketplace)
                 .subcommand(lint_cmd)
                 .subcommand(watch_cmd)
-                .subcommand(tail_cmd),
+                .subcommand(tail_cmd)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb plugin list                 Installed plugins\n  \
+                     ainb plugin lint ./my-plugin     Validate a manifest + binary\n  \
+                     ainb plugin watch burndown       Live-tail a plugin's events\n  \
+                     ainb plugin tail burndown --level info",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1463,7 +1589,14 @@ impl CliCommand for FleetCommand {
                 .subcommand(sequence)
                 .subcommand(needs)
                 .subcommand(daemon)
-                .subcommand(enrich_cache),
+                .subcommand(enrich_cache)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb fleet standup               Live status of all sessions\n  \
+                     ainb fleet needs                 Sessions blocked on input / errors\n  \
+                     ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
+                     ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1531,7 +1664,16 @@ impl CliCommand for McpCommand {
                 .subcommand(status)
                 .subcommand(stop)
                 .subcommand(import)
-                .subcommand(install),
+                .subcommand(install)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb mcp status                  Query the pool daemon (JSON)\n  \
+                     ainb mcp import                  Import .mcp.json servers into ainb config\n  \
+                     ainb mcp import --user           Also import Claude user-scope servers\n  \
+                     ainb mcp install --codex --copilot   Point other agent CLIs at the pool shim\n  \
+                     ainb mcp stop                    Stop the pool daemon\n  \
+                     ainb mcp stop <server>           Stop one pooled server",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -1556,11 +1698,20 @@ impl CliCommand for HangarCommand {
         "hangar"
     }
     fn build(&self, app: Command) -> Command {
+        // `.about()` AFTER augment so it wins over the `HangarCommand` doc-comment
+        // ("The `hangar` subcommand tree.").
         let hangar = <crate::cli::hangar::HangarCommand as Subcommand>::augment_subcommands(
             Command::new(self.name())
-                .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
                 .subcommand_required(true)
                 .arg_required_else_help(true),
+        )
+        .about("Hangar managed-agents control plane (issue / task / beads / daemon)")
+        .after_help(
+            "EXAMPLES:\n  \
+             ainb hangar daemon status        Is the control-plane daemon reachable?\n  \
+             ainb hangar issue list           List Hangar issues\n  \
+             ainb hangar task list            Inspect pending tasks\n  \
+             ainb hangar logs tail --follow   Tail daemon logs",
         );
         app.subcommand(hangar)
     }

@@ -47,7 +47,13 @@ EXAMPLES:
   ainb attach my-project          Drop into a running session
   ainb config get authentication.default_model
   ainb recover list               Find orphaned sessions
-  ainb completion zsh > _ainb     Generate zsh completions";
+  ainb completion zsh > _ainb     Generate zsh completions
+
+SKILL MANAGER:
+  ainb skill browse <query>        Search the skill catalog (skills.sh)
+  ainb skill install <uri>         Install a skill/agent/command unit
+  ainb skill sync                  Reconcile on-disk units with the manifest
+  ainb source / ainb search / ainb migrate   (skill-manager — run with --help)";
 
 /// Build the root `clap::Command` for the `ainb` binary.
 ///
@@ -109,7 +115,11 @@ pub enum OutputFormat {
     Markdown,
 }
 
-/// Arguments for the run command
+// The user-facing command `about` is set in `cli/registry.rs` (`.about()`
+// applied after `augment_args` so it wins). Keep the doc-comment below a
+// SINGLE line — a multi-line doc-comment also becomes clap `long_about` and
+// would leak this note into `ainb run --help`.
+/// Spawn a new AI coding session.
 #[derive(clap::Args)]
 #[command(after_help = "\
 EXAMPLES:
@@ -166,7 +176,7 @@ pub struct RunArgs {
     pub interactive: bool,
 }
 
-/// Arguments for the list command
+/// List sessions (running + idle). Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct ListArgs {
     /// Show only running sessions
@@ -178,7 +188,7 @@ pub struct ListArgs {
     pub workspace: Option<String>,
 }
 
-/// Arguments for the logs command
+/// View session output/logs. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct LogsArgs {
     /// Session ID or name
@@ -193,21 +203,21 @@ pub struct LogsArgs {
     pub lines: usize,
 }
 
-/// Arguments for the attach command
+/// Attach to a running session. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct AttachArgs {
     /// Session ID or name
     pub session: String,
 }
 
-/// Arguments for the status command
+/// Show a session's status/health. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct StatusArgs {
     /// Session ID or name
     pub session: String,
 }
 
-/// Arguments for the kill command
+/// Terminate a session. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct KillArgs {
     /// Session ID or name

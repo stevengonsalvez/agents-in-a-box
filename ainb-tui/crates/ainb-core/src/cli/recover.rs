@@ -19,7 +19,7 @@ use super::OutputFormat;
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::models::session::SessionAgentType;
 
-/// Subcommands for the recover command
+/// Recover orphaned or crashed sessions. Description set in `cli/registry.rs`.
 #[derive(clap::Subcommand)]
 pub enum RecoverCommands {
     /// List orphaned sessions and broken worktree symlinks
