@@ -62,6 +62,8 @@ REFLECT_VENV = HERE.parents[2] / ".venv-locomo"  # reflect-kb/.venv-locomo
 REFLECT_BIN_DIR = REFLECT_VENV / "bin"
 
 MODEL = "sonnet"
+ANSWER_MODEL = "sonnet"   # set in main_async
+JUDGE_MODEL = "sonnet"    # set in main_async; opus = the calibrated reference judge
 CONCURRENCY = 8
 RECALL_LIMIT = 8
 RECALL_MAX_CHARS = 3000
@@ -390,9 +392,9 @@ async def run_qa(sample_id: str, config: str, idx: int, qa: dict, kb: Path, stat
         context = ""
 
     t0 = time.perf_counter()
-    ans = await claude(answer_prompt(question, context), ANSWER_SYS, sem)
+    ans = await claude(answer_prompt(question, context), ANSWER_SYS, sem, model=ANSWER_MODEL)
     answer_s = time.perf_counter() - t0
-    jud = await claude(judge_prompt(question, gold, ans.text, cat), JUDGE_SYS, sem)
+    jud = await claude(judge_prompt(question, gold, ans.text, cat), JUDGE_SYS, sem, model=JUDGE_MODEL)
     correct = False
     m = re.search(r"\{.*\}", jud.text, re.S)
     if m:
@@ -498,11 +500,14 @@ async def main_async(args) -> None:
         samples = [data[i] for i in idxs]
     configs = args.configs.split(",")
     sem = asyncio.Semaphore(args.concurrency)
-    global _RECALL_SEM, RECALL_LIMIT, RECALL_MAX_CHARS, _RUN_TAG
+    global _RECALL_SEM, RECALL_LIMIT, RECALL_MAX_CHARS, _RUN_TAG, ANSWER_MODEL, JUDGE_MODEL
     _RECALL_SEM = asyncio.Semaphore(args.recall_concurrency)
     RECALL_LIMIT = args.recall_limit
     RECALL_MAX_CHARS = args.recall_max_chars
     _RUN_TAG = args.tag
+    ANSWER_MODEL = args.answer_model
+    JUDGE_MODEL = args.judge_model
+    print(f"models: answer={ANSWER_MODEL} judge={JUDGE_MODEL}", flush=True)
     RESULTS.mkdir(parents=True, exist_ok=True)
     print(f"recall: limit={RECALL_LIMIT} max_chars={RECALL_MAX_CHARS}", flush=True)
 
@@ -571,6 +576,8 @@ def parse_args():
     ap.add_argument("--recall-concurrency", type=int, default=3, help="parallel recall.py procs (torch RAM-bound)")
     ap.add_argument("--recall-limit", type=int, default=RECALL_LIMIT, help="top-K notes to retrieve")
     ap.add_argument("--recall-max-chars", type=int, default=RECALL_MAX_CHARS, help="max chars of memory injected")
+    ap.add_argument("--answer-model", default="sonnet", help="model for the QA answerer")
+    ap.add_argument("--judge-model", default="sonnet", help="model for the LLM judge (opus = reference)")
     ap.add_argument("--tag", default="pilot")
     return ap.parse_args()
 
