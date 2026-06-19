@@ -567,6 +567,10 @@ impl ConfigureState {
                 rows.push(ConfigureRow::Yolo);
                 if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
                     rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
                     rows.push(ConfigureRow::Rtk);
                 }
             }
@@ -578,6 +582,10 @@ impl ConfigureState {
                 rows.push(ConfigureRow::Yolo);
                 if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
                     rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
                     rows.push(ConfigureRow::Rtk);
                 }
             }
