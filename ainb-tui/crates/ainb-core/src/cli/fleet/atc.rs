@@ -59,16 +59,22 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         .with_context(|| format!("creating ATC dir {}", paths.dir.display()))?;
 
     // Render policy + write meta. Always overwrite CLAUDE.md/meta so setup is
-    // idempotent and picks up policy/template changes on re-run.
-    std::fs::write(&paths.claude_md, render_claude_md(&meta)).context("writing CLAUDE.md")?;
-    std::fs::write(&paths.meta, meta.to_json()?).context("writing meta.json")?;
+    // idempotent and picks up policy/template changes on re-run. All four durable
+    // artefacts are written through `write_atomic` (M-A3): a crash mid-write
+    // would otherwise leave a torn file that status/list/heartbeat then error on.
+    plumbing::atomic::write_atomic(&paths.claude_md, render_claude_md(&meta).as_bytes())
+        .context("writing CLAUDE.md")?;
+    plumbing::atomic::write_atomic(&paths.meta, meta.to_json()?.as_bytes())
+        .context("writing meta.json")?;
 
     // Seed durable memory only if absent (never clobber accumulated state).
     if !paths.state.exists() {
-        std::fs::write(&paths.state, seed_state_json()).context("seeding state.json")?;
+        plumbing::atomic::write_atomic(&paths.state, seed_state_json().as_bytes())
+            .context("seeding state.json")?;
     }
     if !paths.task_log.exists() {
-        std::fs::write(&paths.task_log, seed_task_log(&name)).context("seeding task-log.md")?;
+        plumbing::atomic::write_atomic(&paths.task_log, seed_task_log(&name).as_bytes())
+            .context("seeding task-log.md")?;
     }
 
     // Install the heartbeat timer (idempotent).
@@ -143,6 +149,14 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
 /// Spawn the ATC Claude session via `ainb run`, rooted in the instance dir so it
 /// reads the generated `CLAUDE.md`. Returns whether a new session was started
 /// (false when one with the same name is already running → idempotent).
+///
+/// INVARIANT (L1): N concurrent ATC instances are SAFE precisely because each
+/// instance consumes its OWN per-parent inbox (`inbox/<name>.jsonl`) and every
+/// drain is exactly-once (turn-fingerprint consumed marker). There is NO shared
+/// queue between ATCs. A future maintainer must NOT introduce a shared/global
+/// completion queue without also adding a lock + exactly-once keying — doing so
+/// would reintroduce the cross-instance lost-update / double-delivery the
+/// per-parent design avoids.
 async fn spawn_session(meta: &AtcMeta, paths: &AtcPaths) -> Result<bool> {
     if tmux_session_exists(&meta.tmux_session()).await {
         return Ok(false);
@@ -262,6 +276,25 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     let timer_installed = timer::is_installed(&name);
     let session_running = tmux_session_exists(&meta.tmux_session()).await;
 
+    // Heartbeat staleness (M-A1): the heartbeat stamps `last_heartbeat_ms` every
+    // firing. If `now - last_heartbeat_ms` is much larger than the interval, the
+    // timer has stalled (e.g. the machine slept and the launchd StartInterval
+    // could not catch up) — so a "session running" ATC can still be effectively
+    // dead. We flag stale when the gap exceeds 3× the interval, and surface the
+    // last-firing age so the operator isn't misled into thinking ATC is alive.
+    let hb_state = read_heartbeat_state(&paths);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let interval_ms = i64::from(meta.heartbeat_interval_min.max(1)) * 60_000;
+    let (last_heartbeat_ms, heartbeat_age_ms, heartbeat_stale) = if hb_state.last_heartbeat_ms > 0 {
+        let age = (now_ms - hb_state.last_heartbeat_ms).max(0);
+        // Only meaningful when a timer is supposed to be firing.
+        let stale = meta.heartbeat_enabled && age > interval_ms.saturating_mul(3);
+        (Some(hb_state.last_heartbeat_ms), Some(age), stale)
+    } else {
+        // Never fired yet: not "stale", just pending.
+        (None, None, false)
+    };
+
     let summary = json!({
         "name": meta.name,
         "dir": paths.dir.display().to_string(),
@@ -271,6 +304,9 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
         "timer_installed": timer_installed,
         "session_running": session_running,
         "tmux_session": meta.tmux_session(),
+        "last_heartbeat_ms": last_heartbeat_ms,
+        "heartbeat_age_ms": heartbeat_age_ms,
+        "heartbeat_stale": heartbeat_stale,
     });
 
     if matches!(format, OutputFormat::Text) {
@@ -289,6 +325,20 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             },
             meta.heartbeat_interval_min
         );
+        match heartbeat_age_ms {
+            Some(age) => {
+                let mins = age / 60_000;
+                if heartbeat_stale {
+                    println!(
+                        "  last beat: {mins}m ago — ⚠ STALE (timer stalled? expected every {}m)",
+                        meta.heartbeat_interval_min
+                    );
+                } else {
+                    println!("  last beat: {mins}m ago");
+                }
+            }
+            None => println!("  last beat: never (no heartbeat recorded yet)"),
+        }
         println!("  idle-pause: {}m", meta.idle_pause_min);
     } else {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -384,21 +434,24 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     let last_active_ms = hb_state.last_active_ms;
     let paused = should_pause_for_idle(rows.len(), last_active_ms, meta.idle_pause_min, now_ms);
 
-    // Build the body. The cap is CODE-ENFORCED here: build_heartbeat_enforcing_cap
-    // owns continue_counts (in hb_state) and presents any ERR past the cap as
-    // ESCALATE-ONLY regardless of model discipline, then mutates hb_state in place.
-    // EVENT-DRIVEN PATH: drain the ATC session's own durable inbox first. When
-    // the plumbing is present, child sessions commit their completions here the
-    // instant they finish (via their Stop hook), so ATC learns about them
-    // without waiting for — or re-deriving from — the poll-mode `fleet needs`
-    // scan. Completions are exactly-once: a record drained here is never
-    // re-delivered. The poll-mode body below stays as the always-on fallback,
-    // so ATC works identically whether or not any child has the hooks installed.
+    // EVENT-DRIVEN PATH: PEEK (do NOT drain yet) the ATC session's own durable
+    // inbox. Child sessions spawned `--parent <name>` commit their completions to
+    // `inbox/<name>.jsonl` the instant they finish (via their Stop hook), so ATC
+    // learns about them without waiting for the poll-mode `fleet needs` scan.
+    //
+    // CRITICAL (C-A1): we must NOT `drain()` here. `drain()` consumes + clears +
+    // records consumed fingerprints — once a fingerprint is in the consumed
+    // marker it is NEVER re-delivered. If we drained before confirming the
+    // session is live AND the heartbeat is actually deliverable, a dead session
+    // or an idle-paused firing would consume the completions and lose them
+    // permanently. So we PEEK (non-destructive), build the body, and only
+    // `drain()` AFTER a fully-confirmed tmux send (C-A2). On any earlier exit the
+    // completions stay in the inbox for a later firing.
     let inbox = plumbing::Inbox::open_in(
         &plumbing::paths::inbox_dir_in(&plumbing::paths::ainb_home()?),
         &meta.name,
     );
-    let completions = inbox.drain().unwrap_or_default();
+    let completions = inbox.peek();
 
     // A pending completion overrides idle-pause: a finished child wakes ATC even
     // during a quiet window. So the *effective* pause is "quiet AND nothing
@@ -415,25 +468,38 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
             build_heartbeat_enforcing_cap(&rows, now_ms, DEFAULT_ERR_RETRY_CAP, &mut hb_state);
         if !completions.is_empty() {
             // Prepend the event-driven completions so ATC handles the freshly
-            // finished children before the polled roster.
+            // finished children before the polled roster. (Summaries are fenced
+            // as untrusted DATA inside `format_completions` — see M3.)
             let header = plumbing::format_completions(&completions);
             b = format!("[HEARTBEAT {now_ms}] event-driven completions:\n{header}\n\n{b}");
         }
         b
     };
 
-    // If the session is gone, do not send into a dead pane — report and exit 0
-    // so the timer keeps firing harmlessly until teardown.
+    // Check liveness + deliverability FIRST (C-A1). Only when delivery is
+    // guaranteed do we touch the inbox.
     let session_live = tmux_session_exists(&tmux).await;
     let should_deliver = !effective_paused;
     let mut delivered = false;
     if session_live && should_deliver {
-        tmux_send(&tmux, &body).await.context("sending heartbeat into ATC session")?;
-        delivered = true;
+        // C-A2: send BEFORE drain. The send result decides whether we drain.
+        let send_result = tmux_send(&tmux, &body).await;
+        delivered = send_result.is_ok();
+        // Encapsulated decision (unit-tested): drain exactly-once ONLY on a
+        // confirmed send; on send failure leave the completions for a later
+        // firing rather than consuming + losing them.
+        commit_delivery_on_send(&inbox, !completions.is_empty(), &send_result);
+        if let Err(e) = send_result {
+            tracing::warn!("atc heartbeat: tmux send failed, completions retained: {e}");
+        }
     }
+    // If not live / not deliverable: we never drained — the completions stay in
+    // the inbox so a later, deliverable firing handles them (C-A1).
 
-    // Persist heartbeat bookkeeping (continue_counts already mutated above) so
-    // the idle-pause window + code-enforced cap survive across timer firings.
+    // Persist heartbeat bookkeeping in EVERY branch (C-A2) — continue_counts were
+    // mutated above, and last_heartbeat_ms/last_active_ms must advance even when
+    // the send failed or the session was dead, so the idle-pause window + the
+    // code-enforced cap survive across timer firings.
     hb_state.last_heartbeat_ms = now_ms;
     hb_state.last_active_ms = if rows.is_empty() {
         last_active_ms.or(Some(now_ms))
@@ -471,6 +537,24 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     Ok(())
 }
 
+/// Drain the inbox exactly-once IFF the heartbeat was actually delivered.
+///
+/// This is the C-A1/C-A2 invariant in one place: a peeked completion is consumed
+/// (`drain`) ONLY after a confirmed send (`send_result.is_ok()`). On a send
+/// failure — or a dead/idle firing that never reached here — the completions are
+/// left in the inbox for a later, deliverable firing rather than consumed and
+/// lost. `had_completions` short-circuits the no-op empty case so a pure-poll
+/// heartbeat never touches the consumed marker.
+fn commit_delivery_on_send<E>(
+    inbox: &plumbing::Inbox,
+    had_completions: bool,
+    send_result: &std::result::Result<(), E>,
+) {
+    if had_completions && send_result.is_ok() {
+        let _ = inbox.drain();
+    }
+}
+
 /// Read the heartbeat process's own bookkeeping (`heartbeat-state.json`).
 /// Missing/corrupt → defaults (idle-pause then stays conservative; cap counters
 /// start fresh). This file is single-writer: only the heartbeat touches it.
@@ -483,9 +567,11 @@ fn read_heartbeat_state(paths: &AtcPaths) -> HeartbeatState {
 
 /// Persist the heartbeat process's own bookkeeping. Best-effort: a write failure
 /// degrades the next firing to conservative defaults rather than aborting.
+/// Written atomically (M-A3) so a crash mid-write never leaves a torn
+/// heartbeat-state.json that the next firing would fail to parse.
 fn write_heartbeat_state(paths: &AtcPaths, state: &HeartbeatState) {
     if let Ok(s) = state.to_json() {
-        let _ = std::fs::write(&paths.heartbeat_state, s);
+        let _ = plumbing::atomic::write_atomic(&paths.heartbeat_state, s.as_bytes());
     }
 }
 
@@ -527,9 +613,65 @@ async fn fetch_needs() -> Result<Vec<NeedsRow>> {
 /// Empty inbox = no block + no writes beyond the status file (the leaf fast
 /// path). Always exits 0 with at most the decision JSON on stdout so a failure
 /// never wedges the host agent.
+///
+/// **Never returns Err (H-A1).** The lifecycle hooks are installed GLOBALLY into
+/// `~/.claude/settings.json`, so this verb runs on EVERY Claude `Stop` on the
+/// host — including hundreds of sessions unrelated to any fleet. If it returned
+/// Err, `main()`'s `Result` would make the process exit NON-ZERO, and a
+/// non-zero Stop-hook exit can disrupt Stop on every unrelated session. So the
+/// real work runs in [`hook_inner`], whose errors are logged-and-swallowed here;
+/// this function always emits valid stdout (the decision JSON or nothing) and
+/// returns `Ok(())` → exit 0.
 async fn hook(matches: &clap::ArgMatches) -> Result<()> {
+    let (_exit_ok, emitted) = swallow_hook_result(hook_inner(matches));
+    if let Some(json) = emitted {
+        // The block JSON on stdout feeds the completions back into this session
+        // as its next turn.
+        println!("{json}");
+    }
+    // ALWAYS Ok → exit 0, regardless of what hook_inner did (H-A1).
+    Ok(())
+}
+
+/// Convert a [`hook_inner`]/[`hook_core`] result into the hook's exit behaviour:
+/// `(exit_ok, emitted_stdout)`. This is the H-A1 swallow contract in one place —
+/// it NEVER yields a non-zero exit. A block decision serializes to the stdout
+/// JSON; a `None` decision emits nothing; an Err is logged and swallowed (no
+/// stdout). `exit_ok` is always `true` (the tuple keeps the intent explicit +
+/// unit-testable).
+fn swallow_hook_result(
+    result: Result<Option<plumbing::StopDecision>>,
+) -> (bool, Option<String>) {
+    match result {
+        Ok(Some(decision)) => match serde_json::to_string(&decision) {
+            Ok(s) => (true, Some(s)),
+            Err(e) => {
+                // Serialization of a StopDecision cannot realistically fail, but
+                // if it ever did we still exit 0 with no stdout rather than
+                // propagate.
+                tracing::warn!("atc hook: failed to serialize decision: {e}");
+                (true, None)
+            }
+        },
+        Ok(None) => (true, None),
+        Err(e) => {
+            // Log-and-swallow: a drain/serialize/IO failure must NOT wedge Stop
+            // on this (or any other) host session.
+            tracing::warn!("atc hook: swallowed error to keep Stop non-blocking: {e}");
+            (true, None)
+        }
+    }
+}
+
+/// The fallible body of [`hook`]: resolves the process env (`AINB_HOME`,
+/// `AINB_PARENT_SESSION`) + stdin payload, then delegates the I/O-on-an-explicit-
+/// home work to [`hook_core`] (which is env-free so it unit-tests against a
+/// tempdir without mutating process-global env — the crate forbids `unsafe`, so
+/// tests can't call `set_var`). Returns the optional Stop-block decision to emit.
+fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<plumbing::StopDecision>> {
     let event = matches.get_one::<String>("event").cloned().unwrap_or_default();
     let session_id = matches.get_one::<String>("session-id").cloned().unwrap_or_default();
+    let cwd = matches.get_one::<String>("cwd").cloned().unwrap_or_default();
     let home = plumbing::paths::ainb_home()?;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -537,15 +679,80 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
     let payload = read_stdin_to_string();
     let done_summary = extract_done_summary(&payload);
 
-    // 1. Status file (every event). Best-effort: never abort the hook on a
-    //    status-write failure.
-    if !session_id.is_empty() {
-        let rec =
-            plumbing::StatusFile::from_event(&session_id, &event, now_ms, done_summary.clone());
-        let _ = plumbing::status::write_status_in(&home, &rec);
-    }
+    // Resolve the live parent linkage from the env (the in-band, zero-lookup
+    // signal `ainb run --parent` seeds).
+    let env_parent = std::env::var(plumbing::PARENT_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
-    let base_event = event.split(':').next().unwrap_or(&event);
+    hook_core(
+        &home,
+        &event,
+        &session_id,
+        &cwd,
+        env_parent.as_deref(),
+        done_summary,
+        now_ms,
+    )
+}
+
+/// Env-free core of the lifecycle hook. All filesystem state is rooted at the
+/// explicit `home`, so this is unit-testable against a tempdir.
+#[allow(clippy::too_many_arguments)]
+fn hook_core(
+    home: &std::path::Path,
+    event: &str,
+    session_id: &str,
+    cwd: &str,
+    env_parent: Option<&str>,
+    done_summary: Option<String>,
+    now_ms: i64,
+) -> Result<Option<plumbing::StopDecision>> {
+    let base_event = event.split(':').next().unwrap_or(event);
+    let inbox_dir = plumbing::paths::inbox_dir_in(home);
+
+    // Resolve the parent of THIS session (env first, then durable map). Used both
+    // to route our own completion up AND as one fleet-membership signal.
+    let our_parent = if session_id.is_empty() {
+        None
+    } else {
+        plumbing::resolve_parent_in(home, session_id, env_parent)
+    };
+
+    // Recognise ATC's OWN session: it was spawned `--repo <atc_root>/<name>`, so
+    // its cwd is exactly that provisioned instance dir. This is the canonical
+    // parent key for ATC (children are spawned `--parent <name>`, so they commit
+    // to `inbox/<name>.jsonl`, NOT `inbox/<atc_session_id>.jsonl`). Resolving it
+    // here lets the Stop-drain consume the SAME key the heartbeat consumes
+    // (fixes the split-brain in C-A3) and is a fleet-membership signal (H1).
+    // The ATC root is always `<home>/atc` (matches `atc::paths::atc_root`).
+    let atc_name = if cwd.is_empty() {
+        None
+    } else {
+        let root = home.join("atc");
+        crate::fleet::atc::instance_name_for_cwd_in(&root, std::path::Path::new(cwd))
+    };
+
+    // Does this session own a non-empty inbox under its session-id key? (A parent
+    // whose children committed under the session-id key — the leaf-vs-parent
+    // distinction for membership.)
+    let self_inbox = (!session_id.is_empty())
+        .then(|| plumbing::Inbox::open_in(&inbox_dir, session_id));
+    let has_self_inbox = self_inbox.as_ref().is_some_and(|ib| !ib.is_empty());
+
+    // 1. Status file — GATED ON FLEET MEMBERSHIP (H1). The hooks are global, so
+    //    without a gate every unrelated host session would accrete an orphan
+    //    status/<id>.json that nothing reaps and pay the write on every event. A
+    //    session belongs to the fleet when it has a resolvable parent, owns a
+    //    non-empty inbox, or IS an ATC-managed session. A truly unrelated session
+    //    is a true no-op here.
+    let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
+    if !session_id.is_empty() && is_fleet_member {
+        let rec =
+            plumbing::StatusFile::from_event(session_id, event, now_ms, done_summary.clone());
+        let _ = plumbing::status::write_status_in(home, &rec);
+    }
 
     // Self-heal the durable child→parent map. `ainb run` seeds only the live
     // AINB_PARENT_SESSION env (claude mints its own session id, so a map keyed by
@@ -553,60 +760,53 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
     // key the durable fallback by the id the hook ACTUALLY sees, so linkage
     // survives env loss (restart / resume) and `resolve_parent_in` can find it.
     // Idempotent (last-write-wins) and cheap; only when both ids are present.
-    let env_parent = std::env::var(plumbing::PARENT_ENV)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
     if !session_id.is_empty() {
-        if let Some(parent) = env_parent.as_deref() {
-            let _ = plumbing::record_parent_in(&home, &session_id, parent);
+        if let Some(parent) = env_parent {
+            let _ = plumbing::record_parent_in(home, session_id, parent);
         }
     }
 
-    // 2. A genuine user turn resets this session's consecutive-block budget. The
-    //    reset is taken under the inbox lock so it serialises against a
-    //    concurrent Stop-drain's block increment (no lost update).
-    if base_event == "UserPromptSubmit" && !session_id.is_empty() {
-        let inbox = plumbing::Inbox::open_in(&plumbing::paths::inbox_dir_in(&home), &session_id);
-        let _ = inbox.reset_budget();
+    // 2. A genuine user turn resets the consecutive-block budget. The ATC session
+    //    drains its CANONICAL key (atc_name), so reset that key's budget; a plain
+    //    parent uses its session-id key. The reset is under the inbox lock so it
+    //    serialises against a concurrent Stop-drain's block increment.
+    if base_event == "UserPromptSubmit" {
+        if let Some(name) = atc_name.as_deref() {
+            let _ = plumbing::Inbox::open_in(&inbox_dir, name).reset_budget();
+        }
+        if !session_id.is_empty() {
+            let _ = plumbing::Inbox::open_in(&inbox_dir, &session_id).reset_budget();
+        }
     }
 
-    // 3. Stop: route this session's completion up to its parent, then drain its
-    //    own inbox for child completions.
+    // 3. Stop: route this session's completion up to its parent, then drain for
+    //    child completions.
     if base_event == "Stop" && !session_id.is_empty() {
-        // (a) Route our completion ONLY when this session has a resolvable
-        //     parent. The hooks are installed globally, so every Claude session
-        //     on the host runs this verb; a session with no linkage (a truly
-        //     unrelated host session) must do ZERO durable writes here — no
-        //     commit, no dead-letter — or every unrelated Stop would grow the
-        //     dead-letter sink without bound. Genuine ATC children self-register
-        //     above, so they still resolve (even after env loss) and still route.
-        if let Some(parent_id) =
-            plumbing::resolve_parent_in(&home, &session_id, env_parent.as_deref())
-        {
+        // (a) Route our completion ONLY when this session has a resolvable parent
+        //     (zero durable writes for a truly unrelated host session — see H1).
+        if let Some(parent_id) = our_parent.as_deref() {
             let summary = done_summary.clone().unwrap_or_default();
-            let rec = plumbing::InboxRecord::new(&session_id, &parent_id, summary, &event, now_ms);
-            let _ = plumbing::commit_completion(&home, &rec);
+            let rec = plumbing::InboxRecord::new(session_id, parent_id, summary, event, now_ms);
+            let _ = plumbing::commit_completion(home, &rec);
         }
 
-        // (b) Drain our own inbox — are we a parent with finished children? The
-        //     budget check + drain happen under one inbox lock: completions are
-        //     consumed only on the drain that also emits them (never destroyed
-        //     when the budget is exhausted), and the budget read-modify-write
-        //     cannot race the UserPromptSubmit reset above.
-        let inbox = plumbing::Inbox::open_in(&plumbing::paths::inbox_dir_in(&home), &session_id);
+        // (b) Drain for finished children. C-A3: ATC's children commit to the
+        //     CANONICAL `atc_name` key (because they were spawned `--parent
+        //     <name>`), so when this IS the ATC session we drain that key — the
+        //     SAME file the heartbeat drains — so the synchronous Stop-drain and
+        //     the timer never miss each other's children. A plain (non-ATC)
+        //     parent drains its session-id key. We pick exactly ONE canonical key
+        //     per session and drain it under the budget so exactly-once holds.
+        let drain_key = atc_name.clone().unwrap_or_else(|| session_id.to_string());
+        let inbox = plumbing::Inbox::open_in(&inbox_dir, &drain_key);
         if !inbox.is_empty() {
             let (_completions, decision) =
                 inbox.drain_with_budget(plumbing::DEFAULT_BLOCK_BUDGET)?;
-            if let Some(decision) = decision {
-                // The block JSON on stdout is what feeds the completions back
-                // into this session as its next turn.
-                println!("{}", serde_json::to_string(&decision)?);
-            }
+            return Ok(decision);
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 // --- inbox (operator-facing: inspect / drain / commit) ----------------------
@@ -735,8 +935,16 @@ fn extract_done_summary(payload: &str) -> Option<String> {
 
 // --- helpers ----------------------------------------------------------------
 
+/// Extract and SANITIZE the instance `<name>` at the CLI boundary. Sanitizing
+/// here (rather than only deep in `AtcPaths`) means the cleaned name is the one
+/// stored in `meta.name` and threaded into the timer unit / plist / tmux session
+/// names too — so `atc setup ../../foo` can neither escape the ATC root on disk
+/// nor inject a traversal string into a launchd/systemd unit name. Every verb
+/// (`setup`/`status`/`teardown`/`heartbeat`) sanitizes identically, so they all
+/// resolve to the SAME instance. (M-A2)
 fn require_name(matches: &clap::ArgMatches) -> Result<String> {
-    matches.get_one::<String>("name").cloned().context("missing <name> argument")
+    let raw = matches.get_one::<String>("name").cloned().context("missing <name> argument")?;
+    Ok(crate::fleet::atc::paths::sanitize_instance_name(&raw))
 }
 
 /// Resolve the `ainb` binary to shell out to: `$AINB_BIN` if set (tests point it
@@ -770,4 +978,256 @@ This is ATC's durable, human-readable memory. Append one dated line per action\n
 (cleared / escalated / skipped) so decisions survive context compaction.\n\n\
 - provisioned\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Provision a minimal ATC instance dir (just meta.json) under
+    /// `<home>/atc/<name>` and return its path — the cwd an ATC session runs in.
+    fn provision_atc(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let dir = home.join("atc").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), AtcMeta::new(name).to_json().unwrap()).unwrap();
+        dir
+    }
+
+    fn inbox_for(home: &std::path::Path, key: &str) -> plumbing::Inbox {
+        plumbing::Inbox::open_in(&plumbing::paths::inbox_dir_in(home), key)
+    }
+
+    // --- C-A1 / C-A2: drain only on a confirmed send -------------------------
+
+    #[test]
+    fn commit_delivery_drains_only_on_send_ok() {
+        let dir = TempDir::new().unwrap();
+        let inbox = inbox_for(dir.path(), "atc");
+        inbox.commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1)).unwrap();
+        assert!(!inbox.is_empty());
+
+        // Confirmed send → drains exactly-once.
+        let ok: std::result::Result<(), String> = Ok(());
+        commit_delivery_on_send(&inbox, true, &ok);
+        assert!(inbox.is_empty(), "confirmed send must drain the completion");
+    }
+
+    #[test]
+    fn commit_delivery_retains_on_send_failure() {
+        let dir = TempDir::new().unwrap();
+        let inbox = inbox_for(dir.path(), "atc");
+        inbox.commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1)).unwrap();
+
+        // Send FAILED → must NOT drain; the completion is retained for a later
+        // firing (C-A2: a send failure after a would-be drain must not lose it).
+        let err: std::result::Result<(), String> = Err("tmux send failed".into());
+        commit_delivery_on_send(&inbox, true, &err);
+        assert!(
+            !inbox.is_empty(),
+            "send failure must retain the completion, not consume it"
+        );
+        assert_eq!(inbox.peek().len(), 1, "the completion is still pending");
+    }
+
+    #[test]
+    fn commit_delivery_is_noop_when_no_completions() {
+        let dir = TempDir::new().unwrap();
+        let inbox = inbox_for(dir.path(), "atc");
+        let ok: std::result::Result<(), String> = Ok(());
+        // No completions → the consumed marker is never touched.
+        commit_delivery_on_send(&inbox, false, &ok);
+        assert!(!dir.path().join("inbox").join("atc.consumed").exists());
+    }
+
+    /// C-A1 end-to-end shape: a "dead session" firing never reaches the send, so
+    /// `commit_delivery_on_send` is never called and the completion survives.
+    /// (Models the heartbeat's `session_live && should_deliver` gate: when false
+    /// we skip the deliver/drain block entirely, leaving the inbox intact.)
+    #[test]
+    fn dead_session_firing_retains_the_completion() {
+        let dir = TempDir::new().unwrap();
+        let inbox = inbox_for(dir.path(), "tower");
+        inbox.commit(&plumbing::InboxRecord::new("c1", "tower", "done", "Stop", 1)).unwrap();
+
+        // Simulate the heartbeat's peek (non-destructive) then the dead-session
+        // branch: session_live=false → the deliver/drain block is skipped.
+        let peeked = inbox.peek();
+        assert_eq!(peeked.len(), 1);
+        let session_live = false;
+        let should_deliver = true;
+        if session_live && should_deliver {
+            let ok: std::result::Result<(), String> = Ok(());
+            commit_delivery_on_send(&inbox, !peeked.is_empty(), &ok);
+        }
+        // Dead session → completion is STILL pending for a later, live firing.
+        assert!(
+            !inbox.is_empty(),
+            "a dead-session heartbeat must not consume the completion"
+        );
+        assert_eq!(inbox.peek().len(), 1);
+    }
+
+    // --- C-A3: ONE canonical key drained by BOTH consumers -------------------
+
+    /// A child spawned `--parent <name>` commits to `inbox/<name>.jsonl`. The
+    /// Stop-hook (when this IS the ATC session, recognised via cwd) drains THAT
+    /// key — the same key the heartbeat drains (`meta.name`). So a completion
+    /// committed under the parent key is consumed by the Stop-drain, and a second
+    /// one by the heartbeat-key drain. Both paths agree on one key, exactly-once.
+    #[test]
+    fn stop_hook_and_heartbeat_share_the_canonical_atc_key() {
+        let home = TempDir::new().unwrap();
+        let name = "tower";
+        let cwd = provision_atc(home.path(), name);
+
+        // A child committed under the CANONICAL parent key (= the ATC name), as
+        // `ainb run --parent tower` routes it.
+        inbox_for(home.path(), name)
+            .commit(&plumbing::InboxRecord::new("child-1", name, "did the thing", "Stop", 1))
+            .unwrap();
+
+        // The synchronous Stop-hook on the ATC session drains that key and blocks.
+        let decision = hook_core(
+            home.path(),
+            "Stop",
+            "atc-session-id",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        let d = decision.expect("Stop-hook must block on the child completion");
+        assert_eq!(d.decision, "block");
+        assert!(d.reason.contains("child-1"), "block carries the child: {}", d.reason);
+
+        // It is consumed exactly-once: the same key is now empty.
+        assert!(inbox_for(home.path(), name).is_empty());
+
+        // A SECOND child completion under the same key is drained by the
+        // HEARTBEAT consumer (which also keys by the ATC name) — proving both
+        // consumers see children under the one canonical key.
+        inbox_for(home.path(), name)
+            .commit(&plumbing::InboxRecord::new("child-2", name, "second turn", "Stop", 2))
+            .unwrap();
+        let hb_drained = inbox_for(home.path(), name).drain().unwrap();
+        assert_eq!(hb_drained.len(), 1);
+        assert_eq!(hb_drained[0].child_id, "child-2");
+    }
+
+    // --- H1: status write GATED on fleet membership --------------------------
+
+    #[test]
+    fn unrelated_session_writes_no_status_file() {
+        let home = TempDir::new().unwrap();
+        // A session with NO parent, NO inbox, NOT an ATC cwd: a true no-op.
+        let decision = hook_core(
+            home.path(),
+            "Stop",
+            "random-unrelated-session",
+            "/tmp/some/unrelated/repo",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(decision.is_none(), "unrelated session must not block");
+
+        let status = plumbing::status::status_path_in(home.path(), "random-unrelated-session");
+        assert!(
+            !status.exists(),
+            "unrelated session must produce NO status file (H1)"
+        );
+    }
+
+    #[test]
+    fn atc_session_writes_a_status_file() {
+        let home = TempDir::new().unwrap();
+        let cwd = provision_atc(home.path(), "tower");
+        // An ATC-managed session IS a fleet member → status file written.
+        hook_core(
+            home.path(),
+            "SessionStart",
+            "atc-sid",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(
+            plumbing::status::read_status_in(home.path(), "atc-sid").is_some(),
+            "ATC session must write a status file"
+        );
+    }
+
+    #[test]
+    fn child_with_parent_writes_a_status_file() {
+        let home = TempDir::new().unwrap();
+        // A child with a live env parent IS a fleet member.
+        hook_core(
+            home.path(),
+            "Stop",
+            "child-sid",
+            "/tmp/child/repo",
+            Some("tower"),
+            Some("finished".into()),
+            1,
+        )
+        .unwrap();
+        assert!(
+            plumbing::status::read_status_in(home.path(), "child-sid").is_some(),
+            "a parented child must write a status file"
+        );
+        // ...and its completion routes to the parent's inbox.
+        assert_eq!(inbox_for(home.path(), "tower").peek().len(), 1);
+    }
+
+    // --- H-A1: the hook NEVER returns Err (always exit 0) --------------------
+
+    #[tokio::test]
+    async fn hook_returns_ok_even_on_unrelated_session() {
+        // The public hook() entry point must resolve to Ok(()) → process exit 0,
+        // so a global Stop hook can never wedge an unrelated host session. We
+        // build the ArgMatches the registry declares for the `hook` verb.
+        let m = clap::Command::new("hook")
+            .arg(clap::Arg::new("event").long("event"))
+            .arg(clap::Arg::new("session-id").long("session-id").default_value(""))
+            .arg(clap::Arg::new("cwd").long("cwd").default_value(""))
+            .get_matches_from(vec!["hook", "--event", "Stop", "--session-id", "unrelated"]);
+        assert!(hook(&m).await.is_ok(), "hook must always return Ok → exit 0");
+    }
+
+    /// H-A1 (forced error): the drain error path is reachable, and the `hook()`
+    /// wrapper swallows it. We force the inbox lock open to fail by making the
+    /// `.lock` PATH a directory, so `Inbox::lock` errors inside
+    /// `drain_with_budget` and the error propagates out of `hook_core`. The
+    /// `hook()` swallow wrapper ([`swallow_hook_result`]) then maps that Err to
+    /// `Ok(())` → exit 0, which we assert directly on the real error value.
+    #[test]
+    fn forced_drain_error_is_swallowed_to_ok() {
+        let home = TempDir::new().unwrap();
+        let name = "tower";
+        let cwd = provision_atc(home.path(), name);
+        inbox_for(home.path(), name)
+            .commit(&plumbing::InboxRecord::new("c1", name, "x", "Stop", 1))
+            .unwrap();
+
+        // Sabotage the lock: make `inbox/<name>.lock` a directory so opening it
+        // as a writable file fails inside drain_with_budget.
+        let lock_path = plumbing::paths::inbox_dir_in(home.path()).join(format!("{name}.lock"));
+        let _ = std::fs::remove_file(&lock_path);
+        std::fs::create_dir_all(&lock_path).unwrap();
+
+        // hook_core errors (the drain can't lock)...
+        let result = hook_core(home.path(), "Stop", "atc-sid", cwd.to_str().unwrap(), None, None, 1);
+        assert!(result.is_err(), "the sabotaged lock should make the drain error");
+
+        // ...and the swallow wrapper the real `hook()` uses maps that Err to a
+        // no-op exit-0 outcome with no stdout block.
+        let (exit_ok, emitted) = swallow_hook_result(result);
+        assert!(exit_ok, "a forced drain error must still yield exit 0");
+        assert!(emitted.is_none(), "an error must emit no decision JSON");
+    }
 }

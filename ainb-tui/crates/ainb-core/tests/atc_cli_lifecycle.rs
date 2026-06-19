@@ -471,23 +471,38 @@ fn atc_event_driven_inbox_drains_exactly_once() {
     );
     let hb: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // Poll scan was empty, yet the heartbeat did not idle-pause: the inbox
-    // completion woke it. (Delivery is false only because no live tmux session.)
+    // completion woke it. Delivery is false because there is no live tmux
+    // session.
     assert_eq!(hb["needs_count"], 0, "poll scan empty");
     assert_eq!(
         hb["idle_paused"], false,
         "inbox completion must override idle-pause"
     );
+    assert_eq!(hb["delivered"], false, "no live session → not delivered");
 
-    // The heartbeat drained the inbox, so a fresh peek is now empty.
+    // C-A1 (data-loss regression): because the session was NOT live, the
+    // heartbeat must NOT have drained the inbox. Draining before a confirmed
+    // delivery would consume + mark the completion's fingerprint and lose it
+    // forever. The completion MUST still be pending for a later, deliverable
+    // firing. (The pre-fix code drained unconditionally here — exactly the bug.)
     let out = run(
         &home,
         &["--format", "json", "fleet", "atc", "inbox", "peek", "tower"],
     );
     let peeked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(
-        peeked.as_array().unwrap().is_empty(),
-        "heartbeat should have drained the inbox: {peeked}"
+    assert_eq!(
+        peeked.as_array().unwrap().len(),
+        1,
+        "dead-session heartbeat must RETAIN the completion, not drain it: {peeked}"
     );
+    assert_eq!(peeked[0]["child_id"], "worker-7");
+
+    // Explicitly drain worker-7 via the CLI so the rest of the flow starts clean.
+    let out = run(
+        &home,
+        &["--format", "json", "fleet", "atc", "inbox", "drain", "tower"],
+    );
+    assert!(out.status.success(), "explicit drain of worker-7 failed");
 
     // 4. Commit a fresh completion and drain it directly → block decision once.
     let out = run(
@@ -547,9 +562,15 @@ fn atc_hook_writes_status_and_routes_completion() {
     let home = std::env::temp_dir().join(format!("atc-hook-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
 
-    // A genuine user turn writes a "running" status file.
+    // A genuine user turn writes a "running" status file. The status write is
+    // now GATED on fleet membership (H1), so we pass the child's parent env —
+    // exactly as `ainb run --parent tower` seeds it — which makes `child-a` a
+    // resolvable fleet member and a legitimate status writer. (An UNRELATED
+    // session with no parent / no inbox writes nothing; that is asserted
+    // separately in the H1 no-op regression below.)
     let out = Command::new(ainb_bin())
         .env("AINB_HOME", &home)
+        .env("AINB_PARENT_SESSION", "tower")
         .args([
             "fleet",
             "atc",
