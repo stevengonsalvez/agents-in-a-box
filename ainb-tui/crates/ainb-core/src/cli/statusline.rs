@@ -212,7 +212,41 @@ pub fn render_powerline(cache: &LiveCache) -> String {
         parts.push(ansi_fg(GOLD, &format!("${cost:.2}")));
     }
 
+    if let Some(hr) = headroom_segment() {
+        parts.push(hr);
+    }
+
     parts.join(&format!(" {} ", ansi_fg(MUTED, "·")))
+}
+
+/// A compact `HR` segment when this session's CLI is routed through the local
+/// Headroom proxy.
+///
+/// Detection reads the base-URL env var the statusline process actually
+/// inherited (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex). A
+/// `#951`-bypassed child that never received the var shows nothing — so the
+/// badge reflects ACTUAL routing, not the stored toggle. A fast localhost TCP
+/// probe distinguishes a live proxy (green `HR`) from a configured-but-down one
+/// (amber `HR`).
+fn headroom_segment() -> Option<String> {
+    let port = crate::headroom::proxy_port();
+    let needle_ip = format!("127.0.0.1:{port}");
+    let needle_localhost = format!("localhost:{port}");
+
+    let routed = ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"].iter().any(|var| {
+        std::env::var(var)
+            .map(|v| v.contains(&needle_ip) || v.contains(&needle_localhost))
+            .unwrap_or(false)
+    });
+    if !routed {
+        return None;
+    }
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let live =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(40)).is_ok();
+    let color = if live { GREEN } else { AMBER };
+    Some(ansi_fg(color, "HR"))
 }
 
 // Hand-rolled ANSI 24-bit escape sequences. Avoid pulling in a colored
@@ -532,6 +566,38 @@ mod tests {
         };
         // Just don't panic; result may be empty string.
         let _ = render_powerline(&cache);
+    }
+
+    #[test]
+    fn headroom_segment_reflects_base_url_routing() {
+        // Shared lock: this test mutates ANTHROPIC_BASE_URL + AINB_HEADROOM_PORT,
+        // which other tests read in parallel (cargo runs tests in-process).
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let key = "ANTHROPIC_BASE_URL";
+        let old = std::env::var_os(key);
+        let port_old = std::env::var_os("AINB_HEADROOM_PORT");
+        std::env::remove_var("AINB_HEADROOM_PORT"); // force default 8787
+
+        // Not routed → no segment.
+        std::env::remove_var(key);
+        assert!(headroom_segment().is_none());
+
+        // Pointed at the real Anthropic endpoint → no segment.
+        std::env::set_var(key, "https://api.anthropic.com");
+        assert!(headroom_segment().is_none());
+
+        // Pointed at the local proxy → segment present (proxy is down in tests,
+        // so it renders, just amber — we only assert the "HR" label is there).
+        std::env::set_var(key, "http://127.0.0.1:8787");
+        assert!(headroom_segment().as_deref().unwrap_or("").contains("HR"));
+
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        if let Some(v) = port_old {
+            std::env::set_var("AINB_HEADROOM_PORT", v);
+        }
     }
 
     /// `--cache-only`: cache is written, stdout payload is `None`

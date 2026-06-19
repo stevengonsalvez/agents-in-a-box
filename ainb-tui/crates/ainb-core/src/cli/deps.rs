@@ -33,6 +33,8 @@ pub enum Consumer {
     Usage,
     /// OpenTelemetry export to Grafana Cloud (`ainb otel setup`).
     Otel,
+    /// Token-optimisation tooling (rtk output compression, headroom proxy).
+    TokenOpt,
 }
 
 impl Consumer {
@@ -44,6 +46,7 @@ impl Consumer {
             Consumer::Beads => "beads",
             Consumer::Usage => "usage",
             Consumer::Otel => "otel",
+            Consumer::TokenOpt => "token-opt",
         }
     }
 
@@ -56,6 +59,7 @@ impl Consumer {
             Consumer::Beads,
             Consumer::Usage,
             Consumer::Otel,
+            Consumer::TokenOpt,
         ]
     }
 }
@@ -250,6 +254,22 @@ pub fn catalog() -> &'static [DepSpec] {
             required: false,
             why: "Grafana Alloy: forwards local OTLP telemetry to Grafana Cloud (run `ainb otel setup`)",
             install_hint: "brew install grafana/grafana/alloy   # macOS · then: ainb otel setup",
+        },
+        DepSpec {
+            name: "rtk",
+            kind: System,
+            consumers: &[TokenOpt],
+            required: false,
+            why: "compress CLI tool output (Bash/test/diff) via PreToolUse hooks — opt-in token savings",
+            install_hint: "brew install rtk        # macOS  ·  curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh  ·  then `rtk init -g`",
+        },
+        DepSpec {
+            name: "headroom",
+            kind: System,
+            consumers: &[TokenOpt],
+            required: false,
+            why: "per-session LLM-API compression proxy (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) — opt-in token savings",
+            install_hint: "uv tool install 'headroom-ai[proxy]'   # or: pipx install 'headroom-ai[proxy]'",
         },
     ]
 }

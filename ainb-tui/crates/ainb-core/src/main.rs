@@ -41,6 +41,7 @@ mod docker;
 mod editors;
 mod fleet;
 mod git;
+mod headroom;
 mod interactive;
 mod mcp_pool;
 mod models;
@@ -48,6 +49,7 @@ mod otel;
 mod perf;
 mod plugins;
 mod providers;
+mod rtk;
 mod tmux;
 mod usage_cache;
 mod widgets;
@@ -258,6 +260,10 @@ async fn tokio_main() -> Result<()> {
             if let Some(rt) = app_state.take_plugin_runtime() {
                 rt.shutdown();
             }
+
+            // Best-effort: stop the shared Headroom proxy so it does not
+            // orphan after the TUI exits.
+            headroom::stop();
 
             tui_result
         }

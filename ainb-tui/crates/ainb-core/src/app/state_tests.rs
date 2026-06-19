@@ -283,6 +283,8 @@ mod tests {
             workspace_name: "ws".to_string(),
             created_at: chrono::Utc::now(),
             agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let session = AppState::stopped_session_from_metadata(&metadata);

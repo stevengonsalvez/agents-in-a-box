@@ -38,6 +38,7 @@ pub enum SidebarItem {
     Inbox,        // ainb-hooks notification inbox
     Recovery,     // Recover orphaned sessions
     Mcp,          // Shared MCP pool overlay
+    Daemons,      // MCP pool + Headroom proxy status (read-only)
     Logs,         // Log history viewer
     Stats,        // Analytics & usage
     Witr,         // Process causality (witr plugin)
@@ -61,6 +62,7 @@ impl SidebarItem {
             Self::Inbox => "📥",
             Self::Recovery => "🔄",
             Self::Mcp => "🧬",
+            Self::Daemons => "⚙",
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Witr => "🌳",
@@ -84,6 +86,7 @@ impl SidebarItem {
             Self::Inbox => "Inbox",
             Self::Recovery => "Recovery",
             Self::Mcp => "MCP",
+            Self::Daemons => "Daemons",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Witr => "Witr",
@@ -107,6 +110,7 @@ impl SidebarItem {
             Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
+            Self::Daemons => "MCP + Headroom",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
@@ -130,6 +134,7 @@ impl SidebarItem {
             Self::Inbox => "b",
             Self::Recovery => "R",
             Self::Mcp => "p",
+            Self::Daemons => "d",
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Witr => "w",
@@ -154,6 +159,7 @@ impl SidebarItem {
             Self::Inbox,
             Self::Recovery,
             Self::Mcp,
+            Self::Daemons,
             Self::Logs,
             Self::Stats,
             Self::Witr,
@@ -564,6 +570,26 @@ mod tests {
         let collisions =
             all.iter().filter(|i| **i != SidebarItem::Memory && i.shortcut() == "m").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'm' collides");
+    }
+
+    #[test]
+    fn daemons_tile_registered_with_non_colliding_shortcut() {
+        let all = SidebarItem::all();
+        let pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Daemons)
+            .expect("SidebarItem::Daemons missing from all()");
+        assert!(pos > 0, "Daemons shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Daemons.icon(), "⚙");
+        assert_eq!(SidebarItem::Daemons.label(), "Daemons");
+        assert_eq!(SidebarItem::Daemons.shortcut(), "d");
+        assert_eq!(SidebarItem::Daemons.description(), "MCP + Headroom");
+        // 'd' must not collide with any other sidebar shortcut.
+        let collisions = all
+            .iter()
+            .filter(|i| **i != SidebarItem::Daemons && i.shortcut() == "d")
+            .count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'd' collides");
     }
 
     #[test]
