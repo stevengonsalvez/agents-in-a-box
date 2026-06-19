@@ -177,7 +177,7 @@ mod tests {
         uninstall_claude_hooks(home.path()).unwrap();
         let v = read(home.path());
         // No ATC entries remain.
-        for event in hooks::ATC_EVENTS {
+        for (event, _matcher) in hooks::ATC_EVENTS {
             let atc = v["hooks"][event]
                 .as_array()
                 .map(|a| a.iter().filter(|e| hooks::is_atc_managed(e)).count())

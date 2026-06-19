@@ -27,29 +27,40 @@ use serde_json::{Map, Value, json};
 /// clean uninstall). Stable — never rename without a migration.
 pub const ATC_MANAGED_KEY: &str = "_ainb_atc_managed";
 
-/// The lifecycle events ATC injects, in stable order. Each maps to a command
-/// that invokes the canonical hook script with the matching `AINB_HOOK_EVENT`
-/// so the script knows which status to write and whether to run the Stop drain.
-pub const ATC_EVENTS: &[&str] = &[
-    "SessionStart",
-    "UserPromptSubmit",
-    "Stop",
-    "Notification",
-    "SessionEnd",
+/// The lifecycle events ATC injects, in stable order, each paired with its
+/// matcher. Most lifecycle events use the all-matcher `""`; `PreToolUse` is
+/// scoped to the `AskUserQuestion` tool so ASK is hook-native (a PreToolUse with
+/// `""` would fire on EVERY tool call — far too hot). `StopFailure` reports an
+/// exhausted-retry API error (observational; it cannot block). Each maps to a
+/// command that invokes the canonical hook script with the matching
+/// `AINB_HOOK_EVENT` so the script forwards the right event + matcher.
+pub const ATC_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", ""),
+    ("UserPromptSubmit", ""),
+    ("Stop", ""),
+    ("Notification", ""),
+    ("SessionEnd", ""),
+    ("PreToolUse", "AskUserQuestion"),
+    ("StopFailure", ""),
 ];
 
-/// Build the ATC-managed hook entry for `event`, pointing at `hook_script`.
+/// Build the ATC-managed hook entry for `event` (scoped to `matcher`), pointing
+/// at `hook_script`.
 ///
 /// The command sets `AINB_HOOK_EVENT=<event>` so the shared script branches
-/// correctly, and `AINB_MANAGED=atc` so it knows it is running under ATC
-/// management (status-file + inbox writes). Returns a single matcher block
-/// (matcher `""` = all) carrying one command hook — the Claude settings shape.
+/// correctly, `AINB_HOOK_MATCHER=<matcher>` so the appended event line records
+/// its discriminator (e.g. `AskUserQuestion`), and `AINB_MANAGED=atc` so it
+/// knows it is running under ATC management (events.jsonl append + inbox writes).
+/// Returns a single matcher block carrying one command hook — the Claude
+/// settings shape (matcher `""` = all events of this type).
 #[must_use]
-pub fn managed_entry(event: &str, hook_script: &str) -> Value {
-    let command = format!("AINB_HOOK_EVENT={event} AINB_MANAGED=atc {hook_script}");
+pub fn managed_entry(event: &str, matcher: &str, hook_script: &str) -> Value {
+    let command = format!(
+        "AINB_HOOK_EVENT={event} AINB_HOOK_MATCHER={matcher} AINB_MANAGED=atc {hook_script}"
+    );
     json!({
         ATC_MANAGED_KEY: true,
-        "matcher": "",
+        "matcher": matcher,
         "hooks": [
             { "type": "command", "command": command, "timeout": 10 }
         ]
@@ -76,8 +87,8 @@ pub fn merge_into(mut settings: Value, hook_script: &str) -> Value {
     }
     let hooks = hooks.as_object_mut().expect("ensured object");
 
-    for event in ATC_EVENTS {
-        let entry = managed_entry(event, hook_script);
+    for (event, matcher) in ATC_EVENTS {
+        let entry = managed_entry(event, matcher, hook_script);
         let arr = hooks.entry((*event).to_string()).or_insert_with(|| Value::Array(Vec::new()));
         if !arr.is_array() {
             *arr = Value::Array(Vec::new());
@@ -260,15 +271,26 @@ mod tests {
     #[test]
     fn merge_adds_full_lifecycle_event_set() {
         let merged = merge_into(json!({}), "/x/notify.sh");
-        for event in ATC_EVENTS {
-            assert!(
-                merged["hooks"][event]
-                    .as_array()
-                    .map(|a| a.iter().any(is_atc_managed))
-                    .unwrap_or(false),
-                "event {event} not added"
+        for (event, matcher) in ATC_EVENTS {
+            let arr = merged["hooks"][event].as_array().expect("event added");
+            let entry = arr.iter().find(|e| is_atc_managed(e)).expect("ATC entry present");
+            assert_eq!(
+                entry["matcher"].as_str(),
+                Some(*matcher),
+                "event {event} matcher mismatch"
             );
         }
+        // PreToolUse is scoped to AskUserQuestion (NOT the all-matcher), so it
+        // doesn't fire on every tool call.
+        let pre = &merged["hooks"]["PreToolUse"];
+        assert!(pre.is_array(), "PreToolUse installed");
+        let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("AINB_HOOK_MATCHER=AskUserQuestion"),
+            "PreToolUse forwards its matcher: {cmd}"
+        );
+        // StopFailure installed (observational ERR source).
+        assert!(merged["hooks"]["StopFailure"].is_array());
     }
 
     #[test]
@@ -286,7 +308,7 @@ mod tests {
         let stripped = strip_from(merged);
 
         // ATC entries gone everywhere.
-        for event in ATC_EVENTS {
+        for (event, _matcher) in ATC_EVENTS {
             let atc = stripped["hooks"][event]
                 .as_array()
                 .map(|a| a.iter().filter(|e| is_atc_managed(e)).count())
