@@ -75,13 +75,58 @@ impl FleetSnapshot {
     /// emits on real change.
     #[must_use]
     pub fn compute_fingerprint(sessions: &Value, needs: &Value, cost: &Value) -> u64 {
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hasher;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        // serde_json::Value isn't Hash; hash its compact string form.
-        sessions.to_string().hash(&mut h);
-        needs.to_string().hash(&mut h);
-        cost.to_string().hash(&mut h);
+        // `serde_json::Value` isn't `Hash`, but it doesn't need to be: walk it
+        // structurally into the hasher. This avoids three full `to_string()`
+        // re-serializations of the entire snapshot on every poll tick (every
+        // ~2s, forever) — we feed bytes straight into the hasher with no
+        // intermediate `String` allocations.
+        hash_value(sessions, &mut h);
+        hash_value(needs, &mut h);
+        hash_value(cost, &mut h);
         h.finish()
+    }
+}
+
+/// Feed a [`serde_json::Value`] into a hasher structurally, with no
+/// intermediate string allocation. A leading discriminant byte per node keeps
+/// distinct shapes from colliding (e.g. the string `"1"` vs the number `1`, or
+/// `[]` vs `{}`), and object keys are hashed in their stored (insertion/sorted)
+/// order — stable for a given serialization, which is all the fingerprint needs.
+fn hash_value<H: std::hash::Hasher>(v: &Value, h: &mut H) {
+    use std::hash::Hash;
+    match v {
+        Value::Null => h.write_u8(0),
+        Value::Bool(b) => {
+            h.write_u8(1);
+            h.write_u8(u8::from(*b));
+        }
+        Value::Number(n) => {
+            h.write_u8(2);
+            // The number's textual form distinguishes int/float/precision
+            // without depending on `f64` round-tripping; hash its bytes.
+            h.write(n.to_string().as_bytes());
+        }
+        Value::String(s) => {
+            h.write_u8(3);
+            s.hash(h);
+        }
+        Value::Array(items) => {
+            h.write_u8(4);
+            h.write_usize(items.len());
+            for item in items {
+                hash_value(item, h);
+            }
+        }
+        Value::Object(map) => {
+            h.write_u8(5);
+            h.write_usize(map.len());
+            for (k, val) in map {
+                k.hash(h);
+                hash_value(val, h);
+            }
+        }
     }
 }
 
@@ -255,5 +300,43 @@ mod tests {
         let s2 = json!([{"id": 2}]);
         let fp_c = FleetSnapshot::compute_fingerprint(&s2, &n1, &c1);
         assert_ne!(fp_a, fp_c, "changed sessions must change the fingerprint");
+    }
+
+    #[test]
+    fn fingerprint_detects_deeply_nested_change() {
+        // A change buried inside nested arrays/objects must still flip the
+        // fingerprint — the structural walk has to reach the leaf.
+        let base = json!([{ "session": { "ctx": { "snippet": "rate_limited" } } }]);
+        let mutated = json!([{ "session": { "ctx": { "snippet": "fetch_failed" } } }]);
+        let empty = Value::Null;
+        let fp_base = FleetSnapshot::compute_fingerprint(&base, &empty, &empty);
+        let fp_mut = FleetSnapshot::compute_fingerprint(&mutated, &empty, &empty);
+        assert_ne!(fp_base, fp_mut, "a nested leaf change must change the hash");
+    }
+
+    #[test]
+    fn fingerprint_does_not_confuse_string_and_number() {
+        // The string "1" and the number 1 serialize differently and must hash
+        // differently — the per-node discriminant byte guarantees it.
+        let as_str = json!([{ "v": "1" }]);
+        let as_num = json!([{ "v": 1 }]);
+        let empty = Value::Null;
+        assert_ne!(
+            FleetSnapshot::compute_fingerprint(&as_str, &empty, &empty),
+            FleetSnapshot::compute_fingerprint(&as_num, &empty, &empty),
+            "string vs number must not collide",
+        );
+    }
+
+    #[test]
+    fn fingerprint_does_not_confuse_empty_array_and_object() {
+        let arr = json!({ "x": [] });
+        let obj = json!({ "x": {} });
+        let empty = Value::Null;
+        assert_ne!(
+            FleetSnapshot::compute_fingerprint(&arr, &empty, &empty),
+            FleetSnapshot::compute_fingerprint(&obj, &empty, &empty),
+            "[] vs {{}} must not collide",
+        );
     }
 }
