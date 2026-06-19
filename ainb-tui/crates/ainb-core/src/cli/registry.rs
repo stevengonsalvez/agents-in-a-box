@@ -1685,7 +1685,7 @@ fn build_atc_command() -> Command {
         .subcommand(
             Command::new("hook")
                 .hide(true)
-                .about("Internal: lifecycle-hook side-effects (status file + inbox + Stop-drain)")
+                .about("Internal: lifecycle-hook side-effects (event append + inbox + Stop-drain)")
                 .arg(clap::Arg::new("event").long("event").required(true).help("Raw hook event name"))
                 .arg(
                     clap::Arg::new("session-id")
