@@ -31,11 +31,14 @@ lazy_static! {
     /// distinct `xapp` prefix rather than `xox`.
     static ref SLACK_TOKEN: Regex =
         Regex::new(r"(?:xox[baprse]|xapp)-[A-Za-z0-9-]+").expect("valid slack token regex");
-    /// Discord bot tokens: three base64url segments of roughly 24+ / 6 / 27+
-    /// chars (`<user-id>.<timestamp>.<hmac>`). Deliberately conservative on the
-    /// boundaries so it does not eat ordinary dotted identifiers (e.g. versions).
+    /// Discord bot tokens: three base64url segments of roughly 24+ / 6–12 / 27+
+    /// chars (`<user-id>.<timestamp>.<hmac>`). The middle (timestamp) segment is a
+    /// BOUNDED RANGE, not a fixed 6, because newer Discord tokens widen it (a
+    /// 7-char middle is already in the wild) and a fixed `{6}` silently failed to
+    /// redact those — leaking the token into `last_error`/logs. The `6,12` ceiling
+    /// keeps it conservative so it still won't eat a short dotted version string.
     static ref DISCORD_TOKEN: Regex =
-        Regex::new(r"[\w-]{24,}\.[\w-]{6}\.[\w-]{27,}").expect("valid discord token regex");
+        Regex::new(r"[\w-]{24,}\.[\w-]{6,12}\.[\w-]{27,}").expect("valid discord token regex");
 }
 
 /// Replacement marker substituted for any matched secret. Stable so callers and
@@ -161,6 +164,22 @@ mod tests {
         assert_eq!(scrub_token(msg), msg);
         // A short dotted identifier (e.g. a version) is not token-shaped.
         assert_eq!(scrub_token("v10.0.1"), "v10.0.1");
+    }
+
+    #[test]
+    fn redacts_discord_token_with_seven_char_middle_segment() {
+        // REGRESSION: newer Discord tokens carry a 7-char (not 6) middle segment.
+        // The old `[\w-]{6}` middle pinned exactly 6 and silently let these
+        // through, leaking the token into last_error/logs. The bounded `{6,12}`
+        // middle must now catch it.
+        let token = "AAAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC";
+        let scrubbed = scrub_token(&format!("auth failed with Bot {token} (401)"));
+        assert!(
+            !scrubbed.contains(token),
+            "7-char-middle token must be redacted: {scrubbed}"
+        );
+        assert!(scrubbed.contains(REDACTED));
+        assert!(scrubbed.contains("(401)"), "non-token text is preserved");
     }
 
     #[test]
