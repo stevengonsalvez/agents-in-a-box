@@ -992,6 +992,12 @@ impl CliCommand for ClaudecodeCommand {
                                      nothing on stdout.",
                                 ),
                         ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb claudecode statusline               Statusline hook (reads Claude JSON on stdin)\n  \
+                     ainb claudecode statusline --cache-only  Cache rate-limit windows, emit nothing\n  \
+                     # wire into ~/.claude/settings.json statusLine.command",
                 ),
         )
     }
@@ -1047,6 +1053,11 @@ impl CliCommand for CodexCommand {
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Bypass the throttle and pull now."),
                         ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb codex statusline          Pull + cache Codex OAuth quota for the TUI top bar\n  \
+                     ainb codex statusline --force  Bypass the throttle and pull now",
                 ),
         )
     }
