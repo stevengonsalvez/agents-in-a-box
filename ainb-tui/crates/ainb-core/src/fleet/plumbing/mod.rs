@@ -6,12 +6,11 @@
 // poll-mode (wait for the next heartbeat) to event-driven (learn the instant a
 // child finishes).
 //
-// The pieces, mirroring agent-deck's hooks → status files → durable inbox →
+// The pieces, mirroring agent-deck's hooks → event log → durable inbox →
 // synchronous Stop-drain chain (see explainers/agent-deck-vs-ainb-fleet.html):
 //
 // - `atomic`  — crash-safe atomic write+fsync, the durability primitive.
-// - `paths`   — `~/.agents-in-a-box/{status,inbox}/` layout (honours `AINB_HOME`).
-// - `status`  — per-session lifecycle status files written on each hook event.
+// - `paths`   — `~/.agents-in-a-box/inbox/` layout (honours `AINB_HOME`).
 // - `inbox`   — durable per-parent JSONL inbox: last-wins-per-child, fsync'd,
 //               atomic rewrite, turn-fingerprint exactly-once, dead-letter sink.
 // - `drain`   — pure Stop-drain decision: empty-inbox fast path + the
@@ -23,6 +22,13 @@
 // `commit_completion` is the one routing entry point a finishing child uses: it
 // resolves the parent and commits to that parent's inbox, dead-lettering when
 // the parent is unresolvable.
+//
+// NOTE: the former `status/<session_id>.json` lifecycle files (the `status`
+// module) are RETIRED. The hook no longer writes them (Wave 2 replaced the
+// write with an append to the event log) and no reader consumes them (Wave 4
+// migrated `fleet needs` / the ATC heartbeat onto the event-sourced
+// `current_state` table). Coarse per-session lifecycle is now `current_state`
+// (kind RUNNING/DONE/…), read via `fleet::read::current_state`.
 
 pub mod atomic;
 pub mod drain;
@@ -31,7 +37,6 @@ pub mod inbox;
 pub mod parent;
 pub mod paths;
 pub mod settings;
-pub mod status;
 
 use std::path::Path;
 
@@ -40,7 +45,6 @@ use anyhow::Result;
 pub use drain::{BlockBudget, DEFAULT_BLOCK_BUDGET, StopDecision, decide, format_completions};
 pub use inbox::{Inbox, InboxRecord, dead_letter_in};
 pub use parent::{PARENT_ENV, record_parent_in, resolve_parent_in};
-pub use status::{SessionStatus, StatusFile};
 
 /// Commit a finished child's completion to its parent's inbox under `home`.
 ///
