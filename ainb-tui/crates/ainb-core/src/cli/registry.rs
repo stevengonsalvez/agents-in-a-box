@@ -1888,7 +1888,12 @@ impl CliCommand for HeadroomCommand {
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(status)
-                .subcommand(stop),
+                .subcommand(stop)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb headroom status    Is the proxy running? port / pid / tokens saved\n  \
+                     ainb headroom stop      Stop the ainb-managed Headroom proxy",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -2056,7 +2061,13 @@ impl CliCommand for RtkCommand {
                 .arg_required_else_help(true)
                 .subcommand(status)
                 .subcommand(install)
-                .subcommand(uninstall),
+                .subcommand(uninstall)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb rtk status      Install state + total tokens saved\n  \
+                     ainb rtk install     Install rtk + wire the Claude Code PreToolUse hook\n  \
+                     ainb rtk uninstall   Remove the hook (keeps the rtk binary)",
+                ),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
