@@ -46,6 +46,24 @@
 //! IDLE-on-age from the last Stop. `Stop` carries no `stop_reason` in
 //! Claude Code 2.1.19 (the firing IS turn-end), so IDLE is purely age-driven
 //! here — the `stop_reason` null/end_turn nuance stays in the tmux fallback.
+//!
+//! # IDLE is TIME-driven, not event-driven (the re-sweep)
+//!
+//! A `Stop` folded while `age < idle_threshold` is written `RUNNING` and would
+//! otherwise NEVER become `IDLE` under steady state: the fold is cursor-driven,
+//! so with no new event after the Stop, [`events_since`] returns nothing and the
+//! pass returns early — the age transition would never fire. To fix that, a
+//! freshly-stopped session is written `RUNNING` but with its stop timestamp
+//! stamped into `context` as `{"stopped_ts": <ms>}`, and EVERY materialize pass
+//! runs a second, TIME-driven [`resweep_idle`] step (independent of the events
+//! cursor) that re-scans these stop-pending `RUNNING` rows and promotes any
+//! whose `now - stopped_ts >= idle_threshold` to `IDLE` with `idle_minutes`.
+//!
+//! Readers treat `RUNNING` (with or without a `stopped_ts` marker) as
+//! not-a-need, so the marker is invisible to the reader contract — the kind set
+//! stays exactly `ASK|ERR|WAIT|IDLE|RUNNING|DONE`. Once promoted to `IDLE` the
+//! row's context is the classifier-shaped `{"idle_minutes": N}`; a later user
+//! turn clears it back to plain `RUNNING` (no marker) via the normal fold.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,6 +75,19 @@ use crate::store::{EventRow, StateRow, Store, StoreError};
 /// same `AINB_FLEET_IDLE_MIN` env var so hook-sourced IDLE and tmux-sourced
 /// IDLE agree on when a stopped session becomes idle.
 const DEFAULT_IDLE_MIN: i64 = 5;
+
+/// Milliseconds per minute. IDLE age is `(now - stop_ts) / MS_PER_MIN` with a
+/// `>= idle_threshold_min` gate — a FLOOR division that matches the classifier
+/// exactly (`ainb-core` `fleet::read::needs` computes `age_ms / 60_000` and
+/// gates with the same `>=`), so hook-IDLE and tmux-IDLE agree at the boundary
+/// (e.g. both flip to IDLE at exactly 5 whole minutes, not 4 or 6).
+const MS_PER_MIN: i64 = 60_000;
+
+/// `context` key carrying the `Stop` timestamp on a stop-pending `RUNNING` row.
+/// Its presence is the signal [`resweep_idle`] uses to find rows that should
+/// flip to `IDLE` once they age past the threshold. Invisible to readers, which
+/// treat any `RUNNING` row as not-a-need.
+const STOPPED_TS_KEY: &str = "stopped_ts";
 
 /// Materialized state kinds. String constants kept in lock-step with the
 /// classifier's `NeedsContext` discriminants + the lifecycle kinds.
@@ -135,11 +166,9 @@ pub fn materialize_at(
     now_ms: i64,
     idle_threshold_min: i64,
 ) -> Result<usize, StoreError> {
+    // 1. EVENT-DRIVEN fold: apply every event past the durable cursor.
     let cursor = store.read_materialize_seq()?;
     let events = store.events_since(cursor)?;
-    if events.is_empty() {
-        return Ok(0);
-    }
 
     // Fold newest-wins per session. We carry the seed of the existing row so a
     // partial batch (e.g. a Stop folded last pass, a UserPromptSubmit this
@@ -173,7 +202,57 @@ pub fn materialize_at(
     if max_seq > cursor {
         store.write_materialize_seq(max_seq)?;
     }
+
+    // 2. TIME-DRIVEN re-sweep: promote stop-pending RUNNING rows to IDLE on age,
+    //    INDEPENDENT of the events cursor. This is what makes IDLE fire under
+    //    steady state — a Stop folded while fresh leaves a `RUNNING` row marked
+    //    with `stopped_ts`; with no further event the fold above is a no-op, so
+    //    only this pass can flip the row to IDLE once it ages. Always runs (even
+    //    when no new events arrived), so it must NOT be gated on `events`.
+    upserted += resweep_idle(store, now_ms, idle_threshold_min)?;
+
     Ok(upserted)
+}
+
+/// Re-scan stop-pending `RUNNING` rows and promote any that have aged past the
+/// idle threshold to `IDLE`. Returns the number of rows flipped this pass.
+///
+/// A stop-pending row is a `RUNNING` row whose `context` carries
+/// [`STOPPED_TS_KEY`] (stamped by [`Accum::into_row`] when a fresh `Stop` was
+/// the latest event). This step is the TIME-driven half of materialize: it runs
+/// every pass regardless of whether any new event was folded, so a steady-state
+/// session with no further hook activity still transitions Stop → IDLE on age.
+///
+/// Idempotent: a row already promoted to `IDLE` no longer matches the
+/// `RUNNING + stopped_ts` predicate, and a fresh user turn rewrites the row to
+/// plain `RUNNING` (no marker) so it is no longer a re-sweep candidate.
+fn resweep_idle(store: &Store, now_ms: i64, idle_threshold_min: i64) -> Result<usize, StoreError> {
+    let mut flipped = 0;
+    for row in store.list_stop_pending_running()? {
+        let Some(stop_ts) = stopped_ts_from_context(row.context.as_deref()) else {
+            continue;
+        };
+        let age_min = now_ms.saturating_sub(stop_ts) / MS_PER_MIN;
+        if age_min >= idle_threshold_min {
+            let promoted = StateRow {
+                kind: kind::IDLE.to_string(),
+                context: Some(serde_json::json!({ "idle_minutes": age_min }).to_string()),
+                ..row
+            };
+            store.upsert_current_state(&promoted)?;
+            flipped += 1;
+        }
+    }
+    Ok(flipped)
+}
+
+/// Extract the `stopped_ts` marker from a stop-pending `RUNNING` row's context.
+fn stopped_ts_from_context(context: Option<&str>) -> Option<i64> {
+    let ctx = context?;
+    serde_json::from_str::<Value>(ctx)
+        .ok()?
+        .get(STOPPED_TS_KEY)
+        .and_then(Value::as_i64)
 }
 
 /// The idle threshold (minutes) — same env knob + default as the classifier.
@@ -274,12 +353,22 @@ impl Accum {
                 // IS turn-end. A freshly-stopped session is RUNNING/quiet until
                 // it ages past the threshold, at which point it is IDLE — the
                 // exact age semantics of the classifier's step-4 IDLE.
-                let age_min = now_ms.saturating_sub(stop_ts) / 60_000;
+                //
+                // CRITICAL: a fresh stop is written `RUNNING` but STAMPED with
+                // `stopped_ts` so the time-driven `resweep_idle` can later flip
+                // it to IDLE on age WITHOUT a new event. Without this marker the
+                // age transition would never fire under steady state (no new
+                // event → empty `events_since` → early no-op).
+                let age_min = now_ms.saturating_sub(stop_ts) / MS_PER_MIN;
                 if age_min >= idle_threshold_min {
                     let ctx = serde_json::json!({ "idle_minutes": age_min }).to_string();
                     (kind::IDLE, Some(ctx))
                 } else {
-                    (kind::RUNNING, None)
+                    // RUNNING, but carry the stop ts so the re-sweep can promote
+                    // it once it ages. Readers treat RUNNING as not-a-need and
+                    // ignore its context, so this marker is invisible to them.
+                    let ctx = serde_json::json!({ STOPPED_TS_KEY: stop_ts }).to_string();
+                    (kind::RUNNING, Some(ctx))
                 }
             }
         };
@@ -613,6 +702,80 @@ mod tests {
             row.kind, "RUNNING",
             "a freshly-stopped session is not yet IDLE"
         );
+        // The RUNNING row must carry the stop marker so the re-sweep can later
+        // promote it WITHOUT a new event arriving.
+        let ctx: Value = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["stopped_ts"], stop_ts, "fresh stop stamps stopped_ts");
+    }
+
+    #[test]
+    fn resweep_promotes_fresh_stop_to_idle_on_age_without_a_new_event() {
+        // THE headline bug: under steady state a fresh Stop must become IDLE on
+        // AGE alone — no new event, no back-dated timestamp. We fold a Stop that
+        // is fresh at fold time (RUNNING), then advance ONLY a synthetic clock
+        // past the threshold and re-run materialize. The TIME-driven re-sweep —
+        // not the events cursor — must flip the row to IDLE.
+        let (_d, store) = store();
+        let stop_ts = NOW; // fired "now": age 0 at first fold.
+        push(&store, stop_ts, "s", "/p", "Stop", None, "{}");
+
+        // Pass 1 at NOW: age 0 < threshold → RUNNING (stop-pending).
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        assert_eq!(
+            state(&store, "s", "/p").kind,
+            "RUNNING",
+            "fresh stop is RUNNING at fold time"
+        );
+
+        // No new event arrives. Advance the clock 6 min past the stop.
+        let later = NOW + 6 * 60_000;
+        // events_since(cursor) is now EMPTY — only the re-sweep can act.
+        let flipped = materialize_at(&store, later, IDLE_MIN).unwrap();
+        assert!(flipped >= 1, "re-sweep flips the aged stop-pending row");
+
+        let row = state(&store, "s", "/p");
+        assert_eq!(
+            row.kind, "IDLE",
+            "steady-state age transition fires via the re-sweep (the headline fix)"
+        );
+        let ctx: Value = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["idle_minutes"], 6);
+    }
+
+    #[test]
+    fn resweep_is_idempotent_and_user_turn_clears_pending() {
+        // Once promoted to IDLE the row is no longer a re-sweep candidate (so a
+        // second sweep is a no-op), and a later user turn rewrites it to plain
+        // RUNNING with no marker — also no longer a candidate.
+        let (_d, store) = store();
+        push(&store, NOW, "s", "/p", "Stop", None, "{}");
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+
+        let later = NOW + 6 * 60_000;
+        materialize_at(&store, later, IDLE_MIN).unwrap();
+        assert_eq!(state(&store, "s", "/p").kind, "IDLE");
+        // Re-running the sweep does not re-flip / re-count an already-IDLE row.
+        let again = materialize_at(&store, later + 60_000, IDLE_MIN).unwrap();
+        assert_eq!(again, 0, "already-IDLE row is not a re-sweep candidate");
+
+        // A user turn after IDLE → plain RUNNING (no stopped_ts marker).
+        push(
+            &store,
+            later + 120_000,
+            "s",
+            "/p",
+            "UserPromptSubmit",
+            None,
+            "{}",
+        );
+        materialize_at(&store, later + 120_000, IDLE_MIN).unwrap();
+        let row = state(&store, "s", "/p");
+        assert_eq!(row.kind, "RUNNING");
+        assert_eq!(row.context, None, "a real user turn carries no stop marker");
+        // And it stays RUNNING even as the clock advances (no pending stop).
+        let n = materialize_at(&store, later + 999_999, IDLE_MIN).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(state(&store, "s", "/p").kind, "RUNNING");
     }
 
     #[test]

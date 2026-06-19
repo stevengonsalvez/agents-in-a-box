@@ -728,6 +728,37 @@ impl Store {
         Ok(out)
     }
 
+    /// Every `RUNNING` row whose `context` carries a `stopped_ts` marker — the
+    /// stop-pending rows the transition loop's time-driven re-sweep promotes to
+    /// `IDLE` on age. Filtering in SQL (`kind = 'RUNNING'` + a `LIKE` on the
+    /// marker key) keeps the re-sweep off the full `current_state` table; the
+    /// caller re-parses `context` to read the exact `stopped_ts`. The `LIKE` is
+    /// a cheap pre-filter, not the source of truth — the JSON parse is.
+    pub fn list_stop_pending_running(&self) -> Result<Vec<StateRow>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, cwd, kind, context, parent, last_event_ts, source
+             FROM current_state
+             WHERE kind = 'RUNNING' AND context LIKE '%stopped_ts%'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StateRow {
+                session_id: r.get(0)?,
+                cwd: r.get(1)?,
+                kind: r.get(2)?,
+                context: r.get(3)?,
+                parent: r.get(4)?,
+                last_event_ts: r.get(5)?,
+                source: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Read the durable ingest cursor (byte offset already consumed from
     /// `events.jsonl`). `0` when nothing has been ingested yet.
     pub fn read_ingest_offset(&self) -> Result<u64, StoreError> {
@@ -1100,6 +1131,35 @@ mod tests {
         store.upsert_current_state(&other).unwrap();
         assert_eq!(store.list_current_state().unwrap().len(), 2);
         assert!(store.get_current_state("missing", "/x").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_stop_pending_running_finds_only_marked_running_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let mk = |sid: &str, kind: &str, ctx: Option<&str>| StateRow {
+            session_id: sid.into(),
+            cwd: "/p".into(),
+            kind: kind.into(),
+            context: ctx.map(str::to_string),
+            parent: None,
+            last_event_ts: 1,
+            source: "hook".into(),
+        };
+        store
+            .upsert_current_state(&mk("pending", "RUNNING", Some(r#"{"stopped_ts":42}"#)))
+            .unwrap();
+        store.upsert_current_state(&mk("plain", "RUNNING", None)).unwrap();
+        store
+            .upsert_current_state(&mk("idle", "IDLE", Some(r#"{"idle_minutes":9}"#)))
+            .unwrap();
+        store
+            .upsert_current_state(&mk("ask", "ASK", Some(r#"{"stopped_ts":1}"#)))
+            .unwrap();
+
+        let pending = store.list_stop_pending_running().unwrap();
+        assert_eq!(pending.len(), 1, "only RUNNING + stopped_ts marker matches");
+        assert_eq!(pending[0].session_id, "pending");
     }
 
     #[test]
