@@ -11,9 +11,9 @@
 //!    frontmatter block ([`parse_skill_frontmatter`]) and the install-URI
 //!    builders ([`owned_install_uri`], [`external_install_uri`]).
 //!
-//! The filesystem walk that feeds these (glob `toolkit/packages/skills/*`,
-//! read `external-dependencies.yaml`) lives in the `xtask` generator — this
-//! module never touches disk.
+//! The filesystem walk that feeds these (glob a fetched ainb-toolkit's
+//! `skills/*`, read its `external-dependencies.yaml`) lives in the `xtask`
+//! generator — this module never touches disk.
 //!
 //! ```text
 //! ┌──────────────────────┐   build_*    ┌───────────────┐  to_hits/search
@@ -32,15 +32,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{CatalogEntryKind, CatalogHit};
 
-/// `owner/repo` slug of the toolkit itself — the source for every owned
-/// (toolkit-authored) catalog entry.
-pub const OWNED_REPO: &str = "stevengonsalvez/agents-in-a-box";
+/// `owner/repo` slug of the standalone ainb-toolkit repo — the sole canonical
+/// home for every owned (curated) catalog entry. ainb consumes it as a pinned
+/// external source; the repo root *is* the skills/installer/catalog contents.
+pub const OWNED_REPO: &str = "stevengonsalvez/ainb-toolkit";
 
-/// Repo-relative directory holding the toolkit's owned skills. The reorg
-/// only moved a handful of dev-tooling skills to repo-root `.claude/skills`;
-/// the curated user-facing set still lives here (matching
-/// `toolkit/bin/generate-catalog.sh`, which globs the same path).
-pub const OWNED_SKILLS_REPO_DIR: &str = "toolkit/packages/skills";
+/// Directory holding the owned skills, relative to the [`OWNED_REPO`] root.
+/// ainb-toolkit is flattened — curated skills live at a top-level `skills/`,
+/// the native external-skill repo layout that ainb's source adapter and sync
+/// engine consume (home-relative path == repo-relative path). This constant
+/// builds install URIs; the `xtask` generator globs a fetched ainb-toolkit
+/// checkout's `skills/` independently.
+pub const OWNED_SKILLS_REPO_DIR: &str = "skills";
 
 /// Schema version of the published index. Bumped only on a breaking change
 /// to [`CatalogIndexEntry`] so an older `AinbCuratedCatalogBackend` can
@@ -195,7 +198,7 @@ fn origin_rank(o: CatalogOrigin) -> u8 {
 }
 
 /// Build the install URI for an owned skill, pinning the release `tag`:
-/// `gh:stevengonsalvez/agents-in-a-box@<tag>/toolkit/packages/skills/<name>`.
+/// `gh:stevengonsalvez/ainb-toolkit@<tag>/skills/<name>`.
 pub fn owned_install_uri(tag: &str, name: &str) -> String {
     format!("gh:{OWNED_REPO}@{tag}/{OWNED_SKILLS_REPO_DIR}/{name}")
 }
@@ -292,7 +295,7 @@ mod tests {
     fn owned_uri_pins_tag_and_skill_path() {
         assert_eq!(
             owned_install_uri("v1.4.0", "commit"),
-            "gh:stevengonsalvez/agents-in-a-box@v1.4.0/toolkit/packages/skills/commit"
+            "gh:stevengonsalvez/ainb-toolkit@v1.4.0/skills/commit"
         );
     }
 

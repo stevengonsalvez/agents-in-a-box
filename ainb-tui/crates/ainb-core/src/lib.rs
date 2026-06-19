@@ -18,6 +18,7 @@ pub mod git;
 pub mod interactive;
 pub mod mcp_pool;
 pub mod models;
+pub mod otel;
 pub mod perf;
 pub mod plugins;
 pub mod providers;

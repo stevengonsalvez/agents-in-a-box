@@ -44,6 +44,7 @@ mod git;
 mod interactive;
 mod mcp_pool;
 mod models;
+mod otel;
 mod perf;
 mod plugins;
 mod providers;

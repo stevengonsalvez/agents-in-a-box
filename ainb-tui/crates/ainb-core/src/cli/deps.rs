@@ -15,7 +15,7 @@ use serde::Serialize;
 /// The `[graph]` extra pulls qmd (BM25) + nano-graphrag (GraphRAG) +
 /// sentence-transformers. `--force --upgrade` makes re-runs idempotent.
 pub const REFLECT_KB_INSTALL: &str = "uv tool install --force --upgrade \
-'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'";
+'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'";
 
 /// Which feature needs a given dependency. A dep may have several consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -31,6 +31,8 @@ pub enum Consumer {
     Beads,
     /// ccusage-backed 5h / weekly usage bars.
     Usage,
+    /// OpenTelemetry export to Grafana Cloud (`ainb otel setup`).
+    Otel,
 }
 
 impl Consumer {
@@ -41,6 +43,7 @@ impl Consumer {
             Consumer::Statusline => "statusline",
             Consumer::Beads => "beads",
             Consumer::Usage => "usage",
+            Consumer::Otel => "otel",
         }
     }
 
@@ -52,6 +55,7 @@ impl Consumer {
             Consumer::Statusline,
             Consumer::Beads,
             Consumer::Usage,
+            Consumer::Otel,
         ]
     }
 }
@@ -238,6 +242,14 @@ pub fn catalog() -> &'static [DepSpec] {
             required: false,
             why: "the Claude Code CLI the reflect drainer shells out to",
             install_hint: "# install Claude Code: https://claude.com/claude-code",
+        },
+        DepSpec {
+            name: "alloy",
+            kind: System,
+            consumers: &[Otel],
+            required: false,
+            why: "Grafana Alloy: forwards local OTLP telemetry to Grafana Cloud (run `ainb otel setup`)",
+            install_hint: "brew install grafana/grafana/alloy   # macOS · then: ainb otel setup",
         },
     ]
 }

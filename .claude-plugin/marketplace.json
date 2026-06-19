@@ -5,24 +5,10 @@
     "url": "https://github.com/stevengonsalvez"
   },
   "metadata": {
-    "description": "Marketplace for plugins shipped with the agents-in-a-box toolkit. Plugins live under toolkit/packages/plugins/ and are installable via `claude plugin install <name>@agents-in-a-box`.",
+    "description": "Marketplace for plugins shipped with agents-in-a-box. Plugins live under plugins/ at the repo root and are installable via `claude plugin install <name>@agents-in-a-box`.",
     "version": "1.0.0"
   },
   "plugins": [
-    {
-      "name": "reflect",
-      "source": "./plugins/reflect",
-      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect:cost, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
-      "strict": false,
-      "keywords": [
-        "self-improvement",
-        "learnings",
-        "graphrag",
-        "memory",
-        "recall",
-        "retrieval"
-      ]
-    },
     {
       "name": "ainb-fleet",
       "source": "./plugins/ainb-fleet",
@@ -66,6 +52,23 @@
         "token-savings",
         "compaction",
         "caveman-mode"
+      ]
+    },
+    {
+      "name": "illustration",
+      "source": "./plugins/illustration",
+      "description": "Mascot-driven explanatory & brand illustration family. A shared workflow engine (digest → shot list → per-image generation → QA → deliver) with per-character sub-skills, each carrying its own visual DNA, IP anchors, and likeness-locked references. Ships illustration:alex (bold comic streetwear Sport Head for ShotClubhouse) and illustration:popa (crude hand-drawn pastel blob for deadpan dev/system explainers). Invoke the bare `illustration` skill to pick a mascot.",
+      "strict": false,
+      "keywords": [
+        "illustration",
+        "mascot",
+        "image-generation",
+        "explainer",
+        "branding",
+        "alex",
+        "popa",
+        "sport-head",
+        "shotclubhouse"
       ]
     }
   ]

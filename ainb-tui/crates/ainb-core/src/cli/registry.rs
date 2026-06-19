@@ -105,6 +105,7 @@ impl CommandRegistry {
         r.register(ClaudecodeCommand);
         r.register(CodexCommand);
         r.register(TmuxCommand);
+        r.register(OtelCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
         r.register(WitrCommand); // headless process-trace via the witr plugin
@@ -1308,6 +1309,36 @@ impl CliCommand for NotifydCommand {
     }
 }
 
+/// `ainb otel {setup,status,start}` — OpenTelemetry export to Grafana Cloud.
+/// See `crate::cli::otel` for the setup flow.
+pub struct OtelCommand;
+impl CliCommand for OtelCommand {
+    fn name(&self) -> &'static str {
+        "otel"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::otel::OtelCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Set up OpenTelemetry export to Grafana Cloud (Grafana Alloy pipeline)")
+                    .subcommand_required(true)
+                    .after_help(
+                        "EXAMPLES:\n  \
+                         ainb otel setup     Configure OTEL export to Grafana Cloud (assets, creds, Alloy)\n  \
+                         ainb otel status    Show the local OTEL pipeline state\n  \
+                         ainb otel start     (Re)start Grafana Alloy in its tmux session",
+                    ),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::otel::OtelCommands::from_arg_matches(matches) {
+            Ok(c) => Box::pin(async move { crate::cli::otel::execute(c, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -1957,14 +1988,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_nine_commands() {
+    fn built_ins_registers_thirty_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // built-ins + doctor + reflect + claudecode + codex + tmux + abtop +
-        // witr + learnings + plugin stub + fleet + mcp + hidden notifyd +
-        // hangar = 29. The TUI is NOT in the registry — main.rs handles `tui` /
-        // no-subcommand inline.
-        assert_eq!(names.len(), 29, "expected 29 entries, got {names:?}");
+        // built-ins + doctor + reflect + claudecode + codex + tmux + otel +
+        // abtop + witr + learnings + plugin stub + fleet + mcp + hidden notifyd
+        // + hangar = 30. The TUI is NOT in the registry — main.rs handles `tui`
+        // / no-subcommand inline.
+        assert_eq!(names.len(), 30, "expected 30 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1986,6 +2017,7 @@ mod tests {
             "claudecode",
             "codex",
             "tmux",
+            "otel",
             "completion",
             "abtop",
             "witr",

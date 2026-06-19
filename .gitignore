@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-toolkit/node_modules/
 
 # Python
 __pycache__/
@@ -43,16 +42,10 @@ skills-lock.json
 
 # Bun build artifacts
 *.bun-build
-toolkit/packages/utilities/hooks/*.bun-build
 
 # Orchestration runtime state (DO NOT COMMIT)
-toolkit/.claude/orchestration/state/sessions.json
-toolkit/.claude/orchestration/state/completed.json
-toolkit/.claude/orchestration/state/dag-*.json
-toolkit/.claude/orchestration/checkpoints/*.json
 
 # Keep config template
-!toolkit/.claude/orchestration/state/config.json
 
 # Local infrastructure (not tracked)
 worktrees/

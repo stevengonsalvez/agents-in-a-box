@@ -46,6 +46,17 @@
 
 A terminal-native ecosystem for managing AI coding agents. Built around a Rust TUI that orchestrates Claude Code, Codex, Gemini, and Copilot sessions with git worktree isolation, and a portable toolkit of skills, agents, and workflows that plug into 9 different AI coding tools.
 
+### Related repositories
+
+The portable skills, the `bootstrap.js` installer, and the catalog live in a
+separate, standalone repo — `ainb` consumes it as a pinned external source.
+
+| Repo | What it holds |
+|---|---|
+| **stevengonsalvez/agents-in-a-box** (this repo) | The `ainb` TUI/CLI unit manager (Rust workspace), the v2 plugin system, and the docs. |
+| **[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory)** | `reflect` — the long-term memory engine (GraphRAG + QMD) + its Claude Code plugin, extracted from this monorepo. Engine install: `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`. |
+| **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 91 curated skills, 37 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
+
 <p align="center">
   <img src="docs/assets/screenshots/dashboard-session.png" alt="ainb TUI — live session dashboard with multi-workspace sidebar" width="900">
   <br>
@@ -90,8 +101,10 @@ brew tap stevengonsalvez/agents-in-a-box && brew install ainb
 # newer Homebrew gates third-party taps — if it says "untrusted tap", run:
 #   brew trust stevengonsalvez/agents-in-a-box
 
-# Seed the manifest from the toolkit and deploy units into your tool home
-ainb migrate --from-bootstrap --toolkit-root ./toolkit
+# Seed the manifest from the toolkit and deploy units into your tool home.
+# The toolkit is a separate repo — clone it, then point --toolkit-root at it.
+git clone https://github.com/stevengonsalvez/ainb-toolkit.git
+ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit
 AINB_USE_REAL_HOMES=1 ainb migrate --clean --backup --yes
 
 # Launch the TUI
@@ -313,7 +326,7 @@ Config lives at `~/.agents-in-a-box/config/config.toml` under a `[plugins]` tabl
 
 A portable AI coding agent toolkit: skills, agents, workflows, and configurations that deploy to 9 different AI coding tools from a single source.
 
-**[Full toolkit documentation →](toolkit/README.md)**
+**[Full toolkit documentation → stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)**
 
 ### Supported AI Tools
 
@@ -418,7 +431,7 @@ A two-tier learning system that captures insights during development and retriev
 | **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
 | **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
 
-The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect-kb/`](reflect-kb/) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in this monorepo and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'`.
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect`](https://github.com/stevengonsalvez/ainb-reflect-memory) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in its own repo, [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory), and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`.
 
 **[How the knowledge system works →](docs/knowledge/overview.md)**
 
@@ -448,31 +461,19 @@ agents-in-a-box/
 │   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
 │
-├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
-│   ├── src/                    #   Package source (installed via `uv tool install`)
-│   ├── tests/                  #   Unit + integration tests
-│   └── pyproject.toml          #   Workspace member
-│
-├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
-│   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+# reflect (the `reflect` CLI + GraphRAG/QMD engine and its Claude Code plugin)
+# now lives in a SEPARATE repo: github.com/stevengonsalvez/ainb-reflect-memory
+# — flattened, with the engine at its repo root and the plugin under plugin/.
+#
+├── plugins/                    # Claude Code plugins (root-level)
 │   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
 │   └── ainb-hooks/             #   ainb lifecycle hooks
 │
-├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
-│   ├── packages/
-│   │   ├── skills/             #   91 reusable skills
-│   │   ├── agents/             #   37 agent definitions
-│   │   │   ├── universal/      #     Cross-stack specialists
-│   │   │   ├── engineering/    #     Backend & infra agents
-│   │   │   ├── orchestrators/  #     Team coordination
-│   │   │   ├── design/         #     UI/UX specialists
-│   │   │   ├── swarm/          #     Multi-agent coordination
-│   │   │   └── meta/           #     Agent creation & reflection
-│   │   ├── workflows/          #   Structured delivery workflows
-│   │   └── utilities/          #   Shared utilities
-│   └── catalog.yaml            #   Auto-generated discovery surface
-│                               #   (regenerate with toolkit/bin/generate-catalog.sh)
-│
+# The portable toolkit (91 skills, 37 agents, workflows, utilities,
+# bootstrap.js, external-dependencies.yaml, catalog.yaml) lives in a
+# SEPARATE repo: github.com/stevengonsalvez/ainb-toolkit — flattened at
+# its repo root. `ainb` consumes it as a pinned external source.
+#
 ├── ainb-tui/                   # `ainb` binary (Rust) — TUI + skill-manager CLI
 │   ├── crates/
 │   │   ├── ainb-cli/           #   ainb source/skill/migrate/doctor subcommands
@@ -489,7 +490,7 @@ agents-in-a-box/
 │   ├── README.md               #   Docs TOC
 │   ├── product/                #   What ainb is, value, architecture
 │   ├── tui/                    #   ainb CLI reference, FAQ, keyboard shortcuts
-│   ├── toolkit/                #   Skills + agents + bootstrap reference
+│   ├── toolkit/                #   ainb-toolkit reference (skills/agents/bootstrap)
 │   ├── plugins/                #   v2 plugin overview, user guide, authoring, spec
 │   ├── knowledge/              #   reflect/recall (GraphRAG + QMD)
 │   ├── contributing/           #   Build, CI/CD, release
@@ -500,7 +501,7 @@ agents-in-a-box/
 │
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
-    ├── toolkit-validation.yml  #   Toolkit structure & install validation
+    ├── toolkit-validation.yml  #   Skill Manager & Catalog CI (ainb + ainb-toolkit)
     ├── release.yml             #   Cross-platform binary releases
     └── deploy-pages.yml        #   Build & deploy the website to GitHub Pages
 ```
@@ -555,8 +556,10 @@ cargo deny check                        # Security + licenses
 ### Installing the toolkit
 
 ```bash
-# Seed your manifest from the bundled toolkit on first run.
-ainb migrate --from-bootstrap --toolkit-root ./toolkit
+# Seed your manifest from the toolkit on first run. The toolkit is a
+# separate repo — clone it and point --toolkit-root at the checkout.
+git clone https://github.com/stevengonsalvez/ainb-toolkit.git
+ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit
 
 # Deploy into the real tool home dirs (opt-in via env).
 AINB_USE_REAL_HOMES=1 ainb skill sync --yes
@@ -619,7 +622,7 @@ and `.agents/goals/ainb-skill-manager-v1.2-rollup-plan.md`.
 - [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-agents-in-a-box)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
 - [Knowledge System Architecture](docs/knowledge/overview.md)
-- [Toolkit Documentation](toolkit/README.md)
+- [Toolkit Repository (ainb-toolkit)](https://github.com/stevengonsalvez/ainb-toolkit)
 
 ---
 

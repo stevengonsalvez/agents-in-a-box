@@ -122,6 +122,8 @@ bytes = "1.6"
 
 # Fleet — filesystem watch for JSONL transcript tail (assistant-turn detection).
 notify = { workspace = true }
+# No-echo terminal read for the Grafana Cloud API token in `ainb otel setup`.
+rpassword = "7"
 
 [features]
 default = []

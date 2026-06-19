@@ -397,7 +397,7 @@ fn seed_full(layout: &SandboxLayout) -> std::io::Result<()> {
     fs::write(layout.ainb_home.join(".skip-banner"), b"")?;
 
     // external-dependencies.yaml — real-schema content lifted (and
-    // trimmed) from toolkit/external-dependencies.yaml. The bytes
+    // trimmed) from external-dependencies.yaml. The bytes
     // here are the input for the future provenance matcher.
     fs::write(
         layout.root.join("external-dependencies.yaml"),
@@ -484,18 +484,18 @@ units:
     Ok(())
 }
 
-/// Trimmed copy of `toolkit/external-dependencies.yaml` (real schema).
+/// Trimmed copy of `external-dependencies.yaml` (real schema).
 /// Includes one `agent-skills` entry that matches a Minimal-tier
 /// seeded skill name (`fireworks-tech-graph`), so the future
 /// provenance matcher can resolve that skill to its `gh:` upstream.
-const EXTERNAL_DEPENDENCIES_YAML: &str = r#"# Sandbox fixture — mirrors toolkit/external-dependencies.yaml schema.
+const EXTERNAL_DEPENDENCIES_YAML: &str = r#"# Sandbox fixture — mirrors external-dependencies.yaml schema.
 # Seeded by ainb-skill-core::fixtures (feature = "test-fixtures").
 version: "1.0.0"
 updated: "2026-06-01"
 
 external-packages:
   - name: reflect-kb
-    source: https://github.com/stevengonsalvez/reflect-kb.git
+    source: https://github.com/stevengonsalvez/ainb-reflect-memory.git
     install: "uv tool install --force '{source}[graph]'"
     cli: reflect
     version-pin: main

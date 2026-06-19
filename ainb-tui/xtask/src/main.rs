@@ -8,7 +8,8 @@
 //!   `include_str!` them without depending on cargo-build state.
 //! * `clean-canaries` — remove fixtures + the sub-workspace's `target/`.
 //! * `gen-catalog-index` — emit the enriched curated-catalog index
-//!   (`toolkit/catalog-index.json`) consumed by `AinbCuratedCatalogBackend`.
+//!   (default `<repo>/catalog-index.json`, consumed by `AinbCuratedCatalogBackend`)
+//!   from a cloned `ainb-toolkit` checkout (`--toolkit-root`).
 //! * `ci-lint` — assert `.github/workflows/ci.yml` satisfies the real Hangar
 //!   e2e CI contract (the `hangar-e2e` job). See [`ci_lint`].
 //!

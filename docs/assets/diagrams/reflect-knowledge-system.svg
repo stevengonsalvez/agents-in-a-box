@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 880" font-family="ui-sans-serif,system-ui,Inter,sans-serif">
+<defs>
+<marker id="a-141413" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#141413"/></marker>
+<marker id="a-D97757" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#D97757"/></marker>
+<marker id="a-788C5D" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#788C5D"/></marker>
+</defs>
+<rect width="1200" height="880" fill="#FAF9F5"/>
+<text x="600" y="44" text-anchor="middle" font-size="25" font-weight="700" fill="#141413">reflect &#8212; capture &#8594; index &#8594; recall</text>
+<rect x="40" y="74" width="1120" height="118" rx="16" fill="#FFFFFF" stroke="#E3DACC" stroke-width="2"/>
+<text x="58" y="98" font-size="12" font-weight="700" letter-spacing="1" fill="#87867F">AGENT SESSION</text>
+<rect x="60" y="112" width="250" height="60" rx="12" fill="#FBF3EE" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="185.0" y="140.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">/prime</text>
+<text x="185.0" y="155.0" text-anchor="middle" font-size="11" fill="#87867F">load context</text>
+<rect x="340" y="112" width="250" height="60" rx="12" fill="#FBF3EE" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="465.0" y="140.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Working session</text>
+<text x="465.0" y="155.0" text-anchor="middle" font-size="11" fill="#87867F">generates signals</text>
+<rect x="620" y="112" width="250" height="60" rx="12" fill="#FBF3EE" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="745.0" y="140.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">/reflect</text>
+<text x="745.0" y="155.0" text-anchor="middle" font-size="11" fill="#87867F">capture corrections</text>
+<rect x="900" y="112" width="250" height="60" rx="12" fill="#FBF3EE" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="1025.0" y="140.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">/recall &#183; /research</text>
+<text x="1025.0" y="155.0" text-anchor="middle" font-size="11" fill="#87867F">retrieve</text>
+<rect x="40" y="236" width="1120" height="350" rx="16" fill="#F6E7DF" stroke="#D97757" stroke-width="2"/>
+<text x="58" y="262" font-size="12" font-weight="700" letter-spacing="1" fill="#D97757">reflect ENGINE</text>
+<text x="1142" y="262" text-anchor="end" font-size="11" fill="#87867F">ships from github.com/stevengonsalvez/ainb-reflect-memory</text>
+<rect x="62" y="300" width="150" height="64" rx="12" fill="#FFFFFF" stroke="#D97757" stroke-width="1.5"/>
+<text x="137.0" y="330.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">/reflect</text>
+<text x="137.0" y="345.0" text-anchor="middle" font-size="11" fill="#87867F">analyse convo</text>
+<rect x="244" y="300" width="160" height="64" rx="12" fill="#FFFFFF" stroke="#D97757" stroke-width="1.5"/>
+<text x="324.0" y="330.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Extract</text>
+<text x="324.0" y="345.0" text-anchor="middle" font-size="11" fill="#87867F">corrections + signals</text>
+<rect x="436" y="300" width="170" height="64" rx="12" fill="#FFFFFF" stroke="#D97757" stroke-width="1.5"/>
+<text x="521.0" y="330.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Atomic notes</text>
+<text x="521.0" y="345.0" text-anchor="middle" font-size="11" fill="#87867F">.md + .entities.yaml</text>
+<rect x="638" y="300" width="120" height="64" rx="12" fill="#D97757" stroke="#141413" stroke-width="1.5"/>
+<text x="698.0" y="337.0" text-anchor="middle" font-size="16" font-weight="600" fill="#FFFFFF">INDEX</text>
+<rect x="800" y="256" width="200" height="52" rx="12" fill="#E7EADF" stroke="#788C5D" stroke-width="1.5"/>
+<text x="900.0" y="280.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">GraphRAG</text>
+<text x="900.0" y="295.0" text-anchor="middle" font-size="11" fill="#87867F">nano-graphrag: graph</text>
+<rect x="800" y="356" width="200" height="52" rx="12" fill="#E7EADF" stroke="#788C5D" stroke-width="1.5"/>
+<text x="900.0" y="380.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">QMD / BM25</text>
+<text x="900.0" y="395.0" text-anchor="middle" font-size="11" fill="#87867F">fast lexical</text>
+<rect x="1024" y="300" width="118" height="64" rx="12" fill="#FFFFFF" stroke="#D97757" stroke-width="1.5"/>
+<text x="1083.0" y="330.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Hybrid recall</text>
+<text x="1083.0" y="345.0" text-anchor="middle" font-size="11" fill="#87867F">rerank</text>
+<path d="M 212,332 L 244,332" stroke="#D97757" stroke-width="2" fill="none" marker-end="url(#a-D97757)"/>
+<path d="M 404,332 L 436,332" stroke="#D97757" stroke-width="2" fill="none" marker-end="url(#a-D97757)"/>
+<path d="M 606,332 L 638,332" stroke="#D97757" stroke-width="2" fill="none" marker-end="url(#a-D97757)"/>
+<path d="M 758,322 L 800,288" stroke="#788C5D" stroke-width="2" fill="none" marker-end="url(#a-788C5D)"/>
+<path d="M 758,342 L 800,372" stroke="#788C5D" stroke-width="2" fill="none" marker-end="url(#a-788C5D)"/>
+<path d="M 1000,282 L 1024,322" stroke="#788C5D" stroke-width="2" fill="none" marker-end="url(#a-788C5D)"/>
+<path d="M 1000,382 L 1024,342" stroke="#788C5D" stroke-width="2" fill="none" marker-end="url(#a-788C5D)"/>
+<path d="M 1083,300 C 1083,210 1025,196 1025,176" stroke="#D97757" stroke-width="2.5" fill="none" marker-end="url(#a-D97757)"/>
+<rect x="1006" y="216" width="170" height="17" rx="3" fill="#FAF9F5" opacity="0.95"/>
+<text x="1091" y="229" text-anchor="middle" font-size="10.5" fill="#87867F">SessionStart injects top-3</text>
+<path d="M 700,172 L 140,300" stroke="#141413" stroke-width="2" fill="none" stroke-dasharray="5,4" marker-end="url(#a-141413)"/>
+<rect x="392.2" y="241" width="55.6" height="16" rx="3" fill="#FAF9F5" opacity="0.95"/>
+<text x="420" y="253" text-anchor="middle" font-size="10.5" fill="#87867F">capture</text>
+<rect x="40" y="630" width="1120" height="150" rx="16" fill="#E3DACC" stroke="#788C5D" stroke-width="1.5" opacity="0.55"/>
+<text x="58" y="656" font-size="12" font-weight="700" letter-spacing="1" fill="#87867F">MEMORY TIERS</text>
+<rect x="62" y="668" width="350" height="92" rx="12" fill="#FFFFFF" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="237.0" y="712.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Tier 1 &#183; Context window</text>
+<text x="237.0" y="727.0" text-anchor="middle" font-size="11" fill="#87867F">MEMORY.md, CLAUDE.md &#8212; always loaded</text>
+<rect x="426" y="668" width="350" height="92" rx="12" fill="#FFFFFF" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="601.0" y="712.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Tier 2 &#183; Project-local</text>
+<text x="601.0" y="727.0" text-anchor="middle" font-size="11" fill="#87867F">docs/solutions, instincts.yaml &#8212; text search</text>
+<rect x="790" y="668" width="350" height="92" rx="12" fill="#FFFFFF" stroke="#788C5D" stroke-width="1.5"/>
+<text x="965.0" y="712.0" text-anchor="middle" font-size="15" font-weight="600" fill="#141413">Tier 3 &#183; Global KB</text>
+<text x="965.0" y="727.0" text-anchor="middle" font-size="11" fill="#87867F">~/.claude/global-learnings/ &#8212; GraphRAG + QMD</text>
+<path d="M 900,408 L 965,668" stroke="#788C5D" stroke-width="2" fill="none" stroke-dasharray="5,4" marker-end="url(#a-788C5D)"/>
+<rect x="945.4" y="531" width="69.19999999999999" height="16" rx="3" fill="#FAF9F5" opacity="0.95"/>
+<text x="980" y="543" text-anchor="middle" font-size="10.5" fill="#87867F">persisted</text>
+</svg>

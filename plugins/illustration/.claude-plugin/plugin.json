@@ -1,0 +1,19 @@
+{
+  "name": "illustration",
+  "version": "1.0.0",
+  "description": "Mascot-driven explanatory illustration family. A shared workflow engine (digest → shot list → per-image generation → QA → deliver) wrapped by per-character sub-skills, each with its own visual DNA, IP anchors, and likeness-locked references. Ships illustration:alex (bold comic streetwear Sport Head for ShotClubhouse) and illustration:popa (crude hand-drawn pastel blob). Invoke the bare `illustration` skill to pick a mascot.",
+  "author": {
+    "name": "stevengonsalvez"
+  },
+  "keywords": [
+    "illustration",
+    "mascot",
+    "image-generation",
+    "explainer",
+    "branding",
+    "alex",
+    "popa",
+    "sport-head",
+    "shotclubhouse"
+  ]
+}

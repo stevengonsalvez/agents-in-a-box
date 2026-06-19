@@ -141,6 +141,7 @@ impl OnboardingComponent {
             OnboardingStep::DependencyCheck => self.render_dependencies(frame, area, state),
             OnboardingStep::GitDirectories => self.render_git_directories(frame, area, state),
             OnboardingStep::Authentication => self.render_authentication(frame, area, state),
+            OnboardingStep::OtelSetup => self.render_otel_setup(frame, area, state),
             OnboardingStep::EditorSelection => self.render_editor_selection(frame, area, state),
             OnboardingStep::Summary => self.render_summary(frame, area, state),
         }
@@ -588,6 +589,137 @@ impl OnboardingComponent {
         frame.render_widget(text, inner);
     }
 
+    /// Render the OpenTelemetry (Grafana Cloud) setup step
+    fn render_otel_setup(&self, frame: &mut Frame, area: Rect, state: &OnboardingState) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CORNFLOWER_BLUE))
+            .style(Style::default().bg(PANEL_BG))
+            .title(" OpenTelemetry → Grafana Cloud ")
+            .title_style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let content_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(5), // What + how-to-get
+                Constraint::Length(3), // endpoint field
+                Constraint::Length(3), // instance id field
+                Constraint::Length(3), // token field
+                Constraint::Min(2),    // instructions
+            ])
+            .split(inner);
+
+        // What this does + where to get the creds.
+        let intro = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Optional: ship Claude Code metrics/logs/traces to Grafana Cloud",
+                Style::default().fg(SOFT_WHITE),
+            )),
+            Line::from(Span::styled(
+                "via a local Grafana Alloy collector (started for you).",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Get creds: ", Style::default().fg(GOLD)),
+                Span::styled(
+                    "Grafana Cloud → Connections → \"OpenTelemetry (OTLP)\"",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]),
+        ])
+        .alignment(Alignment::Center);
+        frame.render_widget(intro, content_layout[0]);
+
+        // Field renderer with focus + token masking.
+        let field =
+            |frame: &mut Frame, area: Rect, idx: usize, label: &str, value: &str, mask: bool| {
+                let focused = state.otel_field == idx && !state.otel_skip;
+                let shown = if mask {
+                    "•".repeat(value.chars().count())
+                } else {
+                    value.to_string()
+                };
+                let display = if focused && state.show_cursor {
+                    format!("{shown}│")
+                } else {
+                    shown
+                };
+                let border = if focused { GOLD } else { SUBDUED_BORDER };
+                let para = Paragraph::new(display).style(Style::default().fg(SOFT_WHITE)).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(border))
+                        .title(format!(" {label} "))
+                        .title_style(Style::default().fg(if focused { GOLD } else { MUTED_GRAY }))
+                        .style(Style::default().bg(DARK_BG)),
+                );
+                frame.render_widget(para, area);
+            };
+
+        field(
+            frame,
+            content_layout[1],
+            0,
+            "OTLP endpoint (…/otlp)",
+            &state.otel_otlp_endpoint,
+            false,
+        );
+        field(
+            frame,
+            content_layout[2],
+            1,
+            "Instance ID",
+            &state.otel_instance_id,
+            false,
+        );
+        field(
+            frame,
+            content_layout[3],
+            2,
+            "API token",
+            &state.otel_api_token,
+            true,
+        );
+
+        // Instructions / status line.
+        let status = if state.otel_skip {
+            Line::from(vec![
+                Span::styled("Optional. ", Style::default().fg(WARNING_YELLOW)),
+                Span::styled("Type to configure · ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("Tab", Style::default().fg(GOLD)),
+                Span::styled(" next field · ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("Enter", Style::default().fg(GOLD)),
+                Span::styled(" skip", Style::default().fg(MUTED_GRAY)),
+            ])
+        } else if state.otel_creds_complete() {
+            Line::from(vec![
+                Span::styled("✓ ready ", Style::default().fg(SELECTION_GREEN)),
+                Span::styled("· Tab next field · ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("Enter", Style::default().fg(GOLD)),
+                Span::styled(" set up & continue", Style::default().fg(MUTED_GRAY)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("Tab", Style::default().fg(GOLD)),
+                Span::styled(
+                    " next field · fill all 3 to enable · ",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+                Span::styled("Enter", Style::default().fg(GOLD)),
+                Span::styled(" skips", Style::default().fg(MUTED_GRAY)),
+            ])
+        };
+        let instr = Paragraph::new(status).alignment(Alignment::Center);
+        frame.render_widget(instr, content_layout[4]);
+    }
+
     /// Render editor selection step
     fn render_editor_selection(&self, frame: &mut Frame, area: Rect, state: &OnboardingState) {
         let block = Block::default()
@@ -804,6 +936,28 @@ impl OnboardingComponent {
             ),
             Span::styled("Authentication: ", Style::default().fg(SOFT_WHITE)),
             Span::styled(auth_status, Style::default().fg(MUTED_GRAY)),
+        ]));
+
+        // Telemetry (OTEL -> Grafana Cloud)
+        let otel_on = state.otel_should_setup();
+        summary_items.push(Line::from(vec![
+            Span::styled(
+                if otel_on { "  ✓ " } else { "  ○ " },
+                Style::default().fg(if otel_on {
+                    SELECTION_GREEN
+                } else {
+                    WARNING_YELLOW
+                }),
+            ),
+            Span::styled("Telemetry: ", Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                if otel_on {
+                    "Grafana Cloud (Alloy)".to_string()
+                } else {
+                    "skipped (run `ainb otel setup` later)".to_string()
+                },
+                Style::default().fg(MUTED_GRAY),
+            ),
         ]));
 
         // Editor

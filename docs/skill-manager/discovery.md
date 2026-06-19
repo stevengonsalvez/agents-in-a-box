@@ -22,7 +22,7 @@ state already on disk:
   `~/.codex/skills/`, etc.
 - Plugins installed via Claude Code's `/plugin install` command,
   cached at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.
-- Bootstrap-era references in a `toolkit/external-dependencies.yaml`.
+- Bootstrap-era references in an `external-dependencies.yaml` (previously at `toolkit/external-dependencies.yaml`, now in the [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo root).
 
 v1.1 scans for that state on the **first open of the SkillManager
 TUI**, computes per-category counts, and offers a one-keystroke
@@ -91,7 +91,7 @@ DiscoveredMarketplaceUnit {
 ### Class B — legacy YAML matcher (opt-in)
 
 Gated behind `--legacy-yaml=<path>` on `ainb migrate --discover`.
-Parses a `toolkit/external-dependencies.yaml` and name-matches
+Parses an `external-dependencies.yaml` (from the ainb-toolkit repo root, previously `toolkit/external-dependencies.yaml`) and name-matches
 discovered units against the legacy bootstrap manifest, so users
 mid-cutover from `bootstrap.js` can adopt their units as
 `gh:<repo>@<ref>` URIs instead of `local:`.
