@@ -48,7 +48,12 @@ async fn cmd_status(format: OutputFormat) -> Result<()> {
 }
 
 fn cmd_stop() -> Result<()> {
-    headroom::stop();
-    println!("headroom proxy stopped");
+    if headroom::stop() {
+        println!("headroom proxy stopped");
+    } else {
+        println!(
+            "no ainb-managed headroom proxy is running (a proxy you started yourself is left untouched)"
+        );
+    }
     Ok(())
 }

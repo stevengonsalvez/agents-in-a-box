@@ -218,10 +218,13 @@ pub async fn status() -> ProxyStatus {
 /// Stop the ainb-managed Headroom proxy.
 ///
 /// Reads the PID file, sends SIGTERM to the process, removes the PID file.
-/// Best-effort — never panics.
-pub fn stop() {
+/// Returns `true` when there was an ainb-managed proxy to stop (a pid file
+/// existed), `false` when there was nothing to do — e.g. the user is running
+/// their own `headroom proxy`, which we must NOT kill. Best-effort, never
+/// panics.
+pub fn stop() -> bool {
     let Some(pid) = read_pid() else {
-        return;
+        return false;
     };
 
     // Use nix::sys::signal::kill if available (nix is in the workspace).
@@ -234,6 +237,7 @@ pub fn stop() {
 
     // Remove pid file regardless of kill outcome.
     let _ = std::fs::remove_file(pid_file());
+    true
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
