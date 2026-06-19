@@ -9,6 +9,7 @@ session can synthesize results itself.
 """
 
 import logging
+import os
 import shutil
 from collections import deque
 from pathlib import Path
@@ -26,9 +27,14 @@ logger = logging.getLogger(__name__)
 
 # Embedding model shared by indexing (nano-graphrag) and `reflect embed`
 # (R3: recall's MMR diversity step) — similarity must live in ONE space.
-EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
-# mpnet truncates at 384 tokens anyway; cap inputs so giant chunks don't
-# waste tokenizer time (mirrors cross_encoder._MAX_CANDIDATE_CHARS).
+# Override with REFLECT_EMBED_MODEL to use a stronger retrieval embedder
+# (e.g. BAAI/bge-large-en-v1.5, 1024-d). The embedding dimension is derived
+# from the loaded model at index time, so any sentence-transformers model
+# works; a model swap requires a fresh reindex (vectors are dim-specific).
+EMBEDDING_MODEL_NAME = os.environ.get("REFLECT_EMBED_MODEL", "all-mpnet-base-v2")
+# Cap inputs so giant chunks don't waste tokenizer time (mirrors
+# cross_encoder._MAX_CANDIDATE_CHARS). 2000 chars ≈ 512 tokens, the window
+# of mpnet and the bge/gte/e5 family alike.
 _MAX_EMBED_CHARS = 2000
 
 # Minimal placeholder entity for docs without sidecars.
@@ -98,7 +104,12 @@ class LearningsGraphEngine:
 
         engine = self
 
-        @wrap_embedding_func_with_attrs(embedding_dim=768, max_token_size=8192)
+        # Derive the embedding dimension from the loaded model so a swapped
+        # REFLECT_EMBED_MODEL (e.g. bge-large = 1024-d) indexes correctly
+        # instead of being forced into mpnet's 768.
+        dim = engine._load_embedding_model().get_sentence_embedding_dimension()
+
+        @wrap_embedding_func_with_attrs(embedding_dim=dim, max_token_size=8192)
         async def embedding_func(texts: list[str]) -> np.ndarray:
             model = engine._load_embedding_model()
             embeddings = model.encode(texts, normalize_embeddings=True)

@@ -61,10 +61,15 @@ from temporal_extraction import (  # noqa: E402
 
 # --- Config --------------------------------------------------------------
 
-DEFAULT_LIMIT = 10
+# Retrieval depth + inject budget. The historical 10/2000 defaults inject only
+# ~700 tokens of memory, which starves multi-hop QA (benchmark: raising these
+# lifted multi-hop 0.10 -> 0.50). Env-overridable so callers can widen the
+# budget without code change; defaults stay modest for the always-on session
+# inject path.
+DEFAULT_LIMIT = int(os.environ.get("REFLECT_RECALL_LIMIT", "10"))
 DEFAULT_MODE = "naive"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
-DEFAULT_MAX_CHARS = 2000
+DEFAULT_MAX_CHARS = int(os.environ.get("REFLECT_RECALL_MAX_CHARS", "2000"))
 # Canonical CLI name (reflect-kb). Resolved via `shutil.which("reflect")` so
 # we honour whatever install path `uv tool install reflect-kb` produced
 # (typically ~/.local/bin/reflect). Legacy `~/.learnings/cli/learnings` is
@@ -3010,6 +3015,35 @@ def run_corpus(
     return 0
 
 
+def _hyde_expand(query: str) -> str:
+    """D: HyDE — generate one hypothetical answer sentence via the same headless
+    ``claude -p`` reflect's writer uses, and append it to the query so retrieval
+    embeds answer-shaped text. Gated by ``REFLECT_RECALL_HYDE``; any failure
+    (no claude, timeout, error) falls back to the raw query so recall never breaks.
+    """
+    import subprocess
+
+    model = os.environ.get("REFLECT_DRAIN_MODEL", "sonnet")
+    sys_p = (
+        "You expand a search query for a memory database. Write ONE short "
+        "hypothetical fact sentence that would answer the question, as if recalled "
+        "from memory. Invent plausible specifics; it is only used to improve "
+        "retrieval, never shown to anyone. Output the sentence only."
+    )
+    try:
+        r = subprocess.run(
+            ["claude", "-p", query, "--model", model, "--setting-sources", "",
+             "--strict-mcp-config", "--system-prompt", sys_p],
+            capture_output=True, text=True, timeout=60,
+        )
+        hyp = (r.stdout or "").strip()
+        if r.returncode == 0 and hyp:
+            return f"{query}\n{hyp}"
+    except Exception:  # noqa: BLE001 — retrieval must survive any HyDE failure
+        pass
+    return query
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query", nargs="*", help="Search query")
@@ -3054,9 +3088,11 @@ def main() -> int:
                     help="Comma-separated query tags for tag-overlap reranking")
     ap.add_argument("--max-tokens", type=int, default=0,
                     help="R4: bound results by estimated tokens (0 = no budget)")
-    ap.add_argument("--min-overlap", type=float, default=0.0,
+    ap.add_argument("--min-overlap", type=float,
+                    default=float(os.environ.get("REFLECT_RECALL_MIN_OVERLAP", "0.0")),
                     help="R7: OOD gate — suppress results when the best hit's "
-                         "query-term coverage is below this (0 = off)")
+                         "query-term coverage is below this (0 = off; env "
+                         "REFLECT_RECALL_MIN_OVERLAP sets the default)")
     ap.add_argument("--no-mmr", action="store_true",
                     help="R3: disable MMR diversity selection (benchmarking)")
     ap.add_argument("--mmr-lambda", type=float, default=None,
@@ -3109,6 +3145,12 @@ def main() -> int:
     if not query:
         print("error: empty query", file=sys.stderr)
         return 2
+
+    # D: HyDE query expansion (gated). Embeds answer-shaped text alongside the
+    # question to bridge the question<->statement vocab gap that costs single-hop
+    # recall. Reuses reflect's own `claude -p` model — no new API key.
+    if os.environ.get("REFLECT_RECALL_HYDE") == "1":
+        query = _hyde_expand(query)
 
     query_tags = [t.strip() for t in args.tags.split(",") if t.strip()]
 
