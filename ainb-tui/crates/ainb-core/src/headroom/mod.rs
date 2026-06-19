@@ -142,20 +142,30 @@ pub struct HeadroomStats {
     pub requests_total: u64,
 }
 
-/// Intermediate shape for deserializing `/stats` JSON:
-/// `{"summary":{"tokens_saved_total":N,"requests_total":N}}`.
-#[derive(Debug, Deserialize)]
+/// Intermediate shape for deserializing the Headroom `/stats` JSON. The real
+/// payload (headroom 0.26) is large; we only pull the two canonical figures:
+/// `savings.total_tokens` (total tokens saved across all layers) and
+/// `summary.api_requests` (requests seen by the proxy). Verified against a live
+/// proxy on 2026-06-19 — an earlier guess at `summary.tokens_saved_total`
+/// silently parsed to 0 because that key does not exist.
+#[derive(Debug, Default, Deserialize)]
 struct StatsResponse {
     #[serde(default)]
     summary: StatsSummary,
+    #[serde(default)]
+    savings: StatsSavings,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct StatsSummary {
     #[serde(default)]
-    tokens_saved_total: u64,
+    api_requests: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsSavings {
     #[serde(default)]
-    requests_total: u64,
+    total_tokens: u64,
 }
 
 /// Fetch `/stats` from the Headroom proxy; returns `None` on any error.
@@ -169,8 +179,8 @@ pub async fn stats() -> Option<HeadroomStats> {
     }
     let body: StatsResponse = resp.json().await.ok()?;
     Some(HeadroomStats {
-        tokens_saved: body.summary.tokens_saved_total,
-        requests_total: body.summary.requests_total,
+        tokens_saved: body.savings.total_tokens,
+        requests_total: body.summary.api_requests,
     })
 }
 
@@ -286,33 +296,42 @@ mod tests {
         assert_eq!(proxy_port(), HEADROOM_DEFAULT_PORT);
     }
 
-    /// Parsing the Headroom `/stats` JSON shape into `HeadroomStats`.
+    /// Parse the REAL Headroom `/stats` shape (headroom 0.26, captured from a
+    /// live proxy) — `savings.total_tokens` + `summary.api_requests`, nested
+    /// among many sibling keys we ignore.
     #[test]
-    fn headroom_stats_parses_summary() {
-        let json = r#"{"summary":{"tokens_saved_total":1220217,"requests_total":196}}"#;
+    fn headroom_stats_parses_real_shape() {
+        let json = r#"{
+            "summary":{"mode":"token","api_requests":196,
+                "compression":{"total_tokens_removed":12345}},
+            "agent_usage":{"totals":{"tokens_saved":999}},
+            "savings":{"total_tokens":1220217,"per_project":{}}
+        }"#;
         let raw: StatsResponse = serde_json::from_str(json).expect("parses");
         let s = HeadroomStats {
-            tokens_saved: raw.summary.tokens_saved_total,
-            requests_total: raw.summary.requests_total,
+            tokens_saved: raw.savings.total_tokens,
+            requests_total: raw.summary.api_requests,
         };
         assert_eq!(s.tokens_saved, 1_220_217);
         assert_eq!(s.requests_total, 196);
     }
 
-    /// Missing or empty summary fields must default to 0 (no panic).
+    /// Missing nested fields must default to 0 (no panic) — the real payload
+    /// reports zeros before any traffic.
     #[test]
     fn headroom_stats_defaults_on_absent_fields() {
-        let json = r#"{"summary":{}}"#;
+        let json = r#"{"summary":{},"savings":{}}"#;
         let raw: StatsResponse = serde_json::from_str(json).expect("parses");
-        assert_eq!(raw.summary.tokens_saved_total, 0);
-        assert_eq!(raw.summary.requests_total, 0);
+        assert_eq!(raw.savings.total_tokens, 0);
+        assert_eq!(raw.summary.api_requests, 0);
     }
 
-    /// Entirely missing `summary` key must also work (default-deriving outer struct).
+    /// Entirely missing `summary`/`savings` keys must also work.
     #[test]
-    fn headroom_stats_defaults_on_no_summary() {
+    fn headroom_stats_defaults_on_empty_object() {
         let json = r#"{}"#;
         let raw: StatsResponse = serde_json::from_str(json).expect("parses");
-        assert_eq!(raw.summary.tokens_saved_total, 0);
+        assert_eq!(raw.savings.total_tokens, 0);
+        assert_eq!(raw.summary.api_requests, 0);
     }
 }

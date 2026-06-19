@@ -38,16 +38,28 @@ impl SavingsData {
 
 // ── Headroom /stats response shape ───────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+// Real headroom 0.26 `/stats` shape (verified against a live proxy 2026-06-19):
+// the canonical total is `savings.total_tokens`; request count is
+// `summary.api_requests`. An earlier guess at `summary.tokens_saved_total`
+// silently parsed to 0 because that key does not exist.
+#[derive(Debug, Default, Deserialize)]
 pub struct HeadroomStats {
+    #[serde(default)]
     pub summary: HeadroomSummary,
+    #[serde(default)]
+    pub savings: HeadroomSavings,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct HeadroomSummary {
-    pub tokens_saved_total: u64,
-    #[allow(dead_code)]
-    pub requests_total: u64,
+    #[serde(default)]
+    pub api_requests: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HeadroomSavings {
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 // ── RTK gain response shape ───────────────────────────────────────────────────
@@ -104,7 +116,7 @@ async fn fetch_headroom() -> (bool, u64) {
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<HeadroomStats>().await {
-            Ok(stats) => (true, stats.summary.tokens_saved_total),
+            Ok(stats) => (true, stats.savings.total_tokens),
             Err(_) => (false, 0),
         },
         _ => (false, 0),
@@ -137,11 +149,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headroom_stats_deserialises_from_sample_json() {
-        let json = r#"{"summary":{"tokens_saved_total":42000,"requests_total":120}}"#;
+    fn headroom_stats_deserialises_from_real_shape() {
+        // Real headroom 0.26 /stats shape (live-verified): savings.total_tokens
+        // is the canonical total; summary.api_requests is the request count.
+        let json = r#"{
+            "summary":{"api_requests":120,"compression":{"total_tokens_removed":1}},
+            "savings":{"total_tokens":42000,"per_project":{}}
+        }"#;
         let stats: HeadroomStats = serde_json::from_str(json).expect("parse HeadroomStats");
-        assert_eq!(stats.summary.tokens_saved_total, 42000);
-        assert_eq!(stats.summary.requests_total, 120);
+        assert_eq!(stats.savings.total_tokens, 42000);
+        assert_eq!(stats.summary.api_requests, 120);
+    }
+
+    #[test]
+    fn headroom_stats_defaults_to_zero_on_empty() {
+        let stats: HeadroomStats = serde_json::from_str("{}").expect("parse empty");
+        assert_eq!(stats.savings.total_tokens, 0);
+        assert_eq!(stats.summary.api_requests, 0);
     }
 
     #[test]
