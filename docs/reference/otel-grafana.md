@@ -1,4 +1,6 @@
-# OpenTelemetry → Grafana Cloud
+---
+title: "OpenTelemetry → Grafana Cloud"
+---
 
 Ship Claude Code (and Codex) metrics, logs, and traces to Grafana Cloud via a
 local [Grafana Alloy](https://grafana.com/docs/alloy/) collector. Wired into
