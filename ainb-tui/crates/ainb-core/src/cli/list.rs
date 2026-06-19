@@ -191,6 +191,7 @@ mod tests {
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);
@@ -207,6 +208,7 @@ mod tests {
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, false);
@@ -223,6 +225,7 @@ mod tests {
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, false, false);
@@ -254,6 +257,7 @@ mod tests {
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);

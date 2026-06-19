@@ -52,6 +52,15 @@ pub fn is_wired() -> bool {
     }
 }
 
+/// Returns the absolute-path hook command for project-local hook wiring.
+///
+/// Uses `which::which` so the returned path is absolute, sidestepping Claude
+/// Code's restricted hook execution PATH (bug #685).  Returns `None` when rtk
+/// is not installed.
+pub fn project_hook_command() -> Option<String> {
+    which::which("rtk").ok().map(|p| format!("{} hook claude", p.display()))
+}
+
 // ── Install / uninstall lifecycle ────────────────────────────────────────────
 
 /// Install RTK and wire its Claude Code hook.

@@ -117,6 +117,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         created_at: Utc::now(),
         agent_type,
         headroom_enabled: false,
+        rtk_enabled: false,
     };
 
     let mut store = SessionStore::load();

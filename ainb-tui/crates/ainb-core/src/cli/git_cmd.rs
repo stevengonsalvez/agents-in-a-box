@@ -463,6 +463,7 @@ mod tests {
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
+            rtk_enabled: false,
         }
     }
 

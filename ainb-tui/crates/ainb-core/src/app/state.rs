@@ -3377,6 +3377,7 @@ struct ConfigureLaunchSnapshot {
     /// HEAD for local repos, origin/HEAD for remote/star launches.
     base: Option<crate::components::new_session::configure::BaseSelection>,
     headroom_enabled: bool,
+    rtk_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7209,6 +7210,7 @@ impl AppState {
             codex_model,
             base: spec.base.clone(),
             headroom_enabled: spec.headroom_enabled,
+            rtk_enabled: spec.rtk_enabled,
         };
 
         // Boss mode builds its own Docker workspace from `repo_path` and
@@ -7364,6 +7366,7 @@ impl AppState {
                 existing_worktree,
                 base_start_point,
                 snapshot.headroom_enabled,
+                snapshot.rtk_enabled,
             )
             .await;
 
@@ -7987,6 +7990,7 @@ impl AppState {
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
         headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -8002,6 +8006,7 @@ impl AppState {
                     existing_worktree,
                     base_start_point,
                     headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
             }
@@ -8043,6 +8048,7 @@ impl AppState {
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
         headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -8103,6 +8109,7 @@ impl AppState {
                     model,
                     codex_model,
                     headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         } else {
@@ -8120,6 +8127,7 @@ impl AppState {
                     model,
                     codex_model,
                     headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         };

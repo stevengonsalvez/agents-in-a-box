@@ -818,6 +818,7 @@ impl SessionRecoveryState {
             created_at: chrono::Utc::now(),
             agent_type,
             headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let mut store = SessionStore::load();
