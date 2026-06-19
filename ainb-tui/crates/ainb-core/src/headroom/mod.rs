@@ -26,6 +26,11 @@ fn pid_file() -> PathBuf {
     headroom_dir().join("proxy.pid")
 }
 
+/// Serializes `ensure_proxy_running` so concurrent callers can't double-spawn
+/// the proxy on the same port (and clobber `proxy.pid`). Real runtime lock —
+/// distinct from the test-only `HEADROOM_ENV_LOCK`.
+static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn log_file() -> PathBuf {
     headroom_dir().join("proxy.log")
 }
@@ -75,6 +80,19 @@ pub async fn is_healthy() -> bool {
 /// 3. Writes the child PID to `proxy.pid`.
 /// 4. Polls `is_healthy()` for up to 5 s (50 × 100ms); returns `Ok` when live.
 pub async fn ensure_proxy_running() -> Result<()> {
+    if is_healthy().await {
+        return Ok(());
+    }
+
+    // Serialize the spawn. Two concurrent callers — a session launch and the
+    // 10s watchdog tick, or two overlapping watchdog ticks — could otherwise
+    // both observe `is_healthy() == false` and both `cmd.spawn()` a proxy on
+    // the same port. The loser exits on bind failure but still overwrites
+    // `proxy.pid` (below), orphaning the real proxy from `stop()`/idle-reap.
+    let _spawn_guard = SPAWN_LOCK.lock().await;
+
+    // Re-check under the lock: a racing caller may have brought the proxy up
+    // while we waited for the guard, in which case there is nothing to do.
     if is_healthy().await {
         return Ok(());
     }
