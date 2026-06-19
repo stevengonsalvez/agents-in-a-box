@@ -25,13 +25,35 @@ allowed-tools:
 List every claude session across the host. Three sources merged + deduped
 by cwd.
 
+## What standup reads vs what `needs` reads
+
+`standup` is a **roster**: it merges discovery sources (ainb + claude-peers
+broker + background jobs) and attaches a JSONL-synthesised `summary` line per
+session. It does **not** read the event-sourced `current_state` table itself —
+it is a "who is running" snapshot, not a "who is blocked" classifier.
+
+The block-detection lives in [`/ainb-fleet:needs`](../needs/SKILL.md), which is
+**hooks-primary**: it reads the materialized `current_state` table (ASK / ERR /
+WAIT / IDLE / RUNNING / DONE), sourced from Claude Code hooks via
+`events.jsonl` → notifyd, with a tmux/transcript fallback for non-Claude agents
+(Codex/Gemini fire no Claude hooks). Standup's job is to spot when a session
+*looks* answerable (`summary` contains `AskUserQuestion`) and **auto-chain to
+`needs`** for the authoritative read + routing (see below).
+
+> Neither skill installs hooks — they consume materialized state. The global
+> Claude Code hooks are installed by [`ainb fleet atc setup`](../atc/SKILL.md).
+
 ## Run
 
 ```bash
 ainb fleet standup                       # text table (default)
-ainb fleet --format json standup         # JSON for piping
+ainb --format json fleet standup         # JSON for piping
 ainb fleet standup --no-enrich           # 0-token roster (env AINB_FLEET_ENRICH=0)
 ```
+
+`--format` is a **global** flag — it may appear anywhere (`ainb --format json
+fleet standup` or `ainb fleet --format json standup` both work); the
+global-first form above is the convention across the fleet skills.
 
 The workflow-backed briefing (`/ainb-fleet:hangar` verb=standup) drafts the
 per-session "what it's doing" lines in a **single batched agent**, not one per

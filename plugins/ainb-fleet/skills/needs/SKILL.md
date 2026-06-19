@@ -26,6 +26,55 @@ allowed-tools:
 Single place to see every claude session that wants your attention. Four
 signal kinds classified per session, priority ASK > ERR > IDLE > WAIT.
 
+## `needs` vs `fleet-needs` — which skill?
+
+> **This skill (`needs`) is the plain, always-available control panel.** It is
+> prompt-driven: render the HUD, fire AskUserQuestion, route answers back. It
+> needs no workflow gate and works everywhere.
+>
+> **[`/ainb-fleet:fleet-needs`](../fleet-needs/SKILL.md) is the workflow-backed
+> "Jarvis" cockpit** — same purpose, but it runs the deterministic `hangar`
+> workflow (verb=needs) for discover→enrich→prioritize, batches enrichment in a
+> single agent, and adds **key-route ASK answering** (presses the target's
+> picker keys via tmux for an open AskUserQuestion). It requires
+> `CLAUDE_CODE_WORKFLOWS=1`; with the gate off it falls back to **this** skill.
+>
+> Rule of thumb: reach for `fleet-needs` when the workflow gate is on and you
+> want the batched/cockpit path; otherwise use `needs`. Both read the same
+> underlying `ainb fleet needs` data, so the panel content is identical.
+
+## Source of truth — materialized `current_state` (hooks), tmux fallback
+
+`ainb fleet needs` reads the **event-sourced** read model first. Claude Code
+hooks append lifecycle events to `events.jsonl`; notifyd ingests them into a
+SQLite `current_state` table that materializes the latest stage per session
+(ASK / ERR / WAIT / IDLE / RUNNING / DONE). For each session (keyed by `cwd` —
+the fleet's cross-source dedupe key), the reader resolves one of three ways:
+
+| resolution | when | what happens | row `source` |
+|---|---|---|---|
+| **hook-authoritative** | a materialized ASK/ERR/WAIT/IDLE row exists for the cwd (`source = hook`) | use it directly — **no pane scan** | `"hook"` |
+| **hook-healthy** | the hook says RUNNING / DONE | not a "need" — emit nothing, skip the pane scan | — |
+| **fallback** | no usable hook row — absent from `current_state` (a **non-Claude session like Codex/Gemini fires no Claude hooks**), `source = tmux`, or a stale row | run the live `classify()` pane/transcript scan, exactly as before the event store existed | `"tmux"` |
+
+So a Claude session's ASK/WAIT/IDLE/ERR is learned **primarily from hooks**;
+the tmux pane scan is the fallback for non-Claude agents (Codex/Gemini) and for
+sessions the daemon hasn't materialized. The read-time merge IS the
+tmux / non-Claude fold — each session yields at most one row, never double-listed.
+
+The `source` field (`"hook"` | `"tmux"`) on each row tells a consumer which
+path produced it. ASK/ERR/WAIT/IDLE are sticky states the materializer only
+changes on a new event, so an aged row is normally still the truth and there is
+**no staleness check by default**. Override only when you have an independent
+reason to distrust an aged row: `AINB_FLEET_STATE_STALE_MS=<ms>` (default `0` =
+no age check). When notifyd is down or the hooks were never installed,
+`current_state` is empty and **every** session falls back to the live scan, so
+the panel still works.
+
+> **This skill does NOT install hooks.** It only *consumes* the materialized
+> state. The global Claude Code hooks are installed by
+> [`ainb fleet atc setup`](../atc/SKILL.md) (into `~/.claude/settings.json`).
+
 ## Run
 
 ```bash
@@ -74,9 +123,14 @@ Each row in the output array:
     "marker": "WAITING:",
     "text": "…the post-marker text…"
   },
-  "route_hint": "tmux" | "broker" | "none"   // advisory; send is tmux-first
+  "route_hint": "tmux" | "broker" | "none",  // advisory; send is tmux-first
+  "source": "hook" | "tmux"                   // provenance: event-sourced row vs live tmux/transcript scan
 }
 ```
+
+`source` distinguishes a hook-sourced need (materialized from `events.jsonl`)
+from a tmux-folded one (the live fallback scan for non-Claude agents / un-
+materialized sessions). It is additive — older consumers that ignore it still work.
 
 ## Enrich — token-efficient (cache-aware)
 
@@ -204,7 +258,18 @@ echo "$out" | jq -r ".[] | select(.session.tmux_session == \"$picked\") | .sessi
   transcript follow the normal shape; surfacing them would dilute the
   panel. Use `ainb status <job>` for those.
 
-## v0.2 changelog
+## Changelog
+
+### v0.3 — hooks-primary (event-sourced)
+
+- Reads the materialized `current_state` table FIRST (hook-sourced ASK/ERR/
+  WAIT/IDLE per session); the live tmux/transcript `classify()` scan is now the
+  **fallback** for non-Claude agents (Codex/Gemini) and un-materialized sessions
+- Added the `source` field (`"hook"` | `"tmux"`) to each row
+- `AINB_FLEET_STATE_STALE_MS` (default `0` = no age check) to optionally distrust aged rows
+- Hooks are installed by `ainb fleet atc setup`, NOT by this skill
+
+### v0.2
 
 - Added ASK, ERR, IDLE signal kinds (was: WAIT-only in v0.1)
 - Added `--idle-min` flag + `AINB_FLEET_IDLE_MIN` env override
