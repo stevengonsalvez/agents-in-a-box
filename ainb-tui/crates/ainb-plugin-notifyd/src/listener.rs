@@ -11,6 +11,8 @@
 //! loop completes any in-flight reads, removes the socket and PID
 //! files, and exits cleanly.
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -51,6 +53,89 @@ impl RunConfig {
     }
 }
 
+/// Exclusive startup ownership lock (M-D3).
+///
+/// The pre-existing startup sequence — "if the pid is dead, remove the stale
+/// socket and bind" — is NOT atomic, and the PID file (`File::create`, which
+/// truncates rather than excludes) does not keep a racer out. Two daemons
+/// starting at the same instant can both observe a dead pid, both `remove_file`
+/// the socket, and both `bind`, leaving the loser silently un-served.
+///
+/// This guard makes ownership exclusive BEFORE any socket mutation: it creates a
+/// `notify.lock` file with `O_EXCL` (`create_new`), which the kernel guarantees
+/// succeeds for exactly one creator. If the lock already exists we read the pid
+/// it records; a LIVE different pid means a real daemon owns startup (we bail),
+/// while a DEAD pid means the lock is stale (a crashed predecessor) and we
+/// recover it by removing and retrying the exclusive create once. The winner
+/// holds the lock for its whole lifetime and removes it on drop.
+#[derive(Debug)]
+struct StartupLock {
+    path: PathBuf,
+}
+
+impl StartupLock {
+    /// Acquire the exclusive startup lock at `path`, recovering a stale lock left
+    /// by a crashed predecessor. Returns an error if a *live* daemon already owns
+    /// it (the caller should bail without touching the socket).
+    fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        // Two attempts: the first may lose to a stale lock we then recover.
+        for attempt in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true) // O_EXCL: exactly one creator wins.
+                .open(path)
+            {
+                Ok(mut f) => {
+                    // We won. Record our pid so a future racer can liveness-check us.
+                    let _ = writeln!(f, "{}", std::process::id());
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Someone holds (or crashed holding) the lock. Decide which.
+                    let holder = std::fs::read_to_string(path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok());
+                    match holder {
+                        Some(pid) if crate::pid::is_running(pid) && pid != std::process::id() => {
+                            anyhow::bail!(
+                                "another notifyd is starting/running (lock pid {pid}); refusing to start"
+                            );
+                        }
+                        // Dead/unreadable holder → stale lock from a crash. Recover
+                        // it and retry the exclusive create exactly once.
+                        _ if attempt == 0 => {
+                            warn!(?path, "removing stale startup lock");
+                            std::fs::remove_file(path).ok();
+                            continue;
+                        }
+                        // Still contended after recovery → a genuine race we lost.
+                        _ => anyhow::bail!(
+                            "lost startup race for {} after stale-lock recovery",
+                            path.display()
+                        ),
+                    }
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("creating startup lock {}", path.display()));
+                }
+            }
+        }
+        unreachable!("startup lock acquire loop always returns within 2 attempts")
+    }
+}
+
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Run the daemon to completion. Returns when one of:
 ///
 /// - the socket can't be bound (port-equivalent collision);
@@ -65,11 +150,18 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         .ensure_base()
         .with_context(|| format!("creating base dir {}", config.paths.base.display()))?;
 
+    // M-D3: claim exclusive startup ownership BEFORE touching the socket. This
+    // O_EXCL lock (with stale-lock recovery) guarantees exactly one daemon
+    // proceeds to the non-atomic remove-stale-socket + bind sequence below, so
+    // two daemons racing startup can no longer both remove + bind. Held for the
+    // process lifetime; removed on drop.
+    let _startup_lock = StartupLock::acquire(&config.paths.spawn_lock)?;
+
     // A stale socket from a crashed predecessor will cause `bind` to
-    // fail with EADDRINUSE; remove it before binding.
+    // fail with EADDRINUSE; remove it before binding. The startup lock above
+    // already excludes a live competitor, but keep the PID cross-check as a
+    // second, independent signal before we delete another process's socket.
     if config.paths.socket.exists() {
-        // Best-effort: if another live daemon already owns the
-        // socket the PID check below will keep us out.
         if let Ok(Some(pid)) = crate::pid::read(&config.paths.pid) {
             if crate::pid::is_running(pid) && pid != std::process::id() {
                 anyhow::bail!("another notifyd is already running (pid {pid}); refusing to start");
@@ -268,6 +360,70 @@ mod tests {
             },
             os_notifications: false, // never spawn osascript in tests
         }
+    }
+
+    #[test]
+    fn startup_lock_excludes_a_second_live_holder() {
+        // M-D3: a lock held by a DIFFERENT live process must exclude a new
+        // acquire — exactly-one-owner. Spawn a real, signalable child process and
+        // record ITS pid as the holder so the liveness cross-check sees a genuine
+        // live, different daemon.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("notify.spawn.lock");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a live holder process");
+        let holder_pid = child.id();
+        assert_ne!(holder_pid, std::process::id());
+        assert!(
+            crate::pid::is_running(holder_pid),
+            "spawned holder must be live"
+        );
+        std::fs::write(&lock, format!("{holder_pid}\n")).unwrap();
+
+        let second = StartupLock::acquire(&lock);
+        // Tidy up the child regardless of the assertion outcome.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            second.is_err(),
+            "a live different-pid holder must exclude a second acquire"
+        );
+        assert!(
+            second.unwrap_err().to_string().contains("refusing to start"),
+            "error should explain the live holder"
+        );
+    }
+
+    #[test]
+    fn startup_lock_recovers_a_stale_lock_from_a_dead_pid() {
+        // M-D3 recovery: a lock file left by a CRASHED predecessor (a dead pid)
+        // must be reclaimed, not block startup forever.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("notify.spawn.lock");
+        // Simulate a crashed predecessor: a lock file naming an impossible pid.
+        std::fs::write(&lock, "2147483647\n").unwrap();
+        let recovered = StartupLock::acquire(&lock);
+        assert!(
+            recovered.is_ok(),
+            "a stale lock from a dead pid must be recoverable"
+        );
+        // The reclaimed lock now records OUR pid.
+        let body = std::fs::read_to_string(&lock).unwrap();
+        assert_eq!(body.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn startup_lock_removed_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("notify.spawn.lock");
+        {
+            let _held = StartupLock::acquire(&lock).unwrap();
+            assert!(lock.exists(), "lock present while held");
+        }
+        assert!(!lock.exists(), "lock removed on drop");
     }
 
     async fn wait_for_socket(path: &std::path::Path) {

@@ -6,6 +6,9 @@
 // rest of the app's read-only screens (Inbox/Stats). Follows the ainb-tui style
 // guide: rounded borders, gold title, cornflower-blue panel, green for healthy.
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -27,46 +30,115 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const PANEL_BG: Color = Color::Rgb(30, 30, 40);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 
-/// Re-poll the aggregator at most every N renders to keep CPU low. The
-/// aggregator only reads a handful of small files, so even 1 is cheap, but a
-/// short throttle avoids re-reading on every redraw of an unchanged screen.
-const POLL_TICKS: u64 = 4;
+/// How often the BACKGROUND collector re-polls the aggregator. The collect only
+/// reads a handful of small files, but it also performs a (bounded) socket
+/// connect and `sysinfo` process lookups — work that must NEVER run on the UI
+/// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
+const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// All state owned by the Daemons screen. Stored at app-level so the cached
-/// snapshot survives cross-screen navigation. Cheap to default.
+/// The immutable snapshot the background collector publishes and `render` reads.
+/// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
+/// takes to swap or clone the row vector — never across I/O.
 #[derive(Debug, Default)]
-pub struct DaemonsState {
+pub struct Snapshot {
     /// Most-recently-collected daemon rows.
     pub rows: Vec<DaemonStatus>,
     /// The clock the cached rows' relative-time columns are measured against.
     pub collected_at_ms: i64,
-    /// Render-tick counter; re-collects every `POLL_TICKS` renders.
-    pub tick: u64,
+}
+
+/// All state owned by the Daemons screen. Stored at app-level so the cached
+/// snapshot survives cross-screen navigation. Cheap to default.
+///
+/// H-D2: `render` performs ZERO disk I/O and ZERO socket connects. A dedicated
+/// background thread runs [`crate::fleet::daemons::collect`] every
+/// [`COLLECT_INTERVAL`] and publishes the result into the shared [`Snapshot`];
+/// `render` only ever clones the latest published snapshot under a microsecond
+/// lock. A mid-crash daemon, a stale socket on a slow FS, or a saturated accept
+/// backlog can stall the background thread but can NEVER freeze the UI.
+#[derive(Debug, Default)]
+pub struct DaemonsState {
+    /// The snapshot the background collector publishes into. `None` until the
+    /// first render lazily spawns the collector.
+    shared: Option<Arc<Mutex<Snapshot>>>,
 }
 
 impl DaemonsState {
-    /// Re-collect the daemon health snapshot from disk. Best-effort: an error
-    /// leaves the prior snapshot in place (and logs) rather than blanking the
-    /// view.
-    pub fn refresh(&mut self) {
-        match crate::fleet::daemons::collect() {
-            Ok(rows) => {
-                self.rows = rows;
-                self.collected_at_ms = now_ms();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "daemons screen: collect failed");
-            }
+    /// Lazily spawn the background collector on first use and return the shared
+    /// snapshot handle. Idempotent: subsequent calls reuse the running thread.
+    ///
+    /// The collector seeds an immediate first collect (so the screen is populated
+    /// within one interval of opening), then re-collects every [`COLLECT_INTERVAL`]
+    /// for the lifetime of the process. It is intentionally a detached daemon
+    /// thread — the snapshot is the only shared state and it is best-effort, so
+    /// there is nothing to join on teardown.
+    fn shared(&mut self) -> Arc<Mutex<Snapshot>> {
+        if let Some(shared) = &self.shared {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::new(Mutex::new(Snapshot::default()));
+        spawn_collector(Arc::clone(&shared));
+        self.shared = Some(Arc::clone(&shared));
+        shared
+    }
+
+    /// Arm the background collector without rendering — called on navigation INTO
+    /// the Daemons screen so collection starts (and the first snapshot lands)
+    /// before the first frame, keeping the screen feeling live on entry.
+    /// Idempotent: re-entering the screen reuses the already-running collector.
+    pub fn arm(&mut self) {
+        let _ = self.shared();
+    }
+
+    /// Read the latest published snapshot. Off the render path this is a pure
+    /// memory read under a microsecond lock.
+    fn snapshot(&mut self) -> Snapshot {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        Snapshot {
+            rows: guard.rows.clone(),
+            collected_at_ms: guard.collected_at_ms,
         }
     }
 }
 
-/// Render the Daemons screen into `area`, polling the aggregator on the tick.
-pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
-    state.tick = state.tick.wrapping_add(1);
-    if state.tick == 1 || state.tick % POLL_TICKS == 0 {
-        state.refresh();
+/// Run one collect and publish it into `shared`. Shared by the background thread
+/// and the test seam so the publish/merge logic is exercised without a thread.
+fn collect_into(shared: &Mutex<Snapshot>) {
+    match crate::fleet::daemons::collect() {
+        Ok(rows) => {
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            guard.rows = rows;
+            guard.collected_at_ms = now_ms();
+        }
+        // Best-effort: an error leaves the prior snapshot in place (and logs)
+        // rather than blanking the view.
+        Err(e) => tracing::warn!(error = %e, "daemons screen: collect failed"),
     }
+}
+
+/// Spawn the detached background collector: one immediate collect, then a collect
+/// every [`COLLECT_INTERVAL`] forever. Keeps ALL disk I/O / socket connects off
+/// the UI render thread (H-D2).
+fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
+    std::thread::Builder::new()
+        .name("ainb-daemons-collect".into())
+        .spawn(move || {
+            loop {
+                collect_into(&shared);
+                std::thread::sleep(COLLECT_INTERVAL);
+            }
+        })
+        // A failure to spawn the collector must not crash the app: the screen
+        // then simply shows an empty (never stale-wrong) table.
+        .map_err(|e| tracing::warn!(error = %e, "daemons screen: collector thread spawn failed"))
+        .ok();
+}
+
+/// Render the Daemons screen into `area`. Reads ONLY the cached background
+/// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
+pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
+    let snapshot = state.snapshot();
 
     let outer = Block::default()
         .title(Line::from(vec![
@@ -93,13 +165,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    render_table(frame, chunks[0], state);
+    render_table(frame, chunks[0], &snapshot);
     render_footer(frame, chunks[1]);
 }
 
-fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
-    let now = if state.collected_at_ms > 0 {
-        state.collected_at_ms
+fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
+    let now = if snapshot.collected_at_ms > 0 {
+        snapshot.collected_at_ms
     } else {
         now_ms()
     };
@@ -115,7 +187,7 @@ fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     ])
     .style(Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD));
 
-    let rows: Vec<Row> = state
+    let rows: Vec<Row> = snapshot
         .rows
         .iter()
         .map(|d| {
@@ -207,6 +279,20 @@ mod tests {
         }
     }
 
+    /// A `DaemonsState` whose background collector is pre-empted: the shared
+    /// snapshot is seeded with `rows` and the `shared` handle is installed, so
+    /// `render`/`snapshot` read the seed and never spawn the real collector.
+    /// This is the H-D2 test seam — render is decoupled from any live collect.
+    fn seeded_state(rows: Vec<DaemonStatus>) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            rows,
+            collected_at_ms: now_ms(),
+        }));
+        DaemonsState {
+            shared: Some(shared),
+        }
+    }
+
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
     fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
@@ -219,30 +305,25 @@ mod tests {
 
     #[test]
     fn renders_title_header_and_all_four_rows() {
-        // Pre-seed the cache so render doesn't depend on the host's real
-        // ~/.agents-in-a-box state (refresh only fires when tick hits the
-        // throttle; tick starts at 0 → first render refreshes, so seed AFTER a
-        // bump by forcing the cache and a non-trigger tick).
-        let mut state = DaemonsState {
-            rows: vec![
-                status(
-                    DaemonKind::Bridge,
-                    DaemonState::Running,
-                    true,
-                    Some("Telegram (@bot)"),
-                ),
-                status(DaemonKind::Notifyd, DaemonState::Stopped, false, None),
-                status(
-                    DaemonKind::Atc,
-                    DaemonState::Running,
-                    true,
-                    Some("primary (every 15m)"),
-                ),
-                status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
-            ],
-            collected_at_ms: now_ms(),
-            tick: 1, // already past the first-render refresh trigger
-        };
+        // Seed the shared snapshot so render reads a deterministic cache and never
+        // touches the host's real ~/.agents-in-a-box state (H-D2: render does no
+        // collect of its own).
+        let mut state = seeded_state(vec![
+            status(
+                DaemonKind::Bridge,
+                DaemonState::Running,
+                true,
+                Some("Telegram (@bot)"),
+            ),
+            status(DaemonKind::Notifyd, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::Atc,
+                DaemonState::Running,
+                true,
+                Some("primary (every 15m)"),
+            ),
+            status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
+        ]);
         let out = render_to_string(&mut state, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
@@ -259,12 +340,53 @@ mod tests {
     }
 
     #[test]
-    fn refresh_does_not_panic_on_empty_home() {
-        // Even with no cached rows and a real collect(), rendering must not
-        // panic — it surfaces whatever the host's daemons look like.
+    fn render_reads_only_the_cached_snapshot_no_io() {
+        // H-D2: with a pre-seeded snapshot, render must reflect exactly the seed —
+        // proving it reads the cache and performs no collect of its own.
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Bridge,
+            DaemonState::Running,
+            true,
+            Some("Telegram (@seam)"),
+        )]);
+        let out = render_to_string(&mut state, 120, 8);
+        assert!(
+            out.contains("Telegram (@seam)"),
+            "seeded row missing: {out}"
+        );
+        // The host's real daemons (notifyd/ATC/fleet) are NOT in the seed, so
+        // their display names must be absent — render didn't collect them.
+        assert!(
+            !out.contains("ATC"),
+            "render must not collect beyond the seed"
+        );
+    }
+
+    #[test]
+    fn collect_into_publishes_into_the_shared_snapshot() {
+        // The background collector's publish step populates the snapshot from a
+        // real collect() (always 4 daemons) without any render involved.
+        let shared = Mutex::new(Snapshot::default());
+        collect_into(&shared);
+        let guard = shared.lock().unwrap();
+        assert_eq!(guard.rows.len(), 4, "collect publishes all four daemons");
+        assert!(
+            guard.collected_at_ms > 0,
+            "publish stamps the collect clock"
+        );
+    }
+
+    #[test]
+    fn render_does_not_panic_on_default_state() {
+        // A fresh state lazily spawns the background collector; the first render
+        // sees an empty snapshot (the collector hasn't published yet) and must
+        // render an empty table without panicking.
         let mut state = DaemonsState::default();
         let _ = render_to_string(&mut state, 100, 10);
-        // After the first render the cache is populated (4 daemons always).
-        assert_eq!(state.rows.len(), 4);
+        // The collector handle is now installed (spawned lazily on first render).
+        assert!(
+            state.shared.is_some(),
+            "first render must arm the collector"
+        );
     }
 }

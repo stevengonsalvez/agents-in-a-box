@@ -280,14 +280,20 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         };
     }
 
-    // Pid is alive. Connection health = the socket is bound AND the DB exists.
+    // Pid is alive. Connection health = the socket is bound AND the DB file is
+    // present. M-D1: we deliberately say "db file present", NOT "db reachable" —
+    // `db_path.exists()` only proves the FILE is there, not that it opens and
+    // accepts writes. A truncated/corrupt `notifications.db` still `exists()`, so
+    // claiming "reachable" would show green while every insert silently fails into
+    // the fallback file. Honest cheap wording avoids a real (blocking) DB open on
+    // this code path.
     let connected = socket_ok && db_ok;
     let reason = if connected {
-        "running + connected (socket bound, db reachable)".to_string()
+        "running + connected (socket bound, db file present)".to_string()
     } else if !socket_ok {
         "running but socket not bound yet".to_string()
     } else {
-        "running but db not reachable".to_string()
+        "running but db file missing".to_string()
     };
     DaemonStatus {
         kind,
@@ -442,9 +448,15 @@ fn read_pid_file(path: &Path) -> Option<u32> {
 /// `path.exists()` only proves a socket FILE is present — a crashed daemon
 /// leaves a stale one behind. A `connect()` succeeds only when a listener is
 /// bound and accepting; a stale socket file refuses the connection
-/// (`ECONNREFUSED`). The connect is immediately dropped, so this is a cheap,
-/// non-blocking liveness probe of the listener itself, not a duplicate read of
+/// (`ECONNREFUSED`). The connect is immediately dropped, so this is a cheap
+/// liveness probe of the listener itself, not a duplicate read of
 /// `socket_path.exists()`.
+///
+/// H-D2: a `connect(2)` on an AF_UNIX socket returns at once (success or
+/// `ECONNREFUSED`) — there is no network round-trip to hang on — but the
+/// surrounding `collect` (this probe + the disk reads it sits beside) is run on a
+/// BACKGROUND tick, never the TUI render thread, so even a pathologically slow FS
+/// can never freeze the UI. See `components::daemons` for the background collector.
 fn socket_is_listening(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }

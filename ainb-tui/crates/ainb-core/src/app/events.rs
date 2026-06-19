@@ -3851,7 +3851,10 @@ impl EventHandler {
                     state.previous_screen = Some(state.current_screen.clone());
                 }
                 state.current_screen = screen_ids::DAEMONS.to_string();
-                state.daemons_state.refresh();
+                // Arm the background collector on entry (H-D2): collection runs
+                // off the UI thread, never on render, so this only spawns/keeps
+                // the collector — it does no disk I/O on the event loop.
+                state.daemons_state.arm();
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
