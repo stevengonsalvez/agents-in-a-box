@@ -861,6 +861,7 @@ Commands:
   currency     Set or reset display currency
   model-alias  Manage model aliases
   optimize     Show read-only optimization findings
+  savings      Token-savings rollup (Headroom proxy + RTK + caveman estimate)
   compare      Compare models
   yield        Estimate usage yield from session signals
   cache        Inspect or wipe the persistent usage cache
@@ -1201,6 +1202,39 @@ $ ainb usage optimize --help
 Show read-only optimization findings
 
 Usage: ainb usage optimize [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage savings`
+
+Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+
+```console
+$ ainb usage savings --help
+Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+
+Usage: ainb usage savings [OPTIONS]
 
 Options:
       --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
@@ -2108,6 +2142,56 @@ Options:
   -h, --help             Print help
 ```
 
+## `ainb headroom`
+
+Manage the ainb-managed Headroom compression proxy
+
+```console
+$ ainb headroom --help
+Manage the ainb-managed Headroom compression proxy
+
+Usage: ainb headroom [OPTIONS] <COMMAND>
+
+Commands:
+  status  Query the Headroom proxy (running, port, pid, tokens saved)
+  stop    Stop the ainb-managed Headroom proxy
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb headroom status`
+
+Query the Headroom proxy (running, port, pid, tokens saved)
+
+```console
+$ ainb headroom status --help
+Query the Headroom proxy (running, port, pid, tokens saved)
+
+Usage: ainb headroom status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb headroom stop`
+
+Stop the ainb-managed Headroom proxy
+
+```console
+$ ainb headroom stop --help
+Stop the ainb-managed Headroom proxy
+
+Usage: ainb headroom stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
 ## `ainb mcp`
 
 Shared MCP server pool: daemon / proxy / status / stop / import / install
@@ -2899,6 +2983,73 @@ Options:
       --lines <LINES>    Print the last N events and exit (the bounded tail window) [default: 200]
       --level <LEVEL>    Only show events at or above this level (`trace`/`debug`/`info`/`warn`/`error`)
       --no-follow        Print + exit even when `--follow` is set (bounded mode for tests/CI)
+  -h, --help             Print help
+```
+
+## `ainb rtk`
+
+RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse hook
+
+```console
+$ ainb rtk --help
+RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse hook
+
+Usage: ainb rtk [OPTIONS] <COMMAND>
+
+Commands:
+  status     Show RTK install state, hook wiring, and total tokens saved
+  install    Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+  uninstall  Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb rtk status`
+
+Show RTK install state, hook wiring, and total tokens saved
+
+```console
+$ ainb rtk status --help
+Show RTK install state, hook wiring, and total tokens saved
+
+Usage: ainb rtk status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb rtk install`
+
+Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+
+```console
+$ ainb rtk install --help
+Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+
+Usage: ainb rtk install [OPTIONS]
+
+Options:
+      --codex            Also wire Codex AGENTS.md prompt injection (rtk init -g --codex). Best-effort; weaker than the Claude Code hook path.
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb rtk uninstall`
+
+Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+
+```console
+$ ainb rtk uninstall --help
+Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+
+Usage: ainb rtk uninstall [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
 ```
 
