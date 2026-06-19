@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -41,6 +41,17 @@ use crate::sender::{PushSender, SendOutcome};
 /// attention transitions. Cheap: it only reads the in-memory cache the poller
 /// already maintains.
 const DELIVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Hard cap on stored push subscriptions. The store is a single-user local
+/// dashboard, so a handful of devices is the realistic ceiling; capping it
+/// stops a misbehaving (or hostile) client from growing the persisted file
+/// without bound. On overflow we evict the oldest subscription (FIFO).
+const MAX_SUBSCRIPTIONS: usize = 64;
+
+/// Max accepted body size for `POST /api/push/subscribe`. A `PushSubscription`
+/// is a small JSON object (endpoint URL + two short base64 keys); 16 KiB is
+/// generous headroom while bounding the per-request allocation.
+const SUBSCRIBE_BODY_LIMIT: usize = 16 * 1024;
 
 // ── On-disk models ──────────────────────────────────────────────────────────
 
@@ -139,11 +150,19 @@ impl PushState {
         tokio::fs::rename(&tmp, &*self.store_path).await
     }
 
-    /// Add (or replace by endpoint) a subscription.
+    /// Add (or replace by endpoint) a subscription, capping the store at
+    /// [`MAX_SUBSCRIPTIONS`] by evicting the oldest entries (FIFO) so it can
+    /// never grow unbounded.
     async fn upsert(&self, sub: Subscription) -> std::io::Result<()> {
         let mut store = self.store.lock().await;
         store.subscriptions.retain(|s| s.endpoint != sub.endpoint);
         store.subscriptions.push(sub);
+        // Evict oldest until within cap (a single push can only ever overflow
+        // by one, but `drain` is robust to any prior over-cap on-disk state).
+        if store.subscriptions.len() > MAX_SUBSCRIPTIONS {
+            let overflow = store.subscriptions.len() - MAX_SUBSCRIPTIONS;
+            store.subscriptions.drain(0..overflow);
+        }
         self.persist(&store).await
     }
 
@@ -439,9 +458,20 @@ fn internal_error(detail: &str) -> Response {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/push/config", get(config))
-        .route("/api/push/subscribe", post(subscribe))
-        .route("/api/push/unsubscribe", post(unsubscribe))
-        .route("/api/push/presence", post(presence))
+        .route(
+            "/api/push/subscribe",
+            // Bound the request body: a subscription is small JSON, so reject
+            // anything oversized before it is buffered/deserialized.
+            post(subscribe).layer(DefaultBodyLimit::max(SUBSCRIBE_BODY_LIMIT)),
+        )
+        .route(
+            "/api/push/unsubscribe",
+            post(unsubscribe).layer(DefaultBodyLimit::max(SUBSCRIBE_BODY_LIMIT)),
+        )
+        .route(
+            "/api/push/presence",
+            post(presence).layer(DefaultBodyLimit::max(SUBSCRIBE_BODY_LIMIT)),
+        )
 }
 
 // ── Key + store persistence ──────────────────────────────────────────────────
@@ -607,6 +637,31 @@ mod tests {
         assert!(
             !push.remove("https://a").await.unwrap(),
             "second remove is a no-op"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_caps_store_and_evicts_oldest() {
+        let sender = Arc::new(FakeSender::new());
+        let (push, _dir) = push_state(sender);
+        // Insert one more than the cap; the very first endpoint must be evicted.
+        for i in 0..=MAX_SUBSCRIPTIONS {
+            push.upsert(sub(&format!("https://e{i}"), Some(false))).await.unwrap();
+        }
+        assert_eq!(
+            push.count().await,
+            MAX_SUBSCRIPTIONS,
+            "store must be capped at MAX_SUBSCRIPTIONS"
+        );
+        // The oldest (e0) was evicted; removing it is a no-op now.
+        assert!(
+            !push.remove("https://e0").await.unwrap(),
+            "oldest subscription should have been evicted"
+        );
+        // The newest is still present.
+        assert!(
+            push.remove(&format!("https://e{MAX_SUBSCRIPTIONS}")).await.unwrap(),
+            "newest subscription must be retained"
         );
     }
 

@@ -303,9 +303,25 @@ async fn events(
     // change — so connecting clients receive the initial frame for free.
     let rx = state.cache.subscribe();
     let stream = WatchStream::new(rx).filter_map(|cached: CachedSnapshot| {
+        // `None` means the poller hasn't produced a snapshot yet — there is
+        // genuinely nothing to send, so skip this tick (not an error).
         let snap = cached?;
-        let payload = serde_json::to_string(&*snap).ok()?;
-        Some(Ok(Event::default().event("snapshot").data(payload)))
+        match serde_json::to_string(&*snap) {
+            Ok(payload) => Some(Ok(Event::default().event("snapshot").data(payload))),
+            // A serialize failure must NOT be swallowed into `None`: that would
+            // leave the client connected and showing a stale "live" dashboard
+            // while silently receiving nothing. Log it loudly AND push an
+            // explicit `error` frame the client can surface.
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize SSE snapshot frame");
+                let payload = json!({
+                    "code": "SNAPSHOT_SERIALIZE_FAILED",
+                    "message": "the server could not serialize the current snapshot",
+                })
+                .to_string();
+                Some(Ok(Event::default().event("error").data(payload)))
+            }
+        }
     });
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEPALIVE_INTERVAL).text("keepalive"))

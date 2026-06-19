@@ -359,8 +359,21 @@ impl PtyBridge {
         })
     }
 
-    /// Take the PTY output receiver. Called once by the socket pump.
+    /// Take the PTY output receiver.
+    ///
+    /// # Invariant
+    ///
+    /// This consumes the single receiver and may be called **exactly once** per
+    /// [`PtyBridge`]. The contract holds today: the only caller is
+    /// [`handle_socket`], which owns the bridge for one WebSocket lifetime and
+    /// takes the receiver once to drive the PTY→socket pump. The `debug_assert`
+    /// below turns a future second-call regression into a loud test/dev failure
+    /// instead of a latent production `expect` panic; behavior is unchanged.
     fn take_output(&mut self) -> mpsc::Receiver<Outbound> {
+        debug_assert!(
+            self.output_rx.is_some(),
+            "take_output must be called exactly once per PtyBridge"
+        );
         self.output_rx.take().expect("take_output called more than once")
     }
 
