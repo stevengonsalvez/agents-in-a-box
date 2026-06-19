@@ -4968,9 +4968,14 @@ impl AppState {
 
     /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
     /// shared proxy went down, re-ensure it. Throttled to ~10s, async, and
-    /// best-effort so it never blocks the render loop. Self-healing: claude's
-    /// Anthropic SDK retries connection errors with backoff, so a respawn
-    /// inside the retry window is transparent to the session.
+    /// best-effort so it never blocks the render loop.
+    ///
+    /// This is a self-heal, not a zero-loss guarantee: a request a session
+    /// makes while the proxy is down (before the next ~10s tick respawns it)
+    /// fails at the CLI and is retried by the agent/user — recovery is "the
+    /// next request succeeds", not "the in-flight request is rescued". The
+    /// statusline reflects actual routing, so an outage surfaces rather than
+    /// silently dropping compression.
     ///
     /// In-loop tick, NOT a separate daemon — surfaced as the "watched" marker
     /// on the Headroom row of the Daemons screen, per the daemons-screen rule.
@@ -10339,14 +10344,32 @@ impl AppState {
         // from the persisted SessionMetadata (keyed by tmux name) and prepend
         // it — otherwise a restarted HR session would silently stop routing
         // through the proxy.
-        let headroom_enabled = crate::interactive::SessionStore::load()
+        //
+        // Mirror the launch path (`start_cli_in_tmux`): the stored flag is
+        // *intent*; only inject the base URL when the proxy is actually
+        // healthy. Injecting a dead-port URL would brick the restarted CLI on
+        // connection-refused. Ensure the proxy first; degrade to direct on
+        // failure rather than pointing the session at a closed port.
+        let mut headroom_active = crate::interactive::SessionStore::load()
             .sessions
             .get(&tmux_session_name)
             .map(|m| m.headroom_enabled)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && matches!(
+                agent_type,
+                SessionAgentType::Claude | SessionAgentType::Codex
+            );
+        if headroom_active {
+            if let Err(e) = crate::headroom::ensure_proxy_running().await {
+                warn!(
+                    "headroom proxy unavailable on restart — running DIRECT, no compression: {e}"
+                );
+                headroom_active = false;
+            }
+        }
         let cli_cmd = format!(
             "{}{}",
-            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_enabled),
+            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_active),
             cmd_parts.join(" ")
         );
 
