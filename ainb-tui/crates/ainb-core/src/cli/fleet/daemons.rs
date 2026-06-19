@@ -28,6 +28,32 @@ pub async fn execute(_matches: &clap::ArgMatches, format: OutputFormat) -> Resul
     Ok(())
 }
 
+/// Fixed widths of the leading (non-HEALTH) columns, in render order:
+/// DAEMON, STATE, PID, UPTIME, LAST ACTIVITY, ERRORS. The HEALTH column is the
+/// free-width remainder. The row format string below MUST keep these widths in
+/// sync — see [`SEPARATOR_WIDTH`], which is derived from them so the `-` rule can
+/// never drift from the header.
+const COLUMN_WIDTHS: [usize; 6] = [14, 9, 8, 10, 12, 7];
+
+/// A nominal display width for the trailing free-form HEALTH column, used only to
+/// size the header underline rule. (The actual HEALTH text is unbounded; this is
+/// just how far the `-` separator extends to look balanced.)
+const HEALTH_RULE_WIDTH: usize = 20;
+
+/// Width of the header underline: every fixed column + one space between each of
+/// the 7 columns + the HEALTH rule. Derived from [`COLUMN_WIDTHS`] so it tracks
+/// the format string automatically instead of the old magic `86` (LOW-9).
+const SEPARATOR_WIDTH: usize = {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < COLUMN_WIDTHS.len() {
+        sum += COLUMN_WIDTHS[i];
+        i += 1;
+    }
+    // 7 columns ⇒ 6 inter-column spaces, + the HEALTH rule width.
+    sum + 6 + HEALTH_RULE_WIDTH
+};
+
 /// Render the daemon rows as a fixed-width text table. `now_ms` is the clock the
 /// relative-time columns (uptime / last-activity) are measured against — passed
 /// in so the rendering is deterministic under test.
@@ -38,7 +64,7 @@ pub fn render_text(rows: &[DaemonStatus], now_ms: i64) -> String {
         "{:<14} {:<9} {:<8} {:<10} {:<12} {:<7} {}\n",
         "DAEMON", "STATE", "PID", "UPTIME", "LAST ACTIVITY", "ERRORS", "HEALTH"
     ));
-    out.push_str(&format!("{}\n", "-".repeat(86)));
+    out.push_str(&format!("{}\n", "-".repeat(SEPARATOR_WIDTH)));
     for r in rows {
         let state = state_glyph(r.state);
         let pid = r.pid.map_or_else(|| "-".to_string(), |p| p.to_string());
