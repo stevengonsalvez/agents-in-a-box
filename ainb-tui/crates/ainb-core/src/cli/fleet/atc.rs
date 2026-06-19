@@ -639,9 +639,7 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
 /// JSON; a `None` decision emits nothing; an Err is logged and swallowed (no
 /// stdout). `exit_ok` is always `true` (the tuple keeps the intent explicit +
 /// unit-testable).
-fn swallow_hook_result(
-    result: Result<Option<plumbing::StopDecision>>,
-) -> (bool, Option<String>) {
+fn swallow_hook_result(result: Result<Option<plumbing::StopDecision>>) -> (bool, Option<String>) {
     match result {
         Ok(Some(decision)) => match serde_json::to_string(&decision) {
             Ok(s) => (true, Some(s)),
@@ -737,8 +735,8 @@ fn hook_core(
     // Does this session own a non-empty inbox under its session-id key? (A parent
     // whose children committed under the session-id key — the leaf-vs-parent
     // distinction for membership.)
-    let self_inbox = (!session_id.is_empty())
-        .then(|| plumbing::Inbox::open_in(&inbox_dir, session_id));
+    let self_inbox =
+        (!session_id.is_empty()).then(|| plumbing::Inbox::open_in(&inbox_dir, session_id));
     let has_self_inbox = self_inbox.as_ref().is_some_and(|ib| !ib.is_empty());
 
     // 1. Status file — GATED ON FLEET MEMBERSHIP (H1). The hooks are global, so
@@ -749,8 +747,7 @@ fn hook_core(
     //    is a true no-op here.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
     if !session_id.is_empty() && is_fleet_member {
-        let rec =
-            plumbing::StatusFile::from_event(session_id, event, now_ms, done_summary.clone());
+        let rec = plumbing::StatusFile::from_event(session_id, event, now_ms, done_summary.clone());
         let _ = plumbing::status::write_status_in(home, &rec);
     }
 
@@ -1004,7 +1001,9 @@ mod tests {
     fn commit_delivery_drains_only_on_send_ok() {
         let dir = TempDir::new().unwrap();
         let inbox = inbox_for(dir.path(), "atc");
-        inbox.commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1)).unwrap();
+        inbox
+            .commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1))
+            .unwrap();
         assert!(!inbox.is_empty());
 
         // Confirmed send → drains exactly-once.
@@ -1017,7 +1016,9 @@ mod tests {
     fn commit_delivery_retains_on_send_failure() {
         let dir = TempDir::new().unwrap();
         let inbox = inbox_for(dir.path(), "atc");
-        inbox.commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1)).unwrap();
+        inbox
+            .commit(&plumbing::InboxRecord::new("c1", "atc", "done", "Stop", 1))
+            .unwrap();
 
         // Send FAILED → must NOT drain; the completion is retained for a later
         // firing (C-A2: a send failure after a would-be drain must not lose it).
@@ -1048,7 +1049,11 @@ mod tests {
     fn dead_session_firing_retains_the_completion() {
         let dir = TempDir::new().unwrap();
         let inbox = inbox_for(dir.path(), "tower");
-        inbox.commit(&plumbing::InboxRecord::new("c1", "tower", "done", "Stop", 1)).unwrap();
+        inbox
+            .commit(&plumbing::InboxRecord::new(
+                "c1", "tower", "done", "Stop", 1,
+            ))
+            .unwrap();
 
         // Simulate the heartbeat's peek (non-destructive) then the dead-session
         // branch: session_live=false → the deliver/drain block is skipped.
@@ -1084,7 +1089,13 @@ mod tests {
         // A child committed under the CANONICAL parent key (= the ATC name), as
         // `ainb run --parent tower` routes it.
         inbox_for(home.path(), name)
-            .commit(&plumbing::InboxRecord::new("child-1", name, "did the thing", "Stop", 1))
+            .commit(&plumbing::InboxRecord::new(
+                "child-1",
+                name,
+                "did the thing",
+                "Stop",
+                1,
+            ))
             .unwrap();
 
         // The synchronous Stop-hook on the ATC session drains that key and blocks.
@@ -1100,7 +1111,11 @@ mod tests {
         .unwrap();
         let d = decision.expect("Stop-hook must block on the child completion");
         assert_eq!(d.decision, "block");
-        assert!(d.reason.contains("child-1"), "block carries the child: {}", d.reason);
+        assert!(
+            d.reason.contains("child-1"),
+            "block carries the child: {}",
+            d.reason
+        );
 
         // It is consumed exactly-once: the same key is now empty.
         assert!(inbox_for(home.path(), name).is_empty());
@@ -1109,7 +1124,13 @@ mod tests {
         // HEARTBEAT consumer (which also keys by the ATC name) — proving both
         // consumers see children under the one canonical key.
         inbox_for(home.path(), name)
-            .commit(&plumbing::InboxRecord::new("child-2", name, "second turn", "Stop", 2))
+            .commit(&plumbing::InboxRecord::new(
+                "child-2",
+                name,
+                "second turn",
+                "Stop",
+                2,
+            ))
             .unwrap();
         let hb_drained = inbox_for(home.path(), name).drain().unwrap();
         assert_eq!(hb_drained.len(), 1);
@@ -1196,7 +1217,10 @@ mod tests {
             .arg(clap::Arg::new("session-id").long("session-id").default_value(""))
             .arg(clap::Arg::new("cwd").long("cwd").default_value(""))
             .get_matches_from(vec!["hook", "--event", "Stop", "--session-id", "unrelated"]);
-        assert!(hook(&m).await.is_ok(), "hook must always return Ok → exit 0");
+        assert!(
+            hook(&m).await.is_ok(),
+            "hook must always return Ok → exit 0"
+        );
     }
 
     /// H-A1 (forced error): the drain error path is reachable, and the `hook()`
@@ -1221,8 +1245,19 @@ mod tests {
         std::fs::create_dir_all(&lock_path).unwrap();
 
         // hook_core errors (the drain can't lock)...
-        let result = hook_core(home.path(), "Stop", "atc-sid", cwd.to_str().unwrap(), None, None, 1);
-        assert!(result.is_err(), "the sabotaged lock should make the drain error");
+        let result = hook_core(
+            home.path(),
+            "Stop",
+            "atc-sid",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            1,
+        );
+        assert!(
+            result.is_err(),
+            "the sabotaged lock should make the drain error"
+        );
 
         // ...and the swallow wrapper the real `hook()` uses maps that Err to a
         // no-op exit-0 outcome with no stdout block.

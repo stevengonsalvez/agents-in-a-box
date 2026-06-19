@@ -500,7 +500,9 @@ fn atc_event_driven_inbox_drains_exactly_once() {
     // Explicitly drain worker-7 via the CLI so the rest of the flow starts clean.
     let out = run(
         &home,
-        &["--format", "json", "fleet", "atc", "inbox", "drain", "tower"],
+        &[
+            "--format", "json", "fleet", "atc", "inbox", "drain", "tower",
+        ],
     );
     assert!(out.status.success(), "explicit drain of worker-7 failed");
 

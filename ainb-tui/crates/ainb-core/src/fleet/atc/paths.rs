@@ -202,7 +202,15 @@ mod tests {
     fn sanitize_neutralizes_traversal_and_separators() {
         // The security property: no separator (`/`, `\`) and no `.` (so no `..`
         // traversal) can survive — the result is always one in-root component.
-        for malicious in ["../../foo", "/etc/passwd", "..", ".", "", "a/../b", "..\\..\\x"] {
+        for malicious in [
+            "../../foo",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+            "a/../b",
+            "..\\..\\x",
+        ] {
             let s = sanitize_instance_name(malicious);
             assert!(!s.contains('/'), "slash survived in {s:?}");
             assert!(!s.contains('\\'), "backslash survived in {s:?}");

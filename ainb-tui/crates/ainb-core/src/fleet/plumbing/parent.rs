@@ -205,6 +205,9 @@ mod tests {
         let lock = map_lock_path_in(home.path());
         assert!(!lock.exists(), "lock file should not exist before record");
         record_parent_in(home.path(), "c", "p").unwrap();
-        assert!(lock.exists(), "record must create + use the parents.json lock");
+        assert!(
+            lock.exists(),
+            "record must create + use the parents.json lock"
+        );
     }
 }
