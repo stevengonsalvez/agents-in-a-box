@@ -273,6 +273,30 @@ They are **complementary, not fallback**. Both run in parallel and results merge
 
 ---
 
+## Memory backend: local or shared (Postgres)
+
+The markdown notes are **always** the local source of truth, and **all
+LLM/embedding/clustering always stays client-side — no extra API key**. Only the
+*derived* vector + graph store has two modes:
+
+![reflect component topology — harness hooks feed the engine; markdown KB is the source of truth; the derived store runs local (QMD sqlite + nano-graphrag) or shared (Supabase Postgres + pgvector)](../assets/reflect-topology.svg)
+
+| | **Mode 1 — Local** (default) | **Mode 2 — Shared** (Postgres) |
+|---|---|---|
+| Derived store | per-machine: QMD `index.sqlite` (BM25) + nano-graphrag (hnswlib + `.graphml`) | one **Supabase Postgres** (pgvector) for everyone |
+| Setup | nothing | `REFLECT_PG_DSN` + `REFLECT_WORKSPACE_ID` + 2 migrations |
+| Share across machines | git-sync the notes, then `reflect reindex` on each machine | automatic — every machine queries the same store |
+
+In Mode 2, nano-graphrag runs **unchanged** — it's handed Postgres-backed storage
+classes (the way it ships `Neo4jStorage`). The DB is dumb (no LLM/embeddings);
+tenant isolation is RLS (fail-closed) + explicit `workspace_id` scoping; writes
+need a `service_role` DSN.
+
+➡️ **Full reference** (schema, setup, threat model, per-harness install):
+[`stevengonsalvez/ainb-reflect-memory`](https://github.com/stevengonsalvez/ainb-reflect-memory#readme).
+
+---
+
 ## Tier 4: Instincts — Micro-Learnings
 
 Lightweight YAML rules with confidence scoring (0.3–0.9). Too small for a full

@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 720" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<defs>
+<marker id="aClay" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 Z" fill="#D97757"/></marker>
+<marker id="aSlate" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 Z" fill="#141413"/></marker>
+<marker id="aOlive" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 Z" fill="#788C5D"/></marker>
+<marker id="aBlue" markerWidth="11" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L11,4 L0,8 Z" fill="#5B7FA6"/></marker>
+</defs>
+<rect width="1040" height="720" fill="#FAF9F5"/>
+<text x="520" y="32" font-size="20" fill="#141413" text-anchor="middle" font-weight="700">reflect — component topology</text>
+<text x="520" y="52" font-size="11" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">one engine · three harnesses · two memory modes (local default / shared Postgres)</text>
+<rect x="60" y="70" width="920" height="96" rx="10" fill="#fff" stroke="#D1CFC5" stroke-width="1.5" stroke-dasharray="5,4"/>
+<text x="80" y="92" font-size="12" fill="#141413" text-anchor="start" font-weight="700">AGENT HARNESS  (your LLM lives here — no extra API key)</text>
+<rect x="80" y="104" width="280" height="50" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="80" y="104" width="4" height="50" rx="2" fill="#D97757"/>
+<text x="220" y="124" font-size="13" fill="#141413" text-anchor="middle" font-weight="700">Claude Code</text>
+<text x="220" y="141" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">native plugin · full hooks</text>
+<rect x="380" y="104" width="280" height="50" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="380" y="104" width="4" height="50" rx="2" fill="#D97757"/>
+<text x="520" y="124" font-size="13" fill="#141413" text-anchor="middle" font-weight="700">Codex CLI</text>
+<text x="520" y="141" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">adapter · hooks.json (0.129+)</text>
+<rect x="680" y="104" width="280" height="50" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="680" y="104" width="4" height="50" rx="2" fill="#D97757"/>
+<text x="820" y="124" font-size="13" fill="#141413" text-anchor="middle" font-weight="700">GitHub Copilot</text>
+<text x="820" y="141" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">adapter · native hooks</text>
+<text x="520" y="176" font-size="10" fill="#D97757" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">lifecycle hooks: SessionStart · PreCompact · Stop · PostToolUse</text>
+<path d="M520,182 L520,212" stroke="#D97757" stroke-width="2.2" fill="none" marker-end="url(#aClay)"/>
+<rect x="260" y="212" width="520" height="86" rx="10" fill="#fff" stroke="#D97757" stroke-width="2"/>
+<rect x="260" y="212" width="4" height="86" rx="2" fill="#D97757"/>
+<text x="520" y="236" font-size="14" fill="#141413" text-anchor="middle" font-weight="700">reflect CLI  —  engine (Python pkg `reflect-kb`)</text>
+<rect x="280" y="250" width="150" height="38" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="280" y="250" width="4" height="38" rx="2" fill="#788C5D"/>
+<text x="355" y="268" font-size="12" fill="#141413" text-anchor="middle" font-weight="600" font-family="ui-monospace,SF Mono,Menlo,monospace">capture</text>
+<text x="355" y="282" font-size="8.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">corrections → notes</text>
+<rect x="447" y="250" width="150" height="38" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="447" y="250" width="4" height="38" rx="2" fill="#788C5D"/>
+<text x="522" y="268" font-size="12" fill="#141413" text-anchor="middle" font-weight="600" font-family="ui-monospace,SF Mono,Menlo,monospace">index</text>
+<text x="522" y="282" font-size="8.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">embed + extract</text>
+<rect x="614" y="250" width="150" height="38" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="614" y="250" width="4" height="38" rx="2" fill="#788C5D"/>
+<text x="689" y="268" font-size="12" fill="#141413" text-anchor="middle" font-weight="600" font-family="ui-monospace,SF Mono,Menlo,monospace">recall</text>
+<text x="689" y="282" font-size="8.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">hybrid + rerank</text>
+<text x="300" y="310" font-size="9.5" fill="#788C5D" text-anchor="start" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">client keeps the brain — recall+index run a LOCAL embed model; capture reuses the harness LLM (claude -p). No separate key.</text>
+<path d="M420,322 L420,360" stroke="#141413" stroke-width="1.8" fill="none" marker-end="url(#aSlate)"/>
+<path d="M620,322 L620,360" stroke="#141413" stroke-width="1.8" fill="none" marker-end="url(#aSlate)"/>
+<rect x="60" y="360" width="920" height="40" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="60" y="360" width="4" height="40" rx="2" fill="#788C5D"/>
+<text x="520" y="385" font-size="11.5" fill="#141413" text-anchor="middle" font-weight="600" font-family="ui-monospace,SF Mono,Menlo,monospace">markdown KB  ~/.claude/global-learnings/*.md   —   SOURCE OF TRUTH (local, always)</text>
+<rect x="60" y="418" width="440" height="210" rx="10" fill="#fff" stroke="#D1CFC5" stroke-width="1.5" stroke-dasharray="6,4"/>
+<text x="280" y="440" font-size="13" fill="#141413" text-anchor="middle" font-weight="700">MODE 1 — LOCAL (default)</text>
+<text x="280" y="457" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">each machine builds + queries its own derived stores</text>
+<rect x="84" y="468" width="180" height="64" rx="10" fill="#fff" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="84" y="468" width="4" height="64" rx="2" fill="#5B7FA6"/>
+<text x="174" y="488" font-size="12" fill="#141413" text-anchor="middle" font-weight="600">QMD</text>
+<text x="174" y="504" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">index.sqlite</text>
+<text x="174" y="519" font-size="9" fill="#5B7FA6" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">BM25 lexical</text>
+<rect x="296" y="468" width="180" height="64" rx="10" fill="#fff" stroke="#D1CFC5" stroke-width="1.5"/>
+<rect x="296" y="468" width="4" height="64" rx="2" fill="#D97757"/>
+<text x="386" y="486" font-size="11.5" fill="#141413" text-anchor="middle" font-weight="600">nano-graphrag</text>
+<text x="386" y="502" font-size="9" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">hnswlib vectors</text>
+<text x="386" y="516" font-size="9" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">.graphml graph</text>
+<rect x="84" y="544" width="392" height="68" rx="10" fill="rgba(227,218,204,0.45)" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="280" y="565" font-size="10" fill="#D97757" text-anchor="middle" font-weight="700" font-family="ui-monospace,SF Mono,Menlo,monospace">share across machines:</text>
+<text x="280" y="584" font-size="10.5" fill="#141413" text-anchor="middle" font-weight="400">git-sync ~/.claude/global-learnings  +  `reflect reindex`</text>
+<text x="280" y="600" font-size="10.5" fill="#141413" text-anchor="middle" font-weight="400">on each machine (re-embeds locally)</text>
+<rect x="540" y="418" width="440" height="210" rx="10" fill="#fff" stroke="#D97757" stroke-width="1.8"/>
+<text x="760" y="440" font-size="13" fill="#141413" text-anchor="middle" font-weight="700">MODE 2 — SHARED (Postgres)</text>
+<text x="760" y="457" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">one store; every machine queries the same memory</text>
+<rect x="564" y="468" width="392" height="68" rx="10" fill="#F0EEE6" stroke="#D97757" stroke-width="1.5"/>
+<rect x="564" y="468" width="4" height="68" rx="2" fill="#D97757"/>
+<text x="760" y="488" font-size="12" fill="#141413" text-anchor="middle" font-weight="700" font-family="ui-monospace,SF Mono,Menlo,monospace">Supabase Postgres  (dumb · RLS · no LLM)</text>
+<text x="760" y="506" font-size="9.5" fill="#87867F" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">ng_vectors (pgvector) · ng_graph_nodes/edges · ng_kv</text>
+<text x="760" y="522" font-size="9" fill="#D97757" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">replaces the nano-graphrag LOCAL stores</text>
+<rect x="564" y="544" width="392" height="68" rx="10" fill="rgba(227,218,204,0.45)" stroke="#E3DACC" stroke-width="1.5"/>
+<text x="760" y="565" font-size="10" fill="#D97757" text-anchor="middle" font-weight="700" font-family="ui-monospace,SF Mono,Menlo,monospace">enable per machine:</text>
+<text x="760" y="584" font-size="10.5" fill="#141413" text-anchor="middle" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">export REFLECT_PG_DSN=…  REFLECT_WORKSPACE_ID=…</text>
+<text x="760" y="600" font-size="10" fill="#141413" text-anchor="middle" font-weight="400">nano-graphrag runs unchanged (storage_classes swap)</text>
+<path d="M420,400 L280,418" stroke="#5B7FA6" stroke-width="1.8" fill="none" marker-end="url(#aBlue)"/>
+<path d="M620,400 L760,418" stroke="#D97757" stroke-width="1.8" fill="none" marker-end="url(#aClay)"/>
+<text x="300" y="694" font-size="9.5" fill="#87867F" text-anchor="start" font-weight="400" font-family="ui-monospace,SF Mono,Menlo,monospace">MODE 1 + MODE 2 share the SAME markdown source of truth + the SAME reflect engine — only the derived vector/graph store moves.</text>
+</svg>
