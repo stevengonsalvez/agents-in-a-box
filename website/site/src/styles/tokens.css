@@ -136,20 +136,44 @@ a:not(.sl-link-card):not([class*='sl-flex']):hover {
   font-size: 0.875em;
 }
 
-/* Tables — cornflower borders, zebra body. */
+/* Tables — cornflower frame, padded cells, subtle zebra + hover. */
 .sl-markdown-content table {
+  width: 100%;
+  margin: 1.15rem 0;
   border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
-  border-collapse: collapse;
+  border-radius: 8px;
+  border-collapse: separate; /* separate so border-radius clips cleanly */
+  border-spacing: 0;
   overflow: hidden;
+}
+/* Consistent breathing room so content never touches the cell edges. */
+.sl-markdown-content th,
+.sl-markdown-content td {
+  padding: 0.55rem 0.9rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 18%, transparent);
 }
 .sl-markdown-content th {
   background: var(--ainb-bg-panel);
   color: var(--ainb-accent-gold);
   font-weight: 700;
-  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 60%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 55%, transparent);
 }
-.sl-markdown-content tr:nth-child(even) td {
+/* Drop the last row's separator so it doesn't double up with the frame. */
+.sl-markdown-content tbody tr:last-child td {
+  border-bottom: none;
+}
+.sl-markdown-content tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--ainb-bg-panel) 45%, transparent);
+}
+.sl-markdown-content tbody tr:hover td {
   background: var(--ainb-bg-panel);
+}
+/* Keep inline <kbd> chips off the cell edge / each other. */
+.sl-markdown-content td kbd,
+.sl-markdown-content th kbd {
+  vertical-align: baseline;
 }
 
 /* Blockquotes — cornflower bar, muted text. */
