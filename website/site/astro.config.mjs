@@ -9,6 +9,12 @@ export default defineConfig({
   site: 'https://stevengonsalvez.github.io',
   base: '/agents-in-a-box',
   trailingSlash: 'never',
+  // Old recall page moved under the dedicated reflect-memory section.
+  // NB: static meta-refresh redirects don't get `base` prepended automatically,
+  // so the destination is written with the `/agents-in-a-box` base explicitly.
+  redirects: {
+    '/knowledge/recall-by-example': '/agents-in-a-box/knowledge/reflect-memory/recall',
+  },
   // Docs live in the repo-root `docs/` tree (outside this site dir), so MDX
   // there can't resolve `@astrojs/starlight/components` from its own folder.
   // Alias the bare specifier to the package file in this site's node_modules.
@@ -141,11 +147,18 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Reflect Memory',
+          items: [
+            { label: 'Problem & fit', slug: 'knowledge/reflect-memory/problem-and-fit' },
+            { label: 'The construct', slug: 'knowledge/reflect-memory/construct' },
+            { label: 'Recall reference (57 ports)', slug: 'knowledge/reflect-memory/recall' },
+          ],
+        },
+        {
           label: 'Knowledge',
           items: [
             { label: 'How reflection works', slug: 'knowledge/overview' },
-            { label: 'How recall works — by example', slug: 'knowledge/recall-by-example' },
-            { label: 'Hooks & platform (Claude + Codex)', slug: 'knowledge/hooks-and-platform' },
+            { label: 'Hooks & platform (Claude · Codex · Copilot)', slug: 'knowledge/hooks-and-platform' },
             { label: 'reflect CLI', slug: 'knowledge/reflect-cli' },
           ],
         },
