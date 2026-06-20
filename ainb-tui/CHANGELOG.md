@@ -7,6 +7,216 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-06-20
+### Added
+- Merge pull request #144 from stevengonsalvez/feat/skill-manager
+- Merge pull request #303 from stevengonsalvez/feat/otel-grafana-onboarding
+- Merge pull request #306 from stevengonsalvez/f/reflect-locomo
+- Merge pull request #316 from stevengonsalvez/f/ainb-cli
+- **adapters-tool**: asymmetric R/W gate — read_root_for defaults to real home
+- **ainb**: wire ainb-cli subcommands into the binary entrypoint
+- **ainb-cli**: P3 reconciler for class-A + class-C walker outputs
+- **ainb-cli**: add `ainb skill check` drift report
+- **ainb-cli**: add class-A discovery walker for Claude Code plugin cache
+- **ainb-cli**: add migrate --discover / --legacy-yaml / --force flags
+- **ainb-cli**: class-C orphan walker for skill-manager v1.1 discovery
+- **ainb-cli**: hdt.5 migrate --discover orchestration
+- **ainb-cli**: hdt.7 ainb skill promote command — git+gh roundtrip with manifest URI rewrite
+- **ainb-skill-core**: hdt.3 schema additions for discovery (shadowed_by, read_only, claude-marketplace kind, marketplace URI)
+- **burndown**: token-savings tab (Headroom + RTK + caveman estimate)
+- **catalog**: install npx/plugin/mcp entries by running their command
+- **catalog**: model install kind; browse npx/plugin/mcp externals
+- **cli**: add AinbCuratedCatalogBackend over the release index
+- **cli**: add EXAMPLES to headroom + rtk (audit gate) + regen reference
+- **cli**: add `ainb notifyd list` to read persisted notifications
+- **cli**: add `ainb skill usage` subcommand
+- **cli**: add `skill browse --catalog ainb` for the curated shelf
+- **cli**: add headless `ainb learnings search <query>`
+- **cli**: add headless `ainb witr <target>` process-trace command
+- **cli**: ainb skill browse <query> [--json] via injectable CatalogBackend
+- **cli**: ainb skill library {list,add,new} over library.yaml
+- **cli**: headless `ainb diff-review --format json`
+- **cli**: make `ainb --help` agent-friendly for headless use
+- **configure**: contextual Headroom usage guide in the new-session filler
+- **configure**: explain the Headroom toggle inline
+- **configure**: gate the Headroom toggle on availability
+- **daemons**: read-only Daemons overlay (MCP pool + Headroom proxy)
+- **deps**: register rtk + headroom as token-optimisation external deps
+- **events**: AppEvent::GoToSkillManager + SkillManagerBack
+- **explain-to-me**: add --gist publish alternate (permanent htmlpreview URL)
+- **headroom**: ainb-managed shared proxy daemon + headroom CLI
+- **headroom**: idle-reap shared proxy when last session closes
+- **headroom**: in-loop proxy watchdog + 'watched' on the Daemons row
+- **headroom**: manual mid-session downgrade with H (resume direct)
+- **home**: rebind SkillManager nav from uppercase M to lowercase m
+- **illustration**: add mascot illustration plugin (alex + popa) (#309)
+- **illustration:alex**: restyle Alex to hand-drawn pastel, drop glasses (#314)
+- **migrate**: add --upgrade-schema to backfill bootstrap target_layout
+- **otel**: add 'ainb otel {setup,status,start}' command
+- **otel**: add OpenTelemetry setup module
+- **otel**: add optional Telemetry step to onboarding wizard
+- **otel**: register alloy dependency under new otel consumer
+- **otel**: vendor Grafana Alloy assets for telemetry setup
+- **reflect-kb**: add LOCOMO long-term-memory benchmark
+- **reflect-kb**: env-gated retrieval-quality knobs (embedder swap, HyDE, recall budget)
+- **rtk**: detect + install/uninstall RTK from ainb
+- **rtk**: per-session RTK via project-local worktree hook
+- **screens**: add SKILL_MANAGER screen id constant
+- **screens**: register SkillManagerScreen in the registry
+- **scripts**: skill-manager-sandbox.sh up/down manual launcher
+- **session**: per-session Headroom proxy opt-in + env injection
+- **sidebar**: SidebarItem::SkillManager — discoverable nav entry
+- **skill-cli**: ainb skill scan — provenance tree CLI
+- **skill-cli**: bidirectional content sync in `ainb skill sync`
+- **skill-core**: CatalogBackend trait + CatalogHit + MockCatalogBackend + URL builder
+- **skill-core**: YAML-backed own-skill library (library.yaml, no SQLite)
+- **skill-core**: add BOOTSTRAP_DEFAULT_MAPPINGS + resolve_pair fallback
+- **skill-core**: add DriftDetector with mockable backend
+- **skill-core**: add MappingEngine resolve_pair glob→path resolver
+- **skill-core**: add SyncEngine apply_to_home (TO_HOME executor)
+- **skill-core**: add SyncEngine apply_to_repo (TO_REPO executor)
+- **skill-core**: add SyncPlanner (plan_sync) for bidirectional home↔repo sync
+- **skill-core**: add curated catalog index types and transforms
+- **skill-core**: add optional target_layout schema to SourceEntry
+- **skill-core**: add per-unit usage telemetry to lockfile (schema v2)
+- **skill-core**: gated sandbox test-fixture for SkillManager
+- **skill-core**: per-source advisory lock around apply_to_repo (v12.1.T7)
+- **skill-install**: honour SourceEntry.target_layout when computing dst
+- **skill-manager**: P5 discovery banner overlay + import/skip flow
+- **skill-manager**: P7 [s] keybind flips shadowed_by on conflict pair
+- **skill-manager**: [b]rowse catalog modal -> select -> install
+- **skill-manager**: [l] own-skill Library view + help-bar entry
+- **skill-manager**: [r] remove drops the unit from the manifest + live tripwire
+- **skill-manager**: `[s]` routes to SkillManagerSync when no conflict
+- **skill-manager**: add drift status column to Units panel
+- **skill-manager**: arrow/j-k nav + selection highlight + empty-state hint
+- **skill-manager**: background drift poll on screen-enter
+- **skill-manager**: live-data binding on SkillsScreenData
+- **skill-manager**: provenance matcher + provenance-aware reconcile
+- **skill-manager**: provenance-aware discovery import in the TUI
+- **skill-manager**: resizable + selectable Sources column with mouse support
+- **skill-manager**: wire UsageCache into Detail pane
+- **skill-manager**: wire reload_from_disk into GoToSkillManager
+- **state**: HomeTile::SkillManager + skill_manager_state
+- **statusline**: Headroom routing indicator (Claude + Codex)
+- **swarm-lib**: descriptive team_id (`swarm-<branch>-<rand>`) instead of bare epoch
+- **tui**: browse the curated catalog in the [b] modal
+- **tui**: wire every SkillManager help-bar key
+- **usage**: add per-tool invocation detector
+- **workspace**: add 7 skill-manager crates
+- **xtask**: generate catalog-index from an external ainb-toolkit checkout
+- **xtask**: generate enriched curated catalog index
+
+### Fixed
+- Merge pull request #301 from stevengonsalvez/ops/ainb
+- Merge pull request #315 from stevengonsalvez/fix/docsite-otel-frontmatter
+- **ainb-cli**: class-C walker skips ~/.claude/plugins/cache/
+- **cli**: don't re-rank the curated catalog; show a kind column
+- **cli**: lazy reqwest client + AINB_CATALOG_MOCK_INSTALL_URI for TUI browse
+- **cli-docs**: resolve AINB_BIN robustly + regen rtk/headroom EXAMPLES
+- **configure**: offer the RTK toggle only for Claude sessions
+- **docs**: add required frontmatter title to otel-grafana (unblocks docsite build)
+- **headroom**: degrade to direct when the proxy can't come up
+- **headroom**: ensure proxy before re-injecting env on session restart
+- **headroom**: parse real /stats shape (savings.total_tokens, api_requests)
+- **headroom**: serialize proxy spawn against double-spawn + pid clobber
+- **headroom**: stop() reports whether it actually stopped a proxy
+- **hooks**: isolate uv-run hooks from the cwd project with --no-project
+- **just**: build before exec so tui/cli don't break rustup HOME lookup
+- **layout**: drop the 'H headroom off' menu-bar hint (width regression)
+- **otel**: harden secret handling and filesystem edge cases
+- **otel**: read API token without echo + validate endpoint
+- **promote**: block argv smuggling in git clone of promote-cache
+- **reflect-kb**: harden env-override parsing + embedding-dim getter (review)
+- **rtk**: harden the project-hook merge and gate it to Claude
+- **session**: atomic SessionStore::save (tmp + rename)
+- **skill-core**: block argv smuggling in drift git ls-remote call
+- **skill-core**: disable interactive git auth prompts in drift backend
+- **skill-core**: strip tool dotdir in apply_to_home/apply_to_repo
+- **skill-core+promote**: finish argv-smuggle hardening + sync auth-prompt guard
+- **skill-manager**: install/sync outcome-correctness fixes found by recording validation
+- **skill-manager**: marketplace sources now surface their plugin skills
+- **skill-manager**: offload catalog browse off the tokio runtime + ConflictFlip toast
+- **skill-manager**: sidebar nav now triggers discovery banner, same as `m` keybind
+- **skill-manager**: stop double-printing the unit path in content-sync plan
+- **skills**: repair malformed sentry-cli frontmatter close
+- **sync**: block argv smuggling in git push of TO_REPO executor
+- **tripwires**: bump poll deadlines for slow debug-binary spawn
+- **tripwires**: wait for HomeScreen fully painted before keystroke
+- **tui**: disarm command-install confirm on edit-query and catalog toggle
+- **usage**: make 'ainb usage savings' reachable and non-hanging
+
+### Documentation
+- Merge pull request #307 from stevengonsalvez/f/reflect-locomo
+- Merge pull request #308 from stevengonsalvez/f/reflect-locomo
+- Merge pull request #312 from stevengonsalvez/docs/refresh-reflect-extraction
+- Merge pull request #318 from stevengonsalvez/docs/reflect-postgres-topology
+- Merge pull request #319 from stevengonsalvez/f/ainb-cli
+- Merge pull request #320 from stevengonsalvez/docs/cli-nav
+- Merge pull request #321 from stevengonsalvez/docs/table-style
+- Merge pull request #322 from stevengonsalvez/docs/table-width
+- chore(just): skill-manager sandbox + TUI/CLI launcher recipes
+- **CONTRIBUTING**: point setup at the ainb binary
+- **README**: point at skill-manager v1.1 discovery + promote refs
+- **README**: retire bootstrap.js commands, point at ainb
+- **burndown**: document why caveman savings stays a blanket estimate
+- **claude-md**: add lead-with-recommendation instruction
+- **cli**: generate the full CLI reference from the binary
+- **cli**: regenerate CLI reference after merge (headroom + rtk)
+- **config**: document [skills].catalog_release pin
+- **knowledge**: reflect Postgres backend + topology section + 3-harness short-version
+- **knowledge**: refresh overview for reflect extraction + SVG architecture diagram
+- **otel**: add Grafana Cloud telemetry setup guide
+- **readme**: point CLI link at the generated multi-hierarchy reference
+- **reflect**: correct 4-cat mean to 77.5, reframe as preliminary, widen leaderboard
+- **reflect**: embed both-judge LOCOMO positioning chart in READMEs
+- **reflect**: surface LOCOMO benchmark results at the top of the READMEs
+- **reflection**: point cross-tool deployment at `ainb skill install`
+- **site**: add Repositories reference page + ainb-toolkit links
+- **site**: clean up markdown table styling (padding, frame, zebra)
+- **site**: give the CLI reference its own top-level sidebar heading + top-nav link
+- **site**: tables hug content width (fix blank right region)
+- **skill-manager**: add Starlight frontmatter to reference pages
+- **skill-manager**: add v1.1 ainb skill promote reference
+- **skill-manager**: add v1.1 discovery flow reference
+- **skill-manager**: add v1.2 references for usage, sync, and check
+- **skill-manager**: document [b] browse + skills.sh API key/env
+- **skill-manager**: document the sandbox safety-guard test
+- **skill-manager**: one-page sandbox-testing how-to
+- **skill-manager**: re-record 6 journeys to prove real outcomes + outcomes contract
+- **skill-manager**: re-record cli-sync-edit for the de-doubled sync path
+- **skill-manager**: tabbed guide page in the docsite
+- **skill-manager**: tabbed user/demos/internals guide page
+- **skill-manager**: vhs recordings of every TUI + CLI journey
+- **toolkit**: add ainb migration notice at top of README
+- repoint toolkit references to the external ainb-toolkit repo
+- fix(docs): add required frontmatter title to otel-grafana (unblocks docsite build)
+
+### Other
+- Merge pull request #298 from stevengonsalvez/feat/extract-ainb-toolkit
+- Merge pull request #311 from stevengonsalvez/chore/extract-reflect-repoint
+- **just**: skill-manager sandbox + TUI/CLI launcher recipes
+- **marketplace**: point reflect plugin to ainb-reflect-memory@v5.0.0
+- **reflect**: extract reflect into its own repo (ainb-reflect-memory)
+- **reflect**: sync plugin.json version to 4.1.0
+- **skill-cli**: silence empty-format-string clippy lint in run_check header
+- **skill-manager**: split apply_discovery_import first-doc paragraph
+- **tests**: quarantine pre-existing NewSessionState drift for v12.1 verify
+- **toolkit**: delete bootstrap.js + parity scripts (P9 cutover)
+- delete toolkit/ from the monorepo (now the ainb-toolkit repo)
+- drop unused deps flagged by cargo-machete
+- move tmux-ui-tripwire skill to repo root
+- pin reflect plugin to v5.0.1
+- **cli**: apply code-review polish to the headless commands
+- **cli**: make --catalog a ValueEnum to reject typos
+- **cli**: tool_dotdir returns String, drop Box::leak fallback
+- **skill-core tests**: consume sandbox fixture from sync + drift tests
+- **skill-core**: hoist strip_tool_dotdir to mapping module
+- **skill-core**: point owned catalog entries at the ainb-toolkit mirror
+- **usage**: swap hand-rolled days_from_civil for chrono (v12.1.T6)
+- repoint hangar skills-sync + migrate to external ainb-toolkit
+
+
 ## [1.7.7] - 2026-06-17
 ### Added
 - Merge pull request #289 from stevengonsalvez/f/copilot-upgrade
