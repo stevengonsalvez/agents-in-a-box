@@ -10,6 +10,26 @@
   },
   "plugins": [
     {
+      "name": "reflect",
+      "source": {
+        "source": "github",
+        "repo": "stevengonsalvez/ainb-reflect-memory",
+        "path": "plugin",
+        "ref": "v5.0.0"
+      },
+      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings via SessionStart/UserPromptSubmit hooks. PostToolUse arms low-cost mini-learning capture; Stop enqueues short-session reflection. Philosophy: Correct once, never again; recall everything next time.",
+      "strict": false,
+      "keywords": [
+        "memory",
+        "recall",
+        "learnings",
+        "graphrag",
+        "self-improvement",
+        "retrieval",
+        "long-term-memory"
+      ]
+    },
+    {
       "name": "ainb-fleet",
       "source": "./plugins/ainb-fleet",
       "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, and the auto-continue daemon. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
