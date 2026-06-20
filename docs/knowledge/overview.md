@@ -16,6 +16,13 @@ pipeline, semantic search engines, micro-learnings, and session context loading.
 > `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`
 > and the plugin with `claude plugin install reflect@ainb-reflect-memory`. The concepts below are unchanged.
 
+:::tip[New here? Start with reflect-memory]
+For the newcomer's path — what bare-harness memory does **not** do, the capture→index→recall
+mental model, and every recall feature with an example — see the dedicated
+**[Reflect Memory](/knowledge/reflect-memory/problem-and-fit/)** section. This page is the deeper
+architecture reference.
+:::
+
 ---
 
 ## Architecture at a Glance
@@ -275,25 +282,12 @@ They are **complementary, not fallback**. Both run in parallel and results merge
 
 ## Memory backend: local or shared (Postgres)
 
-The markdown notes are **always** the local source of truth, and **all
-LLM/embedding/clustering always stays client-side — no extra API key**. Only the
-*derived* vector + graph store has two modes:
+The derived vector + graph store runs **local** per-machine (default) or **shared** on one Supabase
+Postgres so every machine queries the same memory. The markdown notes stay the source of truth and
+all LLM/embedding work stays client-side either way — no extra API key.
 
-![reflect component topology — harness hooks feed the engine; markdown KB is the source of truth; the derived store runs local (QMD sqlite + nano-graphrag) or shared (Supabase Postgres + pgvector)](../assets/reflect-topology.svg)
-
-| | **Mode 1 — Local** (default) | **Mode 2 — Shared** (Postgres) |
-|---|---|---|
-| Derived store | per-machine: QMD `index.sqlite` (BM25) + nano-graphrag (hnswlib + `.graphml`) | one **Supabase Postgres** (pgvector) for everyone |
-| Setup | nothing | `REFLECT_PG_DSN` + `REFLECT_WORKSPACE_ID` + 2 migrations |
-| Share across machines | git-sync the notes, then `reflect reindex` on each machine | automatic — every machine queries the same store |
-
-In Mode 2, nano-graphrag runs **unchanged** — it's handed Postgres-backed storage
-classes (the way it ships `Neo4jStorage`). The DB is dumb (no LLM/embeddings);
-tenant isolation is RLS (fail-closed) + explicit `workspace_id` scoping; writes
-need a `service_role` DSN.
-
-➡️ **Full reference** (schema, setup, threat model, per-harness install):
-[`stevengonsalvez/ainb-reflect-memory`](https://github.com/stevengonsalvez/ainb-reflect-memory#readme).
+➡️ Full treatment (topology, the two modes, threat model) lives on the reflect-memory
+**[Construct](/knowledge/reflect-memory/construct/#backend-local-or-shared-postgres)** page.
 
 ---
 
