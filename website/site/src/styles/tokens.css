@@ -138,7 +138,11 @@ a:not(.sl-link-card):not([class*='sl-flex']):hover {
 
 /* Tables — cornflower frame, padded cells, subtle zebra + hover. */
 .sl-markdown-content table {
-  width: 100%;
+  /* Hug the content (capped at the container) instead of stretching to 100%:
+     narrow 2-column tables otherwise leave a large blank region on the right
+     inside the frame. Wide tables still grow up to max-width. */
+  width: fit-content;
+  max-width: 100%;
   margin: 1.15rem 0;
   border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
   border-radius: 8px;
