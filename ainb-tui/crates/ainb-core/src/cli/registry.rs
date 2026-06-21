@@ -1908,8 +1908,22 @@ impl CliCommand for McpCommand {
         "mcp"
     }
     fn build(&self, app: Command) -> Command {
-        let daemon =
-            Command::new("daemon").about("Run the shared MCP pool daemon (foreground)").arg(
+        let daemon = Command::new("daemon")
+            .about("Run the shared MCP pool daemon (foreground)")
+            .long_about(
+                "Run the shared MCP pool daemon (foreground).\n\n\
+                 You rarely run this directly — `ainb run` and the TUI overlay's import \
+                 auto-start it detached. There is exactly ONE daemon per user, keyed by the \
+                 control socket at ~/.agents-in-a-box/mcp/sockets/control.sock: every `ainb` \
+                 instance (and Codex/Copilot sessions wired via `ainb mcp install`) shares it, \
+                 so N sessions share ONE child process per server. A second start is a no-op — \
+                 it detects the live socket (or loses the bind race) and exits.\n\n\
+                 Lifecycle: servers spawn lazily on first attach; a server's child is reaped \
+                 [mcp_pool].idle_grace_secs after its last client detaches (default 300); and \
+                 the whole daemon exits after [mcp_pool].daemon_idle_grace_secs with no clients \
+                 anywhere (default 900, 0 = never) so an unused or orphaned pool can't linger.",
+            )
+            .arg(
                 clap::Arg::new("idle-grace")
                     .long("idle-grace")
                     .value_parser(clap::value_parser!(u64))

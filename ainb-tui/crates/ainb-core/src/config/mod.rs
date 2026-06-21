@@ -297,6 +297,14 @@ pub struct McpPoolConfig {
     /// polls when closed, so this only affects an actively-watched view.
     #[serde(default = "default_monitor_refresh_secs")]
     pub monitor_refresh_secs: u64,
+
+    /// Seconds the daemon itself stays up with ZERO attached clients (across
+    /// all servers) before it exits cleanly — removing its sockets and
+    /// freeing the process. `ainb run` / import restart it on demand, so this
+    /// just stops an unused (or orphaned) pool from lingering forever. `0`
+    /// disables self-shutdown (the daemon runs until explicitly stopped).
+    #[serde(default = "default_daemon_idle_grace_secs")]
+    pub daemon_idle_grace_secs: u64,
 }
 
 impl Default for McpPoolConfig {
@@ -305,6 +313,7 @@ impl Default for McpPoolConfig {
             enabled: true,
             idle_grace_secs: default_idle_grace_secs(),
             monitor_refresh_secs: default_monitor_refresh_secs(),
+            daemon_idle_grace_secs: default_daemon_idle_grace_secs(),
         }
     }
 }
@@ -315,6 +324,10 @@ fn default_idle_grace_secs() -> u64 {
 
 fn default_monitor_refresh_secs() -> u64 {
     2
+}
+
+fn default_daemon_idle_grace_secs() -> u64 {
+    900
 }
 
 /// Where the single `presets.toml` file lives.
@@ -1353,6 +1366,18 @@ mod tests {
         let parsed: AppConfig = toml::from_str("version = \"1.0.0\"").unwrap();
         assert!(parsed.mcp_pool.enabled);
         assert_eq!(parsed.mcp_pool.idle_grace_secs, 300);
+        // Daemon self-shutdown is on by default (15 min idle) so an unused or
+        // orphaned pool can't linger forever; 0 would disable it.
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 900);
+    }
+
+    #[test]
+    fn mcp_pool_daemon_idle_grace_round_trips() {
+        let mut config = AppConfig::default();
+        config.mcp_pool.daemon_idle_grace_secs = 0; // disable self-shutdown
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 0);
     }
 
     #[test]

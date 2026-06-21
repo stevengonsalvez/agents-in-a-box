@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, mpsc};
@@ -61,6 +61,10 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
 
     let idle_grace =
         Duration::from_secs(idle_grace_override.unwrap_or(config.mcp_pool.idle_grace_secs));
+    // Daemon-level idle shutdown: exit after this long with ZERO attached
+    // clients across all servers (0 = never). Stops an unused or orphaned
+    // pool from lingering forever; `ainb run`/import restart it on demand.
+    let daemon_idle_grace = config.mcp_pool.daemon_idle_grace_secs;
     let status: StatusMap = Arc::new(Mutex::new(HashMap::new()));
     let (register_tx, mut register_rx) = mpsc::unbounded_channel::<Vec<PooledServer>>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
@@ -112,10 +116,37 @@ pub async fn execute(idle_grace_override: Option<u64>) -> Result<()> {
     );
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    // Idle-shutdown bookkeeping. We poll the live client count on a coarse
+    // tick (a fraction of the grace, clamped) and remember when the pool went
+    // quiet; once it's been quiet for `daemon_idle_grace` we break into the
+    // teardown below. The daemon starts idle, so a pool nobody ever attaches
+    // to also reaps itself.
+    let mut idle_since: Option<Instant> = None;
+    let idle_tick = (daemon_idle_grace / 4).clamp(2, 30);
+    let mut idle_check = tokio::time::interval(Duration::from_secs(idle_tick.max(1)));
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
+            _ = idle_check.tick(), if daemon_idle_grace > 0 => {
+                let clients: usize = {
+                    let map = status.lock().await;
+                    map.values().map(|s| s.clients).sum()
+                };
+                if clients == 0 {
+                    let since = *idle_since.get_or_insert_with(Instant::now);
+                    if since.elapsed().as_secs() >= daemon_idle_grace {
+                        eprintln!(
+                            "mcp daemon: idle {daemon_idle_grace}s with no clients — shutting down"
+                        );
+                        break;
+                    }
+                } else {
+                    idle_since = None;
+                }
+            }
             registered = register_rx.recv() => {
                 let Some(servers) = registered else { continue };
                 for server in servers {
