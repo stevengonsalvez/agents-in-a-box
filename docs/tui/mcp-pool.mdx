@@ -158,8 +158,9 @@ Pool settings and per-server opt-out live in `config.toml` (user-level `~/.agent
 # …or  ./.ainb/config.toml                (per-repo override)
 
 [mcp_pool]
-enabled = true          # default true
-idle_grace_secs = 300   # reap a pooled server N seconds after its last session detaches
+enabled = true               # default true
+idle_grace_secs = 300        # reap a pooled server's child N seconds after its last session detaches
+daemon_idle_grace_secs = 900 # exit the whole daemon after N seconds with NO clients (0 = never)
 
 [mcp_servers.context7]
 name = "context7"
@@ -279,6 +280,35 @@ A tool call fans in: many stdio shims, one socket, one child.
 </Steps>
 
 If anything fails — daemon down, server not on PATH — the session silently falls back to spawning its own MCP, so a session never fails to start because of the pool. Host/tmux sessions only; Docker sessions keep their per-container MCP init.
+
+## One daemon per machine — lifecycle &amp; scaling
+
+**Running several `ainb` windows does *not* start several daemons.** There is exactly **one daemon per user**, keyed by the control socket at `~/.agents-in-a-box/mcp/sockets/control.sock`. Every `ainb` instance — and every Codex/Copilot session wired with `ainb mcp install` — discovers and shares that one daemon, which in turn keeps one child process per server. Ten windows all using context7 = **one** `context7` process, not ten.
+
+The singleton is enforced by two independent guards, so even a dead heat collapses to one survivor:
+
+<Steps>
+
+1. **Discover before spawn.** Before starting a daemon, `ensure_daemon()` (what `ainb run` and the overlay's import call) connects to the control socket and `ping`s it. If it answers, nothing is spawned.
+
+2. **Exclusive bind.** If a daemon *is* spawned, it re-checks the socket and then `bind()`s it — an OS-exclusive operation. If two instances race past step 1 simultaneously, the first binds and the second's bind fails, so it logs and exits. A crashed daemon's stale socket fails the liveness `connect` and is cleaned up automatically, so a fresh start is never blocked.
+
+</Steps>
+
+Scope is **per `$HOME`**: same user → same daemon. (Sandboxes with a custom `$HOME` get their own pool — that's how the test harnesses stay isolated.)
+
+### What it costs at rest
+
+| Mechanism | Effect |
+|---|---|
+| **Lazy spawn** | At daemon start only lightweight listener tasks exist; the child process spawns on **first attach**. An idle pool is essentially free. |
+| **Refcounted sharing** | N session shims → **1 child** per server. The win scales with how many sessions you run. |
+| **Per-server reap** | `idle_grace_secs` (default 300) after the last client detaches, the **child** is killed but the listener stays — the next attach respawns it. |
+| **Daemon self-shutdown** | `daemon_idle_grace_secs` (default 900; `0` = never) with **zero** clients anywhere, the **whole daemon** exits and removes its sockets. `ainb run` / import restart it on demand, so an unused — or orphaned — pool never lingers. |
+
+<Aside type="tip" title="Why the daemon can exit on its own">
+The daemon is spawned detached so it survives the TUI closing — useful for a persistent pool, but it means a daemon whose `$HOME`/sandbox was deleted would otherwise run forever. `daemon_idle_grace_secs` closes that: no clients for the grace window → clean exit. Because startup is lazy and cheap, the next session just brings it back.
+</Aside>
 
 ## The hard parts the mux had to solve
 
