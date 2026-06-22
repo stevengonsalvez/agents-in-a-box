@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-06-22
+### Added
+- Merge pull request #327 from stevengonsalvez/feat/mcp-socket
+- **mcp-pool**: daemon self-shuts down when idle
+
+### Fixed
+- Merge pull request #323 from stevengonsalvez/fix/caveman-stats-hook-path
+- **caveman-stats**: move hooks to plugin root so PreCompact/PostToolUse resolve
+
+### Documentation
+- Merge pull request #324 from stevengonsalvez/docs/reflect-memory-section
+- **mcp-pool**: document pool lifecycle, singleton & self-shutdown
+- **overview**: point to the reflect-memory section; trim relocated backend block
+- **reflect**: add reflect-memory construct page
+- **reflect**: add reflect-memory problem & fit page
+- **reflect**: expand recall reference to all 57 ports as tables
+- **site**: add Reflect Memory sidebar group + redirect old recall URL
+
+### Other
+- pin reflect plugin to v5.0.2
+
+
 ## [1.8.0] - 2026-06-20
 ### Added
 - Merge pull request #144 from stevengonsalvez/feat/skill-manager
