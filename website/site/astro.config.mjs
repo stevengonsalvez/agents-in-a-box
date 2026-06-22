@@ -46,7 +46,7 @@ export default defineConfig({
         },
       ],
       plugins: [starlightImageZoom()],
-      customCss: ['./src/styles/tokens.css', './src/styles/crt.css'],
+      customCss: ['./src/styles/tokens.css', './src/styles/crt.css', './src/styles/reflect-viz.css'],
       editLink: {
         baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
       },

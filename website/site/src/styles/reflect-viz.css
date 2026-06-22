@@ -1,0 +1,114 @@
+/*
+ * reflect-memory viz components — explainer-style matrix + Obsidian-style
+ * callout cards for the dense comparison/recall pages. Theme-aware: built on
+ * the --ainb-*/--sl-* tokens so light and dark both work. The goal is to stop
+ * wide markdown tables from squeezing their last column into a one-word sliver:
+ *   - comparison data  -> .rm-matrix  (horizontal scroll, never squeezed)
+ *   - per-feature data -> .rm-cards   (callout cards, wrap naturally)
+ */
+
+/* ---- horizontal-scroll matrix (wide comparisons) ---- */
+.sl-markdown-content .rm-matrix {
+  overflow-x: auto;
+  margin: 1.25rem 0;
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+  border-radius: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+/* Override the global .sl-markdown-content table rules (fit-content/max-width)
+   so the table keeps its natural width and the wrapper scrolls instead. */
+.sl-markdown-content .rm-matrix table {
+  width: max-content;
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.sl-markdown-content .rm-matrix th,
+.sl-markdown-content .rm-matrix td {
+  white-space: nowrap;
+  vertical-align: top;
+  font-size: 0.82rem;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 15%, transparent);
+  background: transparent;
+}
+.sl-markdown-content .rm-matrix th {
+  color: var(--ainb-accent-gold);
+  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 50%, transparent);
+}
+/* descriptive cells that should wrap rather than force scroll */
+.sl-markdown-content .rm-matrix td.wrap,
+.sl-markdown-content .rm-matrix th.wrap {
+  white-space: normal;
+  min-width: 16ch;
+  max-width: 26ch;
+}
+/* sticky first column so the row label stays visible while scrolling */
+.sl-markdown-content .rm-matrix :is(th, td).rowh {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--ainb-bg-panel);
+  color: var(--ainb-text-primary);
+  font-weight: 700;
+  white-space: normal;
+  min-width: 13ch;
+  border-right: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+}
+.sl-markdown-content .rm-matrix tr:last-child td { border-bottom: 0; }
+.sl-markdown-content .rm-matrix tr.tot :is(td, .rowh) {
+  font-weight: 700;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 70%, transparent);
+}
+/* the "me" column / row highlight */
+.sl-markdown-content .rm-matrix .me { background: color-mix(in srgb, var(--ainb-accent-gold) 12%, transparent); }
+
+/* heatmap score tints — semantic, derived from accent tokens so they theme */
+.sl-markdown-content .rm-matrix td.s5 { background: color-mix(in srgb, var(--ainb-accent-green) 30%, transparent); }
+.sl-markdown-content .rm-matrix td.s4 { background: color-mix(in srgb, var(--ainb-accent-green) 16%, transparent); }
+.sl-markdown-content .rm-matrix td.s3 { background: color-mix(in srgb, var(--ainb-accent-gold) 16%, transparent); }
+.sl-markdown-content .rm-matrix td.s2 { background: color-mix(in srgb, #C0563E 18%, transparent); }
+.sl-markdown-content .rm-matrix td.s1 { background: color-mix(in srgb, #C0563E 30%, transparent); }
+
+/* ---- callout cards (per-feature; Obsidian-style) ---- */
+.sl-markdown-content .rm-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+  margin: 1.25rem 0;
+}
+@media (min-width: 56rem) {
+  .sl-markdown-content .rm-cards.two { grid-template-columns: 1fr 1fr; }
+}
+.sl-markdown-content .rm-card {
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
+  border-left: 3px solid var(--ainb-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 55%, transparent);
+  padding: 0.8rem 1rem;
+}
+.sl-markdown-content .rm-card .h {
+  font-family: var(--ainb-font-display);
+  font-weight: 700;
+  color: var(--ainb-accent-gold);
+  margin-bottom: 0.4rem;
+  line-height: 1.3;
+}
+.sl-markdown-content .rm-card .h .id {
+  color: var(--ainb-border);
+  margin-right: 0.5ch;
+}
+.sl-markdown-content .rm-card .h code { font-size: 0.8em; }
+.sl-markdown-content .rm-card p { margin: 0.3rem 0; font-size: 0.9rem; line-height: 1.5; }
+.sl-markdown-content .rm-card .lbl {
+  font-weight: 700;
+  color: var(--ainb-text-muted);
+  text-transform: uppercase;
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  margin-right: 0.5ch;
+}
+.sl-markdown-content .rm-card .without .lbl { color: #C0563E; }
