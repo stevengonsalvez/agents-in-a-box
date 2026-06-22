@@ -1305,7 +1305,14 @@ fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(CORNFLOWER_BLUE))
-                .style(Style::default().bg(DARK_BG)),
+                .style(Style::default().bg(DARK_BG))
+                .title(
+                    Line::from(Span::styled(
+                        " [ ] switch tab ",
+                        Style::default().fg(MUTED_GRAY),
+                    ))
+                    .right_aligned(),
+                ),
         );
 
     ratatui::widgets::Widget::render(tabs, area, buf);
@@ -6331,5 +6338,114 @@ mod zoom_table_tests {
         state.zoom_row_up();
         state.zoom_row_up();
         assert_eq!(state.focus_row, 0);
+    }
+
+    // ── Savings tab observability (G1 tripwire for the Headroom/RTK card) ──
+    // These render the real `render_savings` into a TestBackend buffer and
+    // assert the VT100 truth the user sees — proving the proxy /stats figures
+    // (savings.total_tokens → headroom_tokens_saved) actually reach the screen,
+    // the gap that earlier let observability read 0 forever.
+
+    fn render_savings_flat(
+        sd: Option<&crate::data::savings::SavingsData>,
+        w: u16,
+        h: u16,
+    ) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                render_savings(frame.buffer_mut(), area, sd);
+            })
+            .expect("render_savings must not panic");
+        flatten(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn savings_tab_surfaces_live_headroom_tokens() {
+        use crate::data::savings::{CAVEMAN_OUTPUT_RATIO, SavingsData};
+        let sd = SavingsData {
+            headroom_running: true,
+            headroom_tokens_saved: 12_345,
+            rtk_installed: true,
+            rtk_total_saved: 6_789,
+            caveman_est: 1_000_000,
+        };
+        let flat = render_savings_flat(Some(&sd), 120, 16);
+
+        // Card chrome + columns.
+        assert!(flat.contains("Token Savings"), "card title:\n{flat}");
+        assert!(
+            flat.contains("Source") && flat.contains("Tokens Saved") && flat.contains("Status"),
+            "header row:\n{flat}"
+        );
+        // Headroom observability: live dot, "live" status, and the ACTUAL
+        // saved-token figure from /stats — the whole point of this tab.
+        assert!(flat.contains('●'), "live status dot:\n{flat}");
+        assert!(
+            flat.contains("Headroom") && flat.contains("live"),
+            "headroom row:\n{flat}"
+        );
+        assert!(
+            flat.contains(&format_tokens_short(12_345)),
+            "headroom tokens {} must render:\n{flat}",
+            format_tokens_short(12_345)
+        );
+        // RTK row.
+        assert!(
+            flat.contains("RTK") && flat.contains("installed"),
+            "rtk row:\n{flat}"
+        );
+        assert!(
+            flat.contains(&format_tokens_short(6_789)),
+            "rtk tokens:\n{flat}"
+        );
+        // Caveman is labelled a modelled estimate, never counted as real.
+        assert!(flat.contains("Caveman (est)"), "caveman row:\n{flat}");
+        assert!(
+            flat.contains(&format!("×{CAVEMAN_OUTPUT_RATIO:.2}")),
+            "caveman ratio label:\n{flat}"
+        );
+        // NET = real sources only (Headroom + RTK), not the estimate.
+        assert!(flat.contains("NET (measured)"), "net row:\n{flat}");
+        assert!(
+            flat.contains(&format_tokens_short(12_345 + 6_789)),
+            "net = headroom + rtk = {}:\n{flat}",
+            format_tokens_short(12_345 + 6_789)
+        );
+        assert!(
+            flat.contains("not measured"),
+            "estimate disclaimer:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn savings_tab_shows_offline_state_when_proxy_down() {
+        use crate::data::savings::SavingsData;
+        let sd = SavingsData {
+            headroom_running: false,
+            headroom_tokens_saved: 0,
+            rtk_installed: false,
+            rtk_total_saved: 0,
+            caveman_est: 0,
+        };
+        let flat = render_savings_flat(Some(&sd), 120, 16);
+        assert!(flat.contains('○'), "offline status dot:\n{flat}");
+        assert!(flat.contains("proxy down"), "headroom down status:\n{flat}");
+        assert!(
+            flat.contains("not installed"),
+            "rtk not-installed status:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn savings_tab_shows_fetching_placeholder_before_data_lands() {
+        let flat = render_savings_flat(None, 120, 6);
+        assert!(
+            flat.contains("Fetching savings"),
+            "fetching placeholder:\n{flat}"
+        );
     }
 }

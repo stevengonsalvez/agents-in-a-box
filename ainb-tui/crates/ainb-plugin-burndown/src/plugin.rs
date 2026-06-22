@@ -1038,6 +1038,13 @@ impl BurndownPlugin {
                 self.ui.zoom_reset_cols()
             }
 
+            // ── Outer tab switch (Burndown ↔ … ↔ Savings). While zoomed,
+            // `[`/`]` focus table columns (handled above); when NOT zoomed
+            // they cycle the outer UsageTab so every tab — including the
+            // Savings observability card — is keyboard-reachable.
+            KeyCode::Char { ch: '[' } => self.ui.prev_tab(),
+            KeyCode::Char { ch: ']' } => self.ui.next_tab(),
+
             // ── Zoom-table row navigation (zoomed only). Arrows are safe
             // even while searching; `j` is guarded like the resize keys
             // so it can be typed into the search box.
@@ -1188,6 +1195,47 @@ mod handle_key_dispatch_tests {
         assert!(p.dispatch_key_pure(&KeyCode::Tab));
         let after = p.ui.focused_panel;
         assert_ne!(before, after, "Tab must change focused panel");
+    }
+
+    #[test]
+    fn bracket_keys_cycle_outer_tabs_and_reach_savings() {
+        use crate::ui::UsageTab;
+        // Regression: `[`/`]` were zoom-only, so the outer tabs (incl. the
+        // Savings observability card) were keyboard-unreachable — active_tab
+        // was stuck on Burndown. They now cycle the outer tab when not zoomed.
+        let mut p = BurndownPlugin::default();
+        assert_eq!(p.ui.active_tab, UsageTab::Burndown, "starts on Burndown");
+
+        // `]` walks forward: Burndown → Daily → Weekly → Projects → Optimize → Savings.
+        for expect in [
+            UsageTab::Daily,
+            UsageTab::Weekly,
+            UsageTab::Projects,
+            UsageTab::Optimize,
+            UsageTab::Savings,
+        ] {
+            assert!(
+                p.dispatch_key_pure(&KeyCode::Char { ch: ']' }),
+                "] must be consumed"
+            );
+            assert_eq!(p.ui.active_tab, expect, "] advances the outer tab");
+        }
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Savings,
+            "Savings is now reachable"
+        );
+
+        // `[` walks back off Savings.
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Char { ch: '[' }),
+            "[ must be consumed"
+        );
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Optimize,
+            "[ retreats the outer tab"
+        );
     }
 
     #[test]
@@ -1471,12 +1519,14 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn resize_keys_unbound_on_dashboard() {
-        // Not zoomed: the column keys must fall through (return false)
-        // so they keep their no-op behavior on the dashboard.
+    fn resize_col_keys_unbound_on_dashboard() {
+        // Not zoomed: the column resize keys `< > =` must fall through (return
+        // false) so they keep their no-op behavior on the dashboard. (`[`/`]`
+        // ARE bound off-zoom now — they switch the outer tab; see
+        // bracket_keys_cycle_outer_tabs_and_reach_savings.)
         let mut p = BurndownPlugin::default();
         assert!(!p.ui.is_zoomed());
-        for k in ['[', ']', '<', '>', '='] {
+        for k in ['<', '>', '='] {
             assert!(
                 !p.dispatch_key_pure(&ch(k)),
                 "`{k}` must be unhandled on the dashboard"
