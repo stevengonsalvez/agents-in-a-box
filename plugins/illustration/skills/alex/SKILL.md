@@ -1,37 +1,38 @@
 ---
 name: illustration:alex
-description: Generate illustrations starring Alex, the trademarked ShotClubhouse "Sport Head" mascot (gold-and-black soccer-ball head, black cap, no glasses). Use for ShotClubhouse brand/marketing (social posts, hero art, deck/website visuals, campaigns) and for general explainers/how-it-works/architecture. Crude hand-drawn pastel render in the Popa family — cute but deadpan, gold ball as the one pop of colour.
+description: Generate sketchnote illustrations starring Alex, the trademarked ShotClubhouse "Sport Head" mascot (soccer-ball head, black cap, no glasses). One-page hand-drawn visual notes — banners, framed ideas, arrows, icons, checklists — hosted by an Alex doodle. Use for ShotClubhouse brand/marketing and for explainers/how-it-works/architecture. Black ink on white with an optional single gold accent (or pure mono).
 user-invocable: true
 ---
 
-# illustration:alex — ShotClubhouse Sport Head
+# illustration:alex — ShotClubhouse Sport Head (sketchnote)
 
-Generate brand and explanatory illustrations starring **Alex**, ShotClubhouse's trademarked Sport Head character — drawn in the Popa-family hand-drawn pastel style (crude, charming, deadpan), but wearing the Sport Head. Alex turns a message, product flow, or sporting moment into a witty hand-drawn sketch: *take your shot, own it, make impact.*
+Generate **sketchnotes** — one-page hand-drawn visual summaries — hosted by **Alex**, ShotClubhouse's trademarked Sport Head character. Each note captures an idea with a hand-lettered banner, framed points, arrows, icons and checklists, with a small Alex doodle walking you through it. *Take your shot, own it, make impact.*
 
 ## Read first
 
 1. `${CLAUDE_PLUGIN_ROOT}/references/workflow-engine.md` — the shared digest → shot list → generate → QA → deliver process.
 2. `${CLAUDE_PLUGIN_ROOT}/references/composition-patterns.md` — structure types, format presets, the likeness rule.
-3. `references/alex-ip.md` — Alex's identity anchors, personality, and forbidden moves.
-4. `references/alex-style-dna.md` — the crude hand-drawn pastel visual law.
+3. `references/alex-ip.md` — Alex's anchors, personality, forbidden moves.
+4. `references/alex-style-dna.md` — the sketchnote visual law (gold vs mono accent).
 5. `references/prompt-template.md` — the generation prompt template.
 6. `references/qa-checklist.md` — pass/fail and iteration.
 7. `assets/alex-ref/` — Alex's source art, passed as the likeness reference on every generation (mandatory).
-8. `assets/examples/` — calibration only; never copy these compositions.
+8. `assets/examples/` — calibration only (2×2: brand/dev × gold/mono); never copy these compositions.
 
 ## Core positioning
 
-Alex is a person whose head is a gold-and-black soccer ball, drawn as a crude hand-drawn pastel sketch — cute but deadpan, never goofy. The brand is sport identity for everyone: clubs, coaches, athletes, parents; grassroots to stadium; verified, safe, global. Humour and warmth come from real-sport moments and quiet swagger, not from silly faces.
+An Alex image is a lively hand-drawn page that captures one idea visually: a banner title, a few framed points connected by arrows, bullets and spot icons, and Alex as the recurring doodle host (soccer-ball head, cap, no glasses). Black ink on clean white, with at most a single gold accent (or pure mono). Not a comic, not a pastel scene — a sketchnote.
 
 ## Workflow (engine + Alex specifics)
 
 Follow the five shared steps. Alex specifics:
 
-- **Likeness is mandatory:** pass `assets/alex-ref/alex-source.png` into the backend every time with "this is Alex; use the reference ONLY for his design, not its colours/background; draw him in crude hand-drawn pastel; NO glasses."
-- **No glasses, ever** — the source render has none; never add sunglasses.
-- **On-brand anchors of meaning:** the street-to-stadium arc, the Sport Head ID, the four pillars (club/coach/athlete/parent), "TAKE YOUR SHOT / OWN IT / MAKE IMPACT".
-- **Palette:** soft pastel scene; Alex's gold-and-black ball head is the one saturated pop. Green/coral/blue accents per the Popa family.
+- **Likeness is mandatory:** pass `assets/alex-ref/alex-source.png` every time with "this is Alex; use the reference ONLY for his design; draw him as a small sketchnote doodle; plain ball head, no eyewear; do not letter instruction words into the image."
+- **No glasses, ever** — and never letter the words "no glasses" into the page.
+- **Accent per image:** GOLD (single gold highlight on banners + ball, default for brand) or MONO (pure black & white, best for docs/notes).
+- **Keep it a note:** banner title, framed ideas, arrows, bullets, icons, short hand-lettered labels only — no paragraphs.
+- **On-brand content:** Sport Head ID, four pillars (club/coach/athlete/parent), street-to-stadium, "TAKE YOUR SHOT".
 
 ## Output style
 
-Pre-generation strategy: short and punchy. Delivery report: how many, what each is for, save paths, which are hero-grade vs optional. Let the art carry it.
+Pre-generation strategy: short and punchy. Delivery report: how many, what each is for, save paths, which are solid vs optional. Let the notes carry it.
