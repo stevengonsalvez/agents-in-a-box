@@ -61,3 +61,11 @@ Create `skills/<mascot>/` following the layout above (SKILL.md `name: illustrati
 ```
 /plugin install illustration@agents-in-a-box
 ```
+
+## Credits
+
+Inspired by **[Ian Xiaohei Illustrations](https://github.com/helloianneo/ian-xiaohei-illustrations)** by Ian ([@helloianneo](https://github.com/helloianneo)) — the original hand-drawn 16:9 "body illustration" skill, starring the character 小黑.
+
+English port of the original: **[ian-illustrations-port](https://github.com/stevengonsalvez/ian-illustrations-port)** (instructions and examples translated to English; 小黑 rendered as "Blot").
+
+This `illustration` plugin reimagines that approach as a multi-mascot family — its own characters (Alex, Popa), styles, and shared workflow engine.
