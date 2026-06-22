@@ -146,9 +146,13 @@ show_git_status = true
 #
 # [mcp_pool]
 # enabled = true          # Master switch (default: true)
-# idle_grace_secs = 300   # Reap a pooled server this many seconds after its
-#                         # last client detaches (default: 300)
-# monitor_refresh_secs = 2 # TUI pool overlay (sidebar MCP / `m`) auto-refresh
+# idle_grace_secs = 300   # Reap a pooled server's child process this many
+#                         # seconds after its last client detaches (default: 300)
+# daemon_idle_grace_secs = 900 # Exit the whole daemon after this long with NO
+#                         # clients attached anywhere (default: 900; 0 = never).
+#                         # `ainb run`/import restart it on demand, so this just
+#                         # stops an unused or orphaned pool lingering forever.
+# monitor_refresh_secs = 2 # TUI pool overlay (sidebar MCP / `p`) auto-refresh
 #                         # cadence while OPEN (default: 2; 0 = on-open + manual).
 #                         # The overlay never polls when closed.
 
