@@ -27,7 +27,8 @@ pub const CAVEMAN_OUTPUT_RATIO: f64 = 0.74;
 pub struct SavingsData {
     /// Whether the Headroom proxy responded successfully.
     pub headroom_running: bool,
-    /// `summary.tokens_saved_total` from Headroom /stats.
+    /// `savings.total_tokens` from Headroom /stats (NOT `summary.tokens_saved_total`,
+    /// which does not exist and silently parsed to 0 — see HeadroomStats below).
     pub headroom_tokens_saved: u64,
     /// Whether `rtk` was found on PATH and exited successfully.
     pub rtk_installed: bool,
