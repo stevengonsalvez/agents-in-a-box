@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 520" width="1040" height="520" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#141413"/>
+    </marker>
+    <marker id="ahb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#5B7FA6"/>
+    </marker>
+    <marker id="ahg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#788C5D"/>
+    </marker>
+    <marker id="aho" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#D97757"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1040" height="520" fill="#FAF9F5"/>
+
+  <!-- title -->
+  <text x="40" y="44" font-size="23" font-weight="700" fill="#141413">How reflect operates across one coding session</text>
+  <text x="40" y="68" font-size="13.5" fill="#87867F">Reads inject prior knowledge into context · writes capture new signals · the index closes the loop to the next session.</text>
+
+  <!-- lane labels -->
+  <text x="40" y="120" font-size="12" font-weight="700" fill="#5B7FA6" letter-spacing="0.5">READ → INTO CONTEXT</text>
+  <text x="40" y="404" font-size="12" font-weight="700" fill="#788C5D" letter-spacing="0.5">WRITE ← FROM SESSION</text>
+
+  <!-- ============ SESSION AXIS ============ -->
+  <line x1="70" y1="258" x2="980" y2="258" stroke="#141413" stroke-width="2" marker-end="url(#ah)"/>
+  <!-- phase ticks -->
+  <g font-size="12" fill="#141413" text-anchor="middle">
+    <!-- col1 -->
+    <circle cx="150" cy="258" r="5" fill="#D97757"/>
+    <text x="150" y="282" font-weight="600">SessionStart</text>
+    <!-- col2 -->
+    <circle cx="400" cy="258" r="5" fill="#141413"/>
+    <text x="400" y="282" font-weight="600">UserPromptSubmit</text>
+    <text x="400" y="298" font-size="10.5" fill="#87867F">→ tool calls (Bash/Edit/Todo…)</text>
+    <!-- col3 -->
+    <circle cx="640" cy="258" r="5" fill="#141413"/>
+    <text x="640" y="282" font-weight="600">UserPromptSubmit</text>
+    <text x="640" y="298" font-size="10.5" fill="#87867F">→ more tool calls</text>
+    <!-- col4 -->
+    <circle cx="820" cy="258" r="5" fill="#141413"/>
+    <text x="820" y="282" font-weight="600">Stop</text>
+    <text x="820" y="298" font-size="10.5" fill="#87867F">turn ends</text>
+    <!-- col5 -->
+    <circle cx="935" cy="258" r="5" fill="#D97757"/>
+    <text x="935" y="282" font-weight="600">PreCompact</text>
+  </g>
+
+  <!-- ============ READ LANE (blue, top) ============ -->
+  <g>
+    <!-- SessionStart recall -->
+    <rect x="78" y="132" width="200" height="62" rx="8" fill="#EAF0F6" stroke="#5B7FA6" stroke-width="1.5"/>
+    <text x="90" y="153" font-size="12.5" font-weight="700" fill="#1F3A5F">Recall</text>
+    <text x="90" y="170" font-size="11" fill="#141413">inject relevant prior learnings</text>
+    <text x="90" y="185" font-size="11" fill="#141413">+ drain queued captures</text>
+    <line x1="150" y1="194" x2="150" y2="252" stroke="#5B7FA6" stroke-width="1.5" marker-end="url(#ahb)"/>
+
+    <!-- per-prompt recall col2 -->
+    <rect x="318" y="140" width="172" height="54" rx="8" fill="#EAF0F6" stroke="#5B7FA6" stroke-width="1.5"/>
+    <text x="330" y="161" font-size="12.5" font-weight="700" fill="#1F3A5F">Recall (intent-sharp)</text>
+    <text x="330" y="178" font-size="11" fill="#141413">per prompt · de-duped</text>
+    <line x1="400" y1="194" x2="400" y2="252" stroke="#5B7FA6" stroke-width="1.5" marker-end="url(#ahb)"/>
+
+    <!-- per-prompt recall col3 -->
+    <rect x="566" y="140" width="148" height="54" rx="8" fill="#EAF0F6" stroke="#5B7FA6" stroke-width="1.5"/>
+    <text x="578" y="161" font-size="12.5" font-weight="700" fill="#1F3A5F">Recall</text>
+    <text x="578" y="178" font-size="11" fill="#141413">RRF · rerank · OOD gate</text>
+    <line x1="640" y1="194" x2="640" y2="252" stroke="#5B7FA6" stroke-width="1.5" marker-end="url(#ahb)"/>
+  </g>
+
+  <!-- ============ WRITE LANE (green, bottom) ============ -->
+  <g>
+    <!-- PostToolUse signals (spans col2-col3) -->
+    <rect x="318" y="324" width="396" height="62" rx="8" fill="#EEF1E8" stroke="#788C5D" stroke-width="1.5"/>
+    <text x="330" y="345" font-size="12.5" font-weight="700" fill="#3E4A2E">PostToolUse · signals</text>
+    <text x="330" y="362" font-size="11" fill="#141413">test pass/fail · tool-loop · git event · todo done</text>
+    <text x="330" y="377" font-size="11" fill="#141413">correction (“no — don’t…”) · permission reply</text>
+    <line x1="460" y1="264" x2="460" y2="322" stroke="#788C5D" stroke-width="1.5" marker-end="url(#ahg)"/>
+
+    <!-- Stop capture -->
+    <rect x="742" y="324" width="170" height="62" rx="8" fill="#EEF1E8" stroke="#788C5D" stroke-width="1.5"/>
+    <text x="754" y="345" font-size="12.5" font-weight="700" fill="#3E4A2E">Capture</text>
+    <text x="754" y="362" font-size="11" fill="#141413">slice window →</text>
+    <text x="754" y="377" font-size="11" fill="#141413">learning + sidecar</text>
+    <line x1="820" y1="264" x2="820" y2="322" stroke="#788C5D" stroke-width="1.5" marker-end="url(#ahg)"/>
+
+    <!-- PreCompact flush -->
+    <rect x="862" y="150" width="150" height="48" rx="8" fill="#FBEEE8" stroke="#D97757" stroke-width="1.5"/>
+    <text x="874" y="170" font-size="12" font-weight="700" fill="#9A4D2E">Flush</text>
+    <text x="874" y="186" font-size="10.5" fill="#141413">capture before compact</text>
+    <line x1="935" y1="252" x2="935" y2="198" stroke="#D97757" stroke-width="1.5" marker-end="url(#aho)"/>
+  </g>
+
+  <!-- ============ INDEX + LOOP ============ -->
+  <rect x="318" y="430" width="396" height="46" rx="8" fill="#FBEEE8" stroke="#D97757" stroke-width="1.5"/>
+  <text x="338" y="451" font-size="12.5" font-weight="700" fill="#9A4D2E">Index</text>
+  <text x="338" y="468" font-size="11" fill="#141413">QMD (BM25) + nano-graphrag (vector + entity graph) · local model, no extra key</text>
+  <!-- signals/capture feed the index -->
+  <line x1="516" y1="386" x2="516" y2="428" stroke="#D97757" stroke-width="1.5" marker-end="url(#aho)"/>
+
+  <!-- loop arrow: index back up to next-session recall -->
+  <path d="M714 453 C 980 453, 1006 360, 1006 220 C 1006 150, 660 150, 494 156" fill="none" stroke="#87867F" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+  <text x="780" y="430" font-size="11" font-style="italic" fill="#87867F">recalled in the next session →</text>
+
+  <!-- idle sweep (detached, lower-left) -->
+  <rect x="78" y="430" width="200" height="46" rx="8" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="90" y="451" font-size="12" font-weight="700" fill="#57564F">Idle sweep</text>
+  <text x="90" y="468" font-size="10.5" fill="#87867F">quiet transcripts → speculative (down-ranked)</text>
+</svg>
