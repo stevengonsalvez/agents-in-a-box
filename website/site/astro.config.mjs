@@ -82,6 +82,8 @@ export default defineConfig({
             { label: 'Starting a new session', slug: 'tui/start-session' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
             { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
+            { label: 'Token optimisation (Headroom · RTK)', slug: 'tui/token-optimization' },
+            { label: 'Daemons overlay', slug: 'tui/daemons' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
             { label: 'Architecture', slug: 'tui/architecture' },

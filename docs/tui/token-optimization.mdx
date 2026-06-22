@@ -1,0 +1,113 @@
+---
+title: "Token optimisation — Headroom & RTK"
+description: "Turn on per-session token optimisation in ainb: route a session's CLI through the local Headroom compression proxy, wire the RTK PreToolUse hook, and watch real tokens saved on the burndown Savings tab. Opt-in per session, never global, fault-tolerant."
+---
+
+import { Steps, Card, CardGrid, Aside } from '@astrojs/starlight/components';
+
+Two external tools can cut the tokens a session burns, and ainb wires both in **per session** — opt-in, never global:
+
+- **[Headroom](https://github.com/chopratejas/headroom)** — a local LLM-API compression proxy. A session's Claude/Codex CLI is pointed at it via `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`, so requests are compressed on the way out.
+- **[RTK](https://github.com/rtk-ai/rtk)** (Rust Token Killer) — a Claude Code `PreToolUse` hook that compresses tool output (Bash / test / diff) before it reaches the model.
+
+Both are toggled when you create a session, both degrade gracefully when the binary isn't installed, and the savings show up live in the TUI.
+
+<CardGrid>
+  <Card title="Per session" icon="setting">
+    Toggled on the Configure screen — one session can route through Headroom while another goes direct to Anthropic.
+  </Card>
+  <Card title="Reflects reality" icon="approve-check">
+    The statusline `HR` badge and the Savings tab read **actual routing** (the inherited base-URL env), not the stored toggle.
+  </Card>
+  <Card title="Fault-tolerant" icon="rocket">
+    Availability-gated, degrades to direct if the proxy can't start, and a watchdog respawns it if it dies mid-session.
+  </Card>
+</CardGrid>
+
+## Turn it on for a session
+
+Headroom and RTK are rows on the **Configure** screen when you start a new session (provider must be Claude or Codex for Headroom; RTK is Claude-only). Use `←` / `→` to flip each toggle.
+
+![ainb new-session Configure screen showing the per-session Headroom toggle — Headroom on / [off] with arrow keys to change, a greyed note that it is a proxy that trims token usage with a link to the headroom GitHub](../assets/screenshots/headroom-toggle.gif)
+
+*The Headroom row on Configure. The toggle is **per session** — flip it on here and only this session routes through the proxy. If the `headroom` binary isn't on `PATH`, the row shows `unavailable` with an install hint instead of a toggle, so you can never arm a proxy that can't exist.*
+
+<Aside type="note">
+Headroom proxies **Claude and Codex**; RTK is a Claude Code hook (`.claude/settings.json`), so its toggle only appears for Claude sessions. Gemini and Copilot are routed by neither.
+</Aside>
+
+## How routing works
+
+The toggle is *intent*. When a session launches with Headroom on, ainb first ensures the shared proxy is healthy, then injects the base-URL export into that session's CLI:
+
+```bash
+export ANTHROPIC_BASE_URL='http://127.0.0.1:8787' && exec claude    # Claude
+export OPENAI_BASE_URL='http://127.0.0.1:8787/v1' && exec codex     # Codex
+```
+
+If the proxy can't come up, the session **degrades to direct** — it launches without the base-URL so it talks to the provider straight, never to a dead port. A session with the toggle **off** always goes direct. The default port is `8787` (override with `AINB_HEADROOM_PORT`).
+
+### Statusline `HR` badge
+
+A routed session shows an `HR` pill on the Claude Code statusline — **green** when the proxy is live, **grey** when the session is routed but the proxy is down. It reads the base-URL env the statusline process actually inherited, so it tells you whether requests are *really* being compressed, not just whether you flipped the toggle.
+
+## See what you saved — the Savings tab
+
+Open the usage screen with `i`, then press `]` to cycle the outer tabs to **Savings**:
+
+![ainb usage Savings tab — the Token Savings card with a live green Headroom row showing real saved tokens, RTK not installed, a modelled caveman estimate at times 0.74, and a NET measured total of Headroom plus RTK](../assets/screenshots/savings-tab.gif)
+
+*The Savings card pulls `savings.total_tokens` straight from the live proxy's `/stats`: `● Headroom 907K live`. RTK shows installed/not-installed and its own saved total. The **caveman** row is a modelled estimate (`×0.74`, labelled `est`) and is never counted as real. **NET (measured)** = Headroom + RTK only.*
+
+<Aside type="tip">
+The same figures are available headlessly with `ainb usage savings`, and the Headroom proxy's live saved-token count also appears on the [Daemons overlay](daemons.md) (`d`).
+</Aside>
+
+## CLI surfaces
+
+Every surface has a headless equivalent — `ainb headroom status`, `ainb rtk status`, `ainb usage savings`, and `ainb doctor` (which lists both as token-opt deps):
+
+![ainb doctor listing rtk and headroom as token-opt dependencies, ainb rtk status reporting honestly when rtk is not installed, and ainb usage savings printing the Headroom live tokens, RTK, caveman estimate and NET](../assets/screenshots/headroom-cli-surfaces.gif)
+
+*See the [CLI reference](cli.md) for the full subcommand list.*
+
+## Fault tolerance
+
+Token optimisation is best-effort: it must never break a session. Every failure mode degrades cleanly.
+
+![fault-injection harness — the watchdog starts the proxy within seconds and respawns it with a new pid after a kill, and both the Headroom and RTK rows gate to unavailable when the binary is moved aside; 4 passed 0 failed](../assets/screenshots/headroom-fault-injection.gif)
+
+| Failure | Behaviour |
+|---------|-----------|
+| Binary not installed | Toggle shows `unavailable` + an install hint; can't be armed |
+| Proxy can't start at launch | Session runs **direct** (no dead-port injection), logs a warning |
+| Proxy dies mid-session | An in-loop **watchdog** (~10 s) respawns it; recovery is "next request succeeds" |
+| Last routed session closes | The shared proxy is **idle-reaped** |
+| Proxy misbehaves mid-session | Press `H` on the session to **downgrade to direct** (`claude --continue`) |
+
+## Install
+
+<Steps>
+
+1. **Headroom** (Python tool):
+
+   ```bash
+   uv tool install 'headroom-ai[proxy]'    # or: pipx install 'headroom-ai[proxy]'
+   ```
+
+2. **RTK** (Claude only):
+
+   ```bash
+   brew install rtk
+   # or: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+   ```
+
+3. Re-open the **Configure** screen — the rows are now real toggles instead of `unavailable`.
+
+</Steps>
+
+## See also
+
+- [Daemons overlay](daemons.md) — the `d` screen showing the live Headroom proxy + watchdog.
+- [Shared MCP pool](mcp-pool.md) — the other ainb-managed background daemon.
+- [Keyboard shortcuts](keyboard-shortcuts.md).
