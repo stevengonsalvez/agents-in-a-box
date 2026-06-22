@@ -1,6 +1,6 @@
 # Illustration workflow engine (shared)
 
-Every mascot sub-skill in this plugin (`illustration:alex`, `illustration:popa`, …) shares this engine. The sub-skill supplies the *visual DNA*, *IP anchors*, and *reference images*; this file supplies the *process*. Read this, then read your mascot's own `references/`.
+Every mascot sub-skill in this plugin (`illustration:sporthead-alex`, `illustration:popa`, …) shares this engine. The sub-skill supplies the *visual DNA*, *IP anchors*, and *reference images*; this file supplies the *process*. Read this, then read your mascot's own `references/`.
 
 ## The five steps
 
