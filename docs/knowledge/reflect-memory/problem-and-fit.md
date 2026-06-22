@@ -19,13 +19,13 @@ That has a hard ceiling. The context window is finite and **shared with the actu
 you front-load "just in case" is bloat the moment this particular session doesn't need it — and it
 crowds out the files, diffs, and reasoning the task *does* need.
 
-```
+<pre class="rm-ascii">
    context window  =  [ task: files · diffs · plan · tool output ]  +  [ memory ]
                                                           ▲                    ▲
                             this is the work ─────────────┘                    │
                             front-loaded "just in case" — bloat when ──────────┘
                             irrelevant, and you can only fit so much
-```
+</pre>
 
 So a bigger instructions file is the wrong axis. The questions that actually matter:
 
@@ -54,11 +54,11 @@ coding-agent workflow:
 4. **Do they capture coding signals as first-class events?** Corrections, test outcomes, git events,
    skill upgrades — captured *structurally*, or only as prose an LLM might (or might not) extract?
 
-```
-        store selectively    no extra key     local, no server    first-class signals
-reflect       ✓                  ✓                  ✓                    ✓
-others        varies          mostly ✗           mostly ✗           ✗ (probabilistic)
-```
+<pre class="rm-ascii">
+           store selectively   no extra key   local, no server   first-class signals
+reflect           ✓                 ✓                ✓                    ✓
+others          varies          mostly ✗         mostly ✗          ✗ (probabilistic)
+</pre>
 
 <div class="rm-matrix">
 <table>
@@ -93,13 +93,13 @@ upgrades as typed signals — they hope an LLM extracts them from the transcript
 reflect is the row that holds all four columns at once. Its design line: **the brain is client-side,
 the store is dumb, and the signals are typed.**
 
-```
+<pre class="rm-ascii">
    harness hooks ──▶ reflect (capture)  ──▶ markdown KB (source of truth)
         ▲              ▲ typed signals              │
         │              │ (corrections, tests,  index (QMD + nano-graphrag)
    harness LLM  ◀── reflect (recall) ◀──── git, skills, contradictions)
    (capture reuses the agent's OWN model — no extra key, no separate sub)
-```
+</pre>
 
 | reflect's answer | to the problem |
 |---|---|
