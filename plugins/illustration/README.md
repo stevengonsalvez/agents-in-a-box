@@ -4,6 +4,40 @@ Mascot-driven explanatory & brand illustration family for Claude Code.
 
 A shared workflow engine — **digest → shot list → per-image generation → QA → deliver** — wrapped by per-character sub-skills. Each mascot carries its own visual DNA, identity anchors, and likeness-locked reference images, so you get a consistent character across articles, social, READMEs, decks, and architecture explainers.
 
+## Featured series — agents-in-a-box in 10 frames
+
+A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agents-in-a-box. A single gold journey-line runs edge-to-edge through every frame with Alex as the guide, so the ten panels read (and animate) as one left-to-right mural — built to be fed to an image-to-video model for a panning walkthrough.
+
+**1 — Agents in a box** · terminal-native, runs local, open source
+![1 — intro](assets/agents-in-a-box-series/01-intro.png)
+
+**2 — The problem** · two parallel sessions stomping each other's branches
+![2 — problem](assets/agents-in-a-box-series/02-problem.png)
+
+**3 — The TUI** · one terminal cockpit — workspaces, session rows, preview pane
+![3 — TUI](assets/agents-in-a-box-series/03-tui.png)
+
+**4 — Isolation** · each session in its own box — git worktree + tmux, survives disconnect
+![4 — isolation](assets/agents-in-a-box-series/04-isolation.png)
+
+**5 — Multi-provider** · pick your player — Claude, Codex, Gemini, Copilot, Kiro
+![5 — providers](assets/agents-in-a-box-series/05-providers.png)
+
+**6 — Toolkit** · write once, deploy to 11 tools — 86 skills, 37 agents
+![6 — toolkit](assets/agents-in-a-box-series/06-toolkit.png)
+
+**7 — Plugins (v2)** · native subprocess plugins, JSON-RPC over stdio, capability-gated
+![7 — plugins](assets/agents-in-a-box-series/07-plugins.png)
+
+**8 — Burndown** · token budget + analytics by day / project / model, optimise hints
+![8 — burndown](assets/agents-in-a-box-series/08-burndown.png)
+
+**9 — WITR** · process-causality tracing, the interactive process browser (`w`)
+![9 — witr](assets/agents-in-a-box-series/09-witr.png)
+
+**10 — Hangar** · the managed-agent fleet — issues → kanban → autopilots (`g`), reflect learns across sessions
+![10 — hangar](assets/agents-in-a-box-series/10-hangar.png)
+
 ## Skills
 
 | Invoke | Mascot | Look | Best for |
