@@ -4,9 +4,9 @@ Mascot-driven explanatory & brand illustration family for Claude Code.
 
 A shared workflow engine — **digest → shot list → per-image generation → QA → deliver** — wrapped by per-character sub-skills. Each mascot carries its own visual DNA, identity anchors, and likeness-locked reference images, so you get a consistent character across articles, social, READMEs, decks, and architecture explainers.
 
-## Featured series — agents-in-a-box in 10 frames
+## Featured series — agents-in-a-box in 22 frames
 
-A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agents-in-a-box. A single gold journey-line runs edge-to-edge through every frame with Alex as the guide, so the ten panels read (and animate) as one left-to-right mural — built to be fed to an image-to-video model for a panning walkthrough.
+A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agents-in-a-box end to end. A single gold journey-line runs edge-to-edge through every frame with Alex as the guide, so all 22 panels read (and animate) as one left-to-right mural — built to be fed to an image-to-video model for a panning walkthrough.
 
 **1 — Agents in a box** · terminal-native, runs local, open source
 ![1 — intro](assets/agents-in-a-box-series/01-intro.png)
@@ -37,6 +37,42 @@ A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agen
 
 **10 — Hangar** · the managed-agent fleet — issues → kanban → autopilots (`g`), reflect learns across sessions
 ![10 — hangar](assets/agents-in-a-box-series/10-hangar.png)
+
+**11 — MCP socket-pool** · one shared unix socket instead of 510 node processes — N sessions, one backend
+![11 — mcp pool](assets/agents-in-a-box-series/11-mcp-pool.png)
+
+**12 — Skill manager** · browse a remote catalog, one-key install, sync / sandbox-test from the TUI
+![12 — skill manager](assets/agents-in-a-box-series/12-skill-manager.png)
+
+**13 — Inbox & notifications** · awaiting-input / turn-done / permission as OS banners + a TUI inbox
+![13 — inbox](assets/agents-in-a-box-series/13-inbox.png)
+
+**14 — Attach / foreign-TTY** · suspend the TUI, hand the terminal to an external program, resume
+![14 — attach](assets/agents-in-a-box-series/14-attach.png)
+
+**15 — Swarm** · multi-agent orchestration — leader / workers, broadcast, ack-gated sequence (`/swarm-create`)
+![15 — swarm](assets/agents-in-a-box-series/15-swarm.png)
+
+**16 — reflect-memory: the problem** · memory isn't a bigger `CLAUDE.md` — front-loading bloats a finite context window
+![16 — reflect problem](assets/agents-in-a-box-series/16-reflect-problem.png)
+
+**17 — reflect-memory: capture & index** · a correction → a learning note → indexed three ways (keyword · vector · graph)
+![17 — reflect capture](assets/agents-in-a-box-series/17-reflect-capture.png)
+
+**18 — reflect-memory: recall** · fuse → rerank → gate → inject the one right note at session start. *Correct once, never again.*
+![18 — reflect recall](assets/agents-in-a-box-series/18-reflect-recall.png)
+
+**19 — Beads** · git-backed issues with dependencies that survive context compaction (`bd ready`)
+![19 — beads](assets/agents-in-a-box-series/19-beads.png)
+
+**20 — Code review** · multi-agent review of a diff/PR, inline comments, `--format json`
+![20 — code review](assets/agents-in-a-box-series/20-code-review.png)
+
+**21 — Skills on tap** · the ainb-toolkit slash-skills — `/swarm` · `/reflect` · `/recall` · `/coding-agent` · `/research` · `/commit` · `/handover` · `/make-a-goal` · `/plan` · `/implement` · `/explain-to-me`
+![21 — toolkit skills](assets/agents-in-a-box-series/21-toolkit-skills.png)
+
+**22 — Take your shot** · all local, open source, yours
+![22 — finale](assets/agents-in-a-box-series/22-finale.png)
 
 ## Skills
 
