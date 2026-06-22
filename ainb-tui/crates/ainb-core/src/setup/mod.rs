@@ -5,8 +5,10 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod provision;
 
 pub use catalog::{catalog, Consumer, Dep, Detect, Install, Platform, Tier, Topic};
 pub use detect::{
     detect_all, DepReport, DepState, Env, RealEnv, SetupStatus, TopicReport,
 };
+pub use provision::{provision, ConsentLevel, ProvisionMode, ProvisionOutcome};
