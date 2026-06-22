@@ -1,39 +1,39 @@
-# Alex style DNA
+# Alex style DNA — sketchnote
 
-Alex shares the **Popa-family hand-drawn pastel look** — crude, charming, deadpan — but stars the Alex Sport Head character instead of the blob. Think "witty napkin sketch", not comic book.
+Alex illustrations are **sketchnotes**: one-page hand-drawn visual summaries that mix hand-lettering, framed ideas, arrows, icons and a recurring Alex doodle. Think visual note-taking, not a comic and not a loose pastel sketch.
 
 ## In one line
 
-Crude wobbly hand-drawn pen lines on a soft pastel scene, lots of calm white space, cute-but-deadpan, the gold soccer-ball head as the one pop of color.
+Hand-drawn black ink on clean white, bold hand-lettered banners, ideas in boxes/clouds linked by arrows, bullets and spot icons, with Alex as the doodle host — and an optional single gold accent.
 
 ## Must
 
-- **Crude, wobbly hand-drawn pen line art** — slightly uneven, sketchbook feel. NOT polished, NOT bold-ink comic, NOT cel-shaded, NOT 3D, NOT photoreal.
-- **Soft flat pastel background** — rotate cream / mint / lavender / blush; one gentle tone per image, flat (no heavy gradients/texture).
-- **Simple, slightly rounded cute proportions** for Alex — friendlier and chunkier than the original streetwear render.
-- **Generous calm space** — subject ~40–60% of the frame, ≥30% quiet area.
-- **Few short handwritten labels** — at most 5–8, 1–4 words each.
-- One core idea, structure, or moment per image.
+- **Hand-drawn black ink on a clean white background** — confident marker/pen line, the sketchnote look. NOT comic-book, NOT cel-shaded, NOT 3D, NOT loose pastel.
+- **Bold hand-lettered headlines** inside ribbon/banner shapes.
+- **Framed ideas** — key points sit in hand-drawn boxes, frames, and speech-clouds.
+- **Connectors** — hand-drawn arrows and dotted lines showing flow and relationships.
+- **Bullets & markers** — little stars, checkmarks, numbered circles.
+- **Spot icons & doodles** — small simple symbols around the page (ball, ID card, trophy, gears, etc.).
+- **Alex as the doodle host** — appears as a small hand-drawn character somewhere in the note (see `alex-ip.md`).
+- **Clear visual hierarchy** and breathing room; readable at a glance.
+- **Short hand-lettered words only** — labels and headers, never paragraphs (keeps text legible when generated).
 
-## Color
+## Accent (choose per image)
 
-- Alex is the most saturated element; keep his **soccer-ball head gold-and-black** (his signature pop).
-- Otherwise restrained, soft palette in the Popa family:
-  - Gold — Alex's head, key highlights.
-  - Green — flow, paths, success.
-  - Soft coral — warnings, problems, "ouch" moments.
-  - Sky blue — system/secondary notes.
-  - Soft graphite — line work, structure, text.
-- Less colour rather than more.
+- **Gold accent** (default for brand): black ink on white plus a SINGLE gold/yellow highlight on banners and Alex's ball head. Branded, more pop.
+- **Mono**: pure black and white, no colour. Classic sketchnote — best for docs/notes.
+
+Either way: one accent at most. Never a full palette.
 
 ## Absolutely not
 
-- No bold-ink graphic-novel / comic-book rendering (the old Alex style — retired).
-- No cel shading, no heavy black fills, no dramatic rim-light.
-- No 3D/clay, no photoreal, no vector-flat or PPT-infographic look.
-- No glasses or sunglasses on Alex — ever.
-- No saccharine mascot-poster energy; cute is fine, sugary is not.
+- No comic-book / cel-shaded / 3D / photoreal rendering.
+- No loose pastel-scene look (that's Popa).
+- No full-colour scenes; at most the single gold accent.
+- No glasses/sunglasses on Alex.
+- No paragraphs or long sentences lettered into the page.
+- No top-left type-title that names the format.
 
 ## Aesthetic direction
 
-Charming, witty, warm, a little absurd — the Popa family's deadpan humour, wearing the Sport Head. The reader should smile first, get the point in a second.
+A smart, lively hand-drawn page that captures an idea visually — banners, arrows, icons and Alex — so a reader gets the whole thing in one glance.

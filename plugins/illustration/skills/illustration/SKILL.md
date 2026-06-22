@@ -1,6 +1,6 @@
 ---
 name: illustration
-description: Generate mascot-driven explanatory illustrations. Use when the user wants illustrations/diagrams/explainer images/shot lists/hero art for an article, post, README, deck, or brand, and wants them in a specific mascot's style. Router for the illustration family — picks a character then hands off to its sub-skill. Mascots: illustration:alex (ShotClubhouse Sport Head — gold soccer-ball head, no glasses) and illustration:popa (pink blob with a notepad), both crude hand-drawn pastel.
+description: Generate mascot-driven explanatory illustrations. Use when the user wants illustrations/diagrams/explainer images/shot lists/hero art for an article, post, README, deck, or brand, and wants them in a specific mascot's style. Router for the illustration family — picks a character then hands off to its sub-skill. Mascots: illustration:alex (ShotClubhouse Sport Head — sketchnote visual notes) and illustration:popa (pink blob with a notepad — crude hand-drawn pastel).
 user-invocable: true
 ---
 
@@ -10,7 +10,7 @@ Generate explanatory and brand illustrations in a chosen mascot's voice and styl
 
 ## Pick a mascot
 
-- **`illustration:alex`** — Alex, the trademarked ShotClubhouse "Sport Head" (gold-and-black soccer-ball head, black cap, no glasses). Crude hand-drawn pastel in the Popa family, cute but deadpan. Best for: ShotClubhouse brand/marketing, sport, plus general explainers.
+- **`illustration:alex`** — Alex, the trademarked ShotClubhouse "Sport Head" (soccer-ball head, black cap, no glasses). Sketchnote style: hand-drawn visual notes (banners, framed ideas, arrows, icons) on white with an optional gold accent. Best for: ShotClubhouse brand/marketing, sport, plus general explainers/how-it-works.
 - **`illustration:popa`** — Popa, a cute pink blob with a green sprout and a notepad. Crude hand-drawn on soft pastel, deadpan-absurd humor. Best for: dev/product/system explainers, how-it-works, architecture, friendly social.
 
 If the user named a mascot, invoke that sub-skill directly. If not, infer from context (sport/ShotClubhouse/brand → `alex`; dev/system/funny → `popa`) or ask.

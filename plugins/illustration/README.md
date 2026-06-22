@@ -9,7 +9,7 @@ A shared workflow engine — **digest → shot list → per-image generation →
 | Invoke | Mascot | Look | Best for |
 |--------|--------|------|----------|
 | `illustration` | — | — | Router: pick a mascot, then hands off |
-| `illustration:alex` | **Alex** — ShotClubhouse Sport Head (gold-and-black soccer-ball head, black cap, no glasses) | Crude hand-drawn on soft pastel, cute-but-deadpan | ShotClubhouse brand/marketing, sport, hero/social, explainers |
+| `illustration:alex` | **Alex** — ShotClubhouse Sport Head (soccer-ball head, black cap, no glasses) | Sketchnote — hand-drawn visual notes (banners/arrows/icons) on white, optional gold accent | ShotClubhouse brand/marketing, sport, explainers, how-it-works |
 | `illustration:popa` | **Popa** — pink blob, green sprout, notepad | Crude hand-drawn on soft pastel, deadpan-absurd | Dev/product/system explainers, how-it-works, architecture, friendly social |
 
 ## How it works

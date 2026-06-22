@@ -1,47 +1,43 @@
 # Alex IP
 
-Alex is the trademarked "Sport Head" mascot of ShotClubhouse / SHOT, drawn in the Popa-family hand-drawn pastel style. Source art lives in `assets/alex-ref/` (character reference only — for the design, not the colour/render).
+Alex is the trademarked "Sport Head" mascot of ShotClubhouse / SHOT. In this skill he appears as the recurring **doodle host** of a sketchnote. Source art lives in `assets/alex-ref/` (character reference only — for the design, not the rendering).
 
 `sporthead` /ˈspɔːthɛd/ — *a person obsessed with sport: every swing, every save, every kick, every rep.* Alex is the face of that idea.
 
 ## Non-negotiable identity anchors (every image)
 
-1. **Gold-and-black soccer-ball head** — classic pentagon panels; this is his face and his one pop of colour. Expression is read through posture, not features.
-2. **NO glasses or sunglasses** — ever. Plain ball surface.
+1. **Soccer-ball head** — classic pentagon panels, plain surface. In gold-accent notes the ball is gold; in mono notes it's black-and-white panels.
+2. **NO glasses or sunglasses** — ever. Plain ball, no eyewear. (Do not letter the words "no glasses" into the page — just draw him without them.)
 3. **Black baseball cap** worn forward.
-4. **Simple t-shirt** and **relaxed jogger sweatpants**.
-5. **Brown-skinned arms/hands.**
-6. **Simple sneakers.**
-7. Often a **small football at his feet** (his prop, the way Popa has a notepad).
+4. **Simple t-shirt** and **jogger sweatpants**.
+5. **Simple sneakers.**
+6. Often a **small football** near him.
 
-Drawn with simple, slightly rounded, cute hand-drawn proportions — charming, not a polished comic hero.
+Drawn as a small, simple hand-drawn doodle character within the note — not a polished hero.
 
 ## Likeness rule (MANDATORY)
 
-Pass `assets/alex-ref/alex-source.png` into the image backend every time, instructing: "this is Alex; use the reference ONLY for his character design, NOT its colours/background/render; draw him in crude hand-drawn pastel style; no glasses." Words alone drift the character.
+Pass `assets/alex-ref/alex-source.png` into the image backend every time: "this is Alex; use the reference ONLY for his design; draw him as a small sketchnote doodle; plain ball head, no eyewear; do not letter instruction words into the image." Words alone drift the character.
 
-## Personality
+## Personality (how it reads in a sketchnote)
 
-- Deadpan-cool and earnest, with dry humour — the Popa family's deadpan, wearing the Sport Head.
-- Confident but understated; purpose without showing off.
-- Inclusive and grounded: grassroots roots, stadium dreams; for clubs, coaches, athletes, parents.
-- Humour comes from the situation and quiet swagger, never from goofy faces.
+- Deadpan-cool, dry, encouraging — the host walking you through the note.
+- Confident but understated; points, kicks, presents the ID, gestures at the flow.
+- Inclusive and grounded: grassroots to stadium; for clubs, coaches, athletes, parents.
 
-## Brand beats Alex can carry
+## Brand beats / content Alex's notes capture
 
-- Street-to-stadium arc (small doodled stadium in the distance).
-- Sport Head ID — holding the verified identity card.
-- Four pillars — connecting CLUB / COACH / ATHLETE / PARENT.
-- The ball at his feet — control, ownership.
-- Taglines, sparingly, one per image: TAKE YOUR SHOT · OWN IT · MAKE IMPACT.
+- "What is a Sport Head?" — identity, verified ID, four pillars (CLUB/COACH/ATHLETE/PARENT) → ONE ID.
+- Street-to-stadium arc; track stats / build profile / get scouted.
+- Taglines as banner/star callouts, sparingly: TAKE YOUR SHOT · OWN IT · MAKE IMPACT.
 
 ## Forbidden
 
-- No glasses/sunglasses. No goofy or panicked faces.
-- No bold-comic / cel-shaded / 3D / photoreal rendering.
-- Don't recolour the kit beyond the soft palette; keep the gold-black ball.
-- Don't bury Alex as decoration — he is the actor of the frame.
+- No glasses/sunglasses; no instruction text lettered in.
+- No comic / cel-shaded / 3D / pastel rendering — sketchnote only.
+- Don't make Alex a giant hero centerpiece; he's the doodle host among the notes.
+- Don't bury Alex entirely — he should appear as the recurring character.
 
 ## Litmus test
 
-Remove Alex; if the idea still lands without him, he was decoration — rebuild so Alex performs or embodies it.
+A good Alex note reads as a lively hand-drawn visual summary, hosted by the Sport Head, that lands the idea in one glance.

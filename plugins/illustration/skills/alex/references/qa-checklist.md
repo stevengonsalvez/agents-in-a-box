@@ -1,38 +1,36 @@
-# Alex QA Checklist
+# Alex QA Checklist — sketchnote
 
 ## Must pass
 
 - Correct aspect for the format preset (verify dimensions, don't eyeball).
-- Crude hand-drawn pen line art on a soft flat pastel background — NOT bold-comic, NOT cel-shaded, NOT 3D, NOT photoreal.
-- Identity anchors present and right: gold-and-black soccer-ball head, **no glasses**, black forward cap, simple tee + joggers, brown arms, simple sneakers; football at feet where it fits.
-- Alex is the actor, not decoration (litmus: remove Alex, the idea should collapse).
-- Gold soccer-ball head is the saturated pop; rest of palette soft and restrained.
-- Generous calm white space; subject ~40–60% of frame.
-- Labels: ≤8, short, readable handwritten.
-- Cute but deadpan — humour from the situation, never goofy faces.
+- Sketchnote look: hand-drawn black ink on white, banners + framed ideas + arrows + bullets + spot icons. NOT comic, NOT cel-shaded, NOT 3D, NOT pastel-scene.
+- Accent is correct: either a SINGLE gold highlight (gold mode) or pure black & white (mono mode) — never a full palette.
+- Alex appears as the recurring doodle host; identity anchors right: plain soccer-ball head (gold in gold-mode / B&W panels in mono), **no glasses**, black forward cap, simple kit, football nearby.
+- Clear visual hierarchy: one banner title, a few framed points, readable flow.
+- Hand-lettered text is short labels only — legible, no paragraphs.
+- No stray instruction words lettered in (e.g. "no glasses").
 - Fresh composition — no bundled-example reuse.
 
 ## Failure signals
 
 Regenerate or locally edit when:
 
-- Glasses/sunglasses appeared on Alex (most common drift — always remove).
-- Style went bold-comic / cel-shaded / 3D / photoreal / vector-flat.
-- Background got busy, gradient-heavy, or textured (keep flat pastel).
-- An anchor missing or recoloured (kit soft; ball stays gold-black).
-- Alex looks goofy or mascot-poster cute.
-- Over-stuffed frame (too many elements/labels).
-- Top-left type-title appeared.
-- Too similar to a bundled example.
+- Glasses appeared, or "no glasses"/other instruction text got lettered in.
+- Style drifted to comic / cel-shaded / 3D / loose pastel.
+- More than one accent colour, or full-colour rendering.
+- Wall of text / paragraphs / illegible lettering.
+- No banner, no framing, no arrows — i.e. not actually a sketchnote.
+- Alex missing entirely, or blown up into a giant hero.
+- Cluttered with too many boxes/labels; weak hierarchy.
 
 ## How to iterate
 
-- Glasses crept in: edit them out, restate "no glasses" and pass the reference again.
-- Too polished/comic: emphasise crude wobbly hand-drawn lines + flat pastel.
-- Too busy: cut to one idea + 3–5 elements + ≤5 labels, more calm space.
-- Too cute/sugary: emphasise deadpan posture; the ball-head has no face, so swagger comes from the body.
-- Off-model: pass the reference image again and restate the anchors.
+- Text leak/glasses: edit them out; restate "plain ball, no eyewear; do not letter instruction words".
+- Not sketchnote enough: emphasise banners, framed boxes, arrows, bullets, spot icons on white.
+- Too cluttered: cut to one banner + 4-6 framed points + more white space.
+- Wrong accent: restate GOLD-single-accent or pure MONO.
+- Off-model Alex: pass the reference again and restate anchors.
 
 ## Delivery judgment
 
-A strong Alex image reads as a witty hand-drawn pastel sketch that makes you smile, then lands its point in a second — clearly the Sport Head, clearly the Popa family, never a polished comic.
+A strong Alex sketchnote reads as a lively one-page visual summary hosted by the Sport Head — banners, arrows, icons, short labels — that lands the whole idea in a glance.
