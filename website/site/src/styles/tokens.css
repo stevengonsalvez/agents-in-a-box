@@ -1,14 +1,15 @@
 /*
  * agents-in-a-box — design tokens
  *
- * Locked to the TUI palette (see ../../../BRIEF.md §5.2). No light mode in v1.
+ * Locked to the TUI palette (see ../../../BRIEF.md §5.2).
  * Override Starlight's CSS variables to project the TUI identity through the
- * docs hub.
+ * docs hub. Dark is the default; the light palette below re-points only the
+ * `--ainb-*` leaf tokens (every `--sl-*` mapping lives on `:root`, which always
+ * matches, so the leaf override cascades through them).
  */
 
 :root,
-:root[data-theme='dark'],
-:root[data-theme='light'] {
+:root[data-theme='dark'] {
   /* ---- Palette ---- */
   --ainb-bg-deep:        #0F0F18;
   --ainb-bg-panel:       #191923;
@@ -79,6 +80,32 @@
 
   /* Spacing rhythm */
   --sl-content-width:            48rem;
+}
+
+/*
+ * Light mode — same TUI identity (cornflower frame, goldenrod accent, green),
+ * re-toned for a light surface. Only the `--ainb-*` leaves change; the
+ * `--sl-*` mappings on `:root` above pick these up automatically. Code blocks
+ * intentionally stay on a dark surface (a readable dark island on a light page).
+ */
+:root[data-theme='light'] {
+  --ainb-bg-deep:        #FAFAFC;
+  --ainb-bg-panel:       #EEEEF4;
+  --ainb-bg-raised:      #E4E4EE;
+  --ainb-bg-highlight:   #DCDCEC;
+
+  --ainb-border:         #2F5C99;  /* darker cornflower — contrast on light */
+  --ainb-accent-gold:    #9A6B00;  /* dark goldenrod — gold is unreadable on light */
+  --ainb-accent-green:   #2E7D32;
+
+  --ainb-text-primary:   #16161E;
+  --ainb-text-muted:     #54546A;
+  --ainb-text-faint:     #8C8CA0;
+
+  --ainb-syntax-keyword: #9A6B00;
+  --ainb-syntax-string:  #2E7D32;
+  --ainb-syntax-comment: #54546A;
+  --ainb-syntax-number:  #2F5C99;
 }
 
 /* Headings: use display font and a touch more presence. */
