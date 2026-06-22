@@ -12,7 +12,7 @@ For *why* this exists and how it compares to bare-harness memory, see
 
 ## The loop
 
-```
+<pre class="rm-ascii">
    ┌─────────┐  signal   ┌──────────┐  markdown   ┌──────────────┐
    │ session │ ───────▶  │ capture  │ ─────────▶  │  KB (notes)  │ ◀── source of truth
    └─────────┘ "no—don't"└──────────┘  + sidecar  └──────┬───────┘
@@ -27,7 +27,7 @@ For *why* this exists and how it compares to bare-harness memory, see
                                                           │ rerank · gate · budget
                                                           ▼
                                                    inject into next session
-```
+</pre>
 
 | Stage | What happens | Where it lives |
 |---|---|---|
