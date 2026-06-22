@@ -1,10 +1,10 @@
 ---
-name: illustration:alex
+name: illustration:sporthead-alex
 description: Generate sketchnote illustrations starring Alex, the trademarked ShotClubhouse "Sport Head" mascot (soccer-ball head, black cap, no glasses). One-page hand-drawn visual notes — banners, framed ideas, arrows, icons, checklists — hosted by an Alex doodle. Use for ShotClubhouse brand/marketing and for explainers/how-it-works/architecture. Black ink on white with an optional single gold accent (or pure mono).
 user-invocable: true
 ---
 
-# illustration:alex — ShotClubhouse Sport Head (sketchnote)
+# illustration:sporthead-alex — ShotClubhouse Sport Head (sketchnote)
 
 Generate **sketchnotes** — one-page hand-drawn visual summaries — hosted by **Alex**, ShotClubhouse's trademarked Sport Head character. Each note captures an idea with a hand-lettered banner, framed points, arrows, icons and checklists, with a small Alex doodle walking you through it. *Take your shot, own it, make impact.*
 
