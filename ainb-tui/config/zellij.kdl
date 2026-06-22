@@ -1,0 +1,275 @@
+// ============================================================================
+//  Zellij — optimized developer config
+//  - Non-conflicting keys: Ctrl-n/p/s/o/r stay with the shell.
+//  - Alt + hjkl/arrows : direct pane focus.
+//  - Ctrl-, <key>      : tmux-style prefix (Ctrl-b is left free for *inner* tmux,
+//                        e.g. tmux running under ainb inside a zellij pane).
+//  - Ctrl-g            : lock / unlock (pass everything to the terminal).
+//  - Web client        : reachable over Tailscale (see web_* block at bottom).
+// ============================================================================
+
+keybinds clear-defaults=true {
+
+    // ---------- LOCKED: pass all keys to the terminal; Ctrl-g releases ----------
+    locked {
+        bind "Ctrl g" { SwitchToMode "normal"; }
+    }
+
+    // ---------- tmux prefix entry (every mode except locked & tmux itself) ----------
+    //  Ctrl-, (NOT Ctrl-b) so Ctrl-b passes straight through to an inner tmux.
+    shared_except "locked" "tmux" {
+        bind "Ctrl ," { SwitchToMode "tmux"; }
+    }
+
+    // ---------- GLOBAL direct actions (everything except locked) ----------
+    //  Uses Alt + Ctrl-g/Ctrl-q only — never Ctrl-n/p/s/o/r (left for the shell).
+    shared_except "locked" {
+        bind "Ctrl g" { SwitchToMode "locked"; }
+        bind "Ctrl q" { Quit; }
+
+        // pane focus — Alt + hjkl / arrows (rolls over to adjacent tab on edges)
+        bind "Alt h" "Alt Left"  { MoveFocusOrTab "left"; }
+        bind "Alt l" "Alt Right" { MoveFocusOrTab "right"; }
+        bind "Alt j" "Alt Down"  { MoveFocus "down"; }
+        bind "Alt k" "Alt Up"    { MoveFocus "up"; }
+
+        // quick pane / layout
+        bind "Alt n" { NewPane; }
+        bind "Alt w" { ToggleFloatingPanes; }
+        bind "Alt e" { TogglePaneEmbedOrFloating; }
+        bind "Alt z" { TogglePaneFrames; }
+        bind "Alt f" { ToggleFocusFullscreen; }
+        bind "Alt =" "Alt +" { Resize "Increase"; }
+        bind "Alt -" { Resize "Decrease"; }
+        bind "Alt [" { PreviousSwapLayout; }
+        bind "Alt ]" { NextSwapLayout; }
+    }
+
+    // ---------- TMUX PREFIX MODE (Ctrl-b then a key) ----------
+    tmux {
+        bind "Ctrl ," { SwitchToMode "normal"; }   // press prefix again to cancel
+        bind "esc" { SwitchToMode "normal"; }
+        bind "Ctrl c" { SwitchToMode "normal"; }
+
+        // splits / panes
+        bind "\"" { NewPane "down"; SwitchToMode "normal"; }
+        bind "%" { NewPane "right"; SwitchToMode "normal"; }
+        bind "x" { CloseFocus; SwitchToMode "normal"; }
+        bind "z" { ToggleFocusFullscreen; SwitchToMode "normal"; }
+        bind "f" { ToggleFloatingPanes; SwitchToMode "normal"; }
+        bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "normal"; }
+        bind "o" { FocusNextPane; }
+        bind "space" { NextSwapLayout; }
+
+        // pane focus
+        bind "h" "left"  { MoveFocus "left"; SwitchToMode "normal"; }
+        bind "j" "down"  { MoveFocus "down"; SwitchToMode "normal"; }
+        bind "k" "up"    { MoveFocus "up"; SwitchToMode "normal"; }
+        bind "l" "right" { MoveFocus "right"; SwitchToMode "normal"; }
+
+        // tabs (tmux "windows")
+        bind "c" { NewTab; SwitchToMode "normal"; }
+        bind "n" { GoToNextTab; SwitchToMode "normal"; }
+        bind "p" { GoToPreviousTab; SwitchToMode "normal"; }
+        bind "&" { CloseTab; SwitchToMode "normal"; }
+        bind "," { SwitchToMode "renametab"; TabNameInput 0; }
+        bind "tab" { ToggleTab; }
+        bind "1" { GoToTab 1; SwitchToMode "normal"; }
+        bind "2" { GoToTab 2; SwitchToMode "normal"; }
+        bind "3" { GoToTab 3; SwitchToMode "normal"; }
+        bind "4" { GoToTab 4; SwitchToMode "normal"; }
+        bind "5" { GoToTab 5; SwitchToMode "normal"; }
+        bind "6" { GoToTab 6; SwitchToMode "normal"; }
+        bind "7" { GoToTab 7; SwitchToMode "normal"; }
+        bind "8" { GoToTab 8; SwitchToMode "normal"; }
+        bind "9" { GoToTab 9; SwitchToMode "normal"; }
+
+        // sub-modes
+        bind "r" { SwitchToMode "resize"; }
+        bind "m" { SwitchToMode "move"; }
+        bind "[" { SwitchToMode "scroll"; }
+
+        // session / detach / rename
+        bind "s" {
+            LaunchOrFocusPlugin "session-manager" { floating true; move_to_focused_tab true; }
+            SwitchToMode "normal"
+        }
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" { floating true; move_to_focused_tab true; }
+            SwitchToMode "normal"
+        }
+        bind "$" { SwitchToMode "renametab"; TabNameInput 0; }
+        bind "d" { Detach; }
+        bind "?" {
+            LaunchOrFocusPlugin "zellij:about" { floating true; move_to_focused_tab true; }
+            SwitchToMode "normal"
+        }
+    }
+
+    // ---------- RESIZE (Ctrl-b r) ----------
+    resize {
+        bind "esc" { SwitchToMode "normal"; }
+        bind "Ctrl c" { SwitchToMode "normal"; }
+        bind "enter" { SwitchToMode "normal"; }
+        bind "h" "left"  { Resize "Increase left"; }
+        bind "j" "down"  { Resize "Increase down"; }
+        bind "k" "up"    { Resize "Increase up"; }
+        bind "l" "right" { Resize "Increase right"; }
+        bind "H" { Resize "Decrease left"; }
+        bind "J" { Resize "Decrease down"; }
+        bind "K" { Resize "Decrease up"; }
+        bind "L" { Resize "Decrease right"; }
+        bind "=" "+" { Resize "Increase"; }
+        bind "-" { Resize "Decrease"; }
+    }
+
+    // ---------- MOVE PANE (Ctrl-b m) ----------
+    move {
+        bind "esc" { SwitchToMode "normal"; }
+        bind "Ctrl c" { SwitchToMode "normal"; }
+        bind "enter" { SwitchToMode "normal"; }
+        bind "h" "left"  { MovePane "left"; }
+        bind "j" "down"  { MovePane "down"; }
+        bind "k" "up"    { MovePane "up"; }
+        bind "l" "right" { MovePane "right"; }
+        bind "n" "tab" { MovePane; }
+        bind "p" { MovePaneBackwards; }
+    }
+
+    // ---------- SCROLL / COPY (Ctrl-b [) ----------
+    scroll {
+        bind "esc" { SwitchToMode "normal"; }
+        bind "q" { SwitchToMode "normal"; }
+        bind "Ctrl c" { ScrollToBottom; SwitchToMode "normal"; }
+        bind "e" { EditScrollback; SwitchToMode "normal"; }
+        bind "/" { SwitchToMode "entersearch"; SearchInput 0; }
+        bind "j" "down"  { ScrollDown; }
+        bind "k" "up"    { ScrollUp; }
+        bind "d" { HalfPageScrollDown; }
+        bind "u" { HalfPageScrollUp; }
+        bind "PageDown" "right" "l" { PageScrollDown; }
+        bind "PageUp" "left" "h" { PageScrollUp; }
+        bind "g" { ScrollToTop; }
+        bind "G" { ScrollToBottom; }
+    }
+
+    // ---------- SEARCH (within scroll/copy) ----------
+    entersearch {
+        bind "esc" { SwitchToMode "scroll"; }
+        bind "Ctrl c" { SwitchToMode "scroll"; }
+        bind "enter" { SwitchToMode "search"; }
+    }
+    search {
+        bind "esc" { SwitchToMode "normal"; }
+        bind "Ctrl c" { ScrollToBottom; SwitchToMode "normal"; }
+        bind "j" "down" { ScrollDown; }
+        bind "k" "up"   { ScrollUp; }
+        bind "d" { HalfPageScrollDown; }
+        bind "u" { HalfPageScrollUp; }
+        bind "n" { Search "down"; }
+        bind "p" { Search "up"; }
+        bind "c" { SearchToggleOption "CaseSensitivity"; }
+        bind "w" { SearchToggleOption "Wrap"; }
+        bind "o" { SearchToggleOption "WholeWord"; }
+    }
+
+    // ---------- RENAME ----------
+    renametab {
+        bind "esc" { UndoRenameTab; SwitchToMode "normal"; }
+        bind "Ctrl c" { SwitchToMode "normal"; }
+        bind "enter" { SwitchToMode "normal"; }
+    }
+    renamepane {
+        bind "esc" { UndoRenamePane; SwitchToMode "normal"; }
+        bind "Ctrl c" { SwitchToMode "normal"; }
+        bind "enter" { SwitchToMode "normal"; }
+    }
+}
+
+// ============================================================================
+//  Plugins (standard aliases used by keybinds / status bar)
+// ============================================================================
+plugins {
+    about location="zellij:about"
+    compact-bar location="zellij:compact-bar"
+    configuration location="zellij:configuration"
+    filepicker location="zellij:strider" {
+        cwd "/"
+    }
+    plugin-manager location="zellij:plugin-manager"
+    session-manager location="zellij:session-manager"
+    status-bar location="zellij:status-bar"
+    strider location="zellij:strider"
+    tab-bar location="zellij:tab-bar"
+    welcome-screen location="zellij:session-manager" {
+        welcome_screen true
+    }
+}
+
+// ============================================================================
+//  Look & feel
+// ============================================================================
+theme "catppuccin-mocha"
+default_mode "normal"
+default_layout "compact"
+pane_frames true
+ui {
+    pane_frames {
+        rounded_corners true
+        hide_session_name false
+    }
+}
+styled_underlines true
+auto_layout true
+// Needed so the terminal can transmit Ctrl-, (and other Ctrl+punctuation) to
+// zellij. Works in Ghostty (full kitty protocol); Warp may not send Ctrl-,.
+support_kitty_keyboard_protocol true
+
+// ============================================================================
+//  Shell / input / clipboard
+// ============================================================================
+default_shell "zsh"
+mouse_mode true
+copy_on_select true
+copy_clipboard "system"
+// No copy_command set on purpose: zellij falls back to OSC52, which the web
+// client forwards to the *browser device's* clipboard. Setting pbcopy here
+// would pin copies to this Mac only and break web-client copy/paste.
+scroll_buffer_size 50000
+
+// ============================================================================
+//  Session persistence (resurrect sessions after reboot / crash)
+// ============================================================================
+session_serialization true
+serialize_pane_viewport true
+scrollback_lines_to_serialize 10000
+on_force_close "detach"
+
+// ============================================================================
+//  WEB CLIENT — browse to your sessions over Tailscale (Tailscale Serve in front)
+//
+//    Browse:  https://mb1412-1.tailae910a.ts.net   (real TLS, no port, no warning)
+//    Auth:    zellij login token (create with `zellij web --create-token`)
+//
+//    zellij binds to LOOPBACK only (127.0.0.1) — it never listens on any
+//    network interface, so it's invisible to LAN / internet. `tailscale serve`
+//    terminates HTTPS with a trusted MagicDNS cert and reverse-proxies to it,
+//    so only tailnet-authenticated devices can reach the login page.
+//
+//    Wiring (run once, persists across reboots):
+//      zellij web --create-token            # save the token it prints
+//      tailscale serve --bg 8082            # https://<magicdns>  ->  127.0.0.1:8082
+//    Inspect / tear down:
+//      tailscale serve status
+//      tailscale serve --https=443 off
+//
+//    Note: zellij refuses to bind a non-loopback IP without a cert, which is
+//    why we front it with Tailscale rather than binding the 100.x address.
+// ============================================================================
+web_server true
+web_sharing "on"
+web_server_ip "127.0.0.1"
+web_server_port 8082
+web_client {
+    font "monospace"
+}
