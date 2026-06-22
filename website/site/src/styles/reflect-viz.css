@@ -148,3 +148,61 @@
 @media (max-width: 30rem) {
   .sl-markdown-content pre.rm-ascii { font-size: 0.62rem; }
 }
+
+/* ---- option cards (the 8 systems) — docsite port of the explainer card design.
+   Top accent only (never a left side-stripe); gold for reflect, cornflower for the rest. */
+.sl-markdown-content .rm-opts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.9rem;
+  margin: 1.5rem 0;
+}
+.sl-markdown-content .rm-opt {
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 50%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
+  border-top: 3px solid color-mix(in srgb, var(--ainb-border) 70%, transparent);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+.sl-markdown-content .rm-opt.me {
+  border-top-color: var(--ainb-accent-gold);
+  background: color-mix(in srgb, var(--ainb-accent-gold) 7%, var(--ainb-bg-panel));
+}
+.sl-markdown-content .rm-opt .lab {
+  font-family: var(--ainb-font-mono);
+  font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--ainb-text-muted); margin-bottom: 0.4rem;
+}
+.sl-markdown-content .rm-opt h4 {
+  font-family: var(--ainb-font-display);
+  font-size: 1.05rem; line-height: 1.2; color: var(--ainb-text-primary); margin: 0 0 0.15rem;
+}
+.sl-markdown-content .rm-opt h4 a { color: var(--ainb-text-primary); text-decoration: none; }
+.sl-markdown-content .rm-opt h4 a:hover { color: var(--ainb-accent-gold); }
+.sl-markdown-content .rm-opt .lic {
+  font-family: var(--ainb-font-mono); font-size: 0.66rem;
+  color: var(--ainb-text-muted); margin-bottom: 0.65rem;
+}
+.sl-markdown-content .rm-opt .desc {
+  font-size: 0.82rem; line-height: 1.5; color: var(--ainb-text-primary); margin: 0 0 0.85rem;
+}
+.sl-markdown-content .rm-opt .bars { display: grid; gap: 0.34rem; margin-bottom: 0.85rem; }
+.sl-markdown-content .rm-opt .brow {
+  display: grid; grid-template-columns: 4.6rem 1fr 1.2ch; align-items: center; gap: 0.5rem;
+  font-family: var(--ainb-font-mono); font-size: 0.62rem;
+}
+.sl-markdown-content .rm-opt .brow .bl { color: var(--ainb-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sl-markdown-content .rm-opt .track { height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--ainb-text-faint) 35%, transparent); }
+.sl-markdown-content .rm-opt .fill { display: block; height: 100%; border-radius: 3px; background: var(--ainb-border); }
+.sl-markdown-content .rm-opt.me .fill { background: var(--ainb-accent-gold); }
+.sl-markdown-content .rm-opt .brow .bv { color: var(--ainb-text-primary); text-align: right; }
+.sl-markdown-content .rm-opt .tot {
+  margin-top: auto; padding-top: 0.7rem;
+  border-top: 1px dashed color-mix(in srgb, var(--ainb-border) 25%, transparent);
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.sl-markdown-content .rm-opt .tot .tl { font-family: var(--ainb-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ainb-text-muted); }
+.sl-markdown-content .rm-opt .tot .tn { font-family: var(--ainb-font-display); font-size: 1.5rem; color: var(--ainb-text-primary); }
+.sl-markdown-content .rm-opt .tot .tn small { font-size: 0.8rem; color: var(--ainb-text-muted); }

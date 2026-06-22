@@ -36,24 +36,128 @@ products exists. This page compares them and explains why we built rather than a
 
 ## The eight systems
 
-The matrix scrolls horizontally — every column stays full-width and readable.
+We score each system on the four facets shown as bars on every card; the **weighted total** also
+folds in two more criteria (selective capture / noise-control and license / portability).
 
-<div class="rm-matrix">
-<table>
-<thead><tr>
-<th class="rowh">System</th><th class="wrap">What it stores</th><th class="wrap">Extra LLM/embed key?</th><th class="wrap">Runs as</th><th class="wrap">First-class coding signals</th><th>License</th>
-</tr></thead>
-<tbody>
-<tr class="me"><td class="rowh">reflect</td><td class="wrap"><strong>selective</strong> learnings; markdown = source of truth</td><td class="wrap"><strong>No</strong> — reuses the agent's own model + local embeddings</td><td class="wrap"><strong>local files</strong> (sqlite + graphml); optional shared Postgres</td><td class="wrap"><strong>Yes</strong> — corrections, tests, tool-loops, git, todos, permissions, contradictions, skill-refresh</td><td>MIT</td></tr>
-<tr><td class="rowh"><a href="https://github.com/vectorize-io/hindsight">Hindsight</a></td><td class="wrap">LLM-extracted facts + mental models</td><td class="wrap">Yes for writes¹</td><td class="wrap">local daemon → Docker (FastAPI+Postgres) → cloud</td><td class="wrap">No — extracted from prose; skill capture is a logged bug</td><td>MIT</td></tr>
-<tr><td class="rowh"><a href="https://github.com/mem0ai/mem0">Mem0</a></td><td class="wrap">LLM-extracted facts</td><td class="wrap"><strong>Yes</strong> — OpenAI by default at ingest</td><td class="wrap">library → Docker (Postgres+Neo4j); graph = Pro $249/mo</td><td class="wrap">No — hooks, but no correction/git/test capture</td><td>Apache-2.0 + SaaS</td></tr>
-<tr><td class="rowh"><a href="https://github.com/campfirein/byterover-cli">ByteRover</a></td><td class="wrap">curated markdown tree</td><td class="wrap">curation makes its own LLM calls</td><td class="wrap">local files + node daemon; optional cloud sync</td><td class="wrap">No — curation is agent-<em>directed</em>, not passive</td><td>Elastic 2.0 (not OSS)</td></tr>
-<tr><td class="rowh"><a href="https://github.com/thedotmack/claude-mem">claude-mem</a></td><td class="wrap">every tool call → compressed observations</td><td class="wrap"><strong>No</strong> — reuses Claude auth + local embeddings</td><td class="wrap">always-on Bun daemon + optional ChromaDB</td><td class="wrap">No — probabilistic Haiku extraction</td><td>Apache-2.0</td></tr>
-<tr><td class="rowh"><a href="https://github.com/rohitg00/agentmemory">agentmemory</a></td><td class="wrap"><strong>fire-hose</strong> — every tool call, verbatim</td><td class="wrap">optional (value degrades without it)</td><td class="wrap">always-on Rust daemon (4 ports)</td><td class="wrap">No — raw events; little structure without LLM</td><td>Apache-2.0</td></tr>
-<tr><td class="rowh"><a href="https://github.com/plastic-labs/honcho">Honcho</a></td><td class="wrap">user/peer models (theory-of-mind)</td><td class="wrap">Yes (self-host); cloud is per-token</td><td class="wrap">Postgres + Redis + deriver worker; or cloud</td><td class="wrap">No — built for end-user personalization, not coding</td><td>AGPL-3.0</td></tr>
-<tr><td class="rowh"><a href="https://github.com/volcengine/OpenViking">OpenViking</a></td><td class="wrap">LLM-extracted memories/skills (tiered)</td><td class="wrap"><strong>Yes</strong> — OpenAI/Volcengine by default</td><td class="wrap">Rust+Go+C++ server, always-on</td><td class="wrap">No — git/test/skill not first-class</td><td>AGPL-3.0</td></tr>
-</tbody>
-</table>
+- **Signals** — captures coding signals (corrections, tests, git, skills) as *typed* events, or hopes an LLM extracts them from prose?
+- **No key** — runs on the agent's own model, or needs a *second* LLM/embedding key + subscription?
+- **Local** — runs from local files, or needs an always-on server / cloud?
+- **Retrieval** — hybrid + rerank + graph + temporal quality.
+
+<div class="rm-opts">
+
+  <article class="rm-opt me">
+    <span class="lab">Built</span>
+    <h4>reflect</h4>
+    <div class="lic">MIT · local-first · cross-harness</div>
+    <p class="desc">Selective learnings; markdown is the source of truth. Reuses the agent's own model (<code>claude -p</code>) + a local embedder — no extra key. First-class typed signals.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="bv">5</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="bv">5</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="bv">5</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:80%"></span></span><span class="bv">4</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">4.72<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Strongest adopt</span>
+    <h4><a href="https://github.com/vectorize-io/hindsight">Hindsight</a></h4>
+    <div class="lic">MIT · vectorize-io</div>
+    <p class="desc">LLM-extracted facts + mental models. Best-in-class multi-strategy retrieval (94.6% LongMemEval), ~48 integrations. <code>retain</code> needs an LLM; reuse-your-sub loopback is ToS personal-use-only.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="bv">5</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">3.03<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Closest on cost</span>
+    <h4><a href="https://github.com/thedotmack/claude-mem">claude-mem</a></h4>
+    <div class="lic">Apache-2.0 · thedotmack</div>
+    <p class="desc">Compresses every tool call into observations. Reuses Claude auth + local embeddings (no extra key — ties reflect here). But unbounded growth, no native prune, ChromaDB fragility, probabilistic extraction.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="bv">5</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">3.08<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Curated tree</span>
+    <h4><a href="https://github.com/campfirein/byterover-cli">ByteRover</a></h4>
+    <div class="lic">Elastic-2.0 (not OSS)</div>
+    <p class="desc">Curate-before-store markdown tree, local-first, importance decay. But curation makes its own LLM calls and is <em>agent-directed</em>, not passive — nothing captured unless the agent calls <code>curate</code>.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:80%"></span></span><span class="bv">4</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">3.06<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Fact extractor</span>
+    <h4><a href="https://github.com/mem0ai/mem0">Mem0</a></h4>
+    <div class="lic">Apache-2.0 + SaaS</div>
+    <p class="desc">LLM-extracted facts; OpenAI by default at ingest (separate key). Full stack is Postgres + Neo4j; graph memory gated to the $249/mo Pro tier. Documented dedup gap.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:80%"></span></span><span class="bv">4</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">2.50<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Fire-hose</span>
+    <h4><a href="https://github.com/rohitg00/agentmemory">agentmemory</a></h4>
+    <div class="lic">Apache-2.0 · rohitg00</div>
+    <p class="desc">Captures every tool call verbatim, then consolidates via opt-in LLM. Always-on Rust daemon (4 ports, pinned binary). O(N²) forget ceiling ~1k; documented token-burn incidents.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:60%"></span></span><span class="bv">3</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">2.28<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Personalization</span>
+    <h4><a href="https://github.com/plastic-labs/honcho">Honcho</a></h4>
+    <div class="lic">AGPL-3.0 · Plastic Labs</div>
+    <p class="desc">Theory-of-mind models of users/peers — built for end-user personalization, not coding signals. Self-host needs 1–3 provider keys + Postgres + Redis + a deriver worker; cloud is per-query.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:20%"></span></span><span class="bv">1</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:80%"></span></span><span class="bv">4</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">1.99<small> / 5</small></span></div>
+  </article>
+
+  <article class="rm-opt">
+    <span class="lab">Context DB</span>
+    <h4><a href="https://github.com/volcengine/OpenViking">OpenViking</a></h4>
+    <div class="lic">AGPL-3.0 · ByteDance</div>
+    <p class="desc">Tiered (L0/L1/L2) LLM-extracted memories/skills with conflict-aware dedup. Strong on noise — but OpenAI/Volcengine by default (separate key) and a Rust+Go+C++ always-on server.</p>
+    <div class="bars">
+      <div class="brow"><span class="bl">Signals</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">No key</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Local</span><span class="track"><span class="fill" style="width:40%"></span></span><span class="bv">2</span></div>
+      <div class="brow"><span class="bl">Retrieval</span><span class="track"><span class="fill" style="width:80%"></span></span><span class="bv">4</span></div>
+    </div>
+    <div class="tot"><span class="tl">weighted</span><span class="tn">2.56<small> / 5</small></span></div>
+  </article>
+
 </div>
 
 ¹ Hindsight's `retain` needs an LLM; its "reuse your Claude subscription" loopback is documented as
