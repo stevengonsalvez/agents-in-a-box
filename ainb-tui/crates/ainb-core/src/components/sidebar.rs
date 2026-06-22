@@ -300,14 +300,20 @@ impl SidebarComponent {
         frame.render_widget(block, area);
 
         // Layout: title + spacer + one row per SidebarItem + flexible space.
-        // Constraints are derived from SidebarItem::all() so adding a new
-        // entry to the enum automatically reserves a layout slot (instead of
-        // silently rendering into a zero-height row).
+        // Accordion: every item is a single row; only the selected item gets a
+        // second row for its description. 18 items at 2 rows each overflow a
+        // normal-height panel, and ratatui's solver then shrinks the fixed
+        // `Length` slots unevenly — that's the random jamming/gaps. One row each
+        // keeps the rhythm even and the active item reads as a deliberate expand.
         let items = SidebarItem::all();
         let mut constraints: Vec<Constraint> = Vec::with_capacity(items.len() + 3);
         constraints.push(Constraint::Length(2)); // Title area
         constraints.push(Constraint::Length(1)); // Spacer
-        constraints.extend(items.iter().map(|_| Constraint::Length(2)));
+        constraints.extend(
+            items.iter().enumerate().map(|(idx, _)| {
+                Constraint::Length(if idx == state.selected_index { 2 } else { 1 })
+            }),
+        );
         constraints.push(Constraint::Min(0)); // Flexible space
 
         let layout = Layout::default()
@@ -330,20 +336,24 @@ impl SidebarComponent {
         }
     }
 
-    pub fn item_index_at(area: Rect, y: u16) -> Option<usize> {
-        let inner_y = area.y;
-        let first_item_y = inner_y.saturating_add(3);
+    /// Map a click row to a sidebar item. Row heights are variable (the
+    /// selected item is 2 rows, the rest 1), so the selected index is needed
+    /// to walk the rows correctly.
+    pub fn item_index_at(area: Rect, y: u16, selected_index: usize) -> Option<usize> {
+        let first_item_y = area.y.saturating_add(3); // title(2) + spacer(1)
         if y < first_item_y {
             return None;
         }
 
-        let relative = y - first_item_y;
-        let item_index = (relative / 2) as usize;
-        if relative % 2 <= 1 && item_index < SidebarItem::all().len() {
-            Some(item_index)
-        } else {
-            None
+        let mut row = first_item_y;
+        for idx in 0..SidebarItem::all().len() {
+            let height = if idx == selected_index { 2 } else { 1 };
+            if y >= row && y < row.saturating_add(height) {
+                return Some(idx);
+            }
+            row = row.saturating_add(height);
         }
+        None
     }
 
     /// Render the sidebar title
@@ -442,17 +452,18 @@ impl SidebarComponent {
                 ));
             }
 
-            // Push shortcut to the right
-            let label_len = item.label().len();
-            let badge_len = badge.map(|c| format!(" ●{}", c).len()).unwrap_or(0);
-            let used_width = 4 + label_len + badge_len; // accent + space + icon(2) + spaces + label + badge
-            let available = area.width.saturating_sub(used_width as u16 + 6);
+            // Push shortcut to the right. Measure actual rendered cell width of
+            // the spans so far (Span::width uses unicode-width) instead of byte
+            // length — emoji icons are 1-2 cells wide and byte counts threw the
+            // `[x]` column out of alignment (notably `[S]`).
+            let used_width: usize = main_spans.iter().map(|s| s.width()).sum();
+            let shortcut_box = item.shortcut().chars().count() + 2; // [x]
+            let right_margin = 2;
+            let available =
+                (area.width as usize).saturating_sub(used_width + shortcut_box + right_margin);
 
             if available > 0 {
-                main_spans.push(Span::styled(
-                    " ".repeat(available as usize),
-                    Style::default(),
-                ));
+                main_spans.push(Span::styled(" ".repeat(available), Style::default()));
             }
             main_spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
             main_spans.push(Span::styled(item.shortcut(), shortcut_style));
@@ -501,6 +512,88 @@ impl Default for SidebarComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render the real component into a cell grid and return, for every row
+    /// that carries a `[x]` shortcut, the display column of its `[`.
+    /// Cell columns are VT100 truth — emoji/variation-selector widths can't
+    /// lie here the way captured text can.
+    fn shortcut_columns(selected_index: usize) -> Vec<(u16, u16)> {
+        let backend = ratatui::backend::TestBackend::new(28, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let component = SidebarComponent::new();
+        let mut state = SidebarState::new();
+        state.selected_index = selected_index;
+        terminal
+            .draw(|frame| component.render(frame, Rect::new(0, 0, 28, 40), &state))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut cols = Vec::new();
+        for y in 0..40u16 {
+            for x in 0..28u16 {
+                if buf.get(x, y).symbol() == "[" {
+                    cols.push((y, x));
+                    break; // one shortcut per row
+                }
+            }
+        }
+        cols
+    }
+
+    #[test]
+    fn premium_sidebar_shortcuts_share_one_column() {
+        let cols = shortcut_columns(0);
+        // One shortcut per menu item, all in the same display column —
+        // including [S] (Setup) whose 🛠️ icon carries a variation selector
+        // that byte-length math used to mis-count.
+        assert_eq!(
+            cols.len(),
+            SidebarItem::all().len(),
+            "expected one [x] per item, got {}: {cols:?}",
+            cols.len()
+        );
+        let first_col = cols[0].1;
+        for (y, x) in &cols {
+            assert_eq!(
+                *x, first_col,
+                "shortcut at row {y} is column {x}, not aligned to {first_col}: {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn premium_sidebar_is_accordion_even_spacing() {
+        // Collapsed items are exactly 1 row; the selected item expands to 2
+        // (its description). So consecutive shortcut rows step by 1 everywhere
+        // except a single step of 2 — the gap straddling the selected item.
+        for selected in [0usize, 6, 17] {
+            let rows: Vec<u16> = shortcut_columns(selected).iter().map(|(y, _)| *y).collect();
+            assert_eq!(rows.len(), SidebarItem::all().len());
+            let gaps: Vec<u16> = rows.windows(2).map(|w| w[1] - w[0]).collect();
+            let twos = gaps.iter().filter(|&&g| g == 2).count();
+            let ones = gaps.iter().filter(|&&g| g == 1).count();
+            // selected==17 is the last item: its description row sits *after*
+            // it, so there is no following shortcut and every gap is 1.
+            let expected_twos = if selected == rows.len() - 1 { 0 } else { 1 };
+            assert_eq!(
+                twos, expected_twos,
+                "selected={selected}: expected {expected_twos} double-gap, got gaps {gaps:?}"
+            );
+            assert_eq!(
+                ones,
+                gaps.len() - expected_twos,
+                "selected={selected}: non-double gaps must all be 1, got {gaps:?}"
+            );
+            // The double-gap must follow the selected item (accordion expands
+            // the active row, not a random one).
+            if expected_twos == 1 {
+                let two_at = gaps.iter().position(|&g| g == 2).unwrap();
+                assert_eq!(
+                    two_at, selected,
+                    "selected={selected}: double-gap is after item {two_at}, not the selected one"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_sidebar_state_navigation() {
@@ -615,9 +708,19 @@ mod tests {
     #[test]
     fn maps_sidebar_item_rows_from_render_layout() {
         let area = Rect::new(0, 5, 26, 30);
-        assert_eq!(SidebarComponent::item_index_at(area, 7), None);
-        assert_eq!(SidebarComponent::item_index_at(area, 8), Some(0));
-        assert_eq!(SidebarComponent::item_index_at(area, 9), Some(0));
-        assert_eq!(SidebarComponent::item_index_at(area, 10), Some(1));
+        // Item 0 selected: it occupies 2 rows (main + description), every other
+        // item is a single row. First item row = area.y + 3 = 8.
+        assert_eq!(SidebarComponent::item_index_at(area, 7, 0), None);
+        assert_eq!(SidebarComponent::item_index_at(area, 8, 0), Some(0));
+        assert_eq!(SidebarComponent::item_index_at(area, 9, 0), Some(0)); // desc row
+        assert_eq!(SidebarComponent::item_index_at(area, 10, 0), Some(1));
+        assert_eq!(SidebarComponent::item_index_at(area, 11, 0), Some(2));
+
+        // Item 2 selected: items 0,1 are single rows, item 2 expands to 2.
+        assert_eq!(SidebarComponent::item_index_at(area, 8, 2), Some(0));
+        assert_eq!(SidebarComponent::item_index_at(area, 9, 2), Some(1));
+        assert_eq!(SidebarComponent::item_index_at(area, 10, 2), Some(2));
+        assert_eq!(SidebarComponent::item_index_at(area, 11, 2), Some(2)); // desc row
+        assert_eq!(SidebarComponent::item_index_at(area, 12, 2), Some(3));
     }
 }
