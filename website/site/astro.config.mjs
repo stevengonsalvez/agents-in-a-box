@@ -152,6 +152,7 @@ export default defineConfig({
             { label: 'Problem & fit', slug: 'knowledge/reflect-memory/problem-and-fit' },
             { label: 'The construct', slug: 'knowledge/reflect-memory/construct' },
             { label: 'Recall reference (57 ports)', slug: 'knowledge/reflect-memory/recall' },
+            { label: 'Why build, not adopt', slug: 'knowledge/reflect-memory/comparison' },
           ],
         },
         {
