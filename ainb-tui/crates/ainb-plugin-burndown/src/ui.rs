@@ -1305,7 +1305,14 @@ fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(CORNFLOWER_BLUE))
-                .style(Style::default().bg(DARK_BG)),
+                .style(Style::default().bg(DARK_BG))
+                .title(
+                    Line::from(Span::styled(
+                        " [ ] switch tab ",
+                        Style::default().fg(MUTED_GRAY),
+                    ))
+                    .right_aligned(),
+                ),
         );
 
     ratatui::widgets::Widget::render(tabs, area, buf);
