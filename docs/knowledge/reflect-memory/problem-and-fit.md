@@ -60,16 +60,24 @@ reflect       ✓                  ✓                  ✓                    �
 others        varies          mostly ✗           mostly ✗           ✗ (probabilistic)
 ```
 
-| Tool | What it stores | Extra LLM/embed key? | Runs as | First-class coding signals | License |
-|---|---|---|---|---|---|
-| **reflect** | **selective** learnings; markdown = source of truth | **No** — reuses the agent's own model + local embeddings | **local files** (sqlite + graphml); optional shared Postgres | **Yes** — corrections, tests, tool-loops, git, todos, permissions, contradictions, skill-refresh | MIT |
-| Hindsight | LLM-extracted facts + mental models | Yes for writes¹ | local daemon → Docker (FastAPI+Postgres) → cloud | No — extracted from prose (skill-capture is a logged bug) | MIT |
-| Mem0 | LLM-extracted facts | **Yes** — OpenAI by default at ingest | library → Docker (Postgres+Neo4j); graph = Pro $249/mo | No — hooks, but no correction/git/test capture | Apache-2.0 + SaaS |
-| ByteRover | curated markdown tree | curation makes its own LLM calls | local files + node daemon; optional cloud sync | No — curation is agent-*directed*, not passive | Elastic 2.0 (not OSS) |
-| claude-mem | every tool call → compressed observations | **No** — reuses Claude auth + local embeddings | always-on Bun daemon + optional ChromaDB | No — probabilistic Haiku extraction | Apache-2.0 |
-| agentmemory | **fire-hose** — every tool call, verbatim | optional (value degrades without) | always-on Rust daemon (4 ports) | No — raw events; little structure without LLM | Apache-2.0 |
-| Honcho | user/peer models (theory-of-mind) | Yes (self-host); cloud is per-token | Postgres + Redis + deriver worker; or cloud | No — built for end-user personalization, not coding | AGPL-3.0 |
-| OpenViking | LLM-extracted memories/skills (tiered) | **Yes** — OpenAI/Volcengine by default | Rust+Go+C++ server, always-on | No — git/test/skill not first-class | AGPL-3.0 |
+<div class="rm-matrix">
+<table>
+<thead><tr><th class="rowh">Tool</th><th class="wrap">What it stores</th><th class="wrap">Extra LLM/embed key?</th><th class="wrap">Runs as</th><th class="wrap">First-class coding signals</th><th>License</th></tr></thead>
+<tbody>
+<tr class="me"><td class="rowh">reflect</td><td class="wrap"><strong>selective</strong> learnings; markdown = source of truth</td><td class="wrap"><strong>No</strong> — reuses the agent's own model + local embeddings</td><td class="wrap"><strong>local files</strong> (sqlite + graphml); optional shared Postgres</td><td class="wrap"><strong>Yes</strong> — corrections, tests, tool-loops, git, todos, permissions, contradictions, skill-refresh</td><td>MIT</td></tr>
+<tr><td class="rowh">Hindsight</td><td class="wrap">LLM-extracted facts + mental models</td><td class="wrap">Yes for writes¹</td><td class="wrap">local daemon → Docker (FastAPI+Postgres) → cloud</td><td class="wrap">No — extracted from prose (skill-capture is a logged bug)</td><td>MIT</td></tr>
+<tr><td class="rowh">Mem0</td><td class="wrap">LLM-extracted facts</td><td class="wrap"><strong>Yes</strong> — OpenAI by default at ingest</td><td class="wrap">library → Docker (Postgres+Neo4j); graph = Pro $249/mo</td><td class="wrap">No — hooks, but no correction/git/test capture</td><td>Apache-2.0 + SaaS</td></tr>
+<tr><td class="rowh">ByteRover</td><td class="wrap">curated markdown tree</td><td class="wrap">curation makes its own LLM calls</td><td class="wrap">local files + node daemon; optional cloud sync</td><td class="wrap">No — curation is agent-<em>directed</em>, not passive</td><td>Elastic 2.0 (not OSS)</td></tr>
+<tr><td class="rowh">claude-mem</td><td class="wrap">every tool call → compressed observations</td><td class="wrap"><strong>No</strong> — reuses Claude auth + local embeddings</td><td class="wrap">always-on Bun daemon + optional ChromaDB</td><td class="wrap">No — probabilistic Haiku extraction</td><td>Apache-2.0</td></tr>
+<tr><td class="rowh">agentmemory</td><td class="wrap"><strong>fire-hose</strong> — every tool call, verbatim</td><td class="wrap">optional (value degrades without)</td><td class="wrap">always-on Rust daemon (4 ports)</td><td class="wrap">No — raw events; little structure without LLM</td><td>Apache-2.0</td></tr>
+<tr><td class="rowh">Honcho</td><td class="wrap">user/peer models (theory-of-mind)</td><td class="wrap">Yes (self-host); cloud is per-token</td><td class="wrap">Postgres + Redis + deriver worker; or cloud</td><td class="wrap">No — built for end-user personalization, not coding</td><td>AGPL-3.0</td></tr>
+<tr><td class="rowh">OpenViking</td><td class="wrap">LLM-extracted memories/skills (tiered)</td><td class="wrap"><strong>Yes</strong> — OpenAI/Volcengine by default</td><td class="wrap">Rust+Go+C++ server, always-on</td><td class="wrap">No — git/test/skill not first-class</td><td>AGPL-3.0</td></tr>
+</tbody>
+</table>
+</div>
+
+➡️ Full scored matrix, token economics, LOCOMO benchmark and the build-vs-adopt critique:
+[Why build, not adopt](/knowledge/reflect-memory/comparison/).
 
 ¹ Hindsight's `retain` needs an LLM; its "reuse your Claude subscription" loopback is documented as
 **personal-use-only per Anthropic's terms** — not shippable. See the
