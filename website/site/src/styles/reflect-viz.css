@@ -10,7 +10,8 @@
 /* ---- horizontal-scroll matrix (wide comparisons) ---- */
 .sl-markdown-content .rm-matrix {
   overflow-x: auto;
-  margin: 1.25rem 0;
+  max-width: 100%;            /* never spill past the content column / under the TOC */
+  margin: 1.5rem 0;
   border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
   border-radius: 10px;
   -webkit-overflow-scrolling: touch;
@@ -63,8 +64,14 @@
   font-weight: 700;
   background: color-mix(in srgb, var(--ainb-bg-panel) 70%, transparent);
 }
-/* the "me" column / row highlight */
-.sl-markdown-content .rm-matrix .me { background: color-mix(in srgb, var(--ainb-accent-gold) 12%, transparent); }
+/* reflect row marker — uniform opaque tint (mixed with the surface, not transparent,
+   so it never bleeds/gradients over the page); never painted over a heatmap cell. */
+.sl-markdown-content .rm-matrix tr.me .rowh {
+  background: color-mix(in srgb, var(--ainb-accent-gold) 15%, var(--ainb-bg-panel));
+}
+.sl-markdown-content .rm-matrix tr.me td:not(.s1):not(.s2):not(.s3):not(.s4):not(.s5) {
+  background: color-mix(in srgb, var(--ainb-accent-gold) 7%, var(--ainb-bg-panel));
+}
 
 /* heatmap score tints — semantic, derived from accent tokens so they theme */
 .sl-markdown-content .rm-matrix td.s5 { background: color-mix(in srgb, var(--ainb-accent-green) 30%, transparent); }
@@ -83,12 +90,18 @@
 @media (min-width: 56rem) {
   .sl-markdown-content .rm-cards.two { grid-template-columns: 1fr 1fr; }
 }
+/* Full border + surface tint + a leading gold id as the visual anchor —
+   deliberately NOT a left side-stripe (the #1 AI-design tell). */
 .sl-markdown-content .rm-card {
-  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
-  border-left: 3px solid var(--ainb-border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--ainb-bg-panel) 55%, transparent);
-  padding: 0.8rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 50%, transparent);
+  padding: 0.9rem 1.1rem;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.sl-markdown-content .rm-card:hover {
+  border-color: color-mix(in srgb, var(--ainb-border) 55%, transparent);
+  background: color-mix(in srgb, var(--ainb-bg-panel) 70%, transparent);
 }
 .sl-markdown-content .rm-card .h {
   font-family: var(--ainb-font-display);
@@ -112,3 +125,26 @@
   margin-right: 0.5ch;
 }
 .sl-markdown-content .rm-card .without .lbl { color: #C0563E; }
+
+/* ---- fitted ASCII diagram box ----
+   Plain ASCII art, sized down so it fits the content column without the janky
+   default code-frame scrollbar, in a tidy themed box. Use raw <pre class="rm-ascii">
+   instead of a fenced code block for diagrams (keeps the art, drops the overflow). */
+.sl-markdown-content pre.rm-ascii {
+  font-family: var(--ainb-font-mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  padding: 1rem 1.1rem;
+  color: var(--ainb-text-primary);
+  background: var(--ainb-bg-panel);   /* theme-aware surface (not the always-dark code bg) so the line-art stays readable in light mode */
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
+  border-radius: 10px;
+  font-feature-settings: 'liga' 0;
+}
+@media (max-width: 30rem) {
+  .sl-markdown-content pre.rm-ascii { font-size: 0.62rem; }
+}

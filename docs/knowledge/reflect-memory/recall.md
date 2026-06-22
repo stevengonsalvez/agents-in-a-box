@@ -57,12 +57,12 @@ capture → index → fuse → rerank → gate → inject — is what the 57 por
 
 ## The 57 ports at a glance
 
-```
+<pre class="rm-ascii">
             ┌──────────────────────── recall time ───────────────────────┐
  query ─▶ [arms] ─▶ RRF fuse ─▶ [rerank] ─▶ [gate] ─▶ [boosts] ─▶ budget ─▶ inject
             R1·R5·R6           R2·R3        R7·R12      R8·R16
             ─────────────────── scope: R15·A6 · modes: M1·R10·R11 ────────────────
-```
+</pre>
 
 - **Retrieval arms** — R1 R5 R6 R2 R3 R4 → [§ below](#retrieval-arms)
 - **Relevance gates** — R7 R12 → [§ below](#relevance-gates)
