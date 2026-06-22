@@ -74,6 +74,55 @@ A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agen
 **22 — Take your shot** · all local, open source, yours
 ![22 — finale](assets/agents-in-a-box-series/22-finale.png)
 
+### Popa edition — the same 22 frames
+
+The identical agents-in-a-box storyboard rendered with `illustration:popa` instead — crude hand-drawn pastel, Popa as the guide, and a continuous **green** flow-line carrying the pan. Same beats, different mascot.
+
+**1 — Agents in a box**
+![popa 1](assets/agents-in-a-box-series-popa/01-intro.png)
+**2 — The problem**
+![popa 2](assets/agents-in-a-box-series-popa/02-problem.png)
+**3 — The TUI**
+![popa 3](assets/agents-in-a-box-series-popa/03-tui.png)
+**4 — Isolation (worktree + tmux)**
+![popa 4](assets/agents-in-a-box-series-popa/04-isolation.png)
+**5 — Multi-provider**
+![popa 5](assets/agents-in-a-box-series-popa/05-providers.png)
+**6 — Toolkit**
+![popa 6](assets/agents-in-a-box-series-popa/06-toolkit.png)
+**7 — Plugins (v2)**
+![popa 7](assets/agents-in-a-box-series-popa/07-plugins.png)
+**8 — Burndown**
+![popa 8](assets/agents-in-a-box-series-popa/08-burndown.png)
+**9 — WITR**
+![popa 9](assets/agents-in-a-box-series-popa/09-witr.png)
+**10 — Hangar**
+![popa 10](assets/agents-in-a-box-series-popa/10-hangar.png)
+**11 — MCP socket-pool**
+![popa 11](assets/agents-in-a-box-series-popa/11-mcp-pool.png)
+**12 — Skill manager**
+![popa 12](assets/agents-in-a-box-series-popa/12-skill-manager.png)
+**13 — Inbox & notifications**
+![popa 13](assets/agents-in-a-box-series-popa/13-inbox.png)
+**14 — Attach / foreign-TTY**
+![popa 14](assets/agents-in-a-box-series-popa/14-attach.png)
+**15 — Swarm**
+![popa 15](assets/agents-in-a-box-series-popa/15-swarm.png)
+**16 — reflect-memory: the problem**
+![popa 16](assets/agents-in-a-box-series-popa/16-reflect-problem.png)
+**17 — reflect-memory: capture & index**
+![popa 17](assets/agents-in-a-box-series-popa/17-reflect-capture.png)
+**18 — reflect-memory: recall**
+![popa 18](assets/agents-in-a-box-series-popa/18-reflect-recall.png)
+**19 — Beads**
+![popa 19](assets/agents-in-a-box-series-popa/19-beads.png)
+**20 — Code review**
+![popa 20](assets/agents-in-a-box-series-popa/20-code-review.png)
+**21 — Skills on tap**
+![popa 21](assets/agents-in-a-box-series-popa/21-toolkit-skills.png)
+**22 — Take your shot**
+![popa 22](assets/agents-in-a-box-series-popa/22-finale.png)
+
 ## Skills
 
 | Invoke | Mascot | Look | Best for |
