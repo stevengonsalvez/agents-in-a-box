@@ -1,8 +1,10 @@
 # Alex IP
 
-Alex is the trademarked "Sport Head" mascot of ShotClubhouse / SHOT. In this skill he appears as the recurring **doodle host** of a sketchnote. Source art lives in `assets/alex-ref/` (character reference only — for the design, not the rendering).
+Alex is the **Sport Head®** mascot of ShotClubhouse / SHOT. In this skill he appears as the recurring **doodle host** of a sketchnote. Source art lives in `assets/alex-ref/` (character reference only — for the design, not the rendering).
 
 `sporthead` /ˈspɔːthɛd/ — *a person obsessed with sport: every swing, every save, every kick, every rep.* Alex is the face of that idea.
+
+> **Trademark.** Sport Head® is a registered trade mark (UK IPO no. [UK00004396917](https://trademarks.ipo.gov.uk/ipo-tmcase/page/Results/1/UK00004396917)) owned by SHOT Clubhouse. This skill generates a trademarked character — use it for first-party / authorised ShotClubhouse brand work, mark prominent uses as **Sport Head®**, and don't imply third-party endorsement. See the plugin README's *Trademark* section.
 
 ## Non-negotiable identity anchors (every image)
 
