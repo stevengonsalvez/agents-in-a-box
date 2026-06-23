@@ -6321,9 +6321,9 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingInstallConfig => {
-                use crate::components::onboarding::dependency_checker::DependencyChecker;
+                use crate::setup::install_tmux_config;
                 tracing::debug!("Installing recommended tmux config");
-                match DependencyChecker::install_tmux_config() {
+                match install_tmux_config() {
                     Ok(()) => {
                         tracing::info!("Successfully installed tmux.conf");
                         // Re-run dependency check to update status

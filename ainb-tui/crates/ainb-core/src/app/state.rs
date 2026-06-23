@@ -9240,9 +9240,9 @@ impl AppState {
                 }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");
-                    use crate::components::onboarding::DependencyChecker;
+                    use crate::setup::{detect_all, RealEnv};
                     // Run blocking I/O on dedicated thread pool to avoid blocking async runtime
-                    match tokio::task::spawn_blocking(DependencyChecker::check_all).await {
+                    match tokio::task::spawn_blocking(|| detect_all(&RealEnv)).await {
                         Ok(status) => {
                             if let Some(ref mut onboarding_state) = self.onboarding_state {
                                 onboarding_state.dependency_status = Some(status);

@@ -11,4 +11,6 @@ pub use catalog::{catalog, Consumer, Dep, Detect, Install, Platform, Tier, Topic
 pub use detect::{
     detect_all, DepReport, DepState, Env, RealEnv, SetupStatus, TopicReport,
 };
-pub use provision::{provision, ConsentLevel, ProvisionMode, ProvisionOutcome};
+pub use provision::{
+    install_tmux_config, provision, ConsentLevel, ProvisionMode, ProvisionOutcome,
+};

@@ -9,6 +9,7 @@
 // per-item consent and are never auto-run headlessly. Manual/bundled deps are
 // only ever printed.
 
+use std::fs;
 use std::process::Command;
 
 use anyhow::{bail, Result};
@@ -196,6 +197,28 @@ pub fn provision(
             None => Ok(ProvisionOutcome::PrintOnly { command: p.display, reason }),
         },
     }
+}
+
+/// Install the bundled, optimized tmux.conf (anti-flicker + clipboard), backing
+/// up any existing config. Reloads it if tmux is running. This is the `I`-key
+/// action in the onboarding dependency step — kept here so the setup engine owns
+/// every provisioning side effect.
+pub fn install_tmux_config() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let tmux_conf_path = home.join(".tmux.conf");
+    let tmux_config = include_str!("../../../../config/tmux.conf");
+
+    if tmux_conf_path.exists() {
+        let backup_path = home.join(".tmux.conf.backup");
+        fs::copy(&tmux_conf_path, &backup_path)
+            .map_err(|e| format!("Failed to backup existing config: {e}"))?;
+    }
+    fs::write(&tmux_conf_path, tmux_config)
+        .map_err(|e| format!("Failed to write tmux.conf: {e}"))?;
+    let _ = Command::new("tmux")
+        .args(["source-file", &tmux_conf_path.to_string_lossy()])
+        .output();
+    Ok(())
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ mod perf;
 mod plugins;
 mod providers;
 mod rtk;
+mod setup;
 mod tmux;
 mod usage_cache;
 mod widgets;
