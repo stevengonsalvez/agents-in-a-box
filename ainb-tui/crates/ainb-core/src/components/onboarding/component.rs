@@ -9,8 +9,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::dependency_checker::DependencyChecker;
 use super::state::{OnboardingState, OnboardingStep};
+use crate::setup::{DepReport, DepState, Tier, TopicReport};
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -293,20 +293,20 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(2), // Status summary
-                Constraint::Min(10),   // Dependency list
+                Constraint::Length(3), // Status summary + one-liner legend
+                Constraint::Min(10),   // Dependency columns
                 Constraint::Length(2), // Instructions
             ])
             .split(inner);
 
         // Status summary
-        let (status_icon, status_text, status_color) = if status.mandatory_met {
-            if status.recommended_met {
+        let (status_icon, status_text, status_color) = if status.required_met() {
+            if status.recommended_met() {
                 ("✅", "All dependencies ready!", SELECTION_GREEN)
             } else {
                 (
                     "⚠️",
-                    "Core dependencies ready (some optional missing)",
+                    "Core dependencies ready (some recommended missing)",
                     WARNING_YELLOW,
                 )
             }
@@ -314,96 +314,61 @@ impl OnboardingComponent {
             ("❌", "Missing required dependencies", ERROR_RED)
         };
 
-        let summary = Paragraph::new(Line::from(vec![
-            Span::styled(status_icon, Style::default()),
-            Span::styled(" ", Style::default()),
-            Span::styled(status_text, Style::default().fg(status_color)),
-            Span::styled(
-                format!("  ({}/{})", status.installed_count(), status.total_count()),
-                Style::default().fg(MUTED_GRAY),
-            ),
-        ]))
+        // Summary line + a one-liner explaining what this screen is, with the
+        // icon legend so a first-time user knows why each row is here.
+        let summary = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(status_icon, Style::default()),
+                Span::styled(" ", Style::default()),
+                Span::styled(status_text, Style::default().fg(status_color)),
+                Span::styled(
+                    format!("  ({}/{})", status.satisfied_count(), status.total_count()),
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "First-run setup — the tools ainb, your agents, plugins & memory need.   ",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+                Span::styled("✓", Style::default().fg(SELECTION_GREEN)),
+                Span::styled(" ready  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("✗", Style::default().fg(ERROR_RED)),
+                Span::styled(" required  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("○", Style::default().fg(WARNING_YELLOW)),
+                Span::styled(" recommended/optional  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("·", Style::default().fg(MUTED_GRAY)),
+                Span::styled(" suggested", Style::default().fg(MUTED_GRAY)),
+            ]),
+        ])
         .alignment(Alignment::Center);
         frame.render_widget(summary, content_layout[0]);
 
-        // Dependency list by category
-        let mut items: Vec<ListItem> = Vec::new();
-
-        for category in DependencyChecker::categories() {
-            let checks = status.by_category(category);
-            if checks.is_empty() {
-                continue;
-            }
-
-            // Category header
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(
-                    category.label(),
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
-            ])));
-
-            // Dependencies in this category
-            for check in checks {
-                let (icon, icon_color) = if check.is_installed {
-                    ("✓", SELECTION_GREEN)
-                } else if check.dependency.is_mandatory {
-                    ("✗", ERROR_RED)
-                } else {
-                    ("○", WARNING_YELLOW)
-                };
-
-                let version_text = check
-                    .version
-                    .as_ref()
-                    .map(|v| format!(" ({})", v.chars().take(20).collect::<String>()))
-                    .unwrap_or_default();
-
-                let install_hint = if !check.is_installed {
-                    format!(" → {}", check.dependency.install_hint)
-                } else {
-                    String::new()
-                };
-
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(icon, Style::default().fg(icon_color)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(
-                        check.dependency.name,
-                        if check.is_installed {
-                            Style::default().fg(SOFT_WHITE)
-                        } else {
-                            Style::default().fg(MUTED_GRAY)
-                        },
-                    ),
-                    Span::styled(version_text, Style::default().fg(MUTED_GRAY)),
-                    Span::styled(install_hint, Style::default().fg(CORNFLOWER_BLUE)),
-                ])));
-            }
+        // Distribute topics across two columns, balanced by rendered height, so
+        // the whole width is used instead of one tall narrow list.
+        let mut col_items: [Vec<ListItem>; 2] = [Vec::new(), Vec::new()];
+        let mut col_lines = [0usize, 0usize];
+        for topic in &status.topics {
+            let target = if col_lines[0] <= col_lines[1] { 0 } else { 1 };
+            let before = col_items[target].len();
+            push_topic_items(&mut col_items[target], topic);
+            col_lines[target] += col_items[target].len() - before;
         }
 
-        let list = List::new(items).style(Style::default().bg(PANEL_BG));
-        frame.render_widget(list, content_layout[1]);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(content_layout[1]);
+        for (i, area) in cols.iter().enumerate() {
+            let list =
+                List::new(std::mem::take(&mut col_items[i])).style(Style::default().bg(PANEL_BG));
+            frame.render_widget(list, *area);
+        }
 
-        // Instructions - show "I" for install if tmux config is missing
-        let has_missing_config = status.checks.iter().any(|c| {
-            c.dependency.category == super::dependency_checker::DependencyCategory::Configuration
-                && !c.is_installed
-        });
-
-        let instructions = if status.mandatory_met {
-            if has_missing_config {
-                "Press Enter to continue • I to install tmux config • R to re-check"
-            } else {
-                "Press Enter to continue"
-            }
-        } else if has_missing_config {
-            "Install required dependencies • I to install tmux config • R to re-check"
+        let instructions = if status.required_met() {
+            "Press Enter to continue • I to install tmux config • R to re-check"
         } else {
-            "Install required dependencies and press R to re-check"
+            "Install required dependencies • I to install tmux config • R to re-check"
         };
 
         let instr_widget =
@@ -893,7 +858,7 @@ impl OnboardingComponent {
                 Span::styled(
                     format!(
                         "{}/{} installed",
-                        status.installed_count(),
+                        status.satisfied_count(),
                         status.total_count()
                     ),
                     Style::default().fg(MUTED_GRAY),
@@ -1072,5 +1037,75 @@ impl OnboardingComponent {
 impl Default for OnboardingComponent {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Render one topic (header + its deps) into a column's item list. Each dep
+/// shows its icon, name, detected detail, tier tag and a dimmed one-liner "why",
+/// plus an indented install hint when it's missing.
+fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
+        Span::styled(
+            topic.label,
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
+    ])));
+    for d in &topic.deps {
+        let (icon, icon_color) = dep_icon(d);
+        let tier_tag = if d.satisfied {
+            String::new()
+        } else {
+            format!(" [{}]", d.tier.label())
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(icon, Style::default().fg(icon_color)),
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                d.name,
+                if d.satisfied {
+                    Style::default().fg(SOFT_WHITE)
+                } else {
+                    Style::default().fg(MUTED_GRAY)
+                },
+            ),
+            Span::styled(dep_state_detail(&d.state), Style::default().fg(MUTED_GRAY)),
+            Span::styled(tier_tag, Style::default().fg(MUTED_GRAY)),
+            Span::styled(format!("  {}", d.why), Style::default().fg(SUBDUED_BORDER)),
+        ])));
+        if !d.satisfied {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("      → ", Style::default().fg(CORNFLOWER_BLUE)),
+                Span::styled(d.install_hint.clone(), Style::default().fg(CORNFLOWER_BLUE)),
+            ])));
+        }
+    }
+}
+
+/// Icon + color for a dependency report: ✓ when satisfied, otherwise keyed to
+/// its tier (required=✗ red, recommended=○ yellow, optional=○ gray, suggested=· gray).
+fn dep_icon(d: &DepReport) -> (&'static str, Color) {
+    if d.satisfied {
+        return ("✓", SELECTION_GREEN);
+    }
+    match d.tier {
+        Tier::Required => ("✗", ERROR_RED),
+        Tier::Recommended => ("○", WARNING_YELLOW),
+        Tier::Optional => ("○", MUTED_GRAY),
+        Tier::Suggested => ("·", MUTED_GRAY),
+    }
+}
+
+/// Short trailing detail for a dependency's detected state.
+fn dep_state_detail(state: &DepState) -> String {
+    match state {
+        DepState::Ok(Some(d)) => format!(" ({})", d.chars().take(24).collect::<String>()),
+        DepState::Ok(None) => String::new(),
+        DepState::Alt(d) => format!(" (via {d})"),
+        DepState::TooOld(d) => format!(" — {d}"),
+        DepState::Missing => String::new(),
+        DepState::Unknown => " (?)".to_string(),
     }
 }

@@ -1,8 +1,8 @@
 // ABOUTME: State management for onboarding wizard
 // Tracks current step, user inputs, and validation results
 
-use super::dependency_checker::DependencyStatus;
 use crate::editors;
+use crate::setup::SetupStatus;
 use std::path::PathBuf;
 
 /// Steps in the onboarding wizard
@@ -92,7 +92,7 @@ impl OnboardingStep {
             Self::Welcome => true,
             Self::DependencyCheck => {
                 // Can advance if mandatory deps are met
-                state.dependency_status.as_ref().map(|s| s.mandatory_met).unwrap_or(false)
+                state.dependency_status.as_ref().map(|s| s.required_met()).unwrap_or(false)
             }
             Self::GitDirectories => {
                 // Can advance if at least one valid directory
@@ -227,7 +227,7 @@ pub struct OnboardingState {
     /// Current focus area
     pub focus: OnboardingFocus,
     /// Dependency check results (populated after check)
-    pub dependency_status: Option<DependencyStatus>,
+    pub dependency_status: Option<SetupStatus>,
     /// Whether dependency check is in progress
     pub dependency_check_running: bool,
     /// Raw input for git directories (comma-separated)
@@ -246,8 +246,6 @@ pub struct OnboardingState {
     pub show_cursor: bool,
     /// Error message to display
     pub error_message: Option<String>,
-    /// Selected index in dependency list
-    pub selected_dep_index: usize,
     /// Dependencies user chose to skip
     pub skipped_dependencies: Vec<String>,
     /// Available editor options (detected on EditorSelection step)
@@ -281,7 +279,6 @@ impl OnboardingState {
             cursor_position: 0,
             show_cursor: true,
             error_message: None,
-            selected_dep_index: 0,
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,
