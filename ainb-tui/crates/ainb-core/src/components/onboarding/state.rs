@@ -246,8 +246,6 @@ pub struct OnboardingState {
     pub show_cursor: bool,
     /// Error message to display
     pub error_message: Option<String>,
-    /// Selected index in dependency list
-    pub selected_dep_index: usize,
     /// Dependencies user chose to skip
     pub skipped_dependencies: Vec<String>,
     /// Available editor options (detected on EditorSelection step)
@@ -281,7 +279,6 @@ impl OnboardingState {
             cursor_position: 0,
             show_cursor: true,
             error_message: None,
-            selected_dep_index: 0,
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,

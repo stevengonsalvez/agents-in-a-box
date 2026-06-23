@@ -7,10 +7,10 @@ pub mod catalog;
 pub mod detect;
 pub mod provision;
 
-pub use catalog::{catalog, Consumer, Dep, Detect, Install, Platform, Tier, Topic};
+pub use catalog::{Consumer, Dep, Detect, Install, Platform, Tier, Topic, catalog};
 pub use detect::{
-    detect_all, detect_dep, DepReport, DepState, Env, RealEnv, SetupStatus, TopicReport,
+    DepReport, DepState, Env, RealEnv, SetupStatus, TopicReport, detect_all, detect_dep,
 };
 pub use provision::{
-    install_tmux_config, provision, ConsentLevel, ProvisionMode, ProvisionOutcome,
+    ConsentLevel, ProvisionMode, ProvisionOutcome, install_tmux_config, provision,
 };

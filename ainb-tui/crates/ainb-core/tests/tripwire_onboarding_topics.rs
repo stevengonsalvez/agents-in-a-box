@@ -13,7 +13,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn ainb_bin() -> PathBuf {
@@ -56,7 +60,10 @@ fn onboarding_dependency_step_renders_topics() {
         home.path().display(),
         ainb_bin().display()
     );
-    Command::new("tmux").args(["send-keys", "-t", &session, &cmd, "Enter"]).status().unwrap();
+    Command::new("tmux")
+        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .status()
+        .unwrap();
 
     // Wait for the Welcome step of the setup wizard.
     let pre = poll_capture(&session, Instant::now() + Duration::from_secs(45), |c| {
@@ -69,7 +76,10 @@ fn onboarding_dependency_step_renders_topics() {
     }
 
     // Advance Welcome -> DependencyCheck (auto-triggers the catalog detect).
-    Command::new("tmux").args(["send-keys", "-t", &session, "Enter"]).status().unwrap();
+    Command::new("tmux")
+        .args(["send-keys", "-t", &session, "Enter"])
+        .status()
+        .unwrap();
 
     // The new topic-grouped model must render these headers — none of which
     // existed in the old flat category list (Core/Container/Session/Toolkit/
@@ -85,15 +95,34 @@ fn onboarding_dependency_step_renders_topics() {
     Command::new("tmux").args(["kill-session", "-t", &session]).status().ok();
 
     // Positive markers: the new topics are present.
-    assert!(post.contains("agents-in-a-box"), "missing agents-in-a-box topic:\n{post}");
+    assert!(
+        post.contains("agents-in-a-box"),
+        "missing agents-in-a-box topic:\n{post}"
+    );
     assert!(post.contains("Reflect"), "missing Reflect topic:\n{post}");
-    assert!(post.contains("Plugin binaries"), "missing Plugin binaries topic:\n{post}");
-    assert!(post.contains("Statusline"), "missing Statusline topic:\n{post}");
+    assert!(
+        post.contains("Plugin binaries"),
+        "missing Plugin binaries topic:\n{post}"
+    );
+    assert!(
+        post.contains("Statusline"),
+        "missing Statusline topic:\n{post}"
+    );
     // Tier tags are part of the new model — at least one must show.
     assert!(
         post.contains("[recommended]") || post.contains("[optional]"),
         "no tier tags rendered (topic/tier model not active):\n{post}"
     );
+    // A fresh HOME leaves ainb-toolkit/statusline unsatisfied, so at least one
+    // install hint (the → arrow) must render — proves missing deps surface their
+    // provisioner, not just that everything happened to be installed.
+    assert!(
+        post.contains('\u{2192}'),
+        "no install-hint arrow rendered:\n{post}"
+    );
     // Negative: we are not stuck on the loading placeholder.
-    assert!(!post.contains("Checking dependencies"), "stuck on dependency-check spinner:\n{post}");
+    assert!(
+        !post.contains("Checking dependencies"),
+        "stuck on dependency-check spinner:\n{post}"
+    );
 }

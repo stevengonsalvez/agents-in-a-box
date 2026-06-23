@@ -14,8 +14,8 @@ use std::io::{self, Write as _};
 use super::OutputFormat;
 use crate::config::{AppConfig, OnboardingConfig};
 use crate::setup::{
-    catalog, detect_all, detect_dep, provision, DepState, ProvisionMode, ProvisionOutcome, RealEnv,
-    SetupStatus, Tier,
+    DepState, ProvisionMode, ProvisionOutcome, RealEnv, SetupStatus, Tier, catalog, detect_all,
+    detect_dep, provision,
 };
 
 #[derive(clap::Args)]
@@ -35,6 +35,11 @@ pub struct InitArgs {
     /// Skip interactive confirmation (required for non-interactive --reset)
     #[arg(long, short)]
     pub force: bool,
+
+    /// Auto-install missing dependencies ainb can install safely (npm/uv/cargo/
+    /// ainb/claude-plugin). brew/curl still need explicit per-item consent.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// Output structure for `--status`
@@ -76,7 +81,7 @@ pub async fn execute(args: InitArgs, format: OutputFormat) -> Result<()> {
     } else if args.check {
         cmd_check(format)
     } else {
-        cmd_setup(format)
+        cmd_setup(format, args.yes)
     }
 }
 
@@ -132,7 +137,9 @@ fn render_setup_text(status: &SetupStatus) {
         if status.recommended_met() {
             println!("\u{2713} All dependencies ready ({sat}/{total}).");
         } else {
-            println!("\u{2713} Required dependencies satisfied ({sat}/{total}) — some recommended missing.");
+            println!(
+                "\u{2713} Required dependencies satisfied ({sat}/{total}) — some recommended missing."
+            );
         }
     } else {
         println!("\u{2717} Missing required dependencies ({sat}/{total}).");
@@ -156,7 +163,11 @@ fn offer_installs(status: &SetupStatus, yes: bool) {
     }
 
     let cat = catalog();
-    let mode = if yes { ProvisionMode::Yes } else { ProvisionMode::Ask };
+    let mode = if yes {
+        ProvisionMode::Yes
+    } else {
+        ProvisionMode::Ask
+    };
     println!("\nInstall missing dependencies:");
     for id in missing {
         let Some(dep) = cat.iter().flat_map(|t| &t.deps).find(|d| d.id == id) else {
@@ -170,7 +181,18 @@ fn offer_installs(status: &SetupStatus, yes: bool) {
             line.trim().eq_ignore_ascii_case("y")
         };
         match provision(dep, mode, &mut confirm) {
-            Ok(ProvisionOutcome::Installed) => println!("  \u{2713} {} installed", dep.name),
+            Ok(ProvisionOutcome::Installed) => {
+                // Re-probe so we report what's actually detectable now, not just
+                // that the installer exited 0 (it may not be on PATH yet).
+                if detect_dep(dep, &RealEnv).satisfied() {
+                    println!("  \u{2713} {} installed", dep.name);
+                } else {
+                    println!(
+                        "  \u{26A0} {} installed but not detected yet (may need a fresh shell)",
+                        dep.name
+                    );
+                }
+            }
             Ok(ProvisionOutcome::Declined) => println!("  · {} skipped", dep.name),
             Ok(ProvisionOutcome::PrintOnly { command, reason }) => {
                 println!("  · {}: {command}  ({reason})", dep.name)
@@ -188,7 +210,9 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
 
     match format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&status)
+            // Same envelope as `ainb init --json` ({"setup": ...}) so downstream
+            // tooling reads one shape regardless of which command produced it.
+            let json = serde_json::to_string_pretty(&serde_json::json!({ "setup": status }))
                 .context("Failed to serialize setup status")?;
             println!("{json}");
         }
@@ -205,7 +229,7 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
 }
 
 /// `ainb init` (no flags) - first-time setup
-fn cmd_setup(format: OutputFormat) -> Result<()> {
+fn cmd_setup(format: OutputFormat, yes: bool) -> Result<()> {
     let status = detect_all(&RealEnv);
 
     if matches!(format, OutputFormat::Text) {
@@ -225,9 +249,10 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
     }
 
     // Offer to install missing (recommended/optional) dependencies — same
-    // provisioner the TUI uses. Interactive only (Text mode).
-    if matches!(format, OutputFormat::Text) {
-        offer_installs(&status, false);
+    // provisioner the TUI uses. Interactive in Text mode; with --yes, auto-runs
+    // the safe installers without prompting.
+    if matches!(format, OutputFormat::Text) || yes {
+        offer_installs(&status, yes);
     }
 
     // Ensure base directory exists

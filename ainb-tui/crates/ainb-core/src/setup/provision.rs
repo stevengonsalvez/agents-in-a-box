@@ -12,7 +12,7 @@
 use std::fs;
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::setup::catalog::{Dep, Install};
 
@@ -65,7 +65,10 @@ pub enum ProvisionOutcome {
     /// Installer ran and exited successfully.
     Installed,
     /// Not run — here's the command to run yourself (with the reason).
-    PrintOnly { command: String, reason: &'static str },
+    PrintOnly {
+        command: String,
+        reason: &'static str,
+    },
     /// User declined the confirmation prompt.
     Declined,
 }
@@ -93,7 +96,11 @@ pub fn plan(install: &Install) -> InstallPlan {
     match install {
         Install::Npm(p) => InstallPlan {
             argv: Some(
-                ["npm", "install", "-g"].iter().map(|x| s(x)).chain(p.iter().map(|x| s(x))).collect(),
+                ["npm", "install", "-g"]
+                    .iter()
+                    .map(|x| s(x))
+                    .chain(p.iter().map(|x| s(x)))
+                    .collect(),
             ),
             consent: ConsentLevel::Auto,
             display,
@@ -139,9 +146,11 @@ pub fn plan(install: &Install) -> InstallPlan {
             consent: ConsentLevel::Explicit,
             display,
         },
-        Install::Manual(_) | Install::BundledWith(_) => {
-            InstallPlan { argv: None, consent: ConsentLevel::Never, display }
-        }
+        Install::Manual(_) | Install::BundledWith(_) => InstallPlan {
+            argv: None,
+            consent: ConsentLevel::Never,
+            display,
+        },
     }
 }
 
@@ -181,12 +190,18 @@ pub fn provision(
         ConsentLevel::Auto => "",
     };
     match decide(p.consent, mode) {
-        Decision::Print => Ok(ProvisionOutcome::PrintOnly { command: p.display, reason }),
+        Decision::Print => Ok(ProvisionOutcome::PrintOnly {
+            command: p.display,
+            reason,
+        }),
         Decision::Confirm => {
             if confirm(&p.display) {
                 match p.argv {
                     Some(argv) => execute(&argv).map(|_| ProvisionOutcome::Installed),
-                    None => Ok(ProvisionOutcome::PrintOnly { command: p.display, reason }),
+                    None => Ok(ProvisionOutcome::PrintOnly {
+                        command: p.display,
+                        reason,
+                    }),
                 }
             } else {
                 Ok(ProvisionOutcome::Declined)
@@ -194,7 +209,10 @@ pub fn provision(
         }
         Decision::Run => match p.argv {
             Some(argv) => execute(&argv).map(|_| ProvisionOutcome::Installed),
-            None => Ok(ProvisionOutcome::PrintOnly { command: p.display, reason }),
+            None => Ok(ProvisionOutcome::PrintOnly {
+                command: p.display,
+                reason,
+            }),
         },
     }
 }
@@ -254,14 +272,20 @@ mod tests {
     #[test]
     fn plan_uv() {
         let p = plan(&Install::Uv("headroom-ai[proxy]"));
-        assert_eq!(p.argv.unwrap(), vec!["uv", "tool", "install", "headroom-ai[proxy]"]);
+        assert_eq!(
+            p.argv.unwrap(),
+            vec!["uv", "tool", "install", "headroom-ai[proxy]"]
+        );
         assert_eq!(p.consent, ConsentLevel::Auto);
     }
 
     #[test]
     fn plan_ainb_uses_placeholder() {
         let p = plan(&Install::Ainb(&["reflect", "bootstrap", "--yes"]));
-        assert_eq!(p.argv.unwrap(), vec!["ainb", "reflect", "bootstrap", "--yes"]);
+        assert_eq!(
+            p.argv.unwrap(),
+            vec!["ainb", "reflect", "bootstrap", "--yes"]
+        );
         assert_eq!(p.consent, ConsentLevel::Auto);
     }
 
@@ -284,8 +308,14 @@ mod tests {
 
     #[test]
     fn plan_manual_and_bundled_are_never() {
-        assert_eq!(plan(&Install::Manual("see docs")).consent, ConsentLevel::Never);
+        assert_eq!(
+            plan(&Install::Manual("see docs")).consent,
+            ConsentLevel::Never
+        );
         assert!(plan(&Install::Manual("see docs")).argv.is_none());
-        assert_eq!(plan(&Install::BundledWith("ainb")).consent, ConsentLevel::Never);
+        assert_eq!(
+            plan(&Install::BundledWith("ainb")).consent,
+            ConsentLevel::Never
+        );
     }
 }

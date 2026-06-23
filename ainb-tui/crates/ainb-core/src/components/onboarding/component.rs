@@ -1046,7 +1046,10 @@ impl Default for OnboardingComponent {
 fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
     items.push(ListItem::new(Line::from(vec![
         Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
-        Span::styled(topic.label, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            topic.label,
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
     ])));
     for d in &topic.deps {

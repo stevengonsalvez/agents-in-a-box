@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 pub use crate::cli::deps::{Env, RealEnv};
-use crate::setup::catalog::{catalog, Consumer, Detect, Tier, Topic};
+use crate::setup::catalog::{Consumer, Detect, Tier, Topic, catalog};
 
 /// Detected state of a single dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -151,6 +151,16 @@ fn detect_state(detect: &Detect, env: &dyn Env) -> DepState {
 /// Bespoke probes for the `Custom(..)` detection specs.
 fn detect_custom(name: &str, env: &dyn Env) -> DepState {
     match name {
+        // ainb is whatever is running this wizard — always present. A PATH probe
+        // would false-negative for an off-PATH / freshly-downloaded binary and
+        // trap the user on the dependency step (the only "install" is Manual).
+        "ainb-self" => {
+            if std::env::current_exe().is_ok() || env.which("ainb") {
+                DepState::Ok(None)
+            } else {
+                DepState::Missing
+            }
+        }
         // reflect-kb is installed only when the `reflect` binary is on PATH —
         // a bare system-python import is not enough (skills shell out to it).
         "reflect-kb" => {
@@ -254,12 +264,7 @@ pub fn detect_all(env: &dyn Env) -> SetupStatus {
             id: t.id,
             label: t.label,
             description: t.description,
-            deps: t
-                .deps
-                .iter()
-                .filter(|d| d.applies_here())
-                .map(|d| report_dep(d, env))
-                .collect(),
+            deps: t.deps.iter().filter(|d| d.applies_here()).map(|d| report_dep(d, env)).collect(),
         })
         .filter(|t| !t.deps.is_empty())
         .collect();
@@ -287,12 +292,20 @@ mod tests {
     }
 
     fn find<'a>(status: &'a SetupStatus, id: &str) -> &'a DepReport {
-        status.topics.iter().flat_map(|t| &t.deps).find(|d| d.id == id).expect("dep present")
+        status
+            .topics
+            .iter()
+            .flat_map(|t| &t.deps)
+            .find(|d| d.id == id)
+            .expect("dep present")
     }
 
     #[test]
     fn empty_host_blocks_required_only() {
-        let env = MockEnv { present: vec![], runs: HashMap::new() };
+        let env = MockEnv {
+            present: vec![],
+            runs: HashMap::new(),
+        };
         let status = detect_all(&env);
         assert!(find(&status, "git").is_blocking());
         assert!(find(&status, "tmux").is_blocking());
@@ -304,7 +317,10 @@ mod tests {
 
     #[test]
     fn bin_present_is_satisfied() {
-        let env = MockEnv { present: vec!["git", "tmux", "jq", "ainb"], runs: HashMap::new() };
+        let env = MockEnv {
+            present: vec!["git", "tmux", "jq", "ainb"],
+            runs: HashMap::new(),
+        };
         let status = detect_all(&env);
         assert!(find(&status, "git").satisfied);
         assert!(find(&status, "tmux").satisfied);
@@ -312,7 +328,10 @@ mod tests {
 
     #[test]
     fn gtimeout_satisfies_timeout_as_alt() {
-        let env = MockEnv { present: vec!["gtimeout"], runs: HashMap::new() };
+        let env = MockEnv {
+            present: vec!["gtimeout"],
+            runs: HashMap::new(),
+        };
         let status = detect_all(&env);
         let t = find(&status, "timeout");
         assert!(t.satisfied);
@@ -323,21 +342,36 @@ mod tests {
     fn bash_3_too_old_5_ok() {
         let old = MockEnv {
             present: vec!["bash"],
-            runs: HashMap::from([("bash -c echo ${BASH_VERSINFO[0]:-0}".to_string(), "3".to_string())]),
+            runs: HashMap::from([(
+                "bash -c echo ${BASH_VERSINFO[0]:-0}".to_string(),
+                "3".to_string(),
+            )]),
         };
-        assert!(matches!(find(&detect_all(&old), "bash").state, DepState::TooOld(_)));
+        assert!(matches!(
+            find(&detect_all(&old), "bash").state,
+            DepState::TooOld(_)
+        ));
         let new = MockEnv {
             present: vec!["bash"],
-            runs: HashMap::from([("bash -c echo ${BASH_VERSINFO[0]:-0}".to_string(), "5".to_string())]),
+            runs: HashMap::from([(
+                "bash -c echo ${BASH_VERSINFO[0]:-0}".to_string(),
+                "5".to_string(),
+            )]),
         };
         assert!(find(&detect_all(&new), "bash").satisfied);
     }
 
     #[test]
     fn reflect_kb_needs_reflect_binary() {
-        let env = MockEnv { present: vec!["reflect"], runs: HashMap::new() };
+        let env = MockEnv {
+            present: vec!["reflect"],
+            runs: HashMap::new(),
+        };
         assert!(find(&detect_all(&env), "reflect-kb").satisfied);
-        let env2 = MockEnv { present: vec![], runs: HashMap::new() };
+        let env2 = MockEnv {
+            present: vec![],
+            runs: HashMap::new(),
+        };
         assert!(!find(&detect_all(&env2), "reflect-kb").satisfied);
     }
 
@@ -345,7 +379,10 @@ mod tests {
     fn claude_detected_via_command() {
         let env = MockEnv {
             present: vec![],
-            runs: HashMap::from([("claude --version".to_string(), "2.1.0 (Claude Code)".to_string())]),
+            runs: HashMap::from([(
+                "claude --version".to_string(),
+                "2.1.0 (Claude Code)".to_string(),
+            )]),
         };
         let status = detect_all(&env);
         let c = find(&status, "claude");
@@ -354,7 +391,10 @@ mod tests {
 
     #[test]
     fn marketplace_plugins_are_unknown() {
-        let env = MockEnv { present: vec![], runs: HashMap::new() };
+        let env = MockEnv {
+            present: vec![],
+            runs: HashMap::new(),
+        };
         let status = detect_all(&env);
         let cm = find(&status, "caveman");
         assert!(matches!(cm.state, DepState::Unknown));
