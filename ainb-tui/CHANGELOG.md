@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-06-23
+### Added
+- Merge pull request #325 from stevengonsalvez/chore/otel-dashboards
+- Merge pull request #333 from stevengonsalvez/feat/zellij-config
+- **ainb-tui**: add zellij config alongside tmux.conf
+- **burndown**: make the outer usage tabs keyboard-reachable via [ / ]
+- **illustration:alex**: switch Alex to sketchnote style (#331)
+- **init**: drive ainb init from the shared setup catalog
+- **onboarding**: render TUI dependency step from the setup catalog
+- **onboarding**: two-column layout, per-dep why, Codex parity
+- **otel**: expand Claude Code dashboard to full telemetry coverage
+- **setup**: provisioner engine with consent policy
+- **setup**: shared topic/dependency catalog + detection engine
+- **site**: add a light-mode palette
+- **site**: add explainer-style matrix + callout components
+- **site**: add option-card component for the systems comparison
+
+### Fixed
+- Merge pull request #328 from stevengonsalvez/f/clean-menu
+- **onboarding**: address PR #348 review
+- **site**: impeccable polish on reflect-memory components
+- **tui**: even sidebar spacing and aligned shortcut hints
+
+### Documentation
+- Merge pull request #330 from stevengonsalvez/docs/reflect-memory-polish
+- Merge pull request #332 from stevengonsalvez/docs/impeccable-polish
+- Merge pull request #338 from stevengonsalvez/docs/eight-systems-cards
+- **assets**: add reflect session-timeline diagram
+- **burndown**: correct the headroom_tokens_saved source comment
+- **cli**: regenerate CLI reference for ainb init --yes
+- **illustration**: add Popa edition of the 22-frame aib mural (#342)
+- **illustration**: add Sport Head trademark notice, move Popa to top, drop credits (#347)
+- **illustration**: add example gallery to plugin README (#335)
+- **illustration**: credit original + English port (#336)
+- **illustration**: densify sparse Popa aib frames (#343)
+- **illustration**: extend aib mural to 22 frames (#340)
+- **illustration**: featured 10-frame agents-in-a-box series (#339)
+- **illustration**: fix garbled text on Popa inbox frame (#345)
+- **illustration**: restore dense Popa inbox frame with clean text (#346)
+- **illustration**: retitle Popa witr frame to 'Why Is This Running' (#344)
+- **illustration**: trademarked Sport Head examples, drop old agents-box ones (#349)
+- **reflect**: add 'why build, not adopt' comparison page
+- **reflect**: convert problem-and-fit memory-product table to scroll matrix
+- **reflect**: convert recall feature tables to callout cards
+- **reflect**: fit construct loop diagram in a box
+- **reflect**: fit problem-and-fit ASCII diagrams in boxes
+- **reflect**: fit recall pipeline diagram in a box
+- **reflect**: reframe problem-and-fit around context engineering
+- **reflect**: render the 8 systems as option cards + facet legend
+- **reflect**: scroll-matrix + scored heatmap + LOCOMO on comparison
+- **site**: link the comparison page in the Reflect Memory sidebar
+- **tui**: document Headroom/RTK token optimisation + the Daemons overlay
+- add impeccable design context (.impeccable.md)
+
+### Other
+- pin reflect plugin to v5.0.3
+- **illustration**: rename alex sub-skill to sporthead-alex (#334)
+
+
 ## [1.8.1] - 2026-06-22
 ### Added
 - Merge pull request #327 from stevengonsalvez/feat/mcp-socket
