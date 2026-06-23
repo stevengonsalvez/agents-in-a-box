@@ -184,10 +184,21 @@ fn detect_custom(name: &str, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
-        // notifyd hook installed for Claude.
+        // Codex statusline is pull-based: it works once you're logged into Codex
+        // (~/.codex/auth.json), no settings wiring needed.
+        "codex-statusline" => {
+            if home_path_exists(".codex/auth.json") {
+                DepState::Ok(Some("codex logged in".to_string()))
+            } else {
+                DepState::Missing
+            }
+        }
+        // notifyd hook installed for any agent (Claude / Codex / Copilot).
         "notifyd-installed" => {
             if home_path_exists(".claude/plugins/ainb-hooks")
                 || home_file_contains(".claude/settings.json", "ainb-hooks")
+                || home_path_exists(".codex/hooks.json")
+                || home_path_exists(".copilot/hooks/ainb.json")
             {
                 DepState::Ok(None)
             } else {

@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::state::{OnboardingState, OnboardingStep};
-use crate::setup::{DepReport, DepState, Tier};
+use crate::setup::{DepReport, DepState, Tier, TopicReport};
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -293,8 +293,8 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(2), // Status summary
-                Constraint::Min(10),   // Dependency list
+                Constraint::Length(3), // Status summary + one-liner legend
+                Constraint::Min(10),   // Dependency columns
                 Constraint::Length(2), // Instructions
             ])
             .split(inner);
@@ -314,67 +314,56 @@ impl OnboardingComponent {
             ("❌", "Missing required dependencies", ERROR_RED)
         };
 
-        let summary = Paragraph::new(Line::from(vec![
-            Span::styled(status_icon, Style::default()),
-            Span::styled(" ", Style::default()),
-            Span::styled(status_text, Style::default().fg(status_color)),
-            Span::styled(
-                format!("  ({}/{})", status.satisfied_count(), status.total_count()),
-                Style::default().fg(MUTED_GRAY),
-            ),
-        ]))
+        // Summary line + a one-liner explaining what this screen is, with the
+        // icon legend so a first-time user knows why each row is here.
+        let summary = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(status_icon, Style::default()),
+                Span::styled(" ", Style::default()),
+                Span::styled(status_text, Style::default().fg(status_color)),
+                Span::styled(
+                    format!("  ({}/{})", status.satisfied_count(), status.total_count()),
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "First-run setup — the tools ainb, your agents, plugins & memory need.   ",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+                Span::styled("✓", Style::default().fg(SELECTION_GREEN)),
+                Span::styled(" ready  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("✗", Style::default().fg(ERROR_RED)),
+                Span::styled(" required  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("○", Style::default().fg(WARNING_YELLOW)),
+                Span::styled(" recommended/optional  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("·", Style::default().fg(MUTED_GRAY)),
+                Span::styled(" suggested", Style::default().fg(MUTED_GRAY)),
+            ]),
+        ])
         .alignment(Alignment::Center);
         frame.render_widget(summary, content_layout[0]);
 
-        // Dependency list grouped by topic
-        let mut items: Vec<ListItem> = Vec::new();
-
+        // Distribute topics across two columns, balanced by rendered height, so
+        // the whole width is used instead of one tall narrow list.
+        let mut col_items: [Vec<ListItem>; 2] = [Vec::new(), Vec::new()];
+        let mut col_lines = [0usize, 0usize];
         for topic in &status.topics {
-            // Topic header
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(
-                    topic.label,
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
-            ])));
-
-            for d in &topic.deps {
-                let (icon, icon_color) = dep_icon(d);
-                let detail = dep_state_detail(&d.state);
-                let tier_tag = if d.satisfied {
-                    String::new()
-                } else {
-                    format!(" [{}]", d.tier.label())
-                };
-                let install_hint = if d.satisfied {
-                    String::new()
-                } else {
-                    format!(" → {}", d.install_hint)
-                };
-
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(icon, Style::default().fg(icon_color)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(
-                        d.name,
-                        if d.satisfied {
-                            Style::default().fg(SOFT_WHITE)
-                        } else {
-                            Style::default().fg(MUTED_GRAY)
-                        },
-                    ),
-                    Span::styled(detail, Style::default().fg(MUTED_GRAY)),
-                    Span::styled(tier_tag, Style::default().fg(MUTED_GRAY)),
-                    Span::styled(install_hint, Style::default().fg(CORNFLOWER_BLUE)),
-                ])));
-            }
+            let target = if col_lines[0] <= col_lines[1] { 0 } else { 1 };
+            let before = col_items[target].len();
+            push_topic_items(&mut col_items[target], topic);
+            col_lines[target] += col_items[target].len() - before;
         }
 
-        let list = List::new(items).style(Style::default().bg(PANEL_BG));
-        frame.render_widget(list, content_layout[1]);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(content_layout[1]);
+        for (i, area) in cols.iter().enumerate() {
+            let list =
+                List::new(std::mem::take(&mut col_items[i])).style(Style::default().bg(PANEL_BG));
+            frame.render_widget(list, *area);
+        }
 
         let instructions = if status.required_met() {
             "Press Enter to continue • I to install tmux config • R to re-check"
@@ -1048,6 +1037,47 @@ impl OnboardingComponent {
 impl Default for OnboardingComponent {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Render one topic (header + its deps) into a column's item list. Each dep
+/// shows its icon, name, detected detail, tier tag and a dimmed one-liner "why",
+/// plus an indented install hint when it's missing.
+fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
+        Span::styled(topic.label, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
+    ])));
+    for d in &topic.deps {
+        let (icon, icon_color) = dep_icon(d);
+        let tier_tag = if d.satisfied {
+            String::new()
+        } else {
+            format!(" [{}]", d.tier.label())
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(icon, Style::default().fg(icon_color)),
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                d.name,
+                if d.satisfied {
+                    Style::default().fg(SOFT_WHITE)
+                } else {
+                    Style::default().fg(MUTED_GRAY)
+                },
+            ),
+            Span::styled(dep_state_detail(&d.state), Style::default().fg(MUTED_GRAY)),
+            Span::styled(tier_tag, Style::default().fg(MUTED_GRAY)),
+            Span::styled(format!("  {}", d.why), Style::default().fg(SUBDUED_BORDER)),
+        ])));
+        if !d.satisfied {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("      → ", Style::default().fg(CORNFLOWER_BLUE)),
+                Span::styled(d.install_hint.clone(), Style::default().fg(CORNFLOWER_BLUE)),
+            ])));
+        }
     }
 }
 
