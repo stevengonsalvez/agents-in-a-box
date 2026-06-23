@@ -212,6 +212,12 @@ fn home_file_contains(rel: &str, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect a single dependency's state against the host (public for the CLI
+/// install loop, which needs to re-probe one dep after provisioning it).
+pub fn detect_dep(dep: &crate::setup::catalog::Dep, env: &dyn Env) -> DepState {
+    detect_state(&dep.detect, env)
+}
+
 /// Build a `DepReport` for one catalog dep against the host.
 fn report_dep(dep: &crate::setup::catalog::Dep, env: &dyn Env) -> DepReport {
     let state = detect_state(&dep.detect, env);

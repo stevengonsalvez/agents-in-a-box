@@ -10,10 +10,13 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use std::fs;
 use std::io::{self, Write as _};
-use std::path::PathBuf;
 
 use super::OutputFormat;
 use crate::config::{AppConfig, OnboardingConfig};
+use crate::setup::{
+    catalog, detect_all, detect_dep, provision, DepState, ProvisionMode, ProvisionOutcome, RealEnv,
+    SetupStatus, Tier,
+};
 
 #[derive(clap::Args)]
 pub struct InitArgs {
@@ -32,35 +35,6 @@ pub struct InitArgs {
     /// Skip interactive confirmation (required for non-interactive --reset)
     #[arg(long, short)]
     pub force: bool,
-}
-
-/// Status for a single prerequisite check
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrereqStatus {
-    /// Tool is installed and available
-    Ok,
-    /// Required tool is missing
-    Missing,
-    /// Optional tool is missing
-    Warning,
-}
-
-/// Result of checking a single prerequisite
-#[derive(Debug, Clone, Serialize)]
-pub struct PrereqCheck {
-    pub name: String,
-    pub required: bool,
-    pub status: PrereqStatus,
-    pub path: Option<String>,
-    pub message: String,
-}
-
-/// Full prerequisite report
-#[derive(Debug, Clone, Serialize)]
-pub struct PrereqReport {
-    pub checks: Vec<PrereqCheck>,
-    pub all_required_present: bool,
 }
 
 /// Output structure for `--status`
@@ -106,131 +80,103 @@ pub async fn execute(args: InitArgs, format: OutputFormat) -> Result<()> {
     }
 }
 
-// --- Prerequisite checking ---------------------------------------------------
+// --- Catalog rendering (shared with the TUI via crate::setup) ----------------
 
-/// Real PATH lookup using the `which` crate
-fn real_lookup(name: &str) -> Option<PathBuf> {
-    which::which(name).ok()
+fn state_detail(state: &DepState) -> String {
+    match state {
+        DepState::Ok(Some(d)) => format!(" ({d})"),
+        DepState::Ok(None) => String::new(),
+        DepState::Alt(d) => format!(" (via {d})"),
+        DepState::TooOld(d) => format!(" — {d}"),
+        DepState::Missing => String::new(),
+        DepState::Unknown => " (?)".to_string(),
+    }
 }
 
-/// Build a single prerequisite check entry using a caller-supplied lookup
-fn check_prerequisite<F>(
-    name: &str,
-    required: bool,
-    ok_message: &str,
-    missing_message: &str,
-    lookup: &F,
-) -> PrereqCheck
-where
-    F: Fn(&str) -> Option<PathBuf>,
-{
-    match lookup(name) {
-        Some(path) => PrereqCheck {
-            name: name.to_string(),
-            required,
-            status: PrereqStatus::Ok,
-            path: Some(path.display().to_string()),
-            message: ok_message.to_string(),
-        },
-        None => PrereqCheck {
-            name: name.to_string(),
-            required,
-            status: if required {
-                PrereqStatus::Missing
+/// Render the setup catalog grouped by topic — the exact same model the TUI
+/// dependency step renders, so the CLI and TUI onboard identically.
+fn render_setup_text(status: &SetupStatus) {
+    println!("Setup check (topics × dependencies):");
+    println!("{}", "\u{2501}".repeat(64));
+
+    for topic in &status.topics {
+        println!("\n  {} — {}", topic.label, topic.description);
+        for d in &topic.deps {
+            let marker = if d.satisfied {
+                "\u{2713}" // ✓
+            } else if d.tier == Tier::Required {
+                "\u{2717}" // ✗
             } else {
-                PrereqStatus::Warning
-            },
-            path: None,
-            message: missing_message.to_string(),
-        },
-    }
-}
-
-/// Run the full prerequisite sweep using the provided lookup function.
-///
-/// Exposed (pub) for testability - tests pass a mock lookup that consults a
-/// canned list of "installed" tools.
-pub fn run_checks<F>(lookup: F) -> PrereqReport
-where
-    F: Fn(&str) -> Option<PathBuf>,
-{
-    let checks = vec![
-        check_prerequisite(
-            "tmux",
-            true,
-            "Terminal multiplexer available",
-            "Install tmux (macOS: `brew install tmux`, Debian/Ubuntu: `apt install tmux`)",
-            &lookup,
-        ),
-        check_prerequisite(
-            "git",
-            true,
-            "Git available",
-            "Install git (macOS: `brew install git`, Debian/Ubuntu: `apt install git`)",
-            &lookup,
-        ),
-        check_prerequisite(
-            "claude",
-            false,
-            "Claude CLI available",
-            "Claude CLI not found - install it or pass `--tool codex|gemini|copilot` to `ainb run`",
-            &lookup,
-        ),
-        check_prerequisite(
-            "docker",
-            false,
-            "Docker available (optional, for containerized sessions)",
-            "Docker not found - optional, only needed for containerized sessions",
-            &lookup,
-        ),
-    ];
-
-    let all_required_present = checks.iter().all(|c| !c.required || c.status == PrereqStatus::Ok);
-
-    PrereqReport {
-        checks,
-        all_required_present,
-    }
-}
-
-/// Print the prerequisite report in text form
-fn print_report_text(report: &PrereqReport) {
-    println!("Prerequisite check:");
-    println!("{}", "\u{2501}".repeat(60));
-
-    for c in &report.checks {
-        let marker = match c.status {
-            PrereqStatus::Ok => "\u{2713}",      // ✓
-            PrereqStatus::Missing => "\u{2717}", // ✗
-            PrereqStatus::Warning => "\u{26A0}", // ⚠
-        };
-        let tag = if c.required { "required" } else { "optional" };
-        println!("  {marker} {:<7} [{tag}] - {}", c.name, c.message);
-        if let Some(path) = &c.path {
-            println!("      \u{21B3} {path}");
+                "\u{26A0}" // ⚠
+            };
+            let tag = if d.satisfied {
+                String::new()
+            } else {
+                format!(" [{}]", d.tier.label())
+            };
+            println!(
+                "    {marker} {:<24}{tag}{}  — {}",
+                d.name,
+                state_detail(&d.state),
+                d.why
+            );
+            if !d.satisfied {
+                println!("        \u{2192} {}", d.install_hint);
+            }
         }
     }
 
     println!();
-    if report.all_required_present {
-        println!("All required prerequisites are available.");
+    let (sat, total) = (status.satisfied_count(), status.total_count());
+    if status.required_met() {
+        if status.recommended_met() {
+            println!("\u{2713} All dependencies ready ({sat}/{total}).");
+        } else {
+            println!("\u{2713} Required dependencies satisfied ({sat}/{total}) — some recommended missing.");
+        }
     } else {
-        println!("Missing required prerequisites (see above).");
+        println!("\u{2717} Missing required dependencies ({sat}/{total}).");
     }
 }
 
-/// Surface the reflect / statusline toolchain (bash>=4, uv, reflect-kb, qmd +
-/// nano-graphrag, …) during setup — classified by what needs each tool —
-/// without blocking onboarding. Full breakdown: `ainb doctor`; install:
-/// `ainb reflect bootstrap`. Shares the catalog in [`crate::cli::deps`].
-fn print_reflect_deps_summary() {
-    let reports = crate::cli::deps::detect(&crate::cli::deps::RealEnv);
-    println!("\n{}", crate::cli::deps::reflect_summary_line(&reports));
-    if reports.iter().any(|r| !r.satisfied) {
-        println!(
-            "  \u{2192} `ainb doctor` for the full classified breakdown · \
-             `ainb reflect bootstrap` to install the reflect toolchain."
-        );
+/// Interactively offer to install each unsatisfied dependency via the shared
+/// provisioner. `yes` runs auto-installable items without prompting (still
+/// prints — never auto-runs — the explicit/system ones). Skips suggested-tier
+/// items that can't be detected.
+fn offer_installs(status: &SetupStatus, yes: bool) {
+    let missing: Vec<&str> = status
+        .topics
+        .iter()
+        .flat_map(|t| &t.deps)
+        .filter(|d| !d.satisfied && !matches!(d.state, DepState::Unknown))
+        .map(|d| d.id)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+
+    let cat = catalog();
+    let mode = if yes { ProvisionMode::Yes } else { ProvisionMode::Ask };
+    println!("\nInstall missing dependencies:");
+    for id in missing {
+        let Some(dep) = cat.iter().flat_map(|t| &t.deps).find(|d| d.id == id) else {
+            continue;
+        };
+        let mut confirm = |cmd: &str| -> bool {
+            print!("  install {} ({cmd})? [y/N] ", dep.name);
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).ok();
+            line.trim().eq_ignore_ascii_case("y")
+        };
+        match provision(dep, mode, &mut confirm) {
+            Ok(ProvisionOutcome::Installed) => println!("  \u{2713} {} installed", dep.name),
+            Ok(ProvisionOutcome::Declined) => println!("  · {} skipped", dep.name),
+            Ok(ProvisionOutcome::PrintOnly { command, reason }) => {
+                println!("  · {}: {command}  ({reason})", dep.name)
+            }
+            Err(e) => println!("  \u{2717} {} failed: {e}", dep.name),
+        }
     }
 }
 
@@ -238,24 +184,20 @@ fn print_reflect_deps_summary() {
 
 /// `ainb init --check`
 fn cmd_check(format: OutputFormat) -> Result<()> {
-    let report = run_checks(real_lookup);
+    let status = detect_all(&RealEnv);
 
     match format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&report)
-                .context("Failed to serialize prerequisite report")?;
+            let json = serde_json::to_string_pretty(&status)
+                .context("Failed to serialize setup status")?;
             println!("{json}");
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            print_report_text(&report)
+            render_setup_text(&status)
         }
     }
 
-    if matches!(format, OutputFormat::Text) {
-        print_reflect_deps_summary();
-    }
-
-    if !report.all_required_present {
+    if !status.required_met() {
         return Err(anyhow!("Required prerequisites missing"));
     }
 
@@ -264,23 +206,28 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
 
 /// `ainb init` (no flags) - first-time setup
 fn cmd_setup(format: OutputFormat) -> Result<()> {
-    let report = run_checks(real_lookup);
+    let status = detect_all(&RealEnv);
 
     if matches!(format, OutputFormat::Text) {
-        print_report_text(&report);
-        print_reflect_deps_summary();
+        render_setup_text(&status);
         println!();
     }
 
-    if !report.all_required_present {
+    if !status.required_met() {
         if matches!(format, OutputFormat::Json) {
-            let json = serde_json::to_string_pretty(&report)
-                .context("Failed to serialize prerequisite report")?;
+            let json = serde_json::to_string_pretty(&status)
+                .context("Failed to serialize setup status")?;
             println!("{json}");
         }
         return Err(anyhow!(
             "Cannot complete setup - required prerequisites are missing. Install them and run `ainb init` again."
         ));
+    }
+
+    // Offer to install missing (recommended/optional) dependencies — same
+    // provisioner the TUI uses. Interactive only (Text mode).
+    if matches!(format, OutputFormat::Text) {
+        offer_installs(&status, false);
     }
 
     // Ensure base directory exists
@@ -329,7 +276,7 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
                 "config_path": config_path.display().to_string(),
                 "created_default_config": created_config,
                 "onboarding_completed": true,
-                "prerequisites": report,
+                "setup": status,
             });
             println!(
                 "{}",
@@ -705,18 +652,6 @@ fn read_choice<R: std::io::BufRead>(input: &mut R) -> Result<String> {
 mod tests {
     use super::*;
 
-    /// Build a mock PATH-lookup closure that treats the provided list as
-    /// "installed" and everything else as missing.
-    fn make_lookup(installed: Vec<&'static str>) -> impl Fn(&str) -> Option<PathBuf> {
-        move |name: &str| {
-            if installed.contains(&name) {
-                Some(PathBuf::from(format!("/fake/bin/{name}")))
-            } else {
-                None
-            }
-        }
-    }
-
     // --- validate_flags ---
 
     #[test]
@@ -742,147 +677,6 @@ mod tests {
     fn test_validate_flags_all_three_rejected() {
         let err = validate_flags(true, true, true).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
-    }
-
-    // --- check_prerequisite ---
-
-    #[test]
-    fn test_check_prerequisite_found_sets_ok_and_path() {
-        let lookup = make_lookup(vec!["tmux"]);
-        let c = check_prerequisite("tmux", true, "ok-msg", "missing-msg", &lookup);
-        assert_eq!(c.status, PrereqStatus::Ok);
-        assert_eq!(c.path.as_deref(), Some("/fake/bin/tmux"));
-        assert_eq!(c.message, "ok-msg");
-        assert!(c.required);
-    }
-
-    #[test]
-    fn test_check_prerequisite_missing_required_is_missing() {
-        let lookup = make_lookup(vec![]);
-        let c = check_prerequisite("tmux", true, "ok-msg", "missing-msg", &lookup);
-        assert_eq!(c.status, PrereqStatus::Missing);
-        assert!(c.path.is_none());
-        assert_eq!(c.message, "missing-msg");
-    }
-
-    #[test]
-    fn test_check_prerequisite_missing_optional_is_warning() {
-        let lookup = make_lookup(vec![]);
-        let c = check_prerequisite("docker", false, "ok-msg", "missing-msg", &lookup);
-        assert_eq!(c.status, PrereqStatus::Warning);
-        assert!(c.path.is_none());
-        assert!(!c.required);
-    }
-
-    // --- run_checks ---
-
-    #[test]
-    fn test_run_checks_all_four_tools_present() {
-        let report = run_checks(make_lookup(vec!["tmux", "git", "claude", "docker"]));
-        assert!(report.all_required_present);
-        assert_eq!(report.checks.len(), 4);
-        assert!(report.checks.iter().all(|c| c.status == PrereqStatus::Ok));
-    }
-
-    #[test]
-    fn test_run_checks_missing_tmux_fails_required() {
-        let report = run_checks(make_lookup(vec!["git", "claude", "docker"]));
-        assert!(!report.all_required_present);
-        let tmux = report.checks.iter().find(|c| c.name == "tmux").unwrap();
-        assert_eq!(tmux.status, PrereqStatus::Missing);
-    }
-
-    #[test]
-    fn test_run_checks_missing_git_fails_required() {
-        let report = run_checks(make_lookup(vec!["tmux", "claude"]));
-        assert!(!report.all_required_present);
-        let git = report.checks.iter().find(|c| c.name == "git").unwrap();
-        assert_eq!(git.status, PrereqStatus::Missing);
-    }
-
-    #[test]
-    fn test_run_checks_missing_claude_does_not_fail_required() {
-        let report = run_checks(make_lookup(vec!["tmux", "git"]));
-        assert!(report.all_required_present);
-        let claude = report.checks.iter().find(|c| c.name == "claude").unwrap();
-        assert_eq!(claude.status, PrereqStatus::Warning);
-        assert!(!claude.required);
-    }
-
-    #[test]
-    fn test_run_checks_missing_docker_does_not_fail_required() {
-        let report = run_checks(make_lookup(vec!["tmux", "git", "claude"]));
-        assert!(report.all_required_present);
-        let docker = report.checks.iter().find(|c| c.name == "docker").unwrap();
-        assert_eq!(docker.status, PrereqStatus::Warning);
-        assert!(!docker.required);
-    }
-
-    #[test]
-    fn test_run_checks_nothing_installed() {
-        let report = run_checks(make_lookup(vec![]));
-        assert!(!report.all_required_present);
-        let by_name: std::collections::HashMap<&str, &PrereqCheck> =
-            report.checks.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert_eq!(by_name["tmux"].status, PrereqStatus::Missing);
-        assert_eq!(by_name["git"].status, PrereqStatus::Missing);
-        assert_eq!(by_name["claude"].status, PrereqStatus::Warning);
-        assert_eq!(by_name["docker"].status, PrereqStatus::Warning);
-    }
-
-    #[test]
-    fn test_run_checks_required_vs_optional_classification() {
-        let report = run_checks(make_lookup(vec![]));
-        for c in &report.checks {
-            match c.name.as_str() {
-                "tmux" | "git" => assert!(c.required, "{} should be required", c.name),
-                "claude" | "docker" => assert!(!c.required, "{} should be optional", c.name),
-                other => panic!("unexpected check: {other}"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_run_checks_names_contain_all_four() {
-        let report = run_checks(make_lookup(vec![]));
-        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"tmux"));
-        assert!(names.contains(&"git"));
-        assert!(names.contains(&"claude"));
-        assert!(names.contains(&"docker"));
-    }
-
-    // --- serialization ---
-
-    #[test]
-    fn test_prereq_status_json_rename_all_snake_case() {
-        assert_eq!(serde_json::to_string(&PrereqStatus::Ok).unwrap(), "\"ok\"");
-        assert_eq!(
-            serde_json::to_string(&PrereqStatus::Missing).unwrap(),
-            "\"missing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&PrereqStatus::Warning).unwrap(),
-            "\"warning\""
-        );
-    }
-
-    #[test]
-    fn test_prereq_report_serializes_with_all_required_present_field() {
-        let report = run_checks(make_lookup(vec!["tmux", "git"]));
-        let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["all_required_present"], true);
-        assert_eq!(json["checks"].as_array().unwrap().len(), 4);
-    }
-
-    #[test]
-    fn test_prereq_check_serializes_path_when_ok() {
-        let lookup = make_lookup(vec!["tmux"]);
-        let c = check_prerequisite("tmux", true, "ok", "missing", &lookup);
-        let json = serde_json::to_value(&c).unwrap();
-        assert_eq!(json["status"], "ok");
-        assert_eq!(json["path"], "/fake/bin/tmux");
-        assert_eq!(json["required"], true);
     }
 
     // --- statusline wizard step ---
