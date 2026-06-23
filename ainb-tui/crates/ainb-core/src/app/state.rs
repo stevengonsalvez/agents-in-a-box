@@ -9240,7 +9240,7 @@ impl AppState {
                 }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");
-                    use crate::setup::{detect_all, RealEnv};
+                    use crate::setup::{RealEnv, detect_all};
                     // Run blocking I/O on dedicated thread pool to avoid blocking async runtime
                     match tokio::task::spawn_blocking(|| detect_all(&RealEnv)).await {
                         Ok(status) => {
