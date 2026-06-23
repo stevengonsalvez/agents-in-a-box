@@ -638,6 +638,7 @@ Options:
       --status           Show current onboarding completion status
       --reset            Factory reset: remove ~/.agents-in-a-box entirely
   -f, --force            Skip interactive confirmation (required for non-interactive --reset)
+  -y, --yes              Auto-install missing dependencies ainb can install safely (npm/uv/cargo/ ainb/claude-plugin). brew/curl still need explicit per-item consent
   -h, --help             Print help
 
 EXAMPLES:
