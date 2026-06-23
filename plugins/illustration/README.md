@@ -4,7 +4,56 @@ Mascot-driven explanatory & brand illustration family for Claude Code.
 
 A shared workflow engine — **digest → shot list → per-image generation → QA → deliver** — wrapped by per-character sub-skills. Each mascot carries its own visual DNA, identity anchors, and likeness-locked reference images, so you get a consistent character across articles, social, READMEs, decks, and architecture explainers.
 
-## Featured series — agents-in-a-box in 22 frames
+## Featured series — agents-in-a-box (Popa edition)
+
+A continuous `illustration:popa` storyboard explaining agents-in-a-box end to end — crude hand-drawn pastel, Popa as the guide, and a continuous **green** flow-line so all 22 panels read (and animate) as one left-to-right mural. The `sporthead-alex` edition of the same 22 beats follows below.
+
+**1 — Agents in a box**
+![popa 1](assets/agents-in-a-box-series-popa/01-intro.png)
+**2 — The problem**
+![popa 2](assets/agents-in-a-box-series-popa/02-problem.png)
+**3 — The TUI**
+![popa 3](assets/agents-in-a-box-series-popa/03-tui.png)
+**4 — Isolation (worktree + tmux)**
+![popa 4](assets/agents-in-a-box-series-popa/04-isolation.png)
+**5 — Multi-provider**
+![popa 5](assets/agents-in-a-box-series-popa/05-providers.png)
+**6 — Toolkit**
+![popa 6](assets/agents-in-a-box-series-popa/06-toolkit.png)
+**7 — Plugins (v2)**
+![popa 7](assets/agents-in-a-box-series-popa/07-plugins.png)
+**8 — Burndown**
+![popa 8](assets/agents-in-a-box-series-popa/08-burndown.png)
+**9 — WITR**
+![popa 9](assets/agents-in-a-box-series-popa/09-witr.png)
+**10 — Hangar**
+![popa 10](assets/agents-in-a-box-series-popa/10-hangar.png)
+**11 — MCP socket-pool**
+![popa 11](assets/agents-in-a-box-series-popa/11-mcp-pool.png)
+**12 — Skill manager**
+![popa 12](assets/agents-in-a-box-series-popa/12-skill-manager.png)
+**13 — Inbox & notifications**
+![popa 13](assets/agents-in-a-box-series-popa/13-inbox.png)
+**14 — Attach / foreign-TTY**
+![popa 14](assets/agents-in-a-box-series-popa/14-attach.png)
+**15 — Swarm**
+![popa 15](assets/agents-in-a-box-series-popa/15-swarm.png)
+**16 — reflect-memory: the problem**
+![popa 16](assets/agents-in-a-box-series-popa/16-reflect-problem.png)
+**17 — reflect-memory: capture & index**
+![popa 17](assets/agents-in-a-box-series-popa/17-reflect-capture.png)
+**18 — reflect-memory: recall**
+![popa 18](assets/agents-in-a-box-series-popa/18-reflect-recall.png)
+**19 — Beads**
+![popa 19](assets/agents-in-a-box-series-popa/19-beads.png)
+**20 — Code review**
+![popa 20](assets/agents-in-a-box-series-popa/20-code-review.png)
+**21 — Skills on tap**
+![popa 21](assets/agents-in-a-box-series-popa/21-toolkit-skills.png)
+**22 — Take your shot**
+![popa 22](assets/agents-in-a-box-series-popa/22-finale.png)
+
+## Featured series — agents-in-a-box (sporthead-alex edition)
 
 A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agents-in-a-box end to end. A single gold journey-line runs edge-to-edge through every frame with Alex as the guide, so all 22 panels read (and animate) as one left-to-right mural — built to be fed to an image-to-video model for a panning walkthrough.
 
@@ -74,55 +123,6 @@ A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agen
 **22 — Take your shot** · all local, open source, yours
 ![22 — finale](assets/agents-in-a-box-series/22-finale.png)
 
-### Popa edition — the same 22 frames
-
-The identical agents-in-a-box storyboard rendered with `illustration:popa` instead — crude hand-drawn pastel, Popa as the guide, and a continuous **green** flow-line carrying the pan. Same beats, different mascot.
-
-**1 — Agents in a box**
-![popa 1](assets/agents-in-a-box-series-popa/01-intro.png)
-**2 — The problem**
-![popa 2](assets/agents-in-a-box-series-popa/02-problem.png)
-**3 — The TUI**
-![popa 3](assets/agents-in-a-box-series-popa/03-tui.png)
-**4 — Isolation (worktree + tmux)**
-![popa 4](assets/agents-in-a-box-series-popa/04-isolation.png)
-**5 — Multi-provider**
-![popa 5](assets/agents-in-a-box-series-popa/05-providers.png)
-**6 — Toolkit**
-![popa 6](assets/agents-in-a-box-series-popa/06-toolkit.png)
-**7 — Plugins (v2)**
-![popa 7](assets/agents-in-a-box-series-popa/07-plugins.png)
-**8 — Burndown**
-![popa 8](assets/agents-in-a-box-series-popa/08-burndown.png)
-**9 — WITR**
-![popa 9](assets/agents-in-a-box-series-popa/09-witr.png)
-**10 — Hangar**
-![popa 10](assets/agents-in-a-box-series-popa/10-hangar.png)
-**11 — MCP socket-pool**
-![popa 11](assets/agents-in-a-box-series-popa/11-mcp-pool.png)
-**12 — Skill manager**
-![popa 12](assets/agents-in-a-box-series-popa/12-skill-manager.png)
-**13 — Inbox & notifications**
-![popa 13](assets/agents-in-a-box-series-popa/13-inbox.png)
-**14 — Attach / foreign-TTY**
-![popa 14](assets/agents-in-a-box-series-popa/14-attach.png)
-**15 — Swarm**
-![popa 15](assets/agents-in-a-box-series-popa/15-swarm.png)
-**16 — reflect-memory: the problem**
-![popa 16](assets/agents-in-a-box-series-popa/16-reflect-problem.png)
-**17 — reflect-memory: capture & index**
-![popa 17](assets/agents-in-a-box-series-popa/17-reflect-capture.png)
-**18 — reflect-memory: recall**
-![popa 18](assets/agents-in-a-box-series-popa/18-reflect-recall.png)
-**19 — Beads**
-![popa 19](assets/agents-in-a-box-series-popa/19-beads.png)
-**20 — Code review**
-![popa 20](assets/agents-in-a-box-series-popa/20-code-review.png)
-**21 — Skills on tap**
-![popa 21](assets/agents-in-a-box-series-popa/21-toolkit-skills.png)
-**22 — Take your shot**
-![popa 22](assets/agents-in-a-box-series-popa/22-finale.png)
-
 ## Skills
 
 | Invoke | Mascot | Look | Best for |
@@ -181,10 +181,15 @@ Create `skills/<mascot>/` following the layout above (SKILL.md `name: illustrati
 /plugin install illustration@agents-in-a-box
 ```
 
-## Credits
+## Trademark
 
-Inspired by **[Ian Xiaohei Illustrations](https://github.com/helloianneo/ian-xiaohei-illustrations)** by Ian ([@helloianneo](https://github.com/helloianneo)) — the original hand-drawn 16:9 "body illustration" skill, starring the character 小黑.
+**Sport Head®** is a registered trade mark — UK Intellectual Property Office reg. no. [UK00004396917](https://trademarks.ipo.gov.uk/ipo-tmcase/page/Results/1/UK00004396917) (status: *registered*) — owned by SHOT Clubhouse. The **Alex** character generated by `illustration:sporthead-alex` is part of ShotClubhouse's brand IP; the skill is intended for first-party and authorised ShotClubhouse brand use.
 
-English port of the original: **[ian-illustrations-port](https://github.com/stevengonsalvez/ian-illustrations-port)** (instructions and examples translated to English; 小黑 rendered as "Blot").
+**Using the mark:**
 
-This `illustration` plugin reimagines that approach as a multi-mascot family — its own characters (Alex, Popa), styles, and shared workflow engine.
+- Mark first or prominent use with the registered symbol — **Sport Head®** — and keep it spelled and styled as registered.
+- Use it as an adjective ("the Sport Head® character"), never as a generic noun or verb; don't pluralise or modify it.
+- Attribute ownership, e.g. *"Sport Head® is a registered trade mark of SHOT Clubhouse (UK00004396917)."*
+- Don't imply endorsement of, or affiliation with, SHOT Clubhouse unless it exists.
+
+**How it was protected** (and how to register your own): search the [UK IPO trade-mark register](https://trademarks.ipo.gov.uk/), file an application in the relevant goods/services classes, clear examination and the opposition period, and the mark proceeds to registration — after which you may use **®** and enforce it.
