@@ -137,12 +137,8 @@ A continuous `illustration:sporthead-alex` sketchnote storyboard explaining agen
 
 <table>
   <tr>
-    <td align="center"><img src="skills/sporthead-alex/assets/examples/01-sporthead-gold.png" width="420"><br><sub>“What is a Sport Head?” — gold accent</sub></td>
-    <td align="center"><img src="skills/sporthead-alex/assets/examples/02-sporthead-mono.png" width="420"><br><sub>“What is a Sport Head?” — mono</sub></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="skills/sporthead-alex/assets/examples/03-agents-box-gold.png" width="420"><br><sub>“Agents in a box” — gold accent</sub></td>
-    <td align="center"><img src="skills/sporthead-alex/assets/examples/04-agents-box-mono.png" width="420"><br><sub>“Agents in a box” — mono</sub></td>
+    <td align="center"><img src="skills/sporthead-alex/assets/examples/01-sporthead-gold.png" width="420"><br><sub>“What is a Sport Head®?” — gold accent</sub></td>
+    <td align="center"><img src="skills/sporthead-alex/assets/examples/02-sporthead-mono.png" width="420"><br><sub>“What is a Sport Head®?” — mono</sub></td>
   </tr>
 </table>
 
