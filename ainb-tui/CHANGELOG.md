@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-06-24
+### Added
+- **onboarding**: add Homebrew to the catalog
+
+
 ## [1.9.2] - 2026-06-24
 ### Added
 - **burndown**: mouse support on the usage screen + a switch-tab legend
