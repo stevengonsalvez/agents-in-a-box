@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-06-24
+### Added
+- **burndown**: mouse support on the usage screen + a switch-tab legend
+
+### Fixed
+- **burndown**: clamp wheel scroll to the tab-aware row_count, redraw on movement
+- **burndown**: clip tab titles to inner width so they can't overflow
+
+
 ## [1.9.1] - 2026-06-24
 ### Added
 - **onboarding**: correctness audit fixes, reflect plugin, Codex, checkbox UI
