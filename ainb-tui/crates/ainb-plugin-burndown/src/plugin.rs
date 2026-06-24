@@ -1134,21 +1134,32 @@ impl BurndownPlugin {
     fn dispatch_mouse_pure(&mut self, m: MouseEvent) -> bool {
         match m.kind {
             MouseKind::ScrollUp => {
+                // Return the REAL delta so a boundary tick (already at the top)
+                // doesn't force a needless WireBuffer re-serialize — same
+                // redraw discipline as `handle_key`.
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
                 if self.ui.is_zoomed() {
                     self.ui.zoom_row_up();
                 } else {
                     self.ui.scroll_up();
                 }
-                true
+                (self.ui.scroll_offset, self.ui.focus_row) != before
             }
             MouseKind::ScrollDown => {
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
                 if self.ui.is_zoomed() {
                     self.ui.zoom_row_down();
                 } else {
-                    let max_rows = self.data.as_ref().map_or(0, |d| d.sessions.len());
+                    // `row_count()` reads `ui.data`, which the plugin only syncs
+                    // at render time — refresh it first (same sync the Enter
+                    // handler does) so the clamp matches the live snapshot. It
+                    // is tab-aware (Daily=days, Projects=projects, …), so short
+                    // lists can't over-scroll the way a raw session count would.
+                    self.ui.data = self.data.clone();
+                    let max_rows = self.ui.row_count();
                     self.ui.scroll_down(max_rows);
                 }
-                true
+                (self.ui.scroll_offset, self.ui.focus_row) != before
             }
             MouseKind::Down {
                 button: MouseButton::Left,
@@ -1342,8 +1353,7 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn mouse_wheel_is_consumed_for_redraw() {
-        let mut p = BurndownPlugin::default();
+    fn mouse_wheel_only_redraws_on_real_movement() {
         let up = MouseEvent {
             kind: MouseKind::ScrollUp,
             col: 0,
@@ -1356,8 +1366,22 @@ mod handle_key_dispatch_tests {
             row: 0,
             mods: 0,
         };
-        assert!(p.dispatch_mouse_pure(up), "wheel up is handled");
-        assert!(p.dispatch_mouse_pure(down), "wheel down is handled");
+        // Fresh plugin: nothing to scroll → wheel is a no-op, so it must NOT
+        // request a redraw (boundary tick discipline, mirroring handle_key).
+        let mut p = BurndownPlugin::default();
+        assert!(!p.dispatch_mouse_pure(up), "wheel up at the top is a no-op");
+        assert!(
+            !p.dispatch_mouse_pure(down),
+            "wheel down with no rows is a no-op"
+        );
+
+        // Zoomed table with rows: wheel-down advances the focused row → real
+        // change → redraw requested.
+        let mut z = zoomed_plugin();
+        assert!(
+            z.dispatch_mouse_pure(down),
+            "wheel down in a zoomed table scrolls and redraws"
+        );
     }
 
     #[test]
