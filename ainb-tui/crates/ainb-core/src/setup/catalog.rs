@@ -243,6 +243,18 @@ pub fn catalog() -> Vec<Topic> {
             description: "Required for ainb to function",
             deps: vec![
                 dep(
+                    "brew",
+                    "Homebrew",
+                    "package manager used to install ainb + most tools here",
+                    Recommended,
+                    Custom("brew"),
+                    Manual(
+                        "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
+                    ),
+                    &[Consumer::Core],
+                    &[],
+                ),
+                dep(
                     "git",
                     "git",
                     "branch + worktree/session git ops",

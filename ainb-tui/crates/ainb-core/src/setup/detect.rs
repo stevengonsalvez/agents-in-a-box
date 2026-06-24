@@ -151,6 +151,19 @@ fn detect_state(detect: &Detect, env: &dyn Env) -> DepState {
 /// Bespoke probes for the `Custom(..)` detection specs.
 fn detect_custom(name: &str, env: &dyn Env) -> DepState {
     match name {
+        // Homebrew — on PATH, or at a standard prefix even when the shell hasn't
+        // loaded `brew shellenv` yet (Linuxbrew / Apple-silicon / Intel mac).
+        "brew" => {
+            if env.which("brew")
+                || std::path::Path::new("/home/linuxbrew/.linuxbrew/bin/brew").exists()
+                || std::path::Path::new("/opt/homebrew/bin/brew").exists()
+                || std::path::Path::new("/usr/local/bin/brew").exists()
+            {
+                DepState::Ok(None)
+            } else {
+                DepState::Missing
+            }
+        }
         // ainb is whatever is running this wizard — always present. A PATH probe
         // would false-negative for an off-PATH / freshly-downloaded binary and
         // trap the user on the dependency step (the only "install" is Manual).
