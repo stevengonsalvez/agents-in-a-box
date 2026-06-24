@@ -1344,19 +1344,29 @@ fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     // Paint titles + dividers at the exact columns `tab_zones` reports, so a
     // click resolves to the same tab the user sees. We render manually (not the
     // ratatui Tabs widget) precisely so render and hit-test share one formula.
+    // Every paint is clipped to the block's inner width: `buf.set_string` only
+    // clips at the buffer edge, so without this a long tab strip would overwrite
+    // the right border on a narrow viewport.
     let y = inner.y;
+    let right = inner.x.saturating_add(inner.width); // exclusive inner-right edge
     let div_w = TAB_DIVIDER.chars().count() as u16;
     let div_style = Style::default().fg(MUTED_GRAY);
+    let clip =
+        |s: &str, x: u16| -> String { s.chars().take(right.saturating_sub(x) as usize).collect() };
     for (i, (start, _end, t)) in tab_zones(inner.x).into_iter().enumerate() {
+        if start >= right {
+            break; // this tab — and every tab after it — is off the right edge
+        }
         if i > 0 {
-            buf.set_string(start.saturating_sub(div_w), y, TAB_DIVIDER, div_style);
+            let div_x = start.saturating_sub(div_w);
+            buf.set_string(div_x, y, clip(TAB_DIVIDER, div_x), div_style);
         }
         let style = if t == state.active_tab {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default().fg(MUTED_GRAY)
         };
-        buf.set_string(start, y, t.title(), style);
+        buf.set_string(start, y, clip(t.title(), start), style);
     }
 }
 
@@ -6534,23 +6544,40 @@ mod zoom_table_tests {
     #[test]
     fn tab_bar_geometry_matches_render() {
         use ratatui::{Terminal, backend::TestBackend};
-        let state = UsageViewState::default();
-        let backend = TestBackend::new(120, 24);
-        let mut terminal = Terminal::new(backend).expect("backend");
-        terminal
-            .draw(|f| {
-                let a = f.size();
-                render(f.buffer_mut(), a, &state);
-            })
-            .expect("render must not panic");
-        let buf = terminal.backend().buffer();
-        // Titles paint on the row just inside the tab-bar block's top border.
         let row = TAB_BAR_TOP + 1;
-        let bz = tab_zones(1).into_iter().find(|(_, _, t)| *t == UsageTab::Burndown).unwrap();
-        let got: String = (bz.0..=bz.1).map(|x| buf.get(x, row).symbol().to_string()).collect();
+        let render_at = |w: u16| {
+            let state = UsageViewState::default();
+            let backend = TestBackend::new(w, 24);
+            let mut terminal = Terminal::new(backend).expect("backend");
+            terminal
+                .draw(|f| {
+                    let a = f.size();
+                    render(f.buffer_mut(), a, &state);
+                })
+                .expect("render must not panic");
+            terminal.backend().buffer().clone()
+        };
+
+        // Wide: BOTH a fixed-position tab (Burndown @ col 1) AND a later tab
+        // whose start depends on every preceding divider (Savings) must render
+        // exactly at their hit zones — so a click resolves to the seen tab.
+        let wide = render_at(120);
+        for tab in [UsageTab::Burndown, UsageTab::Savings] {
+            let z = tab_zones(1).into_iter().find(|(_, _, t)| *t == tab).unwrap();
+            let got: String = (z.0..=z.1).map(|x| wide.get(x, row).symbol().to_string()).collect();
+            assert_eq!(
+                got,
+                tab.title(),
+                "{tab:?} must render at its hit-zone on row {row}"
+            );
+        }
+
+        // Narrow: the tab strip must not overwrite the block's right border.
+        let narrow = render_at(40);
         assert_eq!(
-            got, "Burndown",
-            "tab title must render at its hit-zone on row {row}"
+            narrow.get(40 - 1, row).symbol(),
+            "│",
+            "narrow tab bar must keep its right border (no title overflow)"
         );
     }
 
