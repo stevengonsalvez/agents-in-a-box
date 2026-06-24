@@ -246,6 +246,8 @@ pub struct OnboardingState {
     pub show_cursor: bool,
     /// Error message to display
     pub error_message: Option<String>,
+    /// Transient success/status message (e.g. after the `I` tmux-config install)
+    pub status_message: Option<String>,
     /// Dependencies user chose to skip
     pub skipped_dependencies: Vec<String>,
     /// Available editor options (detected on EditorSelection step)
@@ -279,6 +281,7 @@ impl OnboardingState {
             cursor_position: 0,
             show_cursor: true,
             error_message: None,
+            status_message: None,
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,
@@ -432,6 +435,7 @@ impl OnboardingState {
                 self.current_step = next;
                 self.focus = OnboardingFocus::Content;
                 self.error_message = None;
+                self.status_message = None;
 
                 // Auto-trigger dependency check when entering DependencyCheck step
                 let trigger_dep_check =
@@ -449,6 +453,7 @@ impl OnboardingState {
             self.current_step = prev;
             self.focus = OnboardingFocus::Content;
             self.error_message = None;
+            self.status_message = None;
             return true;
         }
         false

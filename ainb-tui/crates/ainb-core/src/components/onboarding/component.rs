@@ -365,15 +365,31 @@ impl OnboardingComponent {
             frame.render_widget(list, *area);
         }
 
-        let instructions = if status.required_met() {
-            "Press Enter to continue • I to install tmux config • R to re-check"
+        // Show the last action's result if there is one (e.g. the I-key tmux
+        // install), otherwise the key hints. Errors take priority over success.
+        let instr_span = if let Some(err) = &state.error_message {
+            Span::styled(
+                err.clone(),
+                Style::default().fg(ERROR_RED).add_modifier(Modifier::BOLD),
+            )
+        } else if let Some(msg) = &state.status_message {
+            Span::styled(
+                msg.clone(),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )
+        } else if status.required_met() {
+            Span::styled(
+                "Press Enter to continue • I to install tmux config • R to re-check",
+                Style::default().fg(MUTED_GRAY),
+            )
         } else {
-            "Install required dependencies • I to install tmux config • R to re-check"
+            Span::styled(
+                "Install required dependencies • I to install tmux config • R to re-check",
+                Style::default().fg(MUTED_GRAY),
+            )
         };
 
-        let instr_widget =
-            Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
-                .alignment(Alignment::Center);
+        let instr_widget = Paragraph::new(instr_span).alignment(Alignment::Center);
         frame.render_widget(instr_widget, content_layout[2]);
     }
 
