@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table},
 };
 
 use ainb_plugin_types_sessions::ScanProgressEvent;
@@ -965,23 +965,23 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Summary bar
-                Constraint::Length(3), // Provider selector
-                Constraint::Length(3), // Tab bar
-                Constraint::Length(1), // Scan banner (mid-scan only)
-                Constraint::Min(0),    // Table content
-                Constraint::Length(2), // Help bar
+                Constraint::Length(SUMMARY_BAR_H),  // Summary bar
+                Constraint::Length(PROVIDER_BAR_H), // Provider selector
+                Constraint::Length(TAB_BAR_H),      // Tab bar
+                Constraint::Length(1),              // Scan banner (mid-scan only)
+                Constraint::Min(0),                 // Table content
+                Constraint::Length(2),              // Help bar
             ])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Summary bar
-                Constraint::Length(3), // Provider selector
-                Constraint::Length(3), // Tab bar
-                Constraint::Min(0),    // Table content
-                Constraint::Length(2), // Help bar
+                Constraint::Length(SUMMARY_BAR_H),  // Summary bar
+                Constraint::Length(PROVIDER_BAR_H), // Provider selector
+                Constraint::Length(TAB_BAR_H),      // Tab bar
+                Constraint::Min(0),                 // Table content
+                Constraint::Length(2),              // Help bar
             ])
             .split(area)
     };
@@ -1282,40 +1282,82 @@ fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     ratatui::widgets::Widget::render(paragraph, inner, buf);
 }
 
+// ── Tab-bar geometry (shared by the renderer AND mouse hit-testing) ──────────
+// The usage view stacks fixed-height bars above the tab bar. Mouse hit-testing
+// needs the tab bar's row range, so `TAB_BAR_TOP` / `*_H` MUST match the render
+// layout heights below — guarded by `tab_bar_geometry_matches_render`.
+pub(crate) const SUMMARY_BAR_H: u16 = 3;
+pub(crate) const PROVIDER_BAR_H: u16 = 3;
+pub(crate) const TAB_BAR_H: u16 = 3;
+/// First viewport row occupied by the tab bar (below summary + provider bars).
+pub(crate) const TAB_BAR_TOP: u16 = SUMMARY_BAR_H + PROVIDER_BAR_H;
+/// Inner-left column of the tab-bar block (rounded border = 1 col).
+const TAB_BAR_INNER_X: u16 = 1;
+const TAB_DIVIDER: &str = " │ ";
+
+/// Per-tab hit zones on the tab-bar title row as `(start, end_inclusive, tab)`,
+/// derived from the tab titles + dividers. Single source of truth so the
+/// painted tabs and the clickable zones can never drift apart.
+fn tab_zones(inner_x: u16) -> Vec<(u16, u16, UsageTab)> {
+    let div_w = TAB_DIVIDER.chars().count() as u16;
+    let mut zones = Vec::with_capacity(UsageTab::all().len());
+    let mut x = inner_x;
+    for (i, t) in UsageTab::all().iter().enumerate() {
+        if i > 0 {
+            x += div_w;
+        }
+        let w = t.title().chars().count() as u16;
+        zones.push((x, x + w.saturating_sub(1), *t));
+        x += w;
+    }
+    zones
+}
+
+/// The tab whose title spans `col` on the tab-bar row, if any. Used by mouse
+/// click hit-testing to turn a column into a tab.
+pub(crate) fn tab_at_col(col: u16) -> Option<UsageTab> {
+    tab_zones(TAB_BAR_INNER_X)
+        .into_iter()
+        .find(|(s, e, _)| col >= *s && col <= *e)
+        .map(|(_, _, t)| t)
+}
+
 fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
-    let titles: Vec<Line> = UsageTab::all()
-        .iter()
-        .map(|t| {
-            let style = if *t == state.active_tab {
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                Style::default().fg(MUTED_GRAY)
-            };
-            Line::from(Span::styled(t.title(), style))
-        })
-        .collect();
-
-    let idx = UsageTab::all().iter().position(|t| *t == state.active_tab).unwrap_or(0);
-    let tabs = Tabs::new(titles)
-        .select(idx)
-        .highlight_style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .divider(Span::styled(" │ ", Style::default().fg(MUTED_GRAY)))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(CORNFLOWER_BLUE))
-                .style(Style::default().bg(DARK_BG))
-                .title(
-                    Line::from(Span::styled(
-                        " [ ] switch tab ",
-                        Style::default().fg(MUTED_GRAY),
-                    ))
-                    .right_aligned(),
-                ),
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG))
+        .title(
+            Line::from(Span::styled(
+                " [ ] switch tab ",
+                Style::default().fg(MUTED_GRAY),
+            ))
+            .right_aligned(),
         );
+    let inner = block.inner(area);
+    ratatui::widgets::Widget::render(block, area, buf);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
-    ratatui::widgets::Widget::render(tabs, area, buf);
+    // Paint titles + dividers at the exact columns `tab_zones` reports, so a
+    // click resolves to the same tab the user sees. We render manually (not the
+    // ratatui Tabs widget) precisely so render and hit-test share one formula.
+    let y = inner.y;
+    let div_w = TAB_DIVIDER.chars().count() as u16;
+    let div_style = Style::default().fg(MUTED_GRAY);
+    for (i, (start, _end, t)) in tab_zones(inner.x).into_iter().enumerate() {
+        if i > 0 {
+            buf.set_string(start.saturating_sub(div_w), y, TAB_DIVIDER, div_style);
+        }
+        let style = if t == state.active_tab {
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(MUTED_GRAY)
+        };
+        buf.set_string(start, y, t.title(), style);
+    }
 }
 
 fn render_loading(buf: &mut Buffer, area: Rect) {
@@ -4518,6 +4560,8 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let mut spans = vec![
         Span::styled(" ◀/▶ p", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("[ ]", Style::default().fg(GOLD)),
+        Span::styled(" switch tab  ", Style::default().fg(MUTED_GRAY)),
         Span::styled(
             "1 Today  2 7d  3 30d  4 90d  5 YTD  m Month  q Quarter  a All  D advanced  ",
             Style::default().fg(MUTED_GRAY),
@@ -6446,6 +6490,86 @@ mod zoom_table_tests {
         assert!(
             flat.contains("Fetching savings"),
             "fetching placeholder:\n{flat}"
+        );
+    }
+
+    // ── Tab-bar mouse geometry (click-to-switch hit zones) ──────────────────
+
+    #[test]
+    fn tab_zones_are_contiguous_with_3col_dividers() {
+        let zones = tab_zones(1);
+        assert_eq!(zones.len(), UsageTab::all().len());
+        assert_eq!(zones[0].0, 1, "first tab starts at inner_x");
+        for (i, (start, end, t)) in zones.iter().enumerate() {
+            let w = t.title().chars().count() as u16;
+            assert_eq!(*end, start + w - 1, "{t:?} zone width must equal its title");
+            if i > 0 {
+                assert_eq!(
+                    *start,
+                    zones[i - 1].1 + 1 + 3,
+                    "3-col ` │ ` divider before {t:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_at_col_resolves_tabs_and_divider_gaps() {
+        let zones = tab_zones(1);
+        let b = zones.iter().find(|(_, _, t)| *t == UsageTab::Burndown).unwrap();
+        let s = zones.iter().find(|(_, _, t)| *t == UsageTab::Savings).unwrap();
+        assert_eq!(tab_at_col(b.0), Some(UsageTab::Burndown));
+        assert_eq!(tab_at_col(s.0), Some(UsageTab::Savings));
+        assert_eq!(
+            tab_at_col(s.1),
+            Some(UsageTab::Savings),
+            "end col is inclusive"
+        );
+        assert_eq!(tab_at_col(b.1 + 1), None, "the divider gap is dead space");
+    }
+
+    /// Drift guard: the rendered tab titles must land exactly where
+    /// `tab_at_col` (and `TAB_BAR_TOP`) say they are, so a click resolves to
+    /// the tab the user sees. Catches both layout-height and tab-zone drift.
+    #[test]
+    fn tab_bar_geometry_matches_render() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = UsageViewState::default();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("backend");
+        terminal
+            .draw(|f| {
+                let a = f.size();
+                render(f.buffer_mut(), a, &state);
+            })
+            .expect("render must not panic");
+        let buf = terminal.backend().buffer();
+        // Titles paint on the row just inside the tab-bar block's top border.
+        let row = TAB_BAR_TOP + 1;
+        let bz = tab_zones(1).into_iter().find(|(_, _, t)| *t == UsageTab::Burndown).unwrap();
+        let got: String = (bz.0..=bz.1).map(|x| buf.get(x, row).symbol().to_string()).collect();
+        assert_eq!(
+            got, "Burndown",
+            "tab title must render at its hit-zone on row {row}"
+        );
+    }
+
+    #[test]
+    fn help_bar_advertises_switch_tab_legend() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = UsageViewState::default();
+        let backend = TestBackend::new(160, 24);
+        let mut terminal = Terminal::new(backend).expect("backend");
+        terminal
+            .draw(|f| {
+                let a = f.size();
+                render(f.buffer_mut(), a, &state);
+            })
+            .expect("render must not panic");
+        let flat = flatten(terminal.backend().buffer());
+        assert!(
+            flat.contains("switch tab"),
+            "help bar must show the legend:\n{flat}"
         );
     }
 }
