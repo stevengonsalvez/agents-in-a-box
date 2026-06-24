@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-06-24
+### Added
+- **onboarding**: show success/failure feedback for the I tmux-config install
+
+
 ## [1.9.3] - 2026-06-24
 ### Added
 - **onboarding**: add Homebrew to the catalog
