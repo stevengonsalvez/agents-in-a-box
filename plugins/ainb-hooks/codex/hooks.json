@@ -1,7 +1,7 @@
 {
-  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Only the events that need the human are registered (Notification = awaiting-input/permission, Stop = turn finished). Telemetry (SessionStart / UserPromptSubmit / PostToolUse / PreCompact) is intentionally NOT hooked — it would bury the signal. The daemon also drops any non-user-facing event defensively.",
+  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Only the events that need the human are registered (PermissionRequest = approval prompt, Stop = turn finished). Telemetry (SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / PostCompact / SubagentStart / SubagentStop) is intentionally NOT hooked because it would bury the signal. The daemon also drops any non-user-facing event defensively.",
   "hooks": {
-    "Notification": [
+    "PermissionRequest": [
       {
         "matcher": "",
         "hooks": [

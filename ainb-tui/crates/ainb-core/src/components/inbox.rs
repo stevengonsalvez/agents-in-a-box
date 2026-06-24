@@ -12,7 +12,7 @@
 //   - d               dismiss selected row
 //   - Shift+C         dismiss every currently-visible row
 //   - a               toggle archived (dismissed) filter
-//   - p               cycle agent filter (all / claude / codex)
+//   - p               cycle agent filter (all / claude / codex / copilot)
 //   - r               force refresh from store
 //   - q / Esc         return to previous screen
 //
@@ -40,22 +40,25 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// Agent filter cycled by the `p` key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentFilter {
-    /// Show both agents.
+    /// Show every agent.
     #[default]
     All,
     /// Only Claude rows.
     Claude,
     /// Only Codex rows.
     Codex,
+    /// Only Copilot rows.
+    Copilot,
 }
 
 impl AgentFilter {
-    /// Cycle to the next filter (All → Claude → Codex → All).
+    /// Cycle to the next filter (All → Claude → Codex → Copilot → All).
     pub fn next(self) -> Self {
         match self {
             AgentFilter::All => AgentFilter::Claude,
             AgentFilter::Claude => AgentFilter::Codex,
-            AgentFilter::Codex => AgentFilter::All,
+            AgentFilter::Codex => AgentFilter::Copilot,
+            AgentFilter::Copilot => AgentFilter::All,
         }
     }
 
@@ -65,6 +68,7 @@ impl AgentFilter {
             AgentFilter::All => "all",
             AgentFilter::Claude => "claude",
             AgentFilter::Codex => "codex",
+            AgentFilter::Copilot => "copilot",
         }
     }
 
@@ -74,6 +78,7 @@ impl AgentFilter {
             AgentFilter::All => None,
             AgentFilter::Claude => Some("claude"),
             AgentFilter::Codex => Some("codex"),
+            AgentFilter::Copilot => Some("copilot"),
         }
     }
 }
@@ -534,6 +539,8 @@ mod tests {
         assert_eq!(f, AgentFilter::Claude);
         f = f.next();
         assert_eq!(f, AgentFilter::Codex);
+        f = f.next();
+        assert_eq!(f, AgentFilter::Copilot);
         f = f.next();
         assert_eq!(f, AgentFilter::All);
     }

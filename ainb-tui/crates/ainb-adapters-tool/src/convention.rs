@@ -142,10 +142,12 @@ pub fn uninstall(deployed: &DeployedRef, install_root: &Path) -> anyhow::Result<
 fn is_protected(rel: &Path) -> bool {
     use std::path::Component;
     // Reject anything that escapes the install root.
-    if rel
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-    {
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         return true;
     }
     let segments: Vec<&str> = rel
@@ -315,9 +317,18 @@ mod tests {
         // A corrupt lockfile claims the unit deployed those state files.
         let bad = deployed(&["projects/session.jsonl", "settings.json"]);
         let err = uninstall(&bad, root.path()).unwrap_err();
-        assert!(err.to_string().contains("protected user state"), "got: {err}");
-        assert!(session.exists(), "session history must survive a refused uninstall");
-        assert!(settings.exists(), "settings.json must survive a refused uninstall");
+        assert!(
+            err.to_string().contains("protected user state"),
+            "got: {err}"
+        );
+        assert!(
+            session.exists(),
+            "session history must survive a refused uninstall"
+        );
+        assert!(
+            settings.exists(),
+            "settings.json must survive a refused uninstall"
+        );
     }
 
     #[test]

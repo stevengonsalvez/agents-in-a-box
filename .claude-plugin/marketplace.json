@@ -48,7 +48,7 @@
     {
       "name": "ainb-hooks",
       "source": "./plugins/ainb-hooks",
-      "description": "Emit actionable Claude Code lifecycle events to the ainb notification inbox: Notification (awaiting-input / permission) and Stop (turn finished) are delivered to ainb-notifyd over a Unix socket, surfacing as native OS banners, the ainb-tui Inbox screen, and the per-session waiting marker. Telemetry events are intentionally not hooked. Install via `/plugin install ainb-hooks@agents-in-a-box` (Claude); Codex wiring is handled by `ainb notifyd install`.",
+      "description": "Emit actionable host-agent lifecycle events to the ainb notification inbox: Claude/Copilot Notification, Codex PermissionRequest, and Stop/agentStop are delivered to ainb-notifyd over a Unix socket, surfacing as native OS banners, the ainb-tui Inbox screen, and per-session attention markers. Telemetry events are intentionally not hooked. Install via `/plugin install ainb-hooks@agents-in-a-box` (Claude); Codex/Copilot wiring is handled by `ainb notifyd install`.",
       "strict": false,
       "keywords": [
         "ainb",

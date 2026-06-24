@@ -5,14 +5,17 @@
 //! [`install`] verb extracts them to known on-disk locations and
 //! wires Claude Code, Codex CLI, and GitHub Copilot CLI to call into `notify.sh`.
 //!
-//! For Claude: a plugin directory at `~/.claude/plugins/ainb-hooks/`
-//! holding the manifest + script (so Claude Code's plugin marketplace
-//! resolves `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh` correctly).
+//! For Claude: the `claude plugin` marketplace CLI installs
+//! `ainb-hooks@agents-in-a-box`, so Claude resolves the plugin root and
+//! bundled `hooks/notify.sh` itself.
 //!
 //! For Codex: a managed JSON block in `~/.codex/hooks.json`, since
 //! Codex resolves hook commands as absolute paths. The block points
 //! at the canonical `~/.agents-in-a-box/hooks/notify.sh` so the
 //! plugin stays agent-agnostic per Stevie's constraint.
+//!
+//! For Copilot: a standalone drop-in at `~/.copilot/hooks/ainb.json`,
+//! because Copilot combines every hook file in that directory.
 //!
 //! Install state is recorded at `~/.agents-in-a-box/install.json` so
 //! [`uninstall`] is fully reversible.
@@ -784,6 +787,14 @@ mod tests {
         assert!(
             text.contains("notify.sh"),
             "managed block lacks script: {text}"
+        );
+        assert!(
+            text.contains("\"PermissionRequest\""),
+            "Codex managed block should use Codex's native permission hook: {text}"
+        );
+        assert!(
+            !text.contains("\"Notification\""),
+            "Codex managed block should not use Claude/Copilot Notification hook: {text}"
         );
     }
 

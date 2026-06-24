@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ainb-hooks: universal notification hook for Claude Code + Codex CLI.
+# ainb-hooks: universal notification hook for Claude Code, Codex CLI, and Copilot CLI.
 #
-# Reads a hook event payload (Claude pipes JSON on stdin; Codex passes JSON
-# as argv[1]), builds a normalized envelope, and delivers it to ainb-notifyd
+# Reads a hook event payload (Claude/Copilot pipe JSON on stdin; Codex passes
+# JSON as argv[1]), builds a normalized envelope, and delivers it to ainb-notifyd
 # via a Unix socket at $HOME/.agents-in-a-box/notify.sock. On any delivery
 # failure the payload is appended to a fallback JSONL file that notifyd
 # replays on its next startup. The script always exits 0 so a delivery
@@ -66,7 +66,8 @@ fi
 
 # Codex emits `type` values like `agent-turn-complete`, `request_user_input`.
 # We preserve the raw_event verbatim per spec (no canonical mapping in MVP)
-# but include a matcher slot for Claude's `Notification:idle_prompt` style.
+# but include a matcher slot for Claude's `Notification:idle_prompt` and
+# Codex's `PermissionRequest` style.
 if [ -n "${AINB_MATCHER}" ]; then
   AINB_RAW_EVENT="${AINB_RAW_EVENT}:${AINB_MATCHER}"
 fi
@@ -165,6 +166,9 @@ ainb_socket_alive() {
 ainb_lazy_spawn() {
   # Best-effort lazy spawn of ainb notifyd. Silent on success and failure;
   # the fallback file is the safety net.
+  if [ "${AINB_NOTIFY_DISABLE_LAZY_SPAWN:-}" = "1" ]; then
+    return 1
+  fi
   if ainb_socket_alive; then
     return 0
   fi

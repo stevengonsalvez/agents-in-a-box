@@ -8,9 +8,9 @@ badges, the dedicated Inbox screen, and optional OS notifications in
 ## How it works
 
 ```
-┌─ Claude / Codex session ─────┐
+┌─ Claude / Codex / Copilot ───┐
 │ hook fires (Stop, Notification│
-│   :idle_prompt, ...)         │
+│   / PermissionRequest, ...)  │
 │ ────────────────────────────▶│ notify.sh
 └──────────────────────────────┘    │
                                     ▼
@@ -68,7 +68,7 @@ ainb-notifyd uninstall --all
 
 The CLI:
 
-1. Drops `.claude-plugin/plugin.json` at `~/.claude/plugins/ainb-hooks/` (Claude).
+1. Installs `ainb-hooks@agents-in-a-box` through the Claude plugin marketplace (Claude).
 2. Merges this directory's `codex/hooks.json` into `~/.codex/hooks.json` as a
    managed block (Codex).
 3. Writes this directory's `copilot/hooks.json` to `~/.copilot/hooks/ainb.json`
@@ -82,18 +82,23 @@ The CLI:
 
 ## Hook events
 
-Claude and Codex use identical PascalCase event names: `SessionStart`,
-`UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop`, `PreCompact`.
-Copilot's hook format differs — camelCase events in a `{"version":1,"hooks":…}`
-drop-in — so its template registers `notification` + `agentStop` (the
-human-facing pair). Only the user-facing events are hooked on every agent;
-telemetry events are intentionally left out so they don't bury the signal.
+Claude and Codex both use PascalCase event names, but Codex now exposes a
+separate `PermissionRequest` hook instead of a `Notification` hook. The
+human-facing registrations are:
 
-The matcher `Notification:idle_prompt` (Claude) and Codex's variants
-(`request_user_input`, `wait_for_user`, etc.) all carry the same
-semantic meaning ("agent awaiting user input"). `notify.sh` preserves
-the raw event name in the `raw_event` field of the envelope so UI
-mapping happens in the consumer, not at the wire.
+| Agent | Hooks registered | Meaning |
+| --- | --- | --- |
+| Claude Code | `Notification`, `Stop` | awaiting input / permission prompt, turn finished |
+| Codex CLI | `PermissionRequest`, `Stop` | approval prompt, turn finished |
+| GitHub Copilot CLI | `notification`, `agentStop` | awaiting input / permission prompt, turn finished |
+
+Only the user-facing events are hooked on every agent; telemetry events are
+intentionally left out so they don't bury the signal.
+
+The matcher `Notification:idle_prompt` (Claude) and `PermissionRequest`
+(Codex) carry different raw names but the same user-facing shape: the agent
+needs Stevie. `notify.sh` preserves the raw event name in the `raw_event` field
+of the envelope so UI mapping happens in the consumer, not at the wire.
 
 ## Envelope shape
 
