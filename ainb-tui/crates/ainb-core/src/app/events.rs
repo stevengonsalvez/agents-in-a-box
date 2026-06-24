@@ -6328,6 +6328,9 @@ impl EventHandler {
                         tracing::info!("Successfully installed tmux.conf");
                         // Re-run dependency check to update status
                         if let Some(ref mut onboarding_state) = state.onboarding_state {
+                            onboarding_state.error_message = None;
+                            onboarding_state.status_message =
+                                Some("✓ Installed optimized tmux.conf → ~/.tmux.conf (backup saved if one existed)".to_string());
                             onboarding_state.dependency_check_running = true;
                         }
                         state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
@@ -6335,7 +6338,9 @@ impl EventHandler {
                     Err(e) => {
                         tracing::error!("Failed to install tmux.conf: {}", e);
                         if let Some(ref mut onboarding_state) = state.onboarding_state {
-                            onboarding_state.error_message = Some(format!("Install failed: {}", e));
+                            onboarding_state.status_message = None;
+                            onboarding_state.error_message =
+                                Some(format!("✗ tmux.conf install failed: {e}"));
                         }
                     }
                 }
