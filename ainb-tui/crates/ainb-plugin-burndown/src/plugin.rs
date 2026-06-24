@@ -9,8 +9,9 @@
 
 use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
-    RenderParams, Result, SdkError, WireBuffer, topics,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext,
+    KeyCode, MouseButton, MouseEvent, MouseKind, Plugin, RenderParams, Result, SdkError,
+    WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
     RefreshRequest, ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
@@ -24,7 +25,9 @@ use crate::cli::{UsageCommands, execute_for_plugin};
 use crate::data::savings::{SavingsData, fetch_savings};
 use crate::data::usage::UsageData;
 use crate::output_format::OutputFormat;
-use crate::ui::{UsageTab, UsageViewState, render as render_ui};
+use crate::ui::{
+    TAB_BAR_H, TAB_BAR_TOP, UsageTab, UsageViewState, render as render_ui, tab_at_col,
+};
 use crate::wire::wire_to_local;
 
 /// Static manifest TOML loaded at compile time. The Server uses this on
@@ -362,6 +365,16 @@ impl Plugin for BurndownPlugin {
             if !matches!(params.key.code, KeyCode::Char { ch: 'y' }) {
                 self.ui.copy_flash = None;
             }
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    async fn handle_mouse(&mut self, _host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        // Same redraw discipline as `handle_key`: only bump the generation
+        // (→ re-render) when the event actually changed something.
+        if self.dispatch_mouse_pure(params.mouse) {
+            self.ui.copy_flash = None;
             self.generation = self.generation.wrapping_add(1);
         }
         Ok(())
@@ -1109,6 +1122,61 @@ impl BurndownPlugin {
         }
         true
     }
+
+    /// Pure mouse dispatch (no host I/O) so it's unit-testable like
+    /// [`Self::dispatch_key_pure`]. Returns true iff it changed visible state.
+    ///
+    /// - **Wheel** scrolls the focused list — the zoomed table row when zoomed
+    ///   (self-clamping), else the dashboard list clamped to the session count
+    ///   so the offset can never run past the data.
+    /// - **Left click on a tab** in the tab bar switches to that tab, so every
+    ///   tab — including the Savings card — is reachable by mouse.
+    fn dispatch_mouse_pure(&mut self, m: MouseEvent) -> bool {
+        match m.kind {
+            MouseKind::ScrollUp => {
+                // Return the REAL delta so a boundary tick (already at the top)
+                // doesn't force a needless WireBuffer re-serialize — same
+                // redraw discipline as `handle_key`.
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
+                if self.ui.is_zoomed() {
+                    self.ui.zoom_row_up();
+                } else {
+                    self.ui.scroll_up();
+                }
+                (self.ui.scroll_offset, self.ui.focus_row) != before
+            }
+            MouseKind::ScrollDown => {
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
+                if self.ui.is_zoomed() {
+                    self.ui.zoom_row_down();
+                } else {
+                    // `row_count()` reads `ui.data`, which the plugin only syncs
+                    // at render time — refresh it first (same sync the Enter
+                    // handler does) so the clamp matches the live snapshot. It
+                    // is tab-aware (Daily=days, Projects=projects, …), so short
+                    // lists can't over-scroll the way a raw session count would.
+                    self.ui.data = self.data.clone();
+                    let max_rows = self.ui.row_count();
+                    self.ui.scroll_down(max_rows);
+                }
+                (self.ui.scroll_offset, self.ui.focus_row) != before
+            }
+            MouseKind::Down {
+                button: MouseButton::Left,
+            } => {
+                if (TAB_BAR_TOP..TAB_BAR_TOP + TAB_BAR_H).contains(&m.row) {
+                    if let Some(tab) = tab_at_col(m.col) {
+                        if tab != self.ui.active_tab {
+                            self.ui.active_tab = tab;
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Copy `text` to the system clipboard via `arboard`.
@@ -1235,6 +1303,84 @@ mod handle_key_dispatch_tests {
             p.ui.active_tab,
             UsageTab::Optimize,
             "[ retreats the outer tab"
+        );
+    }
+
+    #[test]
+    fn mouse_left_click_on_savings_tab_switches_to_it() {
+        use crate::ui::{TAB_BAR_TOP, UsageTab, tab_at_col};
+        let mut p = BurndownPlugin::default();
+        assert_eq!(p.ui.active_tab, UsageTab::Burndown);
+        // A column inside the Savings title's hit zone.
+        let col = (0u16..240)
+            .find(|c| tab_at_col(*c) == Some(UsageTab::Savings))
+            .expect("Savings hit zone exists");
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col,
+            row: TAB_BAR_TOP,
+            mods: 0,
+        };
+        assert!(
+            p.dispatch_mouse_pure(ev),
+            "clicking the Savings tab must switch"
+        );
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Savings,
+            "clicked tab is now active"
+        );
+    }
+
+    #[test]
+    fn mouse_click_off_the_tab_bar_is_a_noop() {
+        use crate::ui::TAB_BAR_TOP;
+        let mut p = BurndownPlugin::default();
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 4,
+            row: TAB_BAR_TOP + 40, // deep in the content area
+            mods: 0,
+        };
+        assert!(
+            !p.dispatch_mouse_pure(ev),
+            "a click outside the tab bar changes nothing"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_only_redraws_on_real_movement() {
+        let up = MouseEvent {
+            kind: MouseKind::ScrollUp,
+            col: 0,
+            row: 0,
+            mods: 0,
+        };
+        let down = MouseEvent {
+            kind: MouseKind::ScrollDown,
+            col: 0,
+            row: 0,
+            mods: 0,
+        };
+        // Fresh plugin: nothing to scroll → wheel is a no-op, so it must NOT
+        // request a redraw (boundary tick discipline, mirroring handle_key).
+        let mut p = BurndownPlugin::default();
+        assert!(!p.dispatch_mouse_pure(up), "wheel up at the top is a no-op");
+        assert!(
+            !p.dispatch_mouse_pure(down),
+            "wheel down with no rows is a no-op"
+        );
+
+        // Zoomed table with rows: wheel-down advances the focused row → real
+        // change → redraw requested.
+        let mut z = zoomed_plugin();
+        assert!(
+            z.dispatch_mouse_pure(down),
+            "wheel down in a zoomed table scrolls and redraws"
         );
     }
 
