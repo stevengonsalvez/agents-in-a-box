@@ -14,7 +14,7 @@ use std::io::{self, Write as _};
 use super::OutputFormat;
 use crate::config::{AppConfig, OnboardingConfig};
 use crate::setup::{
-    DepState, ProvisionMode, ProvisionOutcome, RealEnv, SetupStatus, Tier, catalog, detect_all,
+    DepState, ProvisionMode, ProvisionOutcome, RealEnv, SetupStatus, catalog, detect_all,
     detect_dep, provision,
 };
 
@@ -107,13 +107,7 @@ fn render_setup_text(status: &SetupStatus) {
     for topic in &status.topics {
         println!("\n  {} — {}", topic.label, topic.description);
         for d in &topic.deps {
-            let marker = if d.satisfied {
-                "\u{2713}" // ✓
-            } else if d.tier == Tier::Required {
-                "\u{2717}" // ✗
-            } else {
-                "\u{26A0}" // ⚠
-            };
+            let marker = if d.satisfied { "[\u{2713}]" } else { "[ ]" };
             let tag = if d.satisfied {
                 String::new()
             } else {

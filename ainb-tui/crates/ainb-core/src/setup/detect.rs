@@ -215,7 +215,18 @@ fn detect_custom(name: &str, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
-        // Marketplace plugin presence isn't reliably detectable from disk.
+        // The reflect Claude Code plugin extracts into ~/.claude/plugins — detect
+        // it from disk so we don't re-suggest an already-installed plugin.
+        "claude-plugin:reflect" => {
+            if home_path_exists(".claude/plugins/reflect")
+                || home_path_exists(".claude/plugins/cache/reflect")
+            {
+                DepState::Ok(None)
+            } else {
+                DepState::Missing
+            }
+        }
+        // Other marketplace plugins aren't reliably detectable from disk.
         s if s.starts_with("claude-plugin:") => DepState::Unknown,
         _ => DepState::Unknown,
     }

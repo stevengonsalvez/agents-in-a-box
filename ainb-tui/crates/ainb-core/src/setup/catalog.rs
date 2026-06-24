@@ -352,10 +352,10 @@ pub fn catalog() -> Vec<Topic> {
                 dep(
                     "copilot",
                     "GitHub Copilot CLI",
-                    "GitHub's AI agent (uses gh OAuth)",
+                    "GitHub's agentic CLI (Node 22+)",
                     Optional,
                     Bin("copilot"),
-                    Npm(&["@github/copilot-cli"]),
+                    Npm(&["@github/copilot"]),
                     &[],
                     &[],
                 ),
@@ -440,6 +440,16 @@ pub fn catalog() -> Vec<Topic> {
                     Recommended,
                     Custom("reflect-kb"),
                     Ainb(&["reflect", "bootstrap", "--yes"]),
+                    &[Reflect],
+                    &[],
+                ),
+                dep(
+                    "reflect-plugin",
+                    "reflect plugin",
+                    "Claude Code plugin: SessionStart recall + PreCompact capture hooks (Codex: reflect codex adapter)",
+                    Recommended,
+                    Custom("claude-plugin:reflect"),
+                    ClaudePlugin("reflect@agents-in-a-box"),
                     &[Reflect],
                     &[],
                 ),
@@ -586,7 +596,7 @@ pub fn catalog() -> Vec<Topic> {
         Topic {
             id: "suggested-plugins",
             label: "Suggested plugins",
-            description: "Ecosystem extras — Claude Code marketplace; Codex gets the skill-based ones via the toolkit",
+            description: "Claude: claude plugin install <name>@agents-in-a-box · Codex: ainb skill install <uri> --targets codex",
             deps: vec![
                 dep(
                     "ainb-fleet",
@@ -630,11 +640,13 @@ pub fn catalog() -> Vec<Topic> {
                 ),
                 dep(
                     "bd",
-                    "bd (beads)",
-                    "beads ready-issue count segment",
+                    "beads (bd)",
+                    "git-backed issue tracker agents read/write; powers the beads segment",
                     Suggested,
                     Bin("bd"),
-                    Manual("install per your beads setup: https://github.com/steveyegge/beads"),
+                    Manual(
+                        "brew install beads (or npm i -g @beads/bd), then: bd setup claude · bd setup codex",
+                    ),
                     &[Beads],
                     &[],
                 ),

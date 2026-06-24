@@ -331,14 +331,14 @@ impl OnboardingComponent {
                     "First-run setup — the tools ainb, your agents, plugins & memory need.   ",
                     Style::default().fg(MUTED_GRAY),
                 ),
-                Span::styled("✓", Style::default().fg(SELECTION_GREEN)),
-                Span::styled(" ready  ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("✗", Style::default().fg(ERROR_RED)),
-                Span::styled(" required  ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("○", Style::default().fg(WARNING_YELLOW)),
-                Span::styled(" recommended/optional  ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("·", Style::default().fg(MUTED_GRAY)),
-                Span::styled(" suggested", Style::default().fg(MUTED_GRAY)),
+                Span::styled("[✓]", Style::default().fg(SELECTION_GREEN)),
+                Span::styled(" ready   ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("[ ]", Style::default().fg(ERROR_RED)),
+                Span::styled(" required   ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("[ ]", Style::default().fg(WARNING_YELLOW)),
+                Span::styled(" recommended   ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("[ ]", Style::default().fg(MUTED_GRAY)),
+                Span::styled(" optional / suggested", Style::default().fg(MUTED_GRAY)),
             ]),
         ])
         .alignment(Alignment::Center);
@@ -1053,7 +1053,7 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
         Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
     ])));
     for d in &topic.deps {
-        let (icon, icon_color) = dep_icon(d);
+        let (checkbox, box_color) = dep_checkbox(d);
         let tier_tag = if d.satisfied {
             String::new()
         } else {
@@ -1061,7 +1061,10 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(icon, Style::default().fg(icon_color)),
+            Span::styled(
+                checkbox,
+                Style::default().fg(box_color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
             Span::styled(
                 d.name,
@@ -1077,24 +1080,26 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
         ])));
         if !d.satisfied {
             items.push(ListItem::new(Line::from(vec![
-                Span::styled("      → ", Style::default().fg(CORNFLOWER_BLUE)),
+                Span::styled("       → ", Style::default().fg(CORNFLOWER_BLUE)),
                 Span::styled(d.install_hint.clone(), Style::default().fg(CORNFLOWER_BLUE)),
             ])));
         }
     }
+    // Blank spacer line between sections for visual separation.
+    items.push(ListItem::new(Line::from("")));
 }
 
-/// Icon + color for a dependency report: ✓ when satisfied, otherwise keyed to
-/// its tier (required=✗ red, recommended=○ yellow, optional=○ gray, suggested=· gray).
-fn dep_icon(d: &DepReport) -> (&'static str, Color) {
+/// Checkbox + color for a dependency report: `[✓]` (green) when satisfied,
+/// otherwise an empty `[ ]` coloured by tier urgency (required=red,
+/// recommended=yellow, optional/suggested=gray).
+fn dep_checkbox(d: &DepReport) -> (&'static str, Color) {
     if d.satisfied {
-        return ("✓", SELECTION_GREEN);
+        return ("[✓]", SELECTION_GREEN);
     }
     match d.tier {
-        Tier::Required => ("✗", ERROR_RED),
-        Tier::Recommended => ("○", WARNING_YELLOW),
-        Tier::Optional => ("○", MUTED_GRAY),
-        Tier::Suggested => ("·", MUTED_GRAY),
+        Tier::Required => ("[ ]", ERROR_RED),
+        Tier::Recommended => ("[ ]", WARNING_YELLOW),
+        Tier::Optional | Tier::Suggested => ("[ ]", MUTED_GRAY),
     }
 }
 
