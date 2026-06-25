@@ -1,6 +1,6 @@
 # Illustration workflow engine (shared)
 
-Every mascot sub-skill in this plugin (`illustration:sporthead-alex`, `illustration:popa`, …) shares this engine. The sub-skill supplies the *visual DNA*, *IP anchors*, and *reference images*; this file supplies the *process*. Read this, then read your mascot's own `references/`.
+The mascot sub-skill in this plugin (`illustration:popa`) shares this engine. The sub-skill supplies the *visual DNA*, *IP anchors*, and *reference images*; this file supplies the *process*. Read this, then read your mascot's own `references/`.
 
 ## The five steps
 
@@ -49,4 +49,4 @@ Delivery report: how many, what each is for, save paths, which are solid vs opti
 
 ## Picking a mascot
 
-If the user invokes the bare `illustration` skill without naming a mascot, ask which one (or infer from context: ShotClubhouse/sport/brand → `alex`; generic dev/system explainers with a soft funny tone → `popa`).
+The bare `illustration` skill is an alias for `illustration:popa` — hand straight to Popa.
