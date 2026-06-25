@@ -28,15 +28,15 @@ Pick one per image; don't mix.
 - **Mini comic panels** — 2–4 scenes, one action each.
 - **Hero / brand** — single bold subject + tagline space (marketing).
 
-## Architecture-series pattern (strict minimal, split big topics)
+## Series pattern — split big topics across frames
 
-Never one dense diagram. A big system becomes a series:
+Don't cram a whole system into one frame; give each topic its own (intricate) frame in a series:
 
-1. **Overview frame** — 3–5 mega-blocks as friendly objects; mascot as guide.
-2. **Zoom-in frames** — one per block that matters, 3–5 elements each.
+1. **Overview frame** — the handful of mega-blocks as friendly objects; Popa as guide.
+2. **Per-topic frames** — one intricate sketchnote per block/feature that matters (each densely drawn, busy but legible).
 3. Optional **flow frame** — the one critical path as a map route.
 
-Each frame stands alone; number them in the shot list.
+Within a frame, be intricate (see the style DNA); across frames, split topics so no single page tries to explain everything. Each frame stands alone; number them in the shot list and keep one pastel tone so they tile.
 
 ## Likeness rule (MANDATORY — applies to every mascot)
 

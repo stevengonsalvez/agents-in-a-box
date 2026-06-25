@@ -1,45 +1,46 @@
-# Style DNA
+# Style DNA — intricate Popa sketchnote
+
+Popa draws **intricate hand-drawn sketchnotes**: one busy page where many small ideas are scribbled and wired together — a banner, boxes, clouds, arrows, bullets, spot icons — with Popa as the doodle host. Lots going on in the same note, but **every word is legible** (text integrity is non-negotiable).
 
 ## In one line
 
-Soft pastel scene, crude hand-drawn lines, lots of quiet space, one cute pink blob doing serious absurd work, sleek but funny, clear structure but never an instruction manual.
-
-Like a senior engineer sketching on pastel paper while a small pink creature files paperwork about it.
+A packed hand-drawn sketchnote on soft pastel: a banner title, many linked boxes/notes/icons wired by arrows, Popa scribbling in the middle — busy, charming, and fully readable.
 
 ## Must
 
-- Crude, wobbly hand-drawn pen lines: not vector, not 3D render, not polished, not mechanical.
-- Soft pastel background scene: rotate cream / lavender / mint / blush paper tones. Flat and gentle — one tone per image.
-- Popa is the most saturated element in the frame: pink body + green sprout pop against the pastel.
-- Quiet space: main subject 40-60% of canvas, at least 30% calm empty area.
-- Max 5-8 short handwritten English labels, each 1-4 words.
-- One image conveys only one core action, structure, state, or metaphor.
-- Express structure naturally; never write the structure type on the image.
+- **Crude, wobbly hand-drawn pen line art** — sketchbook feel, not vector/3D/polished.
+- **Soft flat pastel background** — cream by default (or mint / lavender / blush); one tone per image. For a multi-frame series, keep ONE tone across all frames so they tile.
+- **Intricate & dense** — fill the page with many small linked elements: a hand-lettered banner, several boxed/cloud ideas, mini-icons, short bullet lists and side notes, all wired with arrows and dotted connectors. Little empty space — "lots of scribblings in the same note".
+- **Popa is the host** — the pink blob (green sprout, notepad) somewhere in the scene, doing or pointing at the core action; the only fully-saturated element.
+- **Clear hierarchy despite density** — one banner, grouped clusters, a readable left-to-right flow.
 
 ## Color roles
 
 - **Pink** — Popa, key highlights.
-- **Green** — flow, paths, arrows, success, the sprout.
-- **Soft coral** — warnings, problems, "ouch" moments, results that hurt.
-- **Sky blue** — system state, secondary notes, feedback.
-- **Soft graphite** — line work, structure, objects, primary text.
+- **Green** — the flow-line, arrows, links, success, the sprout.
+- **Soft coral** — warnings, problems, "ouch" tags.
+- **Sky blue** — system state, secondary notes.
+- **Soft graphite** — line work, structure, most text.
 
-Color stays restrained: pastel scene + Popa + at most two accent roles per image.
+Restrained even when dense: colour marks meaning, not decoration.
+
+## Text integrity (NON-NEGOTIABLE)
+
+Dense sketchnotes are exactly where image models invent gibberish. Hold the line:
+
+- **Decide the exact words first.** Every label, banner and tag is chosen up front; the image may contain ONLY those exact strings, spelled exactly.
+- **Keep labels short and big enough to read** — 1–4 words each; prefer more icons over more text.
+- **No invented text.** If a spot would need words you didn't specify, leave it a plain icon rather than let the model scribble.
+- **Fix text by editing, not regenerating.** If a finished frame is great but a label is garbled, run an image *edit* that changes only that text — never a full regenerate (that re-garbles and loses the composition).
 
 ## Absolutely not
 
-- No PPT infographics or course slides.
-- No commercial vector illustration or polished flat style.
-- No 3D/clay renders (Popa's source style is reference, not target).
-- No formal flowcharts or complex architecture in one frame.
-- No realistic UI or app screenshots.
-- No heavy gradients, photo textures, or noisy backgrounds.
-- No top-left type-titles ("Workflow / Architecture / Roadmap").
+- No gibberish or unreadable lettering — ever.
+- No bold-ink comic / cel-shaded / 3D / photoreal / vector-flat look.
+- No paragraphs or long sentences lettered into the page.
+- No top-left format-title; the banner is the title.
 - No saccharine mascot-poster energy: cute is allowed, sugar-rush is not.
-- Never explain every node.
 
 ## Aesthetic direction
 
-Sleek, funny, warm, a little absurd. The reader should smile first, understand the structure within a second, and want to repost it.
-
-Humor comes from situations, never from Popa mugging at the camera.
+A lively, packed, charming hand-drawn page that rewards a second look — many little linked ideas, Popa in the thick of it — and reads cleanly the whole way through. Humour from the situation, never from Popa mugging at the camera.

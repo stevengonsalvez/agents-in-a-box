@@ -1,69 +1,66 @@
-# Image generation prompt template
+# Image generation prompt template — intricate Popa sketchnote
 
-Generate each image separately. Replace the variables; never collage multiple images into one.
-
-**MANDATORY: pass the character references as input images on every call** (likeness cannot be described in words):
+Generate each image separately. **Pass the character references on every call** (likeness can't be described in words):
 
 ```bash
 uv run generate_image.py --prompt "..." --filename out.png \
   -i assets/popa-ref/popa_square.png -i assets/popa-ref/tiny_popa2.png
 ```
 
+## The text-integrity workflow (do this every time)
+
+1. **Write the label list first** — the exact, short words the image is allowed to contain (banner + each box/tag). Nothing else may appear as text.
+2. Put that list into the prompt as a hard rule (the `ALLOWED TEXT` block below).
+3. After generating, **read the image and check every label**. If any is garbled or any stray text appeared, **fix it with an edit pass** (see *Edit prompts*) — do NOT full-regenerate a good composition.
+
 ```text
-The pink creature in the two reference images is Popa. Draw THIS exact character — same chubby pear proportions, same big glossy black eyes, same rosy cheeks, same green sprout — translated into crude hand-drawn pen line art (do NOT copy the 3D render style of the references, only the character design).
+The pink creature in the two reference images is Popa. Draw THIS exact character — chubby pear proportions, big glossy black eyes, rosy cheeks, green sprout, small notepad — translated into crude hand-drawn pen line art (do NOT copy the 3D render style of the references, only the character design).
 
-Generate one standalone {ASPECT} illustration. The canvas MUST be {ASPECT} — do not drift the aspect ratio. Do not copy the background or layout of the reference images.
+Generate one standalone {ASPECT} illustration. The canvas MUST be {ASPECT}. Do not copy the reference background or layout.
 
-Visual DNA:
-Crude, wobbly hand-drawn pen line art on a soft flat pastel {cream|lavender|mint|blush} paper-tone background. Slightly uneven lines, sketchbook feel. Lots of calm empty space. Sparse handwritten English labels. Sleek but funny product-sketch energy. No 3D render, no clay style, no vector illustration, no PPT infographic look, no gradients-heavy rendering, no photo texture, no realistic UI, no mascot poster.
+Style — INTRICATE SKETCHNOTE:
+Crude, wobbly hand-drawn pen line art on a soft flat pastel {cream|mint|lavender|blush} background. A bold hand-lettered banner title; many small ideas in hand-drawn boxes, clouds and tags, wired together with arrows and dotted connectors; bullet lists with little stars/checkmarks; small spot icons scattered through. Busy and packed — "lots of scribblings in one note" — but with clear left-to-right hierarchy and legible lettering. No 3D, no comic cel-shading, no photoreal, no vector-flat, no mascot poster.
 
-Recurring IP character required:
-Popa, a small pink round blob creature with a little green sprout on its head, big glossy black eyes, a tiny calm smile, stubby arms and legs, drawn in the same crude hand-drawn line style with pink fill. Popa carries a small notepad and pen — in hand, tucked under an arm, or lying open nearby. Popa must perform the core conceptual action with deadpan earnestness, like a diligent worker who thinks this absurd job is completely normal. The humor comes from the situation, never from Popa's expression.
+Popa (the host):
+Popa appears in the scene with its notepad, doing or pointing at the core action — deadpan-earnest, the only fully-saturated (pink) element.
 
-Theme:
-{theme}
+Banner title:
+{the one banner headline}
 
-Structure type:
-{Workflow / system fragment / before-after contrast / role state / concept metaphor / method layering / map route / mini comic panels / architecture overview / architecture zoom-in}
+Clusters (each a small boxed/cloud idea, a few words max):
+{cluster 1} / {cluster 2} / {cluster 3} / {cluster 4} / {cluster 5} / {cluster 6}
 
-Core idea:
-{the one idea this image expresses}
+Icons & connectors:
+{icon 1} / {icon 2} / {icon 3}; arrows linking {A→B}, {B→C}
 
-Composition:
-{concrete scene: where Popa is, what absurd-but-coherent job it is doing, the main low-tech object, how information flows}
+Color:
+Pink only for Popa + key highlights. Green for the flow-line, arrows, links, success. Soft coral only for warnings. Sky blue only for system/secondary notes. Graphite for line work.
 
-Suggested elements:
-{element 1} / {element 2} / {element 3}
+ALLOWED TEXT (CRITICAL):
+The ONLY words allowed anywhere in the image are exactly these, spelled exactly and legibly, and NOTHING else:
+{banner} ; {label 1} ; {label 2} ; {label 3} ; … (list every word that may appear)
+Do NOT invent, scribble, or letter any other words, letters, numbers or instruction text anywhere. If a spot would need other text, draw a plain icon instead. Keep every label large enough to read.
 
-Handwritten labels:
-{label 1} / {label 2} / {label 3} / {label 4} / {optional 5}
-
-Optional notepad gag (one tiny line on the notepad, skip if busy):
-{e.g. "day 47: box still empty"}
-
-Color use:
-Pink only for Popa and key highlights. Green for the sprout and main flow/paths/arrows/success. Soft coral only for warnings/problems/painful results. Sky blue only for system state or secondary notes. Soft graphite for line work and structure.
-
-Constraints:
-One image explains only one core structure. Main subject 40-60% of the canvas; keep at least 30% calm space. At most 5-8 short handwritten labels. No title in the top-left corner. Never write the structure type on the image. Do not copy prior examples; invent a fresh visual metaphor for this content. Clear but not instructional, funny but not childish, cute but deadpan.
+Layout:
+Optionally a {green flow-line / path} entering from the left edge and exiting the right edge to carry the eye. Busy but organised. No title in the top-left corner.
 ```
 
-## Edit prompts
+## Edit prompts (use these to fix, not regenerate)
+
+Fix garbled / stray text (preferred over regenerating):
+
+```text
+Edit the provided sketchnote. Change ONLY the text so every label is clean and legible — keep all art, layout, colours and positions identical. The labels must read exactly: {list the exact correct words per region}. Remove any stray or gibberish text and any words not in this list. Do not alter the artwork.
+```
 
 Fix a missing anchor:
 
 ```text
-Edit the provided image. Popa is missing {the green sprout / the notepad}. Add it in the same crude hand-drawn style without changing anything else: same composition, labels, colors, line style, aspect ratio.
+Edit the provided image. Popa is missing {the green sprout / the notepad}. Add it in the same crude hand-drawn style; change nothing else.
 ```
 
-Make Popa matter more:
+Add more density (if too sparse):
 
 ```text
-Regenerate with the same core meaning and layout, but make Popa the one performing the central action — operating, carrying, logging — not standing beside the diagram. Keep it pastel, sparse, hand-drawn, deadpan.
-```
-
-De-clutter:
-
-```text
-Regenerate with the same metaphor but remove all but {N} elements and at most 5 short labels. More calm space. One structure only.
+Edit the provided sketchnote to be busier — add a few more small linked boxes/notes/icons and connector arrows in the empty areas, in the same hand-drawn pastel style. Keep all existing labels exactly as they are and add only these new labels: {list}. No gibberish.
 ```
