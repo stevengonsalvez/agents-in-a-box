@@ -1,7 +1,7 @@
 {
   "name": "illustration",
   "version": "1.0.0",
-  "description": "Mascot-driven explanatory illustration family. A shared workflow engine (digest → shot list → per-image generation → QA → deliver) wrapped by per-character sub-skills, each with its own visual style, IP anchors, and likeness-locked references. Ships illustration:sporthead-alex (ShotClubhouse Sport Head — sketchnote visual notes, gold/mono) and illustration:popa (pink blob with a notepad — crude hand-drawn pastel). Invoke the bare `illustration` skill to pick a mascot.",
+  "description": "Explanatory & brand illustration skill starring Popa — a pink blob with a green sprout and a notepad — drawn as intricate hand-drawn sketchnotes. Workflow: digest → shot list → per-image generation → QA → deliver, with likeness-locked references. Invoke `illustration` or `illustration:popa`.",
   "author": {
     "name": "stevengonsalvez"
   },
@@ -10,10 +10,7 @@
     "mascot",
     "image-generation",
     "explainer",
-    "branding",
-    "alex",
-    "popa",
-    "sport-head",
-    "shotclubhouse"
+    "sketchnote",
+    "popa"
   ]
 }
