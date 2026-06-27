@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-06-27
+### Added
+- **onboarding**: auto-copy the G installer command to the clipboard
+
+
 ## [1.9.5] - 2026-06-27
 ### Added
 - **doctor**: point at the dependency catalog + installer
