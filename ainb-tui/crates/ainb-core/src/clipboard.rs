@@ -9,10 +9,14 @@ use std::io::Write;
 
 /// Copy `text` to the terminal clipboard via OSC 52.
 pub fn copy_osc52(text: &str) -> std::io::Result<()> {
-    let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
     let mut out = std::io::stdout();
-    out.write_all(seq.as_bytes())?;
+    out.write_all(osc52_sequence(text).as_bytes())?;
     out.flush()
+}
+
+/// The OSC 52 "set clipboard" escape for `text` (pure — testable without a tty).
+fn osc52_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
 }
 
 /// Standard base64 (no line breaks). Inlined to avoid a crate dependency for the
@@ -54,6 +58,11 @@ mod tests {
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_base64_in_escape() {
+        assert_eq!(osc52_sequence("foo"), "\x1b]52;c;Zm9v\x07");
     }
 
     #[test]
