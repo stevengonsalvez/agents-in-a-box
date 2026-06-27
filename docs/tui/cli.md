@@ -639,6 +639,8 @@ Options:
       --reset            Factory reset: remove ~/.agents-in-a-box entirely
   -f, --force            Skip interactive confirmation (required for non-interactive --reset)
   -y, --yes              Auto-install missing dependencies ainb can install safely (npm/uv/cargo/ ainb/claude-plugin). brew/curl still need explicit per-item consent
+      --script           Generate an idempotent install script for what's missing (writes ~/.agents-in-a-box/installer/install-<agent>.sh) instead of installing
+      --agent <AGENT>    Target agent for --script: claude | codex | copilot (default: claude)
   -h, --help             Print help
 
 EXAMPLES:
