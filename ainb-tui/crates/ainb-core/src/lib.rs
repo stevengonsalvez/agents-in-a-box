@@ -8,6 +8,7 @@ pub mod app;
 pub mod audit;
 pub mod claude;
 pub mod cli;
+pub mod clipboard;
 pub mod components;
 pub mod config;
 pub mod credentials;
