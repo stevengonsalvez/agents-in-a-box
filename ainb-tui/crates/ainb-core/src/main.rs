@@ -34,6 +34,7 @@ mod app;
 mod audit;
 mod claude;
 mod cli;
+mod clipboard;
 mod components;
 mod config;
 mod credentials;

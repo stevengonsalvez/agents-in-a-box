@@ -6388,12 +6388,18 @@ impl EventHandler {
                 match generate_install_script(agent, &RealEnv) {
                     Ok(path) => {
                         tracing::info!("Generated installer at {}", path.display());
+                        // Auto-copy the run command to the clipboard (OSC 52) —
+                        // you can't mouse-select in the TUI. Best-effort.
+                        let run_cmd = format!("bash {}", path.display());
+                        let copied = crate::clipboard::copy_osc52(&run_cmd).is_ok();
                         if let Some(os) = &mut state.onboarding_state {
                             os.error_message = None;
+                            let suffix = if copied { " (copied to clipboard)" } else { "" };
                             os.status_message = Some(format!(
-                                "✓ Wrote {} installer — run:  bash {}",
+                                "✓ Wrote {} installer{} — run:  {}",
                                 agent.label(),
-                                path.display()
+                                suffix,
+                                run_cmd
                             ));
                         }
                     }
