@@ -248,6 +248,9 @@ pub struct OnboardingState {
     pub error_message: Option<String>,
     /// Transient success/status message (e.g. after the `I` tmux-config install)
     pub status_message: Option<String>,
+    /// After pressing `G`: waiting for the user to pick an agent for the
+    /// generated install script (c/x/p), or Esc to cancel.
+    pub agent_pick_open: bool,
     /// Dependencies user chose to skip
     pub skipped_dependencies: Vec<String>,
     /// Available editor options (detected on EditorSelection step)
@@ -282,6 +285,7 @@ impl OnboardingState {
             show_cursor: true,
             error_message: None,
             status_message: None,
+            agent_pick_open: false,
             skipped_dependencies: Vec::new(),
             available_editors: Vec::new(),
             selected_editor_index: 0,
@@ -436,6 +440,7 @@ impl OnboardingState {
                 self.focus = OnboardingFocus::Content;
                 self.error_message = None;
                 self.status_message = None;
+                self.agent_pick_open = false;
 
                 // Auto-trigger dependency check when entering DependencyCheck step
                 let trigger_dep_check =
@@ -454,6 +459,7 @@ impl OnboardingState {
             self.focus = OnboardingFocus::Content;
             self.error_message = None;
             self.status_message = None;
+            self.agent_pick_open = false;
             return true;
         }
         false
