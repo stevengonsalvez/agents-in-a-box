@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-06-27
+### Added
+- **doctor**: point at the dependency catalog + installer
+- **illustration:popa**: intricate sketchnote style with text integrity (#355)
+- **onboarding**: G key generates an agent-specific install script
+- **setup**: generate an agent-specific install script (ainb init --script)
+
+### Documentation
+- **cli**: regenerate CLI reference for ainb init --script/--agent
+
+### Other
+- **illustration**: remove Alex/Sport Head, Popa-only plugin (#354)
+
+
 ## [1.9.4] - 2026-06-24
 ### Added
 - **onboarding**: show success/failure feedback for the I tmux-config install
