@@ -365,9 +365,14 @@ impl OnboardingComponent {
             frame.render_widget(list, *area);
         }
 
-        // Show the last action's result if there is one (e.g. the I-key tmux
-        // install), otherwise the key hints. Errors take priority over success.
-        let instr_span = if let Some(err) = &state.error_message {
+        // Footer priority: agent picker (after G) > last action result (error >
+        // success) > key hints.
+        let instr_span = if state.agent_pick_open {
+            Span::styled(
+                "Generate installer for:   [c] Claude    [x] Codex    [p] Copilot       Esc cancel",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )
+        } else if let Some(err) = &state.error_message {
             Span::styled(
                 err.clone(),
                 Style::default().fg(ERROR_RED).add_modifier(Modifier::BOLD),
@@ -379,12 +384,12 @@ impl OnboardingComponent {
             )
         } else if status.required_met() {
             Span::styled(
-                "Press Enter to continue • I to install tmux config • R to re-check",
+                "Enter continue • G generate install script • I tmux config • R re-check",
                 Style::default().fg(MUTED_GRAY),
             )
         } else {
             Span::styled(
-                "Install required dependencies • I to install tmux config • R to re-check",
+                "Install required deps • G generate install script • I tmux config • R re-check",
                 Style::default().fg(MUTED_GRAY),
             )
         };

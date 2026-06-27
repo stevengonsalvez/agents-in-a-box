@@ -443,26 +443,29 @@ pub enum AppEvent {
     LogHistoryScrollHome,    // Reset horizontal scroll to start (Home)
     LogHistoryCleanup,       // Delete all log files (C)
     // Onboarding wizard events
-    OnboardingNext,            // Go to next step (Enter/Right Arrow)
-    OnboardingBack,            // Go to previous step (Backspace/Left Arrow)
-    OnboardingToMenu,          // Leave wizard for the Setup menu (Esc)
-    OnboardingInputChar(char), // Input character for git directories
-    OnboardingBackspace,       // Backspace in git directories input
-    OnboardingDelete,          // Delete character in input
-    OnboardingCursorLeft,      // Move cursor left in input
-    OnboardingCursorRight,     // Move cursor right in input
-    OnboardingCursorHome,      // Move cursor to start of input
-    OnboardingCursorEnd,       // Move cursor to end of input
-    OnboardingCheckDeps,       // Run dependency check
-    OnboardingSkipAuth,        // Skip authentication step
-    OnboardingEditorUp,        // Move editor selection up
-    OnboardingEditorDown,      // Move editor selection down
-    OnboardingFinish,          // Complete onboarding
-    OnboardingInstallConfig,   // Install recommended config (I key)
-    OnboardingOtelChar(char),  // Type into the focused OTEL field
-    OnboardingOtelBackspace,   // Backspace the focused OTEL field
-    OnboardingOtelNextField,   // Focus next OTEL field (Tab/Down)
-    OnboardingOtelPrevField,   // Focus previous OTEL field (Shift-Tab/Up)
+    OnboardingNext,               // Go to next step (Enter/Right Arrow)
+    OnboardingBack,               // Go to previous step (Backspace/Left Arrow)
+    OnboardingToMenu,             // Leave wizard for the Setup menu (Esc)
+    OnboardingInputChar(char),    // Input character for git directories
+    OnboardingBackspace,          // Backspace in git directories input
+    OnboardingDelete,             // Delete character in input
+    OnboardingCursorLeft,         // Move cursor left in input
+    OnboardingCursorRight,        // Move cursor right in input
+    OnboardingCursorHome,         // Move cursor to start of input
+    OnboardingCursorEnd,          // Move cursor to end of input
+    OnboardingCheckDeps,          // Run dependency check
+    OnboardingSkipAuth,           // Skip authentication step
+    OnboardingEditorUp,           // Move editor selection up
+    OnboardingEditorDown,         // Move editor selection down
+    OnboardingFinish,             // Complete onboarding
+    OnboardingInstallConfig,      // Install recommended config (I key)
+    OnboardingScriptPrompt,       // G key: ask which agent to generate a script for
+    OnboardingCancelScriptPrompt, // Esc out of the agent picker
+    OnboardingGenerateScript(crate::setup::Agent), // Generate installer for agent
+    OnboardingOtelChar(char),     // Type into the focused OTEL field
+    OnboardingOtelBackspace,      // Backspace the focused OTEL field
+    OnboardingOtelNextField,      // Focus next OTEL field (Tab/Down)
+    OnboardingOtelPrevField,      // Focus previous OTEL field (Shift-Tab/Up)
     // Setup menu events
     SetupMenuBack,   // Return to home screen (Esc)
     SetupMenuSelect, // Select menu item (Enter)
@@ -2263,24 +2266,44 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::DependencyCheck => {
-                    match key_event.code {
-                        KeyCode::Enter | KeyCode::Right => {
-                            // If deps not checked yet, check them; otherwise advance
-                            if onboarding_state.dependency_status.is_none() {
-                                Some(AppEvent::OnboardingCheckDeps)
-                            } else {
-                                Some(AppEvent::OnboardingNext)
+                    if onboarding_state.agent_pick_open {
+                        // Agent picker (after G): choose which agent's installer to write.
+                        match key_event.code {
+                            KeyCode::Char('c') | KeyCode::Char('C') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Claude),
+                            ),
+                            KeyCode::Char('x') | KeyCode::Char('X') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
+                            ),
+                            KeyCode::Char('p') | KeyCode::Char('P') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
+                            ),
+                            KeyCode::Esc => Some(AppEvent::OnboardingCancelScriptPrompt),
+                            _ => None,
+                        }
+                    } else {
+                        match key_event.code {
+                            KeyCode::Enter | KeyCode::Right => {
+                                // If deps not checked yet, check them; otherwise advance
+                                if onboarding_state.dependency_status.is_none() {
+                                    Some(AppEvent::OnboardingCheckDeps)
+                                } else {
+                                    Some(AppEvent::OnboardingNext)
+                                }
                             }
+                            KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                            KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
+                                Some(AppEvent::OnboardingBack)
+                            }
+                            KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
+                            KeyCode::Char('i') | KeyCode::Char('I') => {
+                                Some(AppEvent::OnboardingInstallConfig)
+                            } // Install tmux config
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                Some(AppEvent::OnboardingScriptPrompt)
+                            } // Generate install script
+                            _ => None,
                         }
-                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                        KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                            Some(AppEvent::OnboardingBack)
-                        }
-                        KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
-                        KeyCode::Char('i') | KeyCode::Char('I') => {
-                            Some(AppEvent::OnboardingInstallConfig)
-                        } // Install config
-                        _ => None,
                     }
                 }
                 OnboardingStep::Authentication => match key_event.code {
@@ -6341,6 +6364,44 @@ impl EventHandler {
                             onboarding_state.status_message = None;
                             onboarding_state.error_message =
                                 Some(format!("✗ tmux.conf install failed: {e}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::OnboardingScriptPrompt => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = true;
+                    os.error_message = None;
+                    os.status_message = None;
+                }
+            }
+            AppEvent::OnboardingCancelScriptPrompt => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = false;
+                }
+            }
+            AppEvent::OnboardingGenerateScript(agent) => {
+                use crate::setup::{RealEnv, generate_install_script};
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = false;
+                }
+                match generate_install_script(agent, &RealEnv) {
+                    Ok(path) => {
+                        tracing::info!("Generated installer at {}", path.display());
+                        if let Some(os) = &mut state.onboarding_state {
+                            os.error_message = None;
+                            os.status_message = Some(format!(
+                                "✓ Wrote {} installer — run:  bash {}",
+                                agent.label(),
+                                path.display()
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to generate installer: {}", e);
+                        if let Some(os) = &mut state.onboarding_state {
+                            os.status_message = None;
+                            os.error_message = Some(format!("✗ installer generation failed: {e}"));
                         }
                     }
                 }

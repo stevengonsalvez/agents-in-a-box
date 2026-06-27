@@ -14,8 +14,8 @@ use std::io::{self, Write as _};
 use super::OutputFormat;
 use crate::config::{AppConfig, OnboardingConfig};
 use crate::setup::{
-    DepState, ProvisionMode, ProvisionOutcome, RealEnv, SetupStatus, catalog, detect_all,
-    detect_dep, provision,
+    Agent, DepState, ProvisionMode, ProvisionOutcome, RealEnv, SetupStatus, catalog, detect_all,
+    detect_dep, generate_install_script, provision,
 };
 
 #[derive(clap::Args)]
@@ -40,6 +40,15 @@ pub struct InitArgs {
     /// ainb/claude-plugin). brew/curl still need explicit per-item consent.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Generate an idempotent install script for what's missing (writes
+    /// ~/.agents-in-a-box/installer/install-<agent>.sh) instead of installing.
+    #[arg(long)]
+    pub script: bool,
+
+    /// Target agent for --script: claude | codex | copilot (default: claude).
+    #[arg(long)]
+    pub agent: Option<String>,
 }
 
 /// Output structure for `--status`
@@ -59,11 +68,11 @@ struct StatusReport {
 }
 
 /// Validate that at most one mode flag is set
-fn validate_flags(check: bool, status: bool, reset: bool) -> Result<()> {
-    let count = [check, status, reset].iter().filter(|x| **x).count();
+fn validate_flags(check: bool, status: bool, reset: bool, script: bool) -> Result<()> {
+    let count = [check, status, reset, script].iter().filter(|x| **x).count();
     if count > 1 {
         return Err(anyhow!(
-            "--check, --status, and --reset are mutually exclusive"
+            "--check, --status, --reset, and --script are mutually exclusive"
         ));
     }
     Ok(())
@@ -72,7 +81,7 @@ fn validate_flags(check: bool, status: bool, reset: bool) -> Result<()> {
 /// Entry point for `ainb init`
 #[allow(clippy::unused_async)]
 pub async fn execute(args: InitArgs, format: OutputFormat) -> Result<()> {
-    validate_flags(args.check, args.status, args.reset)?;
+    validate_flags(args.check, args.status, args.reset, args.script)?;
 
     if args.reset {
         cmd_reset(args.force, format)
@@ -80,9 +89,36 @@ pub async fn execute(args: InitArgs, format: OutputFormat) -> Result<()> {
         cmd_status(format)
     } else if args.check {
         cmd_check(format)
+    } else if args.script {
+        cmd_script(args.agent.as_deref(), format)
     } else {
         cmd_setup(format, args.yes)
     }
+}
+
+/// `ainb init --script` — generate an install script for the chosen agent.
+fn cmd_script(agent_arg: Option<&str>, format: OutputFormat) -> Result<()> {
+    let agent = match agent_arg {
+        Some(a) => Agent::parse(a)
+            .ok_or_else(|| anyhow!("unknown --agent '{a}' (use claude | codex | copilot)"))?,
+        None => Agent::Claude,
+    };
+    let path = generate_install_script(agent, &RealEnv)?;
+
+    match format {
+        OutputFormat::Json => {
+            let out = serde_json::json!({
+                "agent": agent.slug(),
+                "script_path": path.display().to_string(),
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            println!("Wrote {} installer:\n  {}", agent.label(), path.display());
+            println!("\nReview it, then run:\n  bash {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 // --- Catalog rendering (shared with the TUI via crate::setup) ----------------
@@ -675,26 +711,28 @@ mod tests {
 
     #[test]
     fn test_validate_flags_none_set() {
-        assert!(validate_flags(false, false, false).is_ok());
+        assert!(validate_flags(false, false, false, false).is_ok());
     }
 
     #[test]
     fn test_validate_flags_single_set() {
-        assert!(validate_flags(true, false, false).is_ok());
-        assert!(validate_flags(false, true, false).is_ok());
-        assert!(validate_flags(false, false, true).is_ok());
+        assert!(validate_flags(true, false, false, false).is_ok());
+        assert!(validate_flags(false, true, false, false).is_ok());
+        assert!(validate_flags(false, false, true, false).is_ok());
+        assert!(validate_flags(false, false, false, true).is_ok());
     }
 
     #[test]
     fn test_validate_flags_two_set_rejected() {
-        assert!(validate_flags(true, true, false).is_err());
-        assert!(validate_flags(true, false, true).is_err());
-        assert!(validate_flags(false, true, true).is_err());
+        assert!(validate_flags(true, true, false, false).is_err());
+        assert!(validate_flags(true, false, true, false).is_err());
+        assert!(validate_flags(false, true, true, false).is_err());
+        assert!(validate_flags(false, false, true, true).is_err());
     }
 
     #[test]
     fn test_validate_flags_all_three_rejected() {
-        let err = validate_flags(true, true, true).unwrap_err();
+        let err = validate_flags(true, true, true, false).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 

@@ -256,6 +256,19 @@ pub fn dispatch(home: &Path, args: DoctorArgs, out: &mut dyn io::Write) -> Resul
 }
 
 fn finalize(out: &mut dyn io::Write, issues: Vec<String>) -> Result<()> {
+    // Point at the dependency catalog + installer (lives in the ainb-core setup
+    // engine, not this crate — so surface the commands rather than re-render it).
+    writeln!(out, "\nDependencies (tools the agents + plugins need):")?;
+    writeln!(
+        out,
+        "  ainb init --check                    # full topic/dependency status"
+    )?;
+    writeln!(
+        out,
+        "  ainb init --script --agent <claude|codex|copilot>   # write an installer for what's missing"
+    )?;
+    writeln!(out)?;
+
     if issues.is_empty() {
         writeln!(out, "doctor: all checks passed")?;
         return Ok(());
