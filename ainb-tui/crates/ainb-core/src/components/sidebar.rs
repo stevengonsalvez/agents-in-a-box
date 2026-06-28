@@ -110,7 +110,7 @@ impl SidebarItem {
             Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
-            Self::Daemons => "MCP + Headroom",
+            Self::Daemons => "MCP · Headroom · notifyd",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
@@ -676,7 +676,10 @@ mod tests {
         assert_eq!(SidebarItem::Daemons.icon(), "⚙");
         assert_eq!(SidebarItem::Daemons.label(), "Daemons");
         assert_eq!(SidebarItem::Daemons.shortcut(), "d");
-        assert_eq!(SidebarItem::Daemons.description(), "MCP + Headroom");
+        assert_eq!(
+            SidebarItem::Daemons.description(),
+            "MCP · Headroom · notifyd"
+        );
         // 'd' must not collide with any other sidebar shortcut.
         let collisions = all
             .iter()

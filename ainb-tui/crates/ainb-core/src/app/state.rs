@@ -997,6 +997,8 @@ pub struct DaemonsFetchResult {
     pub mcp_alive: bool,
     pub headroom: crate::headroom::ProxyStatus,
     pub headroom_consumers: Vec<String>,
+    /// Every running `notifyd` process, classified live / stale / orphan.
+    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
 }
 
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
@@ -1006,15 +1008,22 @@ pub struct DaemonsOverlayState {
     pub mcp_alive: bool,
     pub headroom: crate::headroom::ProxyStatus,
     pub headroom_consumers: Vec<String>,
+    /// Every running `notifyd` process, classified live / stale / orphan.
+    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
     pub loading: bool,
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
     pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
 }
 
-/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read.
-/// These are sync calls so they run on the blocking thread pool.
-pub(crate) fn daemons_sync_probe() -> (bool, Vec<String>) {
+/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
+/// + notifyd process scan. These are sync calls (the notifyd scan shells out
+/// to `ps`) so they run on the blocking thread pool.
+pub(crate) fn daemons_sync_probe() -> (
+    bool,
+    Vec<String>,
+    Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
     let headroom_consumers = crate::interactive::SessionStore::load()
         .sessions
@@ -1022,7 +1031,8 @@ pub(crate) fn daemons_sync_probe() -> (bool, Vec<String>) {
         .filter(|m| m.headroom_enabled)
         .map(|m| m.tmux_session_name.clone())
         .collect::<Vec<_>>();
-    (mcp_alive, headroom_consumers)
+    let notifyd = ainb_plugin_notifyd::scan_daemons();
+    (mcp_alive, headroom_consumers, notifyd)
 }
 
 // ============================================================================
@@ -4909,6 +4919,7 @@ impl AppState {
                 tokens_saved: None,
             },
             headroom_consumers: Vec::new(),
+            notifyd: Vec::new(),
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
@@ -4934,16 +4945,20 @@ impl AppState {
         o.fetch_rx = Some(rx);
         o.loading = true;
         tokio::spawn(async move {
-            // Blocking I/O (control socket + file read) on the blocking pool.
-            let (mcp_alive, headroom_consumers) = tokio::task::spawn_blocking(daemons_sync_probe)
-                .await
-                .unwrap_or((false, Vec::new()));
+            // Blocking I/O (control socket + file read + `ps` scan) on the
+            // blocking pool.
+            let (mcp_alive, headroom_consumers, notifyd) = tokio::task::spawn_blocking(
+                daemons_sync_probe,
+            )
+            .await
+            .unwrap_or((false, Vec::new(), Vec::new()));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
             let result = DaemonsFetchResult {
                 mcp_alive,
                 headroom,
                 headroom_consumers,
+                notifyd,
             };
             let _ = tx.send(result);
         });
@@ -4961,6 +4976,7 @@ impl AppState {
                 o.mcp_alive = result.mcp_alive;
                 o.headroom = result.headroom;
                 o.headroom_consumers = result.headroom_consumers;
+                o.notifyd = result.notifyd;
                 o.last_refreshed = Some(std::time::Instant::now());
             }
         }
