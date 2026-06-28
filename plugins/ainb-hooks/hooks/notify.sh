@@ -149,7 +149,9 @@ ainb_socket_alive() {
   # `[ -S ]` alone is what let a stale socket block respawn for days.
   [ -S "${AINB_SOCK}" ] || return 1
   if command -v nc >/dev/null 2>&1; then
-    : | nc -U -w 1 "${AINB_SOCK}" >/dev/null 2>&1
+    # `-N` closes the socket after stdin EOF so an accepting daemon answers
+    # instantly; without it BSD/macOS nc waits out the full `-w` timeout.
+    : | nc -U -N -w 1 "${AINB_SOCK}" >/dev/null 2>&1
     return $?
   fi
   if command -v socat >/dev/null 2>&1; then
