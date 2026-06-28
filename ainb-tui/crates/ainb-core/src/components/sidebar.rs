@@ -110,7 +110,7 @@ impl SidebarItem {
             Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
-            Self::Daemons => "MCP + Headroom",
+            Self::Daemons => "MCP · Headroom · notifyd",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
