@@ -184,15 +184,26 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 /// This is the only daemon surface that enumerates *every* process rather
 /// than a single pid — orphans are invisible to a pid-file-only view.
 fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
-    use ainb_plugin_notifyd::DaemonClass;
+    let lines = build_notifyd_lines(&state.notifyd, area.height as usize);
+    frame.render_widget(Paragraph::new(lines), area);
+}
 
-    let orphan_count = state.notifyd.iter().filter(|d| d.class != DaemonClass::LiveOwner).count();
+/// Build the notifyd section's lines, bounded to `capacity` rows. The
+/// `Paragraph` doesn't scroll, so without a cap a host with many orphans
+/// (the very case this surface exists for) would have rows silently clipped
+/// — and the user would think they'd seen them all. When the list overflows,
+/// the last visible row becomes a "… +N more" pointer instead.
+fn build_notifyd_lines(
+    notifyd: &[ainb_plugin_notifyd::ClassifiedDaemon],
+    capacity: usize,
+) -> Vec<Line<'static>> {
+    let orphan_count = notifyd.iter().filter(|d| !d.class.is_healthy()).count();
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: "notifyd processes (N)  · M need attention".
+    // Header: "notifyd processes (N)  · M to clean up".
     let mut header = vec![Span::styled(
-        format!("  notifyd processes ({})", state.notifyd.len()),
+        format!("  notifyd processes ({})", notifyd.len()),
         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
     )];
     if orphan_count > 0 {
@@ -203,44 +214,63 @@ fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayS
     }
     lines.push(Line::from(header));
 
-    if state.notifyd.is_empty() {
+    if notifyd.is_empty() {
         lines.push(Line::from(Span::styled(
             "    none running — a hook event will lazy-spawn one",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )));
-    } else {
-        for d in &state.notifyd {
-            let (glyph, color) = match d.class {
-                DaemonClass::LiveOwner => ("●", SELECTION_GREEN),
-                DaemonClass::StaleOwner | DaemonClass::Orphan => ("○", CLAY),
-            };
-            let mut spans = vec![
-                Span::styled(format!("    {glyph} "), Style::default().fg(color)),
-                Span::styled(
-                    format!("{:<11}", d.class.label()),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("pid {:<7}", d.proc.pid),
-                    Style::default().fg(SOFT_WHITE),
-                ),
-                Span::styled(
-                    format!("up {:<10}", d.proc.etime),
-                    Style::default().fg(MUTED_GRAY),
-                ),
-                Span::styled(d.proc.bin.clone(), Style::default().fg(MUTED_GRAY)),
-            ];
-            if d.binary_drift {
-                spans.push(Span::styled(
-                    "  ⚠ old binary",
-                    Style::default().fg(CLAY).add_modifier(Modifier::BOLD),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
+        return lines;
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    // Header consumed one row; if the rest don't fit, reserve one row for the
+    // overflow pointer and fill the remainder with daemon rows.
+    let body_cap = capacity.saturating_sub(1);
+    let (shown, overflow) = if notifyd.len() <= body_cap {
+        (notifyd.len(), 0)
+    } else {
+        let shown = body_cap.saturating_sub(1);
+        (shown, notifyd.len() - shown)
+    };
+
+    for d in notifyd.iter().take(shown) {
+        let (glyph, color) = if d.class.is_healthy() {
+            ("●", SELECTION_GREEN)
+        } else {
+            ("○", CLAY)
+        };
+        let mut spans = vec![
+            Span::styled(format!("    {glyph} "), Style::default().fg(color)),
+            Span::styled(
+                format!("{:<11}", d.class.label()),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("pid {:<7}", d.proc.pid),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            Span::styled(
+                format!("up {:<10}", d.proc.etime),
+                Style::default().fg(MUTED_GRAY),
+            ),
+            Span::styled(d.proc.bin.clone(), Style::default().fg(MUTED_GRAY)),
+        ];
+        if d.binary_drift {
+            spans.push(Span::styled(
+                "  ⚠ old binary",
+                Style::default().fg(CLAY).add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if overflow > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("    … +{overflow} more — see `ainb notifyd list`"),
+            Style::default().fg(MUTED_GRAY),
+        )));
+    }
+
+    lines
 }
 
 fn render_help_bar(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
@@ -410,6 +440,38 @@ mod tests {
         assert!(
             text.contains("to clean up"),
             "missing cleanup hint in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn notifyd_lines_cap_to_capacity_with_overflow_pointer() {
+        use ainb_plugin_notifyd::{ClassifiedDaemon, DaemonClass, NotifydProc};
+        let many: Vec<ClassifiedDaemon> = (0..7)
+            .map(|i| ClassifiedDaemon {
+                proc: NotifydProc {
+                    pid: 1000 + i,
+                    bin: "/x/ainb".to_string(),
+                    cmd: "ainb notifyd".to_string(),
+                    etime: "01:00".to_string(),
+                },
+                class: DaemonClass::Orphan,
+                binary_drift: false,
+            })
+            .collect();
+        // capacity 4 → header + 2 rows + "… +5 more"
+        let lines = build_notifyd_lines(&many, 4);
+        assert!(lines.len() <= 4, "exceeded capacity: {}", lines.len());
+        let last: String = lines.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
+        assert!(last.contains("more"), "no overflow pointer in: {last}");
+
+        // Ample capacity → all 7 rows, no overflow line.
+        let full = build_notifyd_lines(&many, 30);
+        assert_eq!(full.len(), 8); // header + 7
+        let full_last: String =
+            full.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
+        assert!(
+            !full_last.contains("more"),
+            "unexpected overflow: {full_last}"
         );
     }
 
