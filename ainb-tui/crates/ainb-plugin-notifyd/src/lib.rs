@@ -46,7 +46,5 @@ pub use listener::{RunConfig, run_daemon};
 pub use osnotify::{AlertKind, classify_attention};
 pub use paths::Paths;
 pub use pid::PidFile;
-pub use procs::{
-    ClassifiedDaemon, DaemonClass, NotifydProc, classify as classify_daemons, scan as scan_daemons,
-};
+pub use procs::{ClassifiedDaemon, DaemonClass, NotifydProc, scan as scan_daemons};
 pub use store::{NotificationRecord, RetentionPolicy, Store, StoreError};

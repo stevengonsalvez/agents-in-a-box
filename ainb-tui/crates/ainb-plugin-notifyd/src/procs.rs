@@ -78,7 +78,7 @@ pub struct ClassifiedDaemon {
 
 /// Enumerate every running notifyd-family process. Returns an empty vec
 /// if `ps` is unavailable or fails — discovery is best-effort.
-pub fn enumerate() -> Vec<NotifydProc> {
+pub(crate) fn enumerate() -> Vec<NotifydProc> {
     let output = match Command::new("ps").args(["-axo", "pid=,etime=,args="]).output() {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
@@ -112,22 +112,38 @@ fn parse_ps_line(line: &str) -> Option<NotifydProc> {
     })
 }
 
-/// Does this process look like a notifyd? Matches either `ainb notifyd …`
-/// (the subcommand form the hook lazy-spawns) or the slim `ainb-notifyd`
-/// binary. The `ainb` TUI itself never carries a `notifyd` token, so it is
-/// not matched.
+/// Does this process look like a *daemon* notifyd? Matches the long-running
+/// forms — `ainb notifyd` / `ainb notifyd run`, or the slim `ainb-notifyd`
+/// (`run`) binary — but NOT the transient CLI subcommands (`status`, `stop`,
+/// `install`, `uninstall`, `list`): those are short-lived invocations, and
+/// labelling one ORPHAN with a "kill it" hint would be actively wrong. The
+/// `ainb` TUI itself never carries a `notifyd` token, so it is not matched.
 fn is_notifyd(p: &NotifydProc) -> bool {
     let base = p.bin.rsplit('/').next().unwrap_or(&p.bin);
-    (base == "ainb" && p.cmd.split_whitespace().any(|t| t == "notifyd")) || base == "ainb-notifyd"
+    let toks: Vec<&str> = p.cmd.split_whitespace().collect();
+    // The subcommand token that selects daemon mode, if any.
+    let sub = match base {
+        "ainb" => match toks.iter().position(|t| *t == "notifyd") {
+            Some(i) => toks.get(i + 1).copied(),
+            None => return false,
+        },
+        "ainb-notifyd" => toks.get(1).copied(),
+        _ => return false,
+    };
+    // Daemon mode is the bare command or an explicit `run`.
+    matches!(sub, None | Some("run"))
 }
 
 /// Classify each discovered process against the canonical owner pid +
-/// socket presence + the currently-running binary. Pure — the testable
-/// core.
-pub fn classify(
+/// whether the socket is actually accepting + the currently-running binary.
+/// Pure — the testable core. `socket_accepting` must reflect a real connect
+/// probe, not mere file presence: a wedged owner that left a stale socket
+/// file behind is the failure this surface exists to show, so it must land
+/// as `StaleOwner`, not `LiveOwner`.
+pub(crate) fn classify(
     procs: Vec<NotifydProc>,
     owner_pid: Option<u32>,
-    socket_present: bool,
+    socket_accepting: bool,
     current_bin: Option<&str>,
 ) -> Vec<ClassifiedDaemon> {
     procs
@@ -135,7 +151,7 @@ pub fn classify(
         .map(|p| {
             let class = match owner_pid {
                 Some(owner) if owner == p.pid => {
-                    if socket_present {
+                    if socket_accepting {
                         DaemonClass::LiveOwner
                     } else {
                         DaemonClass::StaleOwner
@@ -165,20 +181,28 @@ fn same_binary(a: &str, b: &str) -> bool {
     }
 }
 
+/// True when a daemon is actually accepting on the unix socket. A bare
+/// socket *file* left by a crashed daemon connects with `ECONNREFUSED`, so
+/// this correctly returns false for a wedged owner — unlike `Path::exists`.
+/// The throwaway connection sends nothing; the daemon reads EOF and skips
+/// it, same as the hook script's `nc` probe.
+fn socket_accepting(path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
 /// One-shot scan: enumerate notifyd processes and classify them against
-/// the on-disk owner pid, socket, and this process's own binary. Used by
-/// the TUI's Daemons overlay.
+/// the on-disk owner pid, the live socket, and this process's own binary.
+/// Used by the TUI's Daemons overlay.
 pub fn scan() -> Vec<ClassifiedDaemon> {
     let Ok(paths) = Paths::from_home() else {
         return Vec::new();
     };
     let owner_pid = crate::pid::read(&paths.pid).ok().flatten();
-    let socket_present = paths.socket.exists();
     let current_bin = std::env::current_exe().ok().and_then(|p| p.to_str().map(String::from));
     classify(
         enumerate(),
         owner_pid,
-        socket_present,
+        socket_accepting(&paths.socket),
         current_bin.as_deref(),
     )
 }
@@ -296,5 +320,31 @@ mod tests {
             etime: "01:00".to_string(),
         };
         assert!(is_notifyd(&p));
+    }
+
+    #[test]
+    fn is_notifyd_accepts_bare_subcommand() {
+        let p = NotifydProc {
+            pid: 1,
+            bin: "/usr/local/bin/ainb".to_string(),
+            cmd: "/usr/local/bin/ainb notifyd".to_string(),
+            etime: "01:00".to_string(),
+        };
+        assert!(is_notifyd(&p));
+    }
+
+    #[test]
+    fn is_notifyd_rejects_transient_cli_subcommands() {
+        // `ainb notifyd status|stop|install|...` are short-lived CLI calls,
+        // not daemons — labelling one ORPHAN with a kill hint would be wrong.
+        for sub in ["status", "stop", "install", "uninstall", "list"] {
+            let p = NotifydProc {
+                pid: 1,
+                bin: "/usr/local/bin/ainb".to_string(),
+                cmd: format!("/usr/local/bin/ainb notifyd {sub}"),
+                etime: "00:01".to_string(),
+            };
+            assert!(!is_notifyd(&p), "should reject `ainb notifyd {sub}`");
+        }
     }
 }
