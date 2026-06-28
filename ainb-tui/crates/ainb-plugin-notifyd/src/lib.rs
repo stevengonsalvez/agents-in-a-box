@@ -30,6 +30,7 @@ pub mod install;
 pub mod osnotify;
 pub mod paths;
 pub mod pid;
+pub mod procs;
 pub mod store;
 
 mod listener;
@@ -45,4 +46,7 @@ pub use listener::{RunConfig, run_daemon};
 pub use osnotify::{AlertKind, classify_attention};
 pub use paths::Paths;
 pub use pid::PidFile;
+pub use procs::{
+    ClassifiedDaemon, DaemonClass, NotifydProc, classify as classify_daemons, scan as scan_daemons,
+};
 pub use store::{NotificationRecord, RetentionPolicy, Store, StoreError};
