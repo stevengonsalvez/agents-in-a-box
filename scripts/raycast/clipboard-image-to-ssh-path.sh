@@ -5,11 +5,17 @@
 # @raycast.mode silent
 # @raycast.packageName Stevie Utils
 # @raycast.icon 📋
-# @raycast.description Copy clipboard image to remote Mac /tmp over Tailscale SSH; put bare /tmp/... path on clipboard for pasting into Claude SSH session
+# @raycast.description Copy clipboard image to the current host's /tmp over Tailscale SSH; put bare /tmp/... path on clipboard. Change host with "Set SSH Host".
 
 set -euo pipefail
 
-REMOTE_HOST="stevens-macbook-pro-5"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_cc-paste-lib.sh"
+
+HOST_KEY="$(cc_current_key)"
+HOST_SPEC="$(cc_resolve "$HOST_KEY")"
+REMOTE_HOST="${HOST_SPEC%%|*}"
+PEER_NAME="${HOST_SPEC##*|}"
+
 REMOTE_DIR="/tmp"
 FILE_PREFIX="cc-paste"
 
@@ -25,12 +31,13 @@ if ! tailscale status --json >/dev/null 2>&1; then
   fail "tailscale not running"
 fi
 
-if ! tailscale status --json | /usr/bin/python3 -c '
-import json, sys
+if ! tailscale status --json | PEER_NAME="$PEER_NAME" /usr/bin/python3 -c '
+import json, os, sys
+want = os.environ["PEER_NAME"].lower()
 j = json.load(sys.stdin)
 peer = next((p for p in j.get("Peer", {}).values()
-             if p.get("HostName") == "Stevens-MacBook-Pro-5"
-             or p.get("DNSName", "").startswith("stevens-macbook-pro-5.")), None)
+             if p.get("HostName", "").lower() == want
+             or p.get("DNSName", "").lower().startswith(want + ".")), None)
 raise SystemExit(0 if peer and peer.get("Online") else 1)
 '; then
   fail "remote host offline: ${REMOTE_HOST}"
@@ -55,4 +62,4 @@ if ! tailscale ssh "$REMOTE_HOST" "test -s $(printf '%q' "$remote_path")"; then
 fi
 
 printf "%s" "$remote_path" | pbcopy
-printf "Copied: %s\n" "$remote_path"
+printf "Copied to %s: %s\n" "$HOST_KEY" "$remote_path"
