@@ -68,9 +68,14 @@ async fn setup(args: SetupArgs) -> Result<()> {
     println!("OpenTelemetry setup — provider: Grafana Cloud");
     println!("{}", "\u{2501}".repeat(64));
     println!(
-        "Pipeline:  Claude Code --OTLP {}--> Grafana Alloy --> Grafana Cloud\n",
+        "Pipeline:  Claude Code --OTLP {ep}--> Grafana Alloy --(authenticated OTLP)--> Grafana Cloud",
+        ep = otel::LOCAL_OTLP_ENDPOINT
+    );
+    println!(
+        "           The local {} hop (Claude Code -> Alloy) is automatic. Below you supply",
         otel::LOCAL_OTLP_ENDPOINT
     );
+    println!("           the REMOTE Grafana Cloud endpoint + creds that Alloy forwards to.\n");
 
     // 1. Vendor the generic assets (config.alloy, start-alloy.sh, dashboards).
     otel::write_assets()?;
@@ -82,16 +87,25 @@ async fn setup(args: SetupArgs) -> Result<()> {
     // 2. Collect Grafana Cloud creds — with how-to-get instructions.
     println!("\n[2/6] Grafana Cloud credentials");
     println!(
+        "      These are the REMOTE Grafana Cloud values Alloy ships to — NOT the local"
+    );
+    println!("      {} endpoint above (that one is automatic).", otel::LOCAL_OTLP_ENDPOINT);
+    println!(
         "      Where to find these: Grafana Cloud \u{2192} Connections \u{2192} \"OpenTelemetry (OTLP)\"."
     );
     println!("      That page shows the OTLP endpoint URL, an Instance ID (Basic-auth");
     println!("      username), and lets you generate an API token (needs metrics+logs+traces");
     println!("      write). Values can also be preset via the GRAFANA_OTLP_ENDPOINT,");
-    println!("      GRAFANA_INSTANCE_ID and GRAFANA_API_TOKEN env vars.\n");
+    println!("      GRAFANA_INSTANCE_ID and GRAFANA_API_TOKEN env vars.");
+    println!();
+    println!("      Example (your region/numbers differ):");
+    println!("        OTLP endpoint  https://otlp-gateway-prod-us-east-0.grafana.net/otlp");
+    println!("        Instance ID    1234567");
+    println!("        API token      glc_eyJ...  (scope: metrics + logs + traces write)\n");
 
     let otlp_endpoint = resolve_value(
         "GRAFANA_OTLP_ENDPOINT",
-        "      OTLP endpoint URL (ends in /otlp)",
+        "      Grafana Cloud OTLP endpoint URL (https://...grafana.net/otlp)",
     )?;
     let instance_id = resolve_value("GRAFANA_INSTANCE_ID", "      Instance ID (Basic-auth user)")?;
     // Token is a secret — read it without echoing to the terminal.
@@ -101,7 +115,19 @@ async fn setup(args: SetupArgs) -> Result<()> {
     // Warn (don't bail) — a common mistake is swapping the endpoint and instance
     // fields, which otherwise only surfaces as a confusing Alloy auth error.
     let ep = otlp_endpoint.trim();
-    if !ep.starts_with("http://") && !ep.starts_with("https://") {
+    let looks_local = ep.contains("localhost")
+        || ep.contains("127.0.0.1")
+        || ep.contains(":4318")
+        || ep.contains(":4317");
+    if looks_local {
+        eprintln!(
+            "      warning: that looks like the LOCAL Alloy endpoint ({}) — this field wants the",
+            otel::LOCAL_OTLP_ENDPOINT
+        );
+        eprintln!(
+            "      REMOTE Grafana Cloud URL, e.g. https://otlp-gateway-prod-us-east-0.grafana.net/otlp"
+        );
+    } else if !ep.starts_with("http://") && !ep.starts_with("https://") {
         eprintln!(
             "      warning: OTLP endpoint doesn't start with http(s):// — did you paste the right field?"
         );
