@@ -8,8 +8,11 @@ These are **Claude Code plugins** — bundles of skills, hooks, and commands tha
 The repo publishes them through `.claude-plugin/marketplace.json` at the repo root; the source lives under `plugins/<name>/`. Add the marketplace, then install:
 
 ```bash
-claude plugin marketplace add stevengonsalvez/agents-in-a-box
+claude plugin marketplace add https://github.com/stevengonsalvez/agents-in-a-box.git
 claude plugin install ainb-fleet@agents-in-a-box
+
+# (or `stevengonsalvez/agents-in-a-box` shorthand if you have GitHub SSH keys set up —
+#  the shorthand resolves to SSH and fails with "Host key verification failed" otherwise)
 ```
 
 > `reflect` is no longer in this marketplace — it was extracted to [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) and ships from that repo's `plugin/` dir (or run `ainb reflect bootstrap`).
