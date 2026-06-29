@@ -4516,8 +4516,8 @@ impl EventHandler {
                 // P8 live-data binding (hdt.9): rehydrate Sources /
                 // Units / Detail panels from $AINB_HOME/manifest.yaml
                 // + lock.yaml on every screen-open so out-of-band
-                // edits (e.g. `ainb migrate --discover`,
-                // `ainb skill install`) are reflected without
+                // edits (e.g. `ainb skill install`, hand-edited
+                // manifest) are reflected without
                 // requiring a TUI restart. Banner state is preserved
                 // by `reload_from_disk` — the subsequent
                 // `maybe_show_discovery_banner` call only flips
@@ -4716,10 +4716,7 @@ impl EventHandler {
                         state.add_warning_notification("remove: no unit selected".to_string());
                     }
                     Some(uri) => {
-                        let armed = state
-                            .skill_manager_state
-                            .pending_remove_confirm
-                            .as_deref()
+                        let armed = state.skill_manager_state.pending_remove_confirm.as_deref()
                             == Some(uri.as_str());
                         if !armed {
                             // First `[r]`: arm a one-shot confirm for THIS unit.
@@ -4804,6 +4801,17 @@ impl EventHandler {
                         let q = input.buffer.trim().to_lowercase();
                         state.skill_manager_state.search =
                             if q.is_empty() { None } else { Some(q) };
+                        // Reset the cursor to the first row visible under the new
+                        // filter (mirrors the source-filter handlers). Otherwise
+                        // `selected` keeps its old absolute index — which the new
+                        // filter may hide — so the highlighted row and the unit
+                        // that `[r]` remove / `[i]` install act on would diverge.
+                        state.skill_manager_state.selected = state
+                            .skill_manager_state
+                            .visible_indices()
+                            .first()
+                            .copied()
+                            .unwrap_or(0);
                     }
                     InputKind::AddSource => {
                         let uri = input.buffer.trim().to_string();
@@ -7070,16 +7078,15 @@ mod panel_back_tests {
     #[test]
     fn skill_manager_remove_arms_on_first_r_and_back_cancels() {
         let mut state = AppState::default();
-        state.skill_manager_state.units =
-            vec![crate::components::skill_manager_screen::UnitRow {
-                idx: 0,
-                name: "foo".to_string(),
-                kind: "skill".to_string(),
-                source: "gh:o/r".to_string(),
-                git_ref: "main".to_string(),
-                targets: vec!["claude".to_string()],
-                declared_uri: "gh:o/r@main/skills/foo".to_string(),
-            }];
+        state.skill_manager_state.units = vec![crate::components::skill_manager_screen::UnitRow {
+            idx: 0,
+            name: "foo".to_string(),
+            kind: "skill".to_string(),
+            source: "gh:o/r".to_string(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: "gh:o/r@main/skills/foo".to_string(),
+        }];
         state.skill_manager_state.selected = 0;
         assert!(state.skill_manager_state.pending_remove_confirm.is_none());
 
@@ -7101,6 +7108,44 @@ mod panel_back_tests {
         assert!(
             state.skill_manager_state.pending_remove_confirm.is_none(),
             "SkillManagerBack must cancel a pending remove confirm"
+        );
+    }
+
+    /// Applying a search filter must move the cursor onto a visible row.
+    /// Otherwise `selected` keeps a now-hidden absolute index and the
+    /// highlighted row (visible-row-0) diverges from the unit that `[r]`
+    /// remove / `[i]` install act on — a wrong-unit action.
+    #[test]
+    fn skill_manager_search_resets_cursor_to_first_visible_unit() {
+        use crate::components::skill_manager_screen::{InputKind, InputState, UnitRow};
+        let mk = |i: usize, name: &str| UnitRow {
+            idx: i,
+            name: name.to_string(),
+            kind: "skill".to_string(),
+            source: "gh:o/r".to_string(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: format!("gh:o/r@main/skills/{name}"),
+        };
+        let mut state = AppState::default();
+        state.skill_manager_state.units = vec![mk(0, "alpha"), mk(1, "beta"), mk(2, "gamma")];
+        state.skill_manager_state.selected = 0;
+
+        // Submit a search that matches only the last unit.
+        let mut input = InputState::new(InputKind::Search);
+        input.buffer = "gamma".to_string();
+        state.skill_manager_state.input = Some(input);
+        EventHandler::process_event(AppEvent::SkillManagerInputSubmit, &mut state);
+
+        assert_eq!(state.skill_manager_state.search.as_deref(), Some("gamma"));
+        assert_eq!(
+            state.skill_manager_state.visible_indices(),
+            vec![2],
+            "only gamma should be visible under the filter"
+        );
+        assert_eq!(
+            state.skill_manager_state.selected, 2,
+            "cursor must reset onto the visible unit, not stay at hidden index 0"
         );
     }
 

@@ -1207,8 +1207,8 @@ fn format_time_ago(rfc3339: &str) -> String {
 /// §User Flow 1). Banner is centered horizontally inside `area`.
 const BANNER_WIDTH: u16 = 44;
 /// Marker file under `$AINB_HOME` whose presence means the user
-/// pressed `[s] skip` on the discovery banner. Cleared by a forced
-/// re-scan (e.g. `ainb migrate --discover --force`, future P5+).
+/// pressed `[s] skip` on the discovery banner. Cleared programmatically
+/// by `clear_discovery_skip_marker` on a forced re-scan.
 const SKIP_MARKER_FILE: &str = ".discovery-skipped";
 
 /// Title rendered in the banner border. Stable string so tripwires
@@ -1702,8 +1702,8 @@ impl SkillsScreenData {
     /// Reload manifest + lockfile and refresh the rendered rows in
     /// place. Banner state is left untouched. Used by callers that
     /// already own a `SkillsScreenData` and want to pick up
-    /// out-of-band manifest mutations (e.g. after `ainb migrate
-    /// --discover` has rewritten disk).
+    /// out-of-band manifest mutations (e.g. after `ainb skill install`
+    /// or the discovery import has rewritten disk).
     pub fn reload_from_disk(&mut self, home: &Path) {
         let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
         let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
