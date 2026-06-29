@@ -424,33 +424,9 @@ pub fn catalog() -> Vec<Topic> {
                 ),
             ],
         },
-        Topic {
-            id: "container",
-            label: "Container Runtime",
-            description: "Isolated dev environments (optional, at least one)",
-            deps: vec![
-                dep(
-                    "docker",
-                    "Docker",
-                    "container runtime for isolated envs",
-                    Optional,
-                    Bin("docker"),
-                    Manual("Install Docker Desktop: https://docker.com/products/docker-desktop"),
-                    &[],
-                    &[],
-                ),
-                dep(
-                    "colima",
-                    "Colima",
-                    "lightweight Docker alternative (macOS)",
-                    Optional,
-                    Bin("colima"),
-                    Brew(&["colima"]),
-                    &[],
-                    &[MacArm, MacIntel],
-                ),
-            ],
-        },
+        // ponytail: container runtime topic (docker/colima) removed from the
+        // setup surface — container/Boss sessions aren't wired up cleanly yet.
+        // Re-add this Topic when the Docker session path is restored.
         Topic {
             id: "github",
             label: "GitHub",

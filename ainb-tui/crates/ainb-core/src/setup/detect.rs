@@ -367,7 +367,6 @@ mod tests {
         assert!(find(&status, "git").is_blocking());
         assert!(find(&status, "tmux").is_blocking());
         // optional/suggested never block
-        assert!(!find(&status, "docker").is_blocking());
         assert!(!find(&status, "ccusage").is_blocking());
         assert!(!status.required_met());
     }

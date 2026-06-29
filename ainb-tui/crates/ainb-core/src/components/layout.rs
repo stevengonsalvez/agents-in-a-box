@@ -302,17 +302,6 @@ impl LayoutComponent {
     }
 
     fn render_menu_bar_stacked(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        // Pure decision for which restart-shaped affordance to surface.
-        // See test below for the truth table.
-        // The session-action group's restart-shaped affordance is split
-        // across two keys with different semantics:
-        //   - `r` resumes a Stopped Interactive (tmux) session in-place.
-        //   - `e` restarts a Boss/Docker session into a fresh container.
-        // Show the binding that actually applies to the highlighted row
-        // so users don't press the wrong one. See events.rs:834 and
-        // events.rs:868 for the dispatch logic.
-        let (restart_key, restart_label) = restart_affordance(state.selected_session());
-
         // Premium styled command bar with separators - 3 lines for better
         // discoverability. Grouped: (1) navigation + selection, (2) session
         // actions, (3) git / tools / system. Every key that the home screen
@@ -352,8 +341,8 @@ impl LayoutComponent {
 
         // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
         let line2_spans = vec![
-            key(restart_key, SELECTION_GREEN),
-            desc(restart_label),
+            key("r", SELECTION_GREEN),
+            desc(" resume "),
             key("d", red),
             desc("elete "),
             key("⇧D", red),
@@ -379,8 +368,6 @@ impl LayoutComponent {
             desc(" refresh "),
             key("⇧F", WARNING_ORANGE),
             desc(" filter "),
-            key("x", WARNING_ORANGE),
-            desc(" cleanup"),
             sep(),
             key("u", MUTED_GRAY),
             desc(" re-auth "),
@@ -449,36 +436,13 @@ impl LayoutComponent {
 
     /// Wide-terminal legend: two columns separated by a vertical rule. The
     /// left column is everything that acts on a session/workspace; the right
-    /// column is the panels, views, and navigation. Two of the keys are
-    /// mode-specific — `x cleanup` only applies to Boss/container sessions and
-    /// `F filter` only to normal interactive sessions — so the inactive one is
-    /// dimmed based on the highlighted row (see `mode_dim_flags`).
+    /// column is the panels, views, and navigation.
     fn render_menu_bar_two_col(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let (restart_key, restart_label) = restart_affordance(state.selected_session());
-        let (dim_filter, dim_cleanup) = mode_dim_flags(state.selected_session());
-
         let key = |k: &'static str, color: Color| {
             Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
         };
         let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
         let red = Color::Rgb(230, 100, 100);
-        // A mode key that doesn't apply to the highlighted session renders in
-        // the border colour so it reads as present-but-inactive rather than
-        // disappearing (which would make the bar twitch as the cursor moves).
-        let dim = |s: &'static str| Span::styled(s, Style::default().fg(SUBDUED_BORDER));
-
-        // `F filter` (normal-only) and `x cleanup` (Boss-only) dim when the
-        // highlighted session is the other mode — see `mode_dim_flags`.
-        let (filter_key, filter_desc) = if dim_filter {
-            (dim("F"), dim(" filter  "))
-        } else {
-            (key("⇧F", WARNING_ORANGE), desc(" filter  "))
-        };
-        let (cleanup_key, cleanup_desc) = if dim_cleanup {
-            (dim("x"), dim(" cleanup  "))
-        } else {
-            (key("x", WARNING_ORANGE), desc(" cleanup  "))
-        };
 
         // ── Left column: session & workspace actions ──────────────────────
         let left_lines = vec![
@@ -495,8 +459,8 @@ impl LayoutComponent {
                 desc(" select"),
             ]),
             Line::from(vec![
-                key(restart_key, SELECTION_GREEN),
-                desc(restart_label),
+                key("r", SELECTION_GREEN),
+                desc(" resume  "),
                 key("d", red),
                 desc("elete  "),
                 key("⇧D", red),
@@ -517,10 +481,8 @@ impl LayoutComponent {
             Line::from(vec![
                 key("f", WARNING_ORANGE),
                 desc(" refresh  "),
-                filter_key,
-                filter_desc,
-                cleanup_key,
-                cleanup_desc,
+                key("⇧F", WARNING_ORANGE),
+                desc(" filter  "),
                 key("u", MUTED_GRAY),
                 desc(" re-auth  "),
             ]),
@@ -877,37 +839,6 @@ fn inbox_unread_badge(unread: u64) -> Option<String> {
         0 => None,
         1..=99 => Some(format!("● {unread} ")),
         _ => Some("● 99+ ".to_string()),
-    }
-}
-
-fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
-    use crate::models::{SessionMode, SessionStatus};
-    let stopped_interactive = matches!(
-        selected,
-        Some(s) if matches!(s.mode, SessionMode::Interactive)
-            && matches!(s.status, SessionStatus::Stopped)
-    );
-    if stopped_interactive {
-        ("r", " resume ")
-    } else {
-        ("e", " recreate ")
-    }
-}
-
-/// Decide which mode-specific legend keys to dim for the highlighted session.
-///
-/// Two keys only apply to one mode: `F filter` cycles the *normal interactive*
-/// session filter, and `x cleanup` reaps orphaned *Boss/container* sessions.
-/// Returns `(dim_filter, dim_cleanup)` — when a Boss session is selected the
-/// normal-only `filter` is dimmed, and when an Interactive session is selected
-/// the Boss-only `cleanup` is dimmed. With no selection (or any other row type)
-/// neither is dimmed, since both actions are still reachable.
-fn mode_dim_flags(selected: Option<&crate::models::Session>) -> (bool, bool) {
-    use crate::models::SessionMode;
-    match selected.map(|s| &s.mode) {
-        Some(SessionMode::Boss) => (true, false),
-        Some(SessionMode::Interactive) => (false, true),
-        None => (false, false),
     }
 }
 
@@ -1496,8 +1427,7 @@ mod live_widget_tests {
 
 #[cfg(test)]
 mod menu_bar_tests {
-    use super::{inbox_unread_badge, restart_affordance};
-    use crate::models::{Session, SessionMode, SessionStatus};
+    use super::inbox_unread_badge;
 
     #[test]
     fn inbox_badge_hidden_when_zero() {
@@ -1520,54 +1450,6 @@ mod menu_bar_tests {
             assert_eq!(badge, "● 99+ ");
             assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
         }
-    }
-
-    fn stopped_interactive() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Interactive;
-        s.status = SessionStatus::Stopped;
-        s
-    }
-
-    fn running_interactive() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Interactive;
-        s.status = SessionStatus::Running;
-        s
-    }
-
-    fn stopped_boss() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Boss;
-        s.status = SessionStatus::Stopped;
-        s
-    }
-
-    #[test]
-    fn stopped_interactive_shows_r_resume() {
-        let s = stopped_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("r", " resume "));
-    }
-
-    #[test]
-    fn running_interactive_shows_e_recreate() {
-        // `r` only resumes a *stopped* interactive session, so surfacing
-        // `r resume` for a running one would be wrong. Fall back to the
-        // Docker/Boss `e recreate` affordance.
-        let s = running_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
-    }
-
-    #[test]
-    fn stopped_boss_shows_e_recreate() {
-        // Boss/Docker sessions use the Docker container recreate path.
-        let s = stopped_boss();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
-    }
-
-    #[test]
-    fn no_selection_shows_e_recreate() {
-        assert_eq!(restart_affordance(None), ("e", " recreate "));
     }
 
     /// Render the menu bar at the conventional 80-column minimum and assert
@@ -1594,7 +1476,7 @@ mod menu_bar_tests {
         let rendered: String =
             terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
 
-        // With no session selected the restart slot shows `e recreate`.
+        // The restart slot shows `r resume`.
         for token in [
             "ew",       // new
             "xpand",    // expand
@@ -1604,7 +1486,7 @@ mod menu_bar_tests {
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
-            "recreate", // e — Boss/Docker recreate (no selection)
+            "resume",   // r — resume a stopped tmux session
             "del-sel",  // D bulk delete
             "editor",   // o
             "shell",    // $
@@ -1614,7 +1496,6 @@ mod menu_bar_tests {
             "laude",    // c claude
             "refresh",  // f
             "filter",   // F  ← the key that was missing before
-            "cleanup",  // x
             "re-auth",  // u (moved off A for in-pane attach)
             "?/H",      // help
             "home",     // q
@@ -1646,27 +1527,6 @@ mod menu_bar_tests {
                  left={left:?} right={right:?}"
             );
         }
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_filter_for_boss() {
-        // Boss/container row → the normal-only `F filter` is the inactive key.
-        let s = stopped_boss();
-        assert_eq!(super::mode_dim_flags(Some(&s)), (true, false));
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_cleanup_for_interactive() {
-        // Interactive row → the Boss-only `x cleanup` is the inactive key.
-        let s = running_interactive();
-        assert_eq!(super::mode_dim_flags(Some(&s)), (false, true));
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_nothing_without_selection() {
-        // No highlighted session → both mode actions stay reachable, so
-        // neither is dimmed.
-        assert_eq!(super::mode_dim_flags(None), (false, false));
     }
 
     /// On a wide terminal the legend switches to the two-column split. Assert
@@ -1715,15 +1575,14 @@ mod menu_bar_tests {
             "1-9",      // quick attach
             "Space",    // multi-select
             "tar",      // star
-            "recreate", // e — Boss/Docker recreate (no selection)
+            "resume",   // r — resume a stopped tmux session
             "del-sel",  // D bulk delete
             "editor",   // o
             "shell",    // $
             "F2",       // rename
             "commit",   // p
             "refresh",  // f
-            "filter",   // F (dimmed when a Boss row is selected, still present)
-            "cleanup",  // x (dimmed when an Interactive row is selected)
+            "filter",   // F
             "re-auth",  // u
             "inbox",    // b
             "stats",    // i
@@ -1770,7 +1629,7 @@ mod menu_bar_tests {
             rendered.contains('│'),
             "no divider at threshold:\n{rendered}"
         );
-        for token in ["re-auth", "recreate", "del-sel", "abtop", "home", "witr"] {
+        for token in ["re-auth", "resume", "del-sel", "abtop", "home", "witr"] {
             assert!(
                 rendered.contains(token),
                 "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
