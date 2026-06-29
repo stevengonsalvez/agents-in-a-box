@@ -405,12 +405,6 @@ impl TmuxPreviewPane {
                 Span::styled(" scroll mode ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
-                    " k",
-                    Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" kill ", Style::default().fg(SOFT_WHITE)),
-                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(
                     " Ctrl+B D",
                     Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
                 ),
