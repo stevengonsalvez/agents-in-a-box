@@ -508,9 +508,7 @@ pub fn normalize_source_input(raw: &str) -> String {
     let segs: Vec<&str> = bare.split('/').collect();
     let looks_like_repo = segs.len() == 2
         && segs.iter().all(|s| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
         });
     if looks_like_repo {
         format!("gh:{t}")
@@ -523,10 +521,7 @@ pub fn normalize_source_input(raw: &str) -> String {
 /// which `ainb source add` rejects (`ainb-cli` source.rs). Drives the
 /// inline "drop the /path" hint shown before the user hits Enter.
 fn source_input_has_path(normalized: &str) -> bool {
-    ainb_skill_core::Uri::parse(normalized)
-        .ok()
-        .and_then(|u| u.path)
-        .is_some()
+    ainb_skill_core::Uri::parse(normalized).ok().and_then(|u| u.path).is_some()
 }
 
 /// Discovery banner state machine.
@@ -878,7 +873,10 @@ fn render_search_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
         Line::from(""),
         Line::from(vec![
             Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(format!("{}█", input.buffer), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{}█", input.buffer),
+                Style::default().fg(SOFT_WHITE),
+            ),
         ]),
         Line::from(Span::styled(
             "   type to filter   [Enter] apply  [Esc] cancel",
@@ -921,12 +919,13 @@ fn render_add_source_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
         ));
 
     // Input line.
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(format!("{}█", input.buffer), Style::default().fg(SOFT_WHITE)),
-        ]),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
+        Span::styled(
+            format!("{}█", input.buffer),
+            Style::default().fg(SOFT_WHITE),
+        ),
+    ])];
 
     // Live preview / validation line.
     if input.buffer.trim().is_empty() {
@@ -2247,16 +2246,8 @@ mod tests {
             kind: InputKind::AddSource,
             buffer: buffer.to_string(),
         });
-        terminal
-            .draw(|f| render(f, f.size(), &data))
-            .expect("render did not panic");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
+        terminal.draw(|f| render(f, f.size(), &data)).expect("render did not panic");
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
 
     #[test]
