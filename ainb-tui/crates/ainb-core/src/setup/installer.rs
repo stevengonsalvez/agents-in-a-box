@@ -71,6 +71,11 @@ impl Agent {
 const AI_CLI_IDS: &[&str] = &["claude", "codex", "gemini", "copilot"];
 /// All statusline dep ids — keep only the chosen agent's.
 const STATUSLINE_IDS: &[&str] = &["claudecode-statusline", "codex-statusline"];
+/// ainb-owned / first-party tools installed by default even when tagged
+/// Optional — cheap and part of the ainb experience, unlike third-party CLIs
+/// (codex/gemini/copilot), runtimes (docker/colima) or telemetry (alloy/ccusage)
+/// which stay opt-in (commented). reflect's tools are already Recommended.
+const AINB_OWNED_IDS: &[&str] = &["rtk", "headroom", "witr", "abtop"];
 
 /// The binary to guard an install on (`command -v <bin> || install`), if any.
 fn probe_bin(detect: &Detect) -> Option<&'static str> {
@@ -137,6 +142,10 @@ fn classify(id: &str, tier: Tier, agent: Agent) -> Inclusion {
     // reflect's Claude Code plugin only applies to Claude.
     if id == "reflect-plugin" && agent != Agent::Claude {
         return Inclusion::Skip;
+    }
+    // ainb-owned tools install by default regardless of their Optional tier.
+    if AINB_OWNED_IDS.contains(&id) {
+        return Inclusion::Active;
     }
     match tier {
         Tier::Required | Tier::Recommended => Inclusion::Active,
@@ -370,14 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn optional_deps_are_commented_not_active() {
+    fn ainb_owned_optionals_active_third_party_commented() {
         let env = MockEnv { present: vec![] };
         let s = build_script(Agent::Claude, &env);
-        // headroom is optional -> commented
-        let line = s.lines().find(|l| l.contains("headroom")).unwrap_or("");
+        // ainb-owned tools install by default despite their Optional tier.
+        for id in ["rtk", "headroom", "witr", "abtop"] {
+            let line = s.lines().find(|l| l.contains(id)).unwrap_or("");
+            assert!(
+                !line.is_empty() && !line.trim_start().starts_with('#'),
+                "ainb-owned dep should be an active install line: {line:?}"
+            );
+        }
+        // A third-party suggested dep stays commented (opt-in).
+        let line = s.lines().find(|l| l.contains("ccusage")).unwrap_or("");
         assert!(
             line.trim_start().starts_with('#'),
-            "optional dep should be commented: {line}"
+            "third-party optional should be commented: {line:?}"
         );
     }
 }
