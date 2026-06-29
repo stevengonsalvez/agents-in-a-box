@@ -7633,19 +7633,18 @@ impl AppState {
                 ),
             }
         });
-        let (auth_ok, auth_msg) = match tokio::time::timeout(Duration::from_secs(5), auth_check)
-            .await
-        {
-            Ok(Ok(res)) => res,
-            Ok(Err(join_err)) => {
-                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
-                (false, format!("auth check task panicked: {join_err}"))
-            }
-            Err(_) => {
-                tracing::warn!("GitHub auth check timed out after 5s");
-                (false, "`gh auth status` timed out after 5s".to_string())
-            }
-        };
+        let (auth_ok, auth_msg) =
+            match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+                Ok(Ok(res)) => res,
+                Ok(Err(join_err)) => {
+                    tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                    (false, format!("auth check task panicked: {join_err}"))
+                }
+                Err(_) => {
+                    tracing::warn!("GitHub auth check timed out after 5s");
+                    (false, "`gh auth status` timed out after 5s".to_string())
+                }
+            };
 
         if let Some(pick) =
             self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())

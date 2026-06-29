@@ -659,15 +659,24 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
 
     let cta = match status {
         GitAuthStatus::Checking => Line::from(vec![
-            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cancel", Style::default().fg(MUTED_GRAY)),
         ]),
         _ => Line::from(vec![
-            Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Retry   ", Style::default().fg(MUTED_GRAY)),
             Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" Skip auth   ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Dismiss", Style::default().fg(MUTED_GRAY)),
         ]),
     };
@@ -687,7 +696,10 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
-        .title(Span::styled(title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(DARK_BG));
     let inner = block.inner(modal);
@@ -701,7 +713,9 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
     f.render_widget(
-        Paragraph::new(body).wrap(Wrap { trim: false }).style(Style::default().fg(SOFT_WHITE)),
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(SOFT_WHITE)),
         parts[0],
     );
     f.render_widget(Paragraph::new(cta).alignment(Alignment::Center), parts[1]);
@@ -1284,7 +1298,10 @@ mod tests {
 
         let text = render_to_string(&s, 100, 24);
 
-        assert!(text.contains("auth required"), "modal not shown on empty list:\n{text}");
+        assert!(
+            text.contains("auth required"),
+            "modal not shown on empty list:\n{text}"
+        );
         assert!(
             text.contains("not logged into any GitHub hosts"),
             "exact gh error not surfaced:\n{text}"
@@ -1304,7 +1321,10 @@ mod tests {
 
         let text = render_to_string(&s, 100, 16);
 
-        assert!(text.contains("Dismiss"), "Dismiss CTA clipped on long error:\n{text}");
+        assert!(
+            text.contains("Dismiss"),
+            "Dismiss CTA clipped on long error:\n{text}"
+        );
     }
 
     #[test]
@@ -1316,7 +1336,10 @@ mod tests {
 
         let text = render_to_string(&s, 100, 40);
 
-        assert!(text.contains("more lines"), "error body not capped:\n{text}");
+        assert!(
+            text.contains("more lines"),
+            "error body not capped:\n{text}"
+        );
     }
 
     #[test]
