@@ -39,6 +39,8 @@ const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
 const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
+// Soft red for inline validation (e.g. a `/path` in the add-source box).
+const ERROR_RED: Color = Color::Rgb(230, 110, 110);
 
 /// One source row in the left panel.
 #[derive(Debug, Clone)]
@@ -477,10 +479,54 @@ impl InputState {
     /// Prompt label shown in the overlay border.
     pub fn title(&self) -> &'static str {
         match self.kind {
-            InputKind::AddSource => " Add source — gh:owner/repo ",
+            InputKind::AddSource => " Add source ",
             InputKind::Search => " Search units ",
         }
     }
+}
+
+/// Normalize a raw add-source input into a source URI.
+///
+/// Bare `owner/repo` (optionally `@ref`) with no scheme is GitHub
+/// shorthand — prepend `gh:`. Anything already carrying a `type:`
+/// scheme (`git:`, `local:`, `https:`, `gist:`, …) or not shaped like
+/// `owner/repo` (local paths like `/Users/x` or `./foo`, bare single
+/// names) passes through untouched so [`ainb_skill_core::Uri::parse`]
+/// can validate it. Pure: no IO. Shared by the render preview and the
+/// submit handler so both agree on what the user's input resolves to.
+pub fn normalize_source_input(raw: &str) -> String {
+    let t = raw.trim();
+    // Already has a `type:` scheme, or a leading `/`/`.` (a local path
+    // like `/Users/x` or `./foo`) → leave it for Uri::parse.
+    if t.contains(':') || t.starts_with('/') || t.starts_with('.') {
+        return t.to_string();
+    }
+    // GitHub shorthand is exactly `owner/repo` (or `owner/repo@ref`),
+    // each segment limited to repo-name chars — so a local path
+    // (`a/b/c`, bare names) is never mistaken for a repo.
+    let bare = t.split('@').next().unwrap_or(t);
+    let segs: Vec<&str> = bare.split('/').collect();
+    let looks_like_repo = segs.len() == 2
+        && segs.iter().all(|s| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        });
+    if looks_like_repo {
+        format!("gh:{t}")
+    } else {
+        t.to_string()
+    }
+}
+
+/// True when `normalized` parses to a unit URI (carries a `/path`) —
+/// which `ainb source add` rejects (`ainb-cli` source.rs). Drives the
+/// inline "drop the /path" hint shown before the user hits Enter.
+fn source_input_has_path(normalized: &str) -> bool {
+    ainb_skill_core::Uri::parse(normalized)
+        .ok()
+        .and_then(|u| u.path)
+        .is_some()
 }
 
 /// Discovery banner state machine.
@@ -808,9 +854,16 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
 /// overlay with a blinking-style caret. Used for both `[i] add source`
 /// and `[/] search`.
 fn render_input_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
+    match input.kind {
+        InputKind::AddSource => render_add_source_prompt(frame, area, input),
+        InputKind::Search => render_search_prompt(frame, area, input),
+    }
+}
+
+/// Compact single-line filter prompt (the original overlay).
+fn render_search_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
     let width = BANNER_WIDTH.min(area.width.saturating_sub(4)).max(20);
-    let height = 5;
-    let rect = centered_rect(area, width, height);
+    let rect = centered_rect(area, width, 5);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -821,28 +874,102 @@ fn render_input_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
 
-    let hint = match input.kind {
-        InputKind::AddSource => "e.g. gh:owner/repo   [Enter] add  [Esc] cancel",
-        InputKind::Search => "type to filter   [Enter] apply  [Esc] cancel",
-    };
     let lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(
-                format!("{}█", input.buffer),
-                Style::default().fg(SOFT_WHITE),
-            ),
+            Span::styled(format!("{}█", input.buffer), Style::default().fg(SOFT_WHITE)),
         ]),
         Line::from(Span::styled(
-            format!("   {hint}"),
+            "   type to filter   [Enter] apply  [Esc] cancel",
             Style::default().fg(MUTED_GRAY),
         )),
     ];
 
     frame.render_widget(Clear, rect);
-    let para = Paragraph::new(lines).block(block);
-    frame.render_widget(para, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// Backend legend rows for the add-source overlay: `(typed form, what it
+/// is)`. Mirrors the fetchers actually wired in `ainb-cli` (gh/gist/git
+/// → GitFetcher, https → file download, local → on-disk). `npm:` is
+/// omitted because it bails ("not supported in v1").
+const ADD_SOURCE_LEGEND: &[(&str, &str)] = &[
+    ("gh:owner/repo", "GitHub           ← default"),
+    ("gist:<id>", "GitHub gist"),
+    ("git:https://host/o/r", "GitLab/Bitbucket/self-host"),
+    ("https://host/f.tgz", "single file"),
+    ("local:/abs/path", "on-disk folder"),
+];
+
+/// Full add-source overlay: input + live `resolves → gh:…` preview +
+/// the backend legend. The preview applies [`normalize_source_input`]
+/// so the user sees exactly what bare `owner/repo` becomes, and turns
+/// red with a hint when the result carries a `/path` (rejected by
+/// `ainb source add`).
+fn render_add_source_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
+    let width = 58.min(area.width.saturating_sub(4)).max(24);
+    let rect = centered_rect(area, width, 14);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            input.title(),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+
+    // Input line.
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(format!("{}█", input.buffer), Style::default().fg(SOFT_WHITE)),
+        ]),
+    ];
+
+    // Live preview / validation line.
+    if input.buffer.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "   type a repo, e.g. owner/repo",
+            Style::default().fg(MUTED_GRAY),
+        )));
+    } else {
+        let normalized = normalize_source_input(&input.buffer);
+        if source_input_has_path(&normalized) {
+            lines.push(Line::from(Span::styled(
+                "   ✗ drop the /path — that's `skill install`",
+                Style::default().fg(ERROR_RED),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("   resolves → ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(normalized, Style::default().fg(SELECTION_GREEN)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    for (form, desc) in ADD_SOURCE_LEGEND {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {form:<22}"), Style::default().fg(GOLD)),
+            Span::styled((*desc).to_string(), Style::default().fg(MUTED_GRAY)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  +@ref (branch/tag/sha, default main)  ·  no /path",
+        Style::default().fg(MUTED_GRAY),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  [Enter] ", Style::default().fg(GOLD)),
+        Span::styled("add    ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("[Esc] ", Style::default().fg(GOLD)),
+        Span::styled("cancel", Style::default().fg(MUTED_GRAY)),
+    ]));
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
@@ -2055,6 +2182,99 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    // ---- normalize_source_input ----------------------------------
+
+    #[test]
+    fn normalize_bare_repo_gets_gh_prefix() {
+        assert_eq!(
+            normalize_source_input("stevengonsalvez/ainb-toolkit"),
+            "gh:stevengonsalvez/ainb-toolkit"
+        );
+    }
+
+    #[test]
+    fn normalize_bare_repo_with_ref() {
+        assert_eq!(
+            normalize_source_input("stevengonsalvez/ainb-toolkit@v1.2"),
+            "gh:stevengonsalvez/ainb-toolkit@v1.2"
+        );
+    }
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        assert_eq!(normalize_source_input("  owner/repo  "), "gh:owner/repo");
+    }
+
+    #[test]
+    fn normalize_existing_scheme_passes_through() {
+        for s in [
+            "gh:owner/repo",
+            "git:https://gitlab.com/x/y",
+            "gist:abc123",
+            "local:/Users/me/skills",
+            "https://example.com/x.tgz",
+        ] {
+            assert_eq!(normalize_source_input(s), s);
+        }
+    }
+
+    #[test]
+    fn normalize_local_paths_are_not_repos() {
+        // No scheme but not `owner/repo` shaped → left alone for Uri::parse.
+        for s in ["/Users/me/skills", "./foo", "a/b/c", "singlename"] {
+            assert_eq!(normalize_source_input(s), s);
+        }
+    }
+
+    #[test]
+    fn source_input_path_detection() {
+        assert!(!source_input_has_path("gh:owner/repo"));
+        assert!(!source_input_has_path("gh:owner/repo@main"));
+        assert!(source_input_has_path("gh:owner/repo@main/skills/commit"));
+    }
+
+    /// Flatten a rendered TestBackend buffer into one string for substring
+    /// assertions (good enough — cell-level layout isn't what we're testing).
+    fn render_add_source_to_string(buffer: &str) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = SkillsScreenData::default();
+        data.input = Some(InputState {
+            kind: InputKind::AddSource,
+            buffer: buffer.to_string(),
+        });
+        terminal
+            .draw(|f| render(f, f.size(), &data))
+            .expect("render did not panic");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn add_source_overlay_renders_legend_and_live_preview() {
+        // Empty buffer → placeholder + the legend rows.
+        let empty = render_add_source_to_string("");
+        assert!(empty.contains("type a repo"), "placeholder missing");
+        assert!(empty.contains("GitHub"), "legend missing");
+        assert!(empty.contains("GitLab"), "git: row missing");
+
+        // Bare repo → live `resolves → gh:` preview.
+        let repo = render_add_source_to_string("owner/repo");
+        assert!(repo.contains("resolves"), "preview label missing");
+        assert!(repo.contains("gh:owner/repo"), "normalized preview missing");
+
+        // Unit URI (has /path) → the validation hint, not a resolve preview.
+        let unit = render_add_source_to_string("gh:owner/repo@main/skills/commit");
+        assert!(unit.contains("drop the /path"), "path validation missing");
     }
 
     // ---- compute_counts ------------------------------------------
