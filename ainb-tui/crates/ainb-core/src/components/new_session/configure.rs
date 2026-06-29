@@ -1049,57 +1049,14 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
 
-    // Cyclable (Custom selected): build the pills line manually so Boss can
-    // render muted with `[alpha]` suffix regardless of selection state.
-    // Interactive stays as a normal pill.
-    let current = if is_boss { "Boss" } else { "Interactive" };
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(focus_indicator(focused));
-    spans.push(label_span("Mode:    "));
-
-    // Interactive pill.
-    let interactive_selected = current == "Interactive";
-    if interactive_selected {
-        spans.push(Span::styled(
-            "[",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "Interactive",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "]",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.push(Span::styled("Interactive", Style::default().fg(MUTED_GRAY)));
-    }
-
-    spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
-
-    // Boss pill — always muted (the alpha tag and de-emphasis stay even when
-    // selected). Selection still uses brackets so the user knows they picked
-    // it, but the brackets + label render muted, not green-bold.
-    let boss_selected = current == "Boss";
-    let boss_style = Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC);
-    if boss_selected {
-        spans.push(Span::styled("[", boss_style));
-        spans.push(Span::styled("Boss", boss_style));
-        spans.push(Span::styled("]", boss_style));
-    } else {
-        spans.push(Span::styled("Boss", boss_style));
-    }
-    spans.push(Span::styled(" [alpha]", boss_style));
-
-    if focused {
-        spans.push(Span::styled(
-            "   \u{2190}/\u{2192} to change",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        ));
-    }
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // ponytail: Boss/container mode is hidden for now — the only mode is
+    // Interactive, so even the Custom path renders a fixed value (no pills, no
+    // arrows). Restore the Interactive/Boss pill picker when the container
+    // session path is wired up again.
+    f.render_widget(
+        Paragraph::new(value_row_locked("Mode:    ", "Interactive", focused, false)),
+        area,
+    );
 }
 
 fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
@@ -2264,16 +2221,11 @@ fn cycle_model(state: &mut ConfigureState, delta: i32) {
 }
 
 fn cycle_mode(state: &mut ConfigureState) {
+    // ponytail: Boss/container mode is hidden for now, so cycling pins the
+    // mode to Interactive. Restore the Boss<->Interactive toggle (and the
+    // Prompt-row reveal it drove) when the container path is wired up again.
     let overrides = ensure_overrides_seed(state);
-    overrides.mode = match overrides.mode {
-        SessionMode::Boss => SessionMode::Interactive,
-        SessionMode::Interactive => SessionMode::Boss,
-    };
-    // Switching reveals/hides the Prompt row; re-anchor focus if needed.
-    let rows = state.visible_rows();
-    if !rows.contains(&state.focused_row) {
-        state.focused_row = ConfigureRow::Mode;
-    }
+    overrides.mode = SessionMode::Interactive;
 }
 
 fn cycle_yolo(state: &mut ConfigureState) {
