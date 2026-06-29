@@ -365,6 +365,7 @@ mod tests {
                 "gtimeout",
                 "node",
                 "npm",
+                "cargo",
                 "gh",
                 "ainb",
                 "uv",

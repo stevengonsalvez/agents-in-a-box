@@ -339,6 +339,41 @@ pub fn catalog() -> Vec<Topic> {
                 ),
             ],
         },
+        // Runtimes the rest of the catalog installs through. Brew-installed so
+        // the script's `brew shellenv` eval puts them on PATH for the npm /
+        // cargo / uv lines that follow. Ordered before AI CLIs and plugin
+        // binaries on purpose.
+        Topic {
+            id: "toolchains",
+            label: "Language toolchains",
+            description: "Runtimes the agent CLIs + tools install through",
+            deps: vec![
+                dep(
+                    "node",
+                    "node (>=20)",
+                    "Node + npm runtime the agent CLIs install through (Copilot needs 22+)",
+                    Recommended,
+                    MinVersion {
+                        bin: "node",
+                        probe_args: &["-p", "process.versions.node.split('.')[0]"],
+                        min_major: 20,
+                    },
+                    Brew(&["node"]),
+                    &[Consumer::Core],
+                    &[],
+                ),
+                dep(
+                    "cargo",
+                    "cargo (Rust)",
+                    "builds cargo-installed plugin tools (abtop)",
+                    Recommended,
+                    Bin("cargo"),
+                    Brew(&["rust"]),
+                    &[],
+                    &[],
+                ),
+            ],
+        },
         Topic {
             id: "ai-clis",
             label: "AI CLIs",
@@ -454,10 +489,12 @@ pub fn catalog() -> Vec<Topic> {
                 dep(
                     "uv",
                     "uv",
-                    "runs reflect hooks + installs the reflect CLI",
+                    "runs reflect hooks + installs the reflect CLI / headroom",
                     Recommended,
                     Bin("uv"),
-                    Curl("https://astral.sh/uv/install.sh"),
+                    // brew (not the astral curl installer) so the script's brew
+                    // shellenv puts uv on PATH for the `uv tool install` lines.
+                    Brew(&["uv"]),
                     &[Reflect],
                     &[],
                 ),
