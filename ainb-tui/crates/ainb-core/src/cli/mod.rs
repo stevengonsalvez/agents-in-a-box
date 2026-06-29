@@ -56,7 +56,8 @@ SKILL MANAGER:
   ainb skill browse <query>        Search the skill catalog (skills.sh)
   ainb skill install <uri>         Install a skill/agent/command unit
   ainb skill sync                  Reconcile on-disk units with the manifest
-  ainb source / ainb search / ainb migrate   (skill-manager — run with --help)";
+  ainb skill remove <uri>          Uninstall a unit (per-file, never wipes config)
+  ainb source / ainb search        (skill-manager — run with --help)";
 
 /// Build the root `clap::Command` for the `ainb` binary.
 ///

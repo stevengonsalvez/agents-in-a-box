@@ -99,7 +99,7 @@ where
 /// Keep in sync with the safety-tag's CLI_COMMANDS list — adding a
 /// new top-level command means adding it here AND wiring an arm in
 /// ainb-cli's Command enum.
-const SKILL_MANAGER_CLI_COMMANDS: &[&str] = &["source", "search", "skill", "migrate", "doctor"];
+const SKILL_MANAGER_CLI_COMMANDS: &[&str] = &["source", "search", "skill", "doctor"];
 
 fn is_skill_manager_cli_invocation() -> bool {
     std::env::args()

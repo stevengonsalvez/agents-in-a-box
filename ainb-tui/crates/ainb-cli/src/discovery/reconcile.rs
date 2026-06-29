@@ -251,9 +251,7 @@ pub fn reconcile_with_sources(
 /// Rewrite `local:` orphan units in `patch` whose name resolves to an
 /// `ExternalRepo` provenance into `gh:<repo-without-scheme>@<ref>/<path>`
 /// URIs, dropping any now-orphaned `local:` source and adding the
-/// matching `gh:` source. Mirrors the URI shape produced by
-/// [`crate::migrate::apply_legacy_yaml_match`] so the two import paths
-/// stay consistent.
+/// matching `gh:` source.
 fn rewrite_external_local_units(
     patch: &mut ManifestPatch,
     external: &HashMap<&str, &super::provenance::AttributedUnit>,

@@ -38,8 +38,8 @@
 //! 5. **Local** — no match; a genuinely hand-authored unit.
 //!
 //! Toolkit is checked before ExternalRepo because a bundled toolkit
-//! skill is "more owned" than an external clone — matching the
-//! section order used by [`crate::migrate::apply_legacy_yaml_match`].
+//! skill is "more owned" than an external clone — the `bundled-skills`
+//! section is matched before `agent-skills`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -227,8 +227,7 @@ pub fn parse_installed_plugins(json: &str) -> InstalledPlugins {
 
 /// Parse `external-dependencies.yaml` into name-keyed lookups for the
 /// `bundled-skills` (toolkit) and `agent-skills` (external repo)
-/// sections. Mirrors the schema read by
-/// [`crate::migrate::apply_legacy_yaml_match`].
+/// sections.
 ///
 /// Malformed / empty input yields an empty [`ExternalDependencies`].
 pub fn parse_external_dependencies(yaml: &str) -> ExternalDependencies {
@@ -368,8 +367,7 @@ fn attribute_orphan(
 
 /// Index manifest units by their trailing path segment (unit name) so
 /// orphan names can be matched against already-adopted entries. The
-/// last `/`-segment of a unit URI is the unit name (matching the same
-/// convention used by [`crate::migrate::apply_legacy_yaml_match`]).
+/// last `/`-segment of a unit URI is the unit name.
 fn manifest_name_index(units: &[UnitEntry]) -> HashMap<String, Uri> {
     let mut idx = HashMap::new();
     for unit in units {

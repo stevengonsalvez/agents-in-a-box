@@ -124,8 +124,9 @@ pub enum Install {
         spec: &'static str,
         marketplace: Option<&'static str>,
     },
-    /// ainb-toolkit deploy via the skill manager (multi-step `ainb migrate`
-    /// flow). Handled specially by the provisioner.
+    /// ainb-toolkit deploy via the skill manager: `ainb skill sync` reconciles
+    /// the manifest's declared units onto disk **additively** — it never wipes
+    /// existing config. Handled specially by the provisioner.
     Toolkit,
     /// Satisfied automatically once the named dependency is installed (e.g.
     /// bundled inside the ainb binary).
@@ -171,9 +172,7 @@ impl Install {
             } => {
                 format!("claude plugin install {spec}")
             }
-            Install::Toolkit => "ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit \
-                && ainb migrate --clean --backup --yes"
-                .to_string(),
+            Install::Toolkit => "ainb skill sync".to_string(),
             Install::BundledWith(x) => format!("(bundled with {x})"),
             Install::Manual(h) => h.to_string(),
         }

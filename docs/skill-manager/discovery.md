@@ -13,9 +13,9 @@ description: Detect existing skills, agents, commands and marketplace plugins on
 ## Why discovery exists
 
 The v1 skill-manager ships an empty manifest and expects the user
-to run `ainb migrate --from-bootstrap` (or hand-edit
-`manifest.yaml`) before anything appears in the TUI. That works
-for greenfield installs, but most users arrive at `ainb` with
+to register a source (`ainb source add <uri>`) and install units
+(or hand-edit `manifest.yaml`) before anything appears in the TUI.
+That works for greenfield installs, but most users arrive at `ainb` with
 state already on disk:
 
 - Skills they hand-rolled under `~/.claude/skills/`,
@@ -90,8 +90,11 @@ DiscoveredMarketplaceUnit {
 
 ### Class B — legacy YAML matcher (opt-in)
 
-Gated behind `--legacy-yaml=<path>` on `ainb migrate --discover`.
-Parses an `external-dependencies.yaml` (from the ainb-toolkit repo root, previously `toolkit/external-dependencies.yaml`) and name-matches
+The legacy `external-dependencies.yaml` matcher was only ever enabled via the
+`--legacy-yaml=<path>` flag on the now-removed `ainb migrate --discover`
+command; the TUI discovery flow does not currently expose it, so this matcher
+is dormant. It parses an `external-dependencies.yaml` (from the ainb-toolkit
+repo root, previously `toolkit/external-dependencies.yaml`) and name-matches
 discovered units against the legacy bootstrap manifest, so users
 mid-cutover from `bootstrap.js` can adopt their units as
 `gh:<repo>@<ref>` URIs instead of `local:`.
@@ -281,9 +284,8 @@ Counts come from `compute_counts(&WalkerOutput)`:
   answer.
 - **Skip** writes a zero-byte `<ainb_home>/.discovery-skipped`
   marker file. Future opens skip the trigger entirely until the
-  marker is removed via the future `ainb migrate --discover
-  --force` flag (cleared programmatically by
-  `clear_discovery_skip_marker(&ainb_home)`).
+  marker is cleared programmatically by
+  `clear_discovery_skip_marker(&ainb_home)`.
 - **Navigate-away (Esc/q)** writes nothing. Re-entry runs the
   trigger again, sees the still-empty manifest + absent marker,
   and re-shows the same banner.
