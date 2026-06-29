@@ -147,8 +147,8 @@ pub fn plan(install: &Install) -> InstallPlan {
             consent: ConsentLevel::Auto,
             display,
         },
-        // Toolkit is a multi-step git-clone + migrate flow handled by a dedicated
-        // provisioner (phase 5); surface it as explicit-consent, print for now.
+        // Toolkit deploys additively via `ainb skill sync` (never wipes config);
+        // surface it as explicit-consent, print for now (dedicated provisioner, phase 5).
         Install::Toolkit => InstallPlan {
             argv: None,
             consent: ConsentLevel::Explicit,
