@@ -183,6 +183,14 @@ fn detect_custom(name: &str, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
+        // gh is logged in — `gh auth status` exits 0 only with a valid token.
+        "gh-authed" => {
+            if env.run("gh", &["auth", "status"]).is_some() {
+                DepState::Ok(Some("logged in".to_string()))
+            } else {
+                DepState::Missing
+            }
+        }
         // rtk binary present (full "wired" check happens in the provisioner).
         "rtk-wired" => {
             if env.which("rtk") {
@@ -422,6 +430,22 @@ mod tests {
             runs: HashMap::new(),
         };
         assert!(!find(&detect_all(&env2), "reflect-kb").satisfied);
+    }
+
+    #[test]
+    fn gh_auth_detected_via_auth_status() {
+        // `gh auth status` exits 0 (run() -> Some) only when logged in.
+        let authed = MockEnv {
+            present: vec!["gh"],
+            runs: HashMap::from([("gh auth status".to_string(), String::new())]),
+        };
+        assert!(find(&detect_all(&authed), "gh-auth").satisfied);
+        // No scripted success -> run() returns None -> not authed.
+        let not_authed = MockEnv {
+            present: vec!["gh"],
+            runs: HashMap::new(),
+        };
+        assert!(!find(&detect_all(&not_authed), "gh-auth").satisfied);
     }
 
     #[test]
