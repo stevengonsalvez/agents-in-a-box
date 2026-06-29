@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Removed
+- **cli**: remove the `ainb migrate` subcommand. Its `--clean` mode wiped each
+  tool's entire install root (e.g. all of `~/.claude`) before re-syncing from
+  the manifest, which destroyed user state (`CLAUDE.md`, `settings.json`,
+  `projects/` history, `memory/`, custom agents). Installs are additive via
+  `ainb skill install` / `ainb skill sync`; discover + adopt now lives in the
+  Skill Manager TUI.
+
+### Changed
+- **skill manager**: the `[r]` remove key now requires a confirm — the first
+  press arms, a second press on the same unit uninstalls. Moving the cursor or
+  leaving the screen cancels.
+
+### Security
+- **adapters**: `uninstall` now hard-refuses any path that resolves into
+  protected user state (`projects/`, `memory/`, `todos/`, `settings.json`,
+  `CLAUDE.md`, …) or escapes the install root, guarding against a corrupt
+  lockfile deleting non-unit files.
 
 ## [1.9.6] - 2026-06-27
 ### Added

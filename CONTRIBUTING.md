@@ -16,7 +16,7 @@ cd ainb-tui && cargo build --release
 
 | Path | Purpose |
 |------|---------|
-| `ainb-tui/` | The `ainb` binary (Rust) — TUI plus `source`, `skill`, `migrate`, `doctor`, `usage` CLI subcommands. This is the canonical deploy / update / sync surface. |
+| `ainb-tui/` | The `ainb` binary (Rust) — TUI plus `source`, `skill`, `doctor`, `usage` CLI subcommands. This is the canonical deploy / update / sync surface. |
 | `ainb-tui/plans/skill-manager/spec.md` | Full design + acceptance criteria for the unit manager. |
 | `.claude-plugin/marketplace.json` | This repo's Claude plugin marketplace manifest |
 
@@ -39,8 +39,9 @@ ainb-toolkit, not this repo.**
 
 > **Legacy:** `bootstrap.js`, `external-dependencies.yaml`, and
 > `scripts/update-externals.sh` (now in ainb-toolkit) were superseded in May
-> 2026 by `ainb`. Migration path: clone ainb-toolkit, then
-> `ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit`.
+> 2026 by `ainb`. Install path: `ainb source add gh:stevengonsalvez/ainb-toolkit`,
+> then `ainb skill install <unit-uri>` (or browse + install in the Skill
+> Manager). Installs are additive; uninstall a unit with `ainb skill remove`.
 
 ## Making a change
 

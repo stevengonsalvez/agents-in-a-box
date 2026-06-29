@@ -101,15 +101,26 @@ brew tap stevengonsalvez/agents-in-a-box && brew install ainb
 # newer Homebrew gates third-party taps — if it says "untrusted tap", run:
 #   brew trust stevengonsalvez/agents-in-a-box
 
-# Seed the manifest from the toolkit and deploy units into your tool home.
-# The toolkit is a separate repo — clone it, then point --toolkit-root at it.
-git clone https://github.com/stevengonsalvez/ainb-toolkit.git
-ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit
-AINB_USE_REAL_HOMES=1 ainb migrate --clean --backup --yes
-
 # Launch the TUI
 ainb
+
+# Register the toolkit as a source, then install the units you want into your
+# real tool homes. Install is purely ADDITIVE — units land alongside your
+# existing config; your CLAUDE.md, settings, projects/ history and custom
+# agents are never touched.
+ainb source add gh:stevengonsalvez/ainb-toolkit
+AINB_USE_REAL_HOMES=1 ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit
 ```
+
+> **The easy way:** just run `ainb`, press `m` for the Skill Manager, and
+> browse + install units with `[i]`. If you already have skills on disk
+> (`~/.claude/skills/`, etc.), the first open offers one-keystroke adoption —
+> no manual setup. `ainb skill sync` then keeps installed units reconciled with
+> the manifest.
+>
+> To uninstall a unit, run `ainb skill remove <uri>` or press `[r]` on it in the
+> Skill Manager. Removal is **per-file and scoped to that unit** — it deletes
+> only what ainb deployed and can never wipe your config or session history.
 
 ---
 
@@ -476,7 +487,7 @@ agents-in-a-box/
 #
 ├── ainb-tui/                   # `ainb` binary (Rust) — TUI + skill-manager CLI
 │   ├── crates/
-│   │   ├── ainb-cli/           #   ainb source/skill/migrate/doctor subcommands
+│   │   ├── ainb-cli/           #   ainb source/skill/doctor subcommands
 │   │   ├── ainb-core/          #   ratatui app + manifest/lockfile/URI types
 │   │   ├── ainb-fetch/         #   git2 / http / local fetchers
 │   │   ├── ainb-adapters-source/  # marketplace / manifest / raw / single
@@ -555,24 +566,31 @@ cargo deny check                        # Security + licenses
 
 ### Installing the toolkit
 
+Install is **additive** — units are deployed alongside whatever is already in
+your tool homes; nothing is wiped. Writes to the real tool dirs are opt-in via
+`AINB_USE_REAL_HOMES=1` (without it, ainb writes to a managed sandbox).
+
 ```bash
-# Seed your manifest from the toolkit on first run. The toolkit is a
-# separate repo — clone it and point --toolkit-root at the checkout.
-git clone https://github.com/stevengonsalvez/ainb-toolkit.git
-ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit
+# Register the toolkit as a source (fetches it and reports its unit count).
+ainb source add gh:stevengonsalvez/ainb-toolkit
 
-# Deploy into the real tool home dirs (opt-in via env).
-AINB_USE_REAL_HOMES=1 ainb skill sync --yes
+# Install the units you want into the real tool home dirs.
+AINB_USE_REAL_HOMES=1 ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit
 
-# Or scope the install to specific tools (passed to every mutating verb):
-ainb skill install local:./toolkit@main/packages/skills/commit --targets claude,codex
+# Scope an install to specific tools (passed to every mutating verb):
+ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit --targets claude,codex
+ainb skill sync                               # reconcile installed units with the manifest
 ainb skill update --check                     # report drift across sources
 ainb skill update --all --yes                 # re-fetch + apply
+ainb skill remove gh:stevengonsalvez/ainb-toolkit/skills/commit   # per-file uninstall, never touches config
 ainb doctor                                   # health-check the deployment
 ```
 
+> Prefer the TUI? Press `m` for the Skill Manager to browse + install units
+> with `[i]` and remove them with `[r]` — no manual URIs.
+
 See `ainb-tui/plans/skill-manager/spec.md` for the full §8 CLI
-surface (`source`, `skill`, `migrate`, `doctor`, `usage`).
+surface (`source`, `skill`, `doctor`, `usage`).
 
 #### v1.1 — Discovery + adoption + promote
 
