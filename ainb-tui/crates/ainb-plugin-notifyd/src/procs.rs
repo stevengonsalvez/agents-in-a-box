@@ -190,6 +190,76 @@ fn socket_accepting(path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
+/// Outcome of a [`reap`] sweep.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReapReport {
+    /// Pids that were signalled and confirmed gone.
+    pub killed: Vec<u32>,
+    /// Pids that could not be reaped, with the reason (e.g. `EPERM` —
+    /// another user's process — or survival past `SIGKILL`).
+    pub failed: Vec<(u32, String)>,
+    /// The healthy live owner left untouched, if one was found.
+    pub spared: Option<u32>,
+}
+
+/// The pids worth reaping from a classified set: everything that is not a
+/// healthy live owner (orphans plus a wedged stale owner). Pure — the
+/// selection is the part worth testing; the killing is not.
+pub(crate) fn reapable(daemons: &[ClassifiedDaemon]) -> Vec<u32> {
+    daemons.iter().filter(|d| !d.class.is_healthy()).map(|d| d.proc.pid).collect()
+}
+
+fn signal_pid(pid: u32, sig: nix::sys::signal::Signal) -> nix::Result<()> {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), sig)
+}
+
+/// Kill every notifyd process that isn't the healthy live owner — the
+/// orphans (and a wedged stale owner) the TUI flags. Sends `SIGTERM`,
+/// waits briefly, then `SIGKILL`s any survivor: wedged daemons don't
+/// always honour `SIGTERM`. The live owner is spared, and this very
+/// process can't be hit because its `notifyd reap` command line is
+/// excluded by the scan filter. Kills by exact pid only — never a name
+/// match or signal broadcast.
+pub fn reap() -> ReapReport {
+    use nix::errno::Errno;
+    use nix::sys::signal::Signal;
+
+    let daemons = scan();
+    let spared = daemons.iter().find(|d| d.class.is_healthy()).map(|d| d.proc.pid);
+    let mut report = ReapReport {
+        spared,
+        ..Default::default()
+    };
+
+    // Phase 1 — SIGTERM each target; collect the ones that took the signal.
+    let mut pending = Vec::new();
+    for pid in reapable(&daemons) {
+        match signal_pid(pid, Signal::SIGTERM) {
+            Ok(()) => pending.push(pid),
+            Err(Errno::ESRCH) => report.killed.push(pid), // already gone
+            Err(e) => report.failed.push((pid, e.to_string())), // EPERM, etc.
+        }
+    }
+
+    // Phase 2 — give them a moment, then SIGKILL any survivor and confirm.
+    if !pending.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        for pid in pending {
+            if crate::pid::is_running(pid) {
+                let _ = signal_pid(pid, Signal::SIGKILL);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if crate::pid::is_running(pid) {
+                report.failed.push((pid, "survived SIGKILL".to_string()));
+            } else {
+                report.killed.push(pid);
+            }
+        }
+    }
+
+    report
+}
+
 /// One-shot scan: enumerate notifyd processes and classify them against
 /// the on-disk owner pid, the live socket, and this process's own binary.
 /// Used by the TUI's Daemons overlay.
@@ -218,6 +288,31 @@ mod tests {
             cmd: format!("{bin} notifyd run"),
             etime: "01:23".to_string(),
         }
+    }
+
+    fn classified(class: DaemonClass, pid: u32) -> ClassifiedDaemon {
+        ClassifiedDaemon {
+            proc: proc(pid, "/x/ainb"),
+            class,
+            binary_drift: false,
+        }
+    }
+
+    #[test]
+    fn reapable_selects_everything_but_the_live_owner() {
+        let ds = vec![
+            classified(DaemonClass::LiveOwner, 1),
+            classified(DaemonClass::Orphan, 2),
+            classified(DaemonClass::StaleOwner, 3),
+            classified(DaemonClass::Orphan, 4),
+        ];
+        assert_eq!(reapable(&ds), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn reapable_empty_when_only_live_owner() {
+        let ds = vec![classified(DaemonClass::LiveOwner, 1)];
+        assert!(reapable(&ds).is_empty());
     }
 
     #[test]
