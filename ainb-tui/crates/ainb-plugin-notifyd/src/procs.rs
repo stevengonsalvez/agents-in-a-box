@@ -36,14 +36,14 @@ pub struct NotifydProc {
 /// How a discovered notifyd process relates to the canonical daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonClass {
-    /// Pid recorded in `notify.pid` *and* the socket is present — the
-    /// process actually serving notifications.
+    /// Holds the live, accepting socket — the process actually serving
+    /// notifications. Spared from a reap, whatever `notify.pid` says.
     LiveOwner,
-    /// Pid recorded in `notify.pid` but the socket is missing — the owner
-    /// is wedged / not listening.
+    /// The pid recorded in `notify.pid`, but it is not the live socket
+    /// holder — a wedged / superseded owner. Reapable.
     StaleOwner,
-    /// A running notifyd whose pid is **not** the recorded owner — an
-    /// orphan that should be reaped.
+    /// A running notifyd that is neither the live socket holder nor the
+    /// recorded owner — an orphan that should be reaped.
     Orphan,
 }
 
@@ -134,30 +134,29 @@ fn is_notifyd(p: &NotifydProc) -> bool {
     matches!(sub, None | Some("run"))
 }
 
-/// Classify each discovered process against the canonical owner pid +
-/// whether the socket is actually accepting + the currently-running binary.
-/// Pure — the testable core. `socket_accepting` must reflect a real connect
-/// probe, not mere file presence: a wedged owner that left a stale socket
-/// file behind is the failure this surface exists to show, so it must land
-/// as `StaleOwner`, not `LiveOwner`.
+/// Classify each discovered process. `live_pids` is the set of pids that
+/// actually hold an **accepting** socket (lsof ∩ a successful connect probe)
+/// — the authoritative liveness signal. A process is the live owner iff it
+/// holds that socket, *regardless of what `notify.pid` records*: in a spawn
+/// race the pid that won the socket can differ from the one in the file, and
+/// reaping must never kill whoever is actually serving. The pid file only
+/// distinguishes a wedged recorded owner (`StaleOwner`) from a plain orphan
+/// when nothing is serving. Pure — the testable core.
 pub(crate) fn classify(
     procs: Vec<NotifydProc>,
     owner_pid: Option<u32>,
-    socket_accepting: bool,
+    live_pids: &[u32],
     current_bin: Option<&str>,
 ) -> Vec<ClassifiedDaemon> {
     procs
         .into_iter()
         .map(|p| {
-            let class = match owner_pid {
-                Some(owner) if owner == p.pid => {
-                    if socket_accepting {
-                        DaemonClass::LiveOwner
-                    } else {
-                        DaemonClass::StaleOwner
-                    }
-                }
-                _ => DaemonClass::Orphan,
+            let class = if live_pids.contains(&p.pid) {
+                DaemonClass::LiveOwner
+            } else if owner_pid == Some(p.pid) {
+                DaemonClass::StaleOwner
+            } else {
+                DaemonClass::Orphan
             };
             let binary_drift = current_bin.is_some_and(|cur| !same_binary(&p.bin, cur));
             ClassifiedDaemon {
@@ -188,6 +187,21 @@ fn same_binary(a: &str, b: &str) -> bool {
 /// it, same as the hook script's `nc` probe.
 fn socket_accepting(path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+/// Pids holding the unix socket, via `lsof -t`. Empty when `lsof` is absent
+/// or nothing holds the path. Used only once the socket is confirmed
+/// accepting, so the result identifies the live listener to spare from a
+/// reap. Best-effort: if `lsof` can't be run we fall back to pid-file-only
+/// liveness (the historical behaviour).
+fn socket_listener_pids(path: &std::path::Path) -> Vec<u32> {
+    let Ok(out) = Command::new("lsof").arg("-t").arg(path).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect()
 }
 
 /// Outcome of a [`reap`] sweep.
@@ -257,6 +271,16 @@ pub fn reap() -> ReapReport {
         }
     }
 
+    // If nothing live remains, the recorded owner (if any) is now a dead pid
+    // — drop the dangling pid file so `status` / the next lazy-spawn don't
+    // read a stale owner, mirroring what `cmd_stop` does. A SIGKILL'd owner
+    // never runs its `PidFile::Drop`, so this is the only cleanup point.
+    if report.spared.is_none() && !report.killed.is_empty() {
+        if let Ok(paths) = Paths::from_home() {
+            let _ = std::fs::remove_file(&paths.pid);
+        }
+    }
+
     report
 }
 
@@ -269,12 +293,16 @@ pub fn scan() -> Vec<ClassifiedDaemon> {
     };
     let owner_pid = crate::pid::read(&paths.pid).ok().flatten();
     let current_bin = std::env::current_exe().ok().and_then(|p| p.to_str().map(String::from));
-    classify(
-        enumerate(),
-        owner_pid,
-        socket_accepting(&paths.socket),
-        current_bin.as_deref(),
-    )
+    // Authoritative liveness: who actually holds an *accepting* socket. The
+    // connect probe proves something is serving; lsof names the listener to
+    // spare. A wedged listener that bound but hung fails the connect probe,
+    // so it stays reapable.
+    let live_pids = if socket_accepting(&paths.socket) {
+        socket_listener_pids(&paths.socket)
+    } else {
+        Vec::new()
+    };
+    classify(enumerate(), owner_pid, &live_pids, current_bin.as_deref())
 }
 
 #[cfg(test)]
@@ -316,24 +344,19 @@ mod tests {
     }
 
     #[test]
-    fn owner_with_socket_is_live() {
+    fn owner_holding_live_socket_is_live() {
         let out = classify(
             vec![proc(100, "/usr/local/bin/ainb")],
             Some(100),
-            true,
+            &[100],
             None,
         );
         assert_eq!(out[0].class, DaemonClass::LiveOwner);
     }
 
     #[test]
-    fn owner_without_socket_is_stale() {
-        let out = classify(
-            vec![proc(100, "/usr/local/bin/ainb")],
-            Some(100),
-            false,
-            None,
-        );
+    fn owner_not_serving_is_stale() {
+        let out = classify(vec![proc(100, "/usr/local/bin/ainb")], Some(100), &[], None);
         assert_eq!(out[0].class, DaemonClass::StaleOwner);
     }
 
@@ -342,18 +365,31 @@ mod tests {
         let out = classify(
             vec![proc(200, "/usr/local/bin/ainb")],
             Some(100),
-            true,
+            &[100],
             None,
         );
         assert_eq!(out[0].class, DaemonClass::Orphan);
     }
 
     #[test]
-    fn no_owner_pid_makes_everything_orphan() {
+    fn live_socket_holder_is_spared_even_when_pid_file_points_elsewhere() {
+        // Spawn race: the process that won the socket (200) is not the pid
+        // the file records (100, now dead). The live server must classify as
+        // LiveOwner and never be reaped — the bug this guards against.
+        let out = classify(vec![proc(200, "/x/ainb")], Some(100), &[200], None);
+        assert_eq!(out[0].class, DaemonClass::LiveOwner);
+        assert!(
+            reapable(&out).is_empty(),
+            "must not reap the live socket holder"
+        );
+    }
+
+    #[test]
+    fn no_owner_and_nothing_serving_makes_everything_orphan() {
         let out = classify(
             vec![proc(100, "/a/ainb"), proc(200, "/b/ainb")],
             None,
-            true,
+            &[],
             None,
         );
         assert!(out.iter().all(|d| d.class == DaemonClass::Orphan));
@@ -365,7 +401,7 @@ mod tests {
         let out = classify(
             vec![proc(100, "/opt/homebrew/Cellar/ainb/1.7.4/libexec/ainb")],
             Some(100),
-            true,
+            &[100],
             Some("/opt/homebrew/Cellar/ainb/1.9.4/libexec/ainb"),
         );
         assert!(out[0].binary_drift);
@@ -377,7 +413,7 @@ mod tests {
         let out = classify(
             vec![proc(100, "/same/path/ainb")],
             Some(100),
-            true,
+            &[100],
             Some("/same/path/ainb"),
         );
         assert!(!out[0].binary_drift);
