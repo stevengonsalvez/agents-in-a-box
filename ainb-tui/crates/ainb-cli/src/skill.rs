@@ -113,9 +113,9 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
 
     // Find the fetched checkout via lockfile. If the source has never been
     // fetched (or its cache dir is gone — e.g. the manifest was authored by
-    // `migrate --discover`, hand-edited, or shared without a lockfile),
-    // fetch it on demand so `install <unit-uri>` is self-sufficient and
-    // never dead-ends on "not yet fetched".
+    // Skill Manager discovery/import, hand-edited, or shared without a
+    // lockfile), fetch it on demand so `install <unit-uri>` is self-sufficient
+    // and never dead-ends on "not yet fetched".
     let mut lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
     let already_fetched = lockfile
         .sources

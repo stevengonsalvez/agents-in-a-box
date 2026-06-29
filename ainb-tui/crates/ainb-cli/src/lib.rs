@@ -2,7 +2,7 @@
 //!
 //! P2 ships the `source` subcommand tree (with real fetch on `add`)
 //! and the top-level `search` query. P3+ will wire up `skill`,
-//! `plugin`, `agent`, `hook`, `mcp`, `migrate`, `cache`, and `doctor`
+//! `plugin`, `agent`, `hook`, `mcp`, `cache`, and `doctor`
 //! via the same dispatch entrypoint.
 
 use std::io;
@@ -15,7 +15,6 @@ pub mod catalog_http;
 pub mod discovery;
 pub mod doctor;
 pub mod library;
-pub mod migrate;
 pub mod promote;
 pub mod scan;
 pub mod search;
@@ -44,10 +43,6 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillCommand,
     },
-    /// Day-1 migration helpers: scan existing tool homes, optionally
-    /// wipe them with a backup, or seed the manifest from
-    /// `external-dependencies.yaml`.
-    Migrate(MigrateArgs),
     /// Health-check the manifest, lockfile, deployed files, and
     /// configured sources. Exits non-zero when any problem is found.
     Doctor(DoctorArgs),
@@ -63,73 +58,6 @@ pub struct DoctorArgs {
     /// network / re-running fetchers).
     #[arg(long)]
     pub offline: bool,
-}
-
-#[derive(Args, Debug, Default)]
-pub struct MigrateArgs {
-    /// Scan adapter install roots and report what would be wiped.
-    /// Read-only; mutually exclusive with the other migrate modes.
-    #[arg(long, conflicts_with_all = ["clean", "from_bootstrap", "discover", "upgrade_schema"])]
-    pub check: bool,
-
-    /// Wipe every adapter's install root (after optional backup) and
-    /// then run `skill sync` to reconcile from the manifest.
-    #[arg(long, conflicts_with_all = ["from_bootstrap", "discover", "upgrade_schema"])]
-    pub clean: bool,
-
-    /// Snapshot every adapter's install root to
-    /// `$AINB_HOME/backups/<ts>/<tool>/` before clean wipes it.
-    /// Only valid with --clean.
-    #[arg(long, requires = "clean")]
-    pub backup: bool,
-
-    /// Parse `external-dependencies.yaml` from the supplied
-    /// path (or the working directory if omitted) and populate the
-    /// manifest with one source + matching unit entries.
-    #[arg(long = "from-bootstrap", conflicts_with_all = ["discover", "upgrade_schema"])]
-    pub from_bootstrap: bool,
-
-    /// Override the toolkit root used by --from-bootstrap. Defaults
-    /// to the current working directory.
-    #[arg(long, value_name = "PATH")]
-    pub toolkit_root: Option<std::path::PathBuf>,
-
-    /// Scan the Claude Code plugin cache + every adapter install
-    /// root for units the manifest does not yet know about and
-    /// merge them in (skill-manager v1.1 discovery flow). Honors
-    /// `--dry-run`, `--legacy-yaml=<path>`, and `--force`.
-    #[arg(long, conflicts_with = "upgrade_schema")]
-    pub discover: bool,
-
-    /// Fill in every source's empty `target_layout` with the
-    /// canonical bootstrap defaults (`skills/*/SKILL.md → .claude/skills`,
-    /// `agents/...`, `commands/*.md → .claude/commands`). Existing
-    /// non-empty layouts are left alone. Idempotent: a second run is
-    /// a no-op.
-    #[arg(long = "upgrade-schema")]
-    pub upgrade_schema: bool,
-
-    /// Opt-in `external-dependencies.yaml` name-match. Only valid
-    /// with `--discover`; orphan units whose name matches a
-    /// `bundled-skills`/`agent-skills` entry get their URI rewritten
-    /// from `local:` to `gh:<repo>@<ref>/...` so they're tracked as
-    /// git-backed instead of local.
-    #[arg(long = "legacy-yaml", value_name = "PATH", requires = "discover")]
-    pub legacy_yaml: Option<std::path::PathBuf>,
-
-    /// Override the empty-manifest guard on `--discover` so a
-    /// populated manifest can be re-scanned. Only valid with
-    /// `--discover`.
-    #[arg(long, requires = "discover")]
-    pub force: bool,
-
-    /// Skip the interactive confirmation prompt.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Show the planned actions but don't apply.
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -486,7 +414,6 @@ pub fn dispatch(home: &std::path::Path, command: Command, out: &mut dyn io::Writ
         Command::Source { action } => source::dispatch(home, action, out),
         Command::Search(args) => search::dispatch(home, args, out),
         Command::Skill { action } => skill::dispatch(home, action, out),
-        Command::Migrate(args) => migrate::dispatch(home, args, out),
         Command::Doctor(args) => doctor::dispatch(home, args, out),
     }
 }
