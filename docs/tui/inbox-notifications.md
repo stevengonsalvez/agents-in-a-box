@@ -1,25 +1,25 @@
 ---
 title: "Inbox & notifications"
-description: "How ainb captures Claude Code / Codex hook events into the Inbox and the per-session [!]/[?]/[✓] status markers, via the ainb-notifyd daemon. Host code, not a plugin."
+description: "How ainb captures host-agent hook events into the Inbox and the per-session [!]/[?]/[✓] status markers, via the ainb-notifyd daemon. Host code, not a plugin."
 ---
 
-The **Inbox** screen, the per-session **status markers** (`[!]` / `[?]` / `[✓]`), and the **`ainb-notifyd`** daemon are all part of the `ainb` host binary — **not** an ainb plugin. This page is the single reference for how notifications work: the daemon captures Claude Code / Codex lifecycle hook events into SQLite, and `ainb-tui` renders them two ways — the Inbox screen (full history) and a live per-session marker (the one row glyph that tells you a session needs you).
+The **Inbox** screen, the per-session **status markers** (`[!]` / `[?]` / `[✓]`), and the **`ainb-notifyd`** daemon are all part of the `ainb` host binary — **not** an ainb plugin. This page is the single reference for how notifications work: the daemon captures Claude Code / Codex / Copilot lifecycle hook events into SQLite, and `ainb-tui` renders them two ways — the Inbox screen (full history) and a live per-session marker (the one row glyph that tells you a session needs you).
 
-> **Agent support.** Claude Code is the primary, most-tested path (registered through the `claude` plugin CLI). Codex is wired via `~/.codex/hooks.json` and verified end-to-end too — its `Stop` / `Notification` events flow into the Inbox and mark Codex sessions (`[✓]` / `[?]`) — though Claude remains the better-exercised integration.
+> **Agent support.** Claude Code is the primary, most-tested path (registered through the `claude` plugin CLI). Codex is wired via `~/.codex/hooks.json`; Copilot is wired via `~/.copilot/hooks/ainb.json`. Their user-facing events flow into the Inbox and mark matching sessions (`[✓]` / `[?]` / `[!]`), though Claude remains the better-exercised integration.
 
-> **Why it's not a plugin.** The crate is *named* `ainb-plugin-notifyd` (it lives alongside the example plugin crates), but it has no `manifest.toml`, no JSON-RPC boundary, and is never spawned as a subprocess. `ainb-core` links it as an ordinary Rust path-dependency and compiles it straight into the host. Contrast with the real v2 subprocess plugins — `burndown`, `session-reader`, `witr` — which run as spawned child processes over stdio JSON-RPC and are governed by the capability gate. The **only** plugin in this feature is [`ainb-hooks`](../toolkit/plugins/ainb-hooks.md), and that is a plugin of the *host agent* (Claude Code / Codex), installed into their config dirs — not a plugin of `ainb`.
+> **Why it's not a plugin.** The crate is *named* `ainb-plugin-notifyd` (it lives alongside the example plugin crates), but it has no `manifest.toml`, no JSON-RPC boundary, and is never spawned as a subprocess. `ainb-core` links it as an ordinary Rust path-dependency and compiles it straight into the host. Contrast with the real v2 subprocess plugins — `burndown`, `session-reader`, `witr` — which run as spawned child processes over stdio JSON-RPC and are governed by the capability gate. The **only** plugin in this feature is [`ainb-hooks`](../toolkit/plugins/ainb-hooks.md), and that is a plugin of the *host agent* (Claude Code / Codex / Copilot), installed into their config dirs — not a plugin of `ainb`.
 
 ![The Inbox screen in ainb-tui](../assets/screenshots/notifyd-inbox.png)
 
-*Press `b` in ainb to open the Inbox — captured Claude Code / Codex lifecycle events with a list + detail pane, agent filter, and per-session unread counts.*
+*Press `b` in ainb to open the Inbox — captured Claude Code / Codex / Copilot lifecycle events with a list + detail pane, agent filter, and per-session unread counts.*
 
 ## How it works
 
 ![Inbox & notifications — how it works](../assets/diagrams/notifyd.svg)
 
-The capture path starts outside ainb, in a thin bash hook (`notify.sh`). For **Claude Code** it is registered through the plugin marketplace — `ainb notifyd install` shells out to `claude plugin install ainb-hooks@agents-in-a-box`, so Claude resolves and runs the plugin's bundled `notify.sh`. For **Codex** a managed block is merged into `~/.codex/hooks.json` pointing at the canonical `~/.agents-in-a-box/hooks/notify.sh`. Either way only the **actionable** lifecycle events are registered — `Notification` (idle / awaiting-input + permission prompts) and `Stop` (turn finished). When one fires, the script normalizes the payload into a JSON `Envelope` (`protocol_version`, `agent`, `raw_event`, `session_id`, `cwd`, `project`, `ts`, `payload`) and writes one newline-terminated line to the Unix socket at `~/.agents-in-a-box/notify.sock`. If the socket is absent it lazy-spawns the daemon; if delivery still fails it appends the envelope to `notify.fallback.jsonl`. The hook always exits `0` so a delivery failure never blocks the agent.
+The capture path starts outside ainb, in a thin bash hook (`notify.sh`). For **Claude Code** it is registered through the plugin marketplace — `ainb notifyd install` shells out to `claude plugin install ainb-hooks@agents-in-a-box`, so Claude resolves and runs the plugin's bundled `notify.sh`. For **Codex** a managed block is merged into `~/.codex/hooks.json` pointing at the canonical `~/.agents-in-a-box/hooks/notify.sh`. For **Copilot**, `ainb-notifyd` writes a standalone drop-in at `~/.copilot/hooks/ainb.json`. Only the **actionable** lifecycle events are registered — Claude uses `Notification` (idle / awaiting-input + permission prompts), Codex uses `PermissionRequest` (approval prompts), Copilot uses `notification`, and all three have a turn-finished hook (`Stop` / `agentStop`). When one fires, the script normalizes the payload into a JSON `Envelope` (`protocol_version`, `agent`, `raw_event`, `session_id`, `cwd`, `project`, `ts`, `payload`) and writes one newline-terminated line to the Unix socket at `~/.agents-in-a-box/notify.sock`. If the socket is absent it lazy-spawns the daemon; if delivery still fails it appends the envelope to `notify.fallback.jsonl`. The hook always exits `0` so a delivery failure never blocks the agent.
 
-Telemetry events (`SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact`) are deliberately **not** hooked — `PostToolUse` alone fires dozens of times per turn and would bury the signal. So the inbox only ever contains things that need you.
+Telemetry events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`) are deliberately **not** hooked — `PostToolUse` alone fires dozens of times per turn and would bury the signal. So the inbox only ever contains things that need you.
 
 `ainb-notifyd` is a tokio accept-loop daemon. On startup it replays (and clears) any queued `notify.fallback.jsonl`, then binds the `0600` socket and writes a PID file. Each accepted connection is parsed into an `Envelope` and checked against `is_user_facing`: non-actionable events (telemetry like `SessionStart` / `PostToolUse`) are **dropped before persistence** — a defensive second filter on top of the trimmed hook registration, so a stale install never accumulates noise either. User-facing events (`Stop`, `Notification`, `PermissionRequest`, `agent-turn-complete`, approval/wait events, etc.) are persisted via `insert_and_prune` and emitted as a native OS notification, debounced per `(session_id, raw_event)` on a 60s window.
 
@@ -35,7 +35,7 @@ The Inbox is the full history; the **status marker** is the at-a-glance signal. 
 
 *Live markers: a Codex session that just finished its turn shows `[✓]`; a Claude session awaiting input shows `[?]`. Idle sessions with nothing pending stay blank.*
 
-Both agents register the same two hooks (`Notification`, `Stop`), so in practice you see `[?]` and `[✓]`. The mapping (identical for Claude and Codex):
+The agents register the same intent, but not the same raw hook names. The mapping:
 
 ### Claude Code
 
@@ -50,10 +50,17 @@ Both agents register the same two hooks (`Notification`, `Stop`), so in practice
 
 | Hook fired | Marker | Means | Shows until |
 |------------|--------|-------|-------------|
-| `Notification` (aliases `request_user_input`, `wait_for_user`) | `[?]` amber | awaiting input | the agent resumes · you attach · a newer `Stop` supersedes — **no TTL** |
+| *(none — Codex has no `Notification` hook)* | `[?]` amber | awaiting input | **not shown today** — Codex permission prompts use `PermissionRequest`; turn completion uses `Stop` |
 | `Stop` (aliases `agent-turn-complete`, `task_complete`) | `[✓]` green | turn finished | **5-minute TTL** · resumes · attach |
-| `exec_approval_request` · `apply_patch_approval_request` | `[!]` red | blocked on exec/patch approval | mapped, but **not registered today** (only `Notification` + `Stop` are wired) |
-| `SessionStart` · `UserPromptSubmit` · `PostToolUse` · `PreCompact` | *(none)* | telemetry — not hooked | — |
+| `PermissionRequest` | `[!]` red | blocked on exec/patch approval | clears when the agent resumes · attach |
+| `SessionStart` · `UserPromptSubmit` · `PreToolUse` · `PostToolUse` · `PreCompact` · `PostCompact` · `SubagentStart` · `SubagentStop` | *(none)* | telemetry — not hooked | — |
+
+### GitHub Copilot CLI
+
+| Hook fired | Marker | Means | Shows until |
+|------------|--------|-------|-------------|
+| `notification` | `[?]` amber | awaiting input or permission prompt | the agent resumes · you attach · a newer `agentStop` supersedes it — **no TTL** |
+| `agentStop` | `[✓]` green | turn finished | **5-minute TTL** · resumes · attach |
 
 While a session is **actively generating**, the marker is suppressed (the busy state covers it). The marker recomputes every **~5 s** (the preview-refresh tick), so every appear/clear lands on that cadence rather than instantly.
 
@@ -70,7 +77,7 @@ Because this is host code, there is **no manifest and no capability declaration*
 | `~/.agents-in-a-box/notifications.db` (SQLite, read+write) | Persist captured envelopes; back the Inbox list and the unread badge. |
 | `~/.agents-in-a-box/notify.sock` (Unix socket, `0600`) | Receive envelopes from the `ainb-hooks` script. |
 | `~/.agents-in-a-box/notify.pid`, `notify.fallback.jsonl` | Single-instance guard; recover events queued while the daemon was down. |
-| `claude` CLI (subprocess), `~/.codex/hooks.json` (read+write), `~/.agents-in-a-box/hooks/notify.sh` | The `install` / `uninstall` verbs wire the hook into the host agents — Claude via `claude plugin install/uninstall`, Codex via a managed `hooks.json` block. |
+| `claude` CLI (subprocess), `~/.codex/hooks.json` (read+write), `~/.copilot/hooks/ainb.json`, `~/.agents-in-a-box/hooks/notify.sh` | The `install` / `uninstall` verbs wire the hook into the host agents — Claude via `claude plugin install/uninstall`, Codex via a managed `hooks.json` block, Copilot via a standalone drop-in. |
 | `osascript` / `notify-send` (subprocess) | Emit the native OS notification for user-facing events. |
 
 ## Using it
@@ -83,12 +90,12 @@ Because this is host code, there is **no manifest and no capability declaration*
   - The home screen sidebar lists `📥 Inbox  [b]` between Sessions and Recovery — press `Enter` on the tile, or `b` globally, to open it. (`b` for "in-**B**ox" — picked to avoid the case-pair confusion between `i` Stats and the earlier `I` Inbox binding.)
   - The bottom menu bar (every split-pane screen) always shows `b inbox`. When the store has unread + non-dismissed events the hint becomes `● N · b inbox`, so the global unread count is visible even when the Inbox screen is closed.
   - The Sessions screen renders a live **status marker** (`[!]` / `[?]` / `[✓]`) on the row of any session with a pending hook event, matched by `cwd` ↔ `workspace_path`. This is the primary surface — notifications are tied to the session that produced them, not a separate destination. See [Per-session status markers](#per-session-status-markers).
-- **Inbox screen** — press **`b`** from anywhere on the home screen, or `Enter` on the `📥 Inbox` sidebar tile. You get a two-pane list + detail view of captured events. Keys inside the Inbox: `↑`/`↓` (or `k`/`j`) move, `PageUp`/`PageDown` jump 10 rows, `Enter` open + mark read **and jump to the matching session's tmux pane** (via the cwd correlation below), `d` dismiss selected, `Shift+C` dismiss every visible row, `a` toggle archived (dismissed) rows, `p` cycle the agent filter (all → claude → codex), `r` force refresh, `q`/`Esc` back.
+- **Inbox screen** — press **`b`** from anywhere on the home screen, or `Enter` on the `📥 Inbox` sidebar tile. You get a two-pane list + detail view of captured events. Keys inside the Inbox: `↑`/`↓` (or `k`/`j`) move, `PageUp`/`PageDown` jump 10 rows, `Enter` open + mark read **and jump to the matching session's tmux pane** (via the cwd correlation below), `d` dismiss selected, `Shift+C` dismiss every visible row, `a` toggle archived (dismissed) rows, `p` cycle the agent filter (all → claude → codex → copilot), `r` force refresh, `q`/`Esc` back.
 - **cwd-based correlation (jump-to-tmux)** — every envelope carries the agent's `cwd` at hook-fire time, and every ainb `Session` carries a `workspace_path`. When the user presses `Enter` on an Inbox row, notifyd resolves the row's `cwd` to the first ainb workspace whose path matches (exact or `workspace_path/`-prefix to cover worktree subdirs), picks a session in that workspace, and queues an `AttachToOtherTmux` action with that session's `tmux_session_name`. There is no shared session-id namespace between the host agents' `session_id` strings and ainb's `Session.id` `Uuid`; the cwd is the bridge.
 - **Daemon + installer CLI** — the documented entrypoint is the standalone `ainb-notifyd` binary. The same verbs are also available as a **hidden `ainb notifyd …` subcommand** on the main `ainb` binary (it delegates to the identical `ainb_plugin_notifyd` functions). The hidden alias exists because `notify.sh`'s lazy-spawn invokes `ainb notifyd` — the host binary is the one guaranteed to be on `PATH` after a normal install. Verbs (both forms work):
   - `ainb-notifyd run` (or `ainb notifyd run` / bare `ainb notifyd`) — run the daemon in the foreground. The hook script lazy-spawns `ainb notifyd` when the socket is missing; if `ainb` is on `PATH` the daemon auto-starts and the event is delivered live (no fallback file).
-  - `ainb-notifyd install --claude --codex` (or `--all`) — install the `ainb-hooks` hook for the chosen agents.
-  - `ainb-notifyd uninstall --claude --codex` (or `--all`) — reverse the install; preserves user-authored Codex hooks.
+  - `ainb-notifyd install --claude --codex --copilot` (or `--all`) — install the `ainb-hooks` hook for the chosen agents.
+  - `ainb-notifyd uninstall --claude --codex --copilot` (or `--all`) — reverse the install; preserves user-authored Codex hooks and other Copilot hook files.
   - `ainb-notifyd status` — report per-agent install state, hook-script health, socket liveness, last event, and daemon PID liveness.
   - `ainb-notifyd stop` — send `SIGTERM` to a running daemon via its PID file.
   - Every verb accepts `--format text|json|csv|markdown` (default `text`) for scripting — e.g. `ainb notifyd status --format json`.

@@ -10002,11 +10002,12 @@ impl AppState {
 
     /// The ainb-hooks `agent` string a session's events are recorded
     /// under, or `None` for session types that don't emit hook events
-    /// (plain shell / SSH, and the not-yet-wired Gemini/Copilot/Kiro).
+    /// (plain shell / SSH, and the not-yet-wired Gemini/Kiro).
     const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
         match agent {
             SessionAgentType::Claude => Some("claude"),
             SessionAgentType::Codex => Some("codex"),
+            SessionAgentType::Copilot => Some("copilot"),
             _ => None,
         }
     }

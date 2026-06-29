@@ -90,8 +90,8 @@ pub enum AlertKind {
 /// the ainb-tui per-session marker classify through here so the two
 /// surfaces never drift apart.
 ///
-/// Codex and Claude name the same semantic event differently; both
-/// variants map to the same [`AlertKind`]. A matcher suffix
+/// Host agents name the same semantic events differently; every
+/// supported variant maps to the same [`AlertKind`]. A matcher suffix
 /// (e.g. `Notification:idle_prompt`) is stripped before matching.
 pub fn classify_attention(raw_event: &str) -> Option<AlertKind> {
     let head = raw_event.split(':').next().unwrap_or(raw_event);
@@ -102,9 +102,11 @@ pub fn classify_attention(raw_event: &str) -> Option<AlertKind> {
         | "exec_approval_request"
         | "apply_patch_approval_request" => AlertKind::NeedsPermission,
         // Asked the user something / idle awaiting input.
-        "Notification" | "request_user_input" | "wait_for_user" => AlertKind::WaitingOnUser,
+        "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
+            AlertKind::WaitingOnUser
+        }
         // Turn ended — informational.
-        "Stop" | "agent-turn-complete" | "task_complete" => AlertKind::Finished,
+        "Stop" | "agentStop" | "agent-turn-complete" | "task_complete" => AlertKind::Finished,
         // Telemetry / lifecycle (PreToolUse, PostToolUse, UserPromptSubmit, …).
         _ => return None,
     })
@@ -120,10 +122,10 @@ pub fn render_title(env: &Envelope) -> String {
         other => other,
     };
     match head {
-        "Stop" | "agent-turn-complete" | "task_complete" => {
+        "Stop" | "agentStop" | "agent-turn-complete" | "task_complete" => {
             format!("{agent} session finished")
         }
-        "Notification" | "request_user_input" | "wait_for_user" => {
+        "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
             format!("{agent} is waiting for you")
         }
         "PermissionRequest"
@@ -256,6 +258,12 @@ mod tests {
     }
 
     #[test]
+    fn copilot_attention_events_are_user_facing() {
+        assert!(is_user_facing(&env("agentStop", "copilot")));
+        assert!(is_user_facing(&env("notification", "copilot")));
+    }
+
+    #[test]
     fn classify_attention_maps_each_kind() {
         // Permission / approval (Claude + Codex) → NeedsPermission.
         for e in [
@@ -274,13 +282,14 @@ mod tests {
         for e in [
             "Notification",
             "Notification:idle_prompt",
+            "notification",
             "request_user_input",
             "wait_for_user",
         ] {
             assert_eq!(classify_attention(e), Some(AlertKind::WaitingOnUser), "{e}");
         }
         // Turn ended → Finished.
-        for e in ["Stop", "agent-turn-complete", "task_complete"] {
+        for e in ["Stop", "agentStop", "agent-turn-complete", "task_complete"] {
             assert_eq!(classify_attention(e), Some(AlertKind::Finished), "{e}");
         }
         // Telemetry / lifecycle → no marker.

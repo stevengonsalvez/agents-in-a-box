@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_hook_name_maps_claude_and_codex_only() {
+    fn agent_hook_name_maps_supported_hook_agents() {
         assert_eq!(
             AppState::agent_hook_name(SessionAgentType::Claude),
             Some("claude")
@@ -1069,6 +1069,10 @@ mod tests {
         assert_eq!(
             AppState::agent_hook_name(SessionAgentType::Codex),
             Some("codex")
+        );
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Copilot),
+            Some("copilot")
         );
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
