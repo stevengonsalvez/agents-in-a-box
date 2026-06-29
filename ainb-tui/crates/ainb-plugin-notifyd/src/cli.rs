@@ -65,6 +65,42 @@ pub fn cmd_stop() -> Result<()> {
     Ok(())
 }
 
+/// `reap` — kill every notifyd process that isn't the healthy live owner
+/// (orphans + a wedged stale owner). The live daemon is left running. This
+/// is the typed verb behind the Daemons overlay's "to clean up" hint —
+/// safer than a hand-typed `kill <pid>` against a possibly-recycled pid.
+pub fn cmd_reap(json: bool) -> Result<()> {
+    let report = crate::procs::reap();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.killed.is_empty() && report.failed.is_empty() {
+        println!("no orphan notifyd processes to reap");
+    } else {
+        for pid in &report.killed {
+            println!("reaped pid {pid}");
+        }
+        for (pid, why) in &report.failed {
+            println!("could not reap pid {pid}: {why}");
+        }
+        println!(
+            "reaped {} orphan(s){}",
+            report.killed.len(),
+            if report.failed.is_empty() {
+                String::new()
+            } else {
+                format!(", {} failed", report.failed.len())
+            }
+        );
+    }
+    match report.spared {
+        Some(p) => println!("left live daemon running (pid {p})"),
+        None => println!("no live daemon remains — next hook event will lazy-spawn one"),
+    }
+    Ok(())
+}
+
 /// `install` — wire the ainb-hooks hook into the chosen agents and
 /// print the resolved on-disk paths.
 pub fn cmd_install(agents: &[Agent]) -> Result<()> {

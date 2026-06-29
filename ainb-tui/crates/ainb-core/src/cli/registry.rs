@@ -1205,6 +1205,10 @@ impl CliCommand for NotifydCommand {
                 .hide(true)
                 .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
                 .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
+                .subcommand(
+                    Command::new("reap")
+                        .about("Kill orphan / wedged notifyd processes, sparing the live owner"),
+                )
                 .subcommand(agent_flags(
                     Command::new("install").about("Install the ainb-hooks hook"),
                 ))
@@ -1253,6 +1257,9 @@ impl CliCommand for NotifydCommand {
         enum Verb {
             Run,
             Stop,
+            Reap {
+                json: bool,
+            },
             Install(Vec<ainb_plugin_notifyd::Agent>),
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
             Status,
@@ -1277,6 +1284,9 @@ impl CliCommand for NotifydCommand {
         let verb = match matches.subcommand() {
             Some(("run", _)) | None => Verb::Run,
             Some(("stop", _)) => Verb::Stop,
+            Some(("reap", _)) => Verb::Reap {
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some(("install", m)) => Verb::Install(agents(m)),
             Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
             Some(("status", _)) => Verb::Status,
@@ -1298,6 +1308,7 @@ impl CliCommand for NotifydCommand {
             match verb {
                 Verb::Run => cli::cmd_run().await,
                 Verb::Stop => cli::cmd_stop(),
+                Verb::Reap { json } => cli::cmd_reap(json),
                 Verb::Install(a) => cli::cmd_install(&a),
                 Verb::Uninstall(a) => cli::cmd_uninstall(&a),
                 Verb::Status => cli::cmd_status(),
