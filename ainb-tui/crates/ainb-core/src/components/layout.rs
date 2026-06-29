@@ -331,7 +331,7 @@ impl LayoutComponent {
         let line1_spans = vec![
             key("n", GOLD),
             desc("ew "),
-            key("E", GOLD),
+            key("⇧E", GOLD),
             desc("xpand "),
             key("Tab", GOLD),
             desc(" focus"),
@@ -339,7 +339,7 @@ impl LayoutComponent {
             // Attach / select group
             key("a", SELECTION_GREEN),
             desc("ttach "),
-            key("A", SELECTION_GREEN),
+            key("⇧A", SELECTION_GREEN),
             desc(" pane "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
@@ -356,7 +356,7 @@ impl LayoutComponent {
             desc(restart_label),
             key("d", red),
             desc("elete "),
-            key("D", red),
+            key("⇧D", red),
             desc(" del-sel "),
             key("o", SELECTION_GREEN),
             desc(" editor "),
@@ -377,7 +377,7 @@ impl LayoutComponent {
             desc("laude "),
             key("f", WARNING_ORANGE),
             desc(" refresh "),
-            key("F", WARNING_ORANGE),
+            key("⇧F", WARNING_ORANGE),
             desc(" filter "),
             key("x", WARNING_ORANGE),
             desc(" cleanup"),
@@ -472,7 +472,7 @@ impl LayoutComponent {
         let (filter_key, filter_desc) = if dim_filter {
             (dim("F"), dim(" filter  "))
         } else {
-            (key("F", WARNING_ORANGE), desc(" filter  "))
+            (key("⇧F", WARNING_ORANGE), desc(" filter  "))
         };
         let (cleanup_key, cleanup_desc) = if dim_cleanup {
             (dim("x"), dim(" cleanup  "))
@@ -487,7 +487,7 @@ impl LayoutComponent {
                 desc("ew  "),
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
-                key("A", SELECTION_GREEN),
+                key("⇧A", SELECTION_GREEN),
                 desc(" pane  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
@@ -499,7 +499,7 @@ impl LayoutComponent {
                 desc(restart_label),
                 key("d", red),
                 desc("elete  "),
-                key("D", red),
+                key("⇧D", red),
                 desc(" del-sel  "),
                 key("s", GOLD),
                 desc("tar"),
@@ -565,7 +565,7 @@ impl LayoutComponent {
                 desc("it  "),
                 key("c", WARNING_ORANGE),
                 desc("laude  "),
-                key("E", GOLD),
+                key("⇧E", GOLD),
                 desc("xpand"),
             ]),
             Line::from(vec![
