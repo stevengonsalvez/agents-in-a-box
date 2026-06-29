@@ -600,49 +600,63 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
         GitAuthStatus::Authenticated => return,
     };
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Body holds everything above the CTA. The CTA is rendered into a pinned
+    // 1-row footer below, so Dismiss/Retry stays visible no matter how long
+    // the error is — a chatty `gh` must never push the CTA off-screen (the
+    // very symptom this modal exists to fix).
+    const MAX_ERR_LINES: usize = 8;
+    let mut body: Vec<Line> = Vec::new();
     match status {
         GitAuthStatus::Checking => {
-            lines.push(Line::from(Span::styled(
+            body.push(Line::from(Span::styled(
                 "\u{1f504} Running `gh auth status`\u{2026}",
                 Style::default().fg(Color::Rgb(100, 200, 230)),
             )));
         }
         GitAuthStatus::NotAuthenticated => {
-            lines.push(Line::from(Span::styled(
+            body.push(Line::from(Span::styled(
                 "\u{1f511} Can't clone this repo without GitHub auth.",
                 Style::default().fg(amber),
             )));
             // The verbatim probe output — the specific error, not a generic
-            // "auth failed". Empty only if the probe produced no output.
-            if let Some(err) = state.git_auth_error.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            // "auth failed". Capped to keep the modal bounded.
+            if let Some(err) =
+                state.git_auth_error.as_deref().map(str::trim).filter(|s| !s.is_empty())
             {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
+                body.push(Line::from(""));
+                body.push(Line::from(Span::styled(
                     "gh auth status:",
                     Style::default().fg(MUTED_GRAY),
                 )));
-                for l in err.lines() {
-                    lines.push(Line::from(Span::styled(
-                        l.to_string(),
+                let err_lines: Vec<&str> = err.lines().collect();
+                for l in err_lines.iter().take(MAX_ERR_LINES) {
+                    body.push(Line::from(Span::styled(
+                        (*l).to_string(),
                         Style::default().fg(red),
                     )));
                 }
+                if err_lines.len() > MAX_ERR_LINES {
+                    body.push(Line::from(Span::styled(
+                        format!("\u{2026} ({} more lines)", err_lines.len() - MAX_ERR_LINES),
+                        Style::default().fg(MUTED_GRAY),
+                    )));
+                }
             }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
                 "Fix \u{2014} in another terminal run:",
                 Style::default().fg(MUTED_GRAY),
             )));
-            lines.push(Line::from(Span::styled(
+            body.push(Line::from(Span::styled(
                 "  gh auth login && gh auth setup-git",
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             )));
         }
-        GitAuthStatus::Authenticated => unreachable!(),
+        // Returned early above; kept exhaustive without a panic landmine.
+        GitAuthStatus::Authenticated => return,
     }
+    body.push(Line::from("")); // gap before the pinned CTA footer
 
-    lines.push(Line::from(""));
     let cta = match status {
         GitAuthStatus::Checking => Line::from(vec![
             Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
@@ -657,11 +671,11 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
             Span::styled(" Dismiss", Style::default().fg(MUTED_GRAY)),
         ]),
     };
-    lines.push(cta);
 
-    // Size to content, clamped to the available area (+2 for the border).
-    let height = (lines.len() as u16 + 2).min(area.height.max(3));
-    let width = area.width.saturating_sub(4).clamp(20, 76);
+    // Size to content: body + 1 CTA row + 2 border rows, clamped to the area.
+    // Width never exceeds the area (centred when it fits).
+    let height = (body.len() as u16 + 3).min(area.height.max(3));
+    let width = area.width.saturating_sub(4).clamp(20, 76).min(area.width);
     let modal = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -676,13 +690,21 @@ fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
         .title(Span::styled(title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(DARK_BG));
-    let para = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(SOFT_WHITE));
-
+    let inner = block.inner(modal);
     f.render_widget(Clear, modal);
-    f.render_widget(para, modal);
+    f.render_widget(block, modal);
+
+    // Body takes all rows but the last; the CTA is pinned to the final row so
+    // it survives even when the body is clipped on a short terminal.
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }).style(Style::default().fg(SOFT_WHITE)),
+        parts[0],
+    );
+    f.render_widget(Paragraph::new(cta).alignment(Alignment::Center), parts[1]);
 }
 
 /// Handle a single key event. Mutates state in place; returns the outcome
@@ -1268,6 +1290,33 @@ mod tests {
             "exact gh error not surfaced:\n{text}"
         );
         assert!(text.contains("Dismiss"), "missing Dismiss CTA:\n{text}");
+    }
+
+    #[test]
+    fn modal_keeps_dismiss_cta_visible_with_a_long_error() {
+        // A chatty `gh` must not push the CTA off the bottom of the modal — the
+        // footer is pinned. Constrained viewport: the pre-fix layout clipped it.
+        let mut s = mk_state_with_rows(vec![]);
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+        let long = (0..30).map(|i| format!("error line {i}")).collect::<Vec<_>>().join("\n");
+        s.git_auth_error = Some(long);
+
+        let text = render_to_string(&s, 100, 16);
+
+        assert!(text.contains("Dismiss"), "Dismiss CTA clipped on long error:\n{text}");
+    }
+
+    #[test]
+    fn modal_caps_a_chatty_gh_error() {
+        let mut s = mk_state_with_rows(vec![]);
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        let long = (0..30).map(|i| format!("noisy line {i}")).collect::<Vec<_>>().join("\n");
+        s.git_auth_error = Some(long);
+
+        let text = render_to_string(&s, 100, 40);
+
+        assert!(text.contains("more lines"), "error body not capped:\n{text}");
     }
 
     #[test]
