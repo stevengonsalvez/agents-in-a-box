@@ -1747,7 +1747,7 @@ impl EventHandler {
             KeyCode::Char('f') => Some(AppEvent::RefreshWorkspaces), // Manual refresh
             KeyCode::Char('F') => Some(AppEvent::CycleSessionFilter), // Cycle session filter (active/stopped/all)
             KeyCode::Char('n') => Some(AppEvent::NewSession),
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') | KeyCode::Char('S') => {
                 // Star/unstar the selected workspace (only if a workspace is selected)
                 if state.selected_workspace_index.is_some() {
                     Some(AppEvent::StarSelectedWorkspace)
