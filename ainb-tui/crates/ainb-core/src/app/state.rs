@@ -7603,27 +7603,47 @@ impl AppState {
 
         // Bound the probe: a hung `gh` (network stall, credential helper
         // wedged) must not leave the picker stuck in `Checking` forever.
-        // Timeout and task-panic both fail closed → NotAuthenticated, with a
-        // warning so the cause is visible in the logs.
+        // Timeout and task-panic both fail closed → NotAuthenticated. Capture
+        // the EXACT `gh auth status` output (stderr+stdout) so the failure
+        // modal can show the real reason instead of a generic "auth failed".
         let auth_check = tokio::task::spawn_blocking(|| {
-            std::process::Command::new("gh")
+            match std::process::Command::new("gh")
                 .args(["auth", "status", "--hostname", "github.com"])
                 .env("GIT_TERMINAL_PROMPT", "0")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+                .output()
+            {
+                Ok(out) => {
+                    // gh writes its human status to stderr; fold in stdout too
+                    // in case a future version moves it.
+                    let mut msg = String::from_utf8_lossy(&out.stderr).into_owned();
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if !stdout.trim().is_empty() {
+                        if !msg.is_empty() && !msg.ends_with('\n') {
+                            msg.push('\n');
+                        }
+                        msg.push_str(&stdout);
+                    }
+                    (out.status.success(), msg.trim().to_string())
+                }
+                Err(e) => (
+                    false,
+                    format!(
+                        "could not run `gh`: {e}\nInstall the GitHub CLI: https://cli.github.com"
+                    ),
+                ),
+            }
         });
-        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
-            Ok(Ok(ok)) => ok,
+        let (auth_ok, auth_msg) = match tokio::time::timeout(Duration::from_secs(5), auth_check)
+            .await
+        {
+            Ok(Ok(res)) => res,
             Ok(Err(join_err)) => {
                 tracing::warn!(error = %join_err, "GitHub auth check task panicked");
-                false
+                (false, format!("auth check task panicked: {join_err}"))
             }
             Err(_) => {
                 tracing::warn!("GitHub auth check timed out after 5s");
-                false
+                (false, "`gh auth status` timed out after 5s".to_string())
             }
         };
 
@@ -7633,6 +7653,7 @@ impl AppState {
             if auth_ok {
                 tracing::info!("GitHub auth check passed");
                 pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                pick.git_auth_error = None;
                 // Auto-advance: take the pending source and emit StartClone
                 // via the advance-to-configure path. We replicate the
                 // AdvanceTo → Configure transition inline here.
@@ -7641,8 +7662,9 @@ impl AppState {
                     self.advance_pick_repo_to_configure(source);
                 }
             } else {
-                tracing::warn!("GitHub auth check failed");
+                tracing::warn!(error = %auth_msg, "GitHub auth check failed");
                 pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+                pick.git_auth_error = Some(auth_msg);
             }
         }
         self.ui_needs_refresh = true;

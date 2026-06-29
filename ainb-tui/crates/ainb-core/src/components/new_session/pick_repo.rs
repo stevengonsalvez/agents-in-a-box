@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,10 @@ pub struct PickRepoState {
     pub git_auth_status: Option<GitAuthStatus>,
     /// Source that triggered the auth check, held until auth passes or user skips.
     pub pending_clone_source: Option<RepoSource>,
+    /// Exact, verbatim output of the failed `gh auth status` probe (stderr +
+    /// stdout). Shown in the `NotAuthenticated` modal so the user sees the real
+    /// reason instead of a generic "auth failed". `None` until a probe fails.
+    pub git_auth_error: Option<String>,
     /// Snapshot of session-defaults — read on open, updated on `^R`.
     pub defaults: SessionDefaults,
     /// Snapshot of favorites — read on open, updated on `^F`.
@@ -170,6 +174,7 @@ impl PickRepoState {
             clone_progress: None,
             git_auth_status: None,
             pending_clone_source: None,
+            git_auth_error: None,
             defaults,
             favorites,
         }
@@ -500,71 +505,13 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             // Inline status shown directly under the highlighted row
             // by appending extra lines. Works inside ListItem::new(vec![…]).
             let mut lines = vec![Line::from(spans)];
+            // Auth status (Checking / NotAuthenticated) renders as a standalone
+            // modal after the list (see `render_git_auth_modal`) so it stays
+            // visible even when the filter matches no rows — a typed
+            // `owner/repo` clone has no local row to attach an inline message
+            // to. Only clone progress stays inline on the selected row.
             if is_selected {
-                if let Some(auth) = &state.git_auth_status {
-                    match auth {
-                        GitAuthStatus::Checking => {
-                            lines.push(Line::from(vec![
-                                Span::raw("    "),
-                                Span::styled(
-                                    "\u{1f504} Checking GitHub auth...",
-                                    Style::default().fg(Color::Rgb(100, 200, 230)),
-                                ),
-                            ]));
-                        }
-                        GitAuthStatus::NotAuthenticated => {
-                            // The `gh`-specific copy is intentional: the auth
-                            // pre-check only fires for GitHub sources (see
-                            // `is_github_host` gating in events.rs StartClone),
-                            // so this branch never renders for GitLab /
-                            // self-hosted HTTPS remotes.
-                            let amber = Color::Rgb(255, 191, 0);
-                            lines.push(Line::from(vec![
-                                Span::raw("    "),
-                                Span::styled(
-                                    "\u{1f511} GitHub auth required. In another terminal run:",
-                                    Style::default().fg(amber),
-                                ),
-                            ]));
-                            lines.push(Line::from(vec![
-                                Span::raw("      "),
-                                Span::styled(
-                                    "gh auth login && gh auth setup-git",
-                                    Style::default()
-                                        .fg(SELECTION_GREEN)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                            ]));
-                            lines.push(Line::from(vec![
-                                Span::raw("    "),
-                                Span::styled(
-                                    "Enter",
-                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled("=Retry  ", Style::default().fg(MUTED_GRAY)),
-                                Span::styled(
-                                    "s",
-                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled("=Skip auth  ", Style::default().fg(MUTED_GRAY)),
-                                Span::styled(
-                                    "Esc",
-                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled("=Back", Style::default().fg(MUTED_GRAY)),
-                            ]));
-                        }
-                        GitAuthStatus::Authenticated => {
-                            lines.push(Line::from(vec![
-                                Span::raw("    "),
-                                Span::styled(
-                                    "\u{2705} Authenticated",
-                                    Style::default().fg(SELECTION_GREEN),
-                                ),
-                            ]));
-                        }
-                    }
-                } else if let Some(progress) = &state.clone_progress {
+                if let Some(progress) = &state.clone_progress {
                     if let Some(err) = &progress.error {
                         lines.push(Line::from(vec![
                             Span::raw("    "),
@@ -605,6 +552,12 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
     });
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
+    // Auth pre-check feedback as a centered overlay on the list area. Drawn
+    // here (not inline under a row) so a typed `owner/repo` with no local
+    // match — empty list, no selection — still shows the spinner / the exact
+    // failure + CTA instead of silently hanging.
+    render_git_auth_modal(f, state, chunks[1]);
+
     // Help bar — gold keys + muted descriptions, single line.
     let help = Line::from(vec![
         Span::styled(
@@ -624,6 +577,112 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
     ]);
     let help_p = Paragraph::new(help).alignment(Alignment::Center);
     f.render_widget(help_p, chunks[2]);
+}
+
+/// Centered overlay reporting GitHub auth pre-check state. Renders for
+/// `Checking` (spinner) and `NotAuthenticated` (the EXACT `gh auth status`
+/// output + the fix command + CTAs); `Authenticated` is transient and draws
+/// nothing. Drawn over the list area so it is visible even when the filter
+/// matches no rows — the case that previously hung silently. The overlay is
+/// persistent: it clears only on an explicit key (Enter/s/Esc), never on a
+/// timer.
+fn render_git_auth_modal(f: &mut Frame, state: &PickRepoState, area: Rect) {
+    let Some(status) = &state.git_auth_status else {
+        return;
+    };
+    let amber = Color::Rgb(255, 191, 0);
+    let red = Color::Rgb(230, 100, 100);
+
+    let (title, border) = match status {
+        GitAuthStatus::Checking => (" Checking GitHub auth ", Color::Rgb(100, 200, 230)),
+        GitAuthStatus::NotAuthenticated => (" GitHub auth required ", amber),
+        // Transient — auto-advances to Configure, no overlay needed.
+        GitAuthStatus::Authenticated => return,
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    match status {
+        GitAuthStatus::Checking => {
+            lines.push(Line::from(Span::styled(
+                "\u{1f504} Running `gh auth status`\u{2026}",
+                Style::default().fg(Color::Rgb(100, 200, 230)),
+            )));
+        }
+        GitAuthStatus::NotAuthenticated => {
+            lines.push(Line::from(Span::styled(
+                "\u{1f511} Can't clone this repo without GitHub auth.",
+                Style::default().fg(amber),
+            )));
+            // The verbatim probe output — the specific error, not a generic
+            // "auth failed". Empty only if the probe produced no output.
+            if let Some(err) = state.git_auth_error.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "gh auth status:",
+                    Style::default().fg(MUTED_GRAY),
+                )));
+                for l in err.lines() {
+                    lines.push(Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(red),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Fix \u{2014} in another terminal run:",
+                Style::default().fg(MUTED_GRAY),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  gh auth login && gh auth setup-git",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )));
+        }
+        GitAuthStatus::Authenticated => unreachable!(),
+    }
+
+    lines.push(Line::from(""));
+    let cta = match status {
+        GitAuthStatus::Checking => Line::from(vec![
+            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Cancel", Style::default().fg(MUTED_GRAY)),
+        ]),
+        _ => Line::from(vec![
+            Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Retry   ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Skip auth   ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Dismiss", Style::default().fg(MUTED_GRAY)),
+        ]),
+    };
+    lines.push(cta);
+
+    // Size to content, clamped to the available area (+2 for the border).
+    let height = (lines.len() as u16 + 2).min(area.height.max(3));
+    let width = area.width.saturating_sub(4).clamp(20, 76);
+    let modal = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        .title_alignment(Alignment::Center)
+        .style(Style::default().bg(DARK_BG));
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(SOFT_WHITE));
+
+    f.render_widget(Clear, modal);
+    f.render_widget(para, modal);
 }
 
 /// Handle a single key event. Mutates state in place; returns the outcome
@@ -649,18 +708,23 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
                 if matches!(key.code, KeyCode::Esc) {
                     state.git_auth_status = None;
                     state.pending_clone_source = None;
+                    state.git_auth_error = None;
                 }
                 return PickRepoOutcome::Stay;
             }
             GitAuthStatus::NotAuthenticated => {
                 match key.code {
                     KeyCode::Enter => {
+                        // Re-probe: drop the stale error so the modal shows the
+                        // spinner, not last attempt's failure, while it re-runs.
+                        state.git_auth_error = None;
                         state.git_auth_status = Some(GitAuthStatus::Checking);
                         return PickRepoOutcome::Stay; // dispatcher sees Checking → re-runs check
                     }
                     KeyCode::Char('s' | 'S') => {
                         let source = state.pending_clone_source.take();
                         state.git_auth_status = None;
+                        state.git_auth_error = None;
                         if let Some(src) = source {
                             return PickRepoOutcome::StartClone(src);
                         }
@@ -669,6 +733,7 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
                     KeyCode::Esc => {
                         state.git_auth_status = None;
                         state.pending_clone_source = None;
+                        state.git_auth_error = None;
                         return PickRepoOutcome::Stay;
                     }
                     _ => return PickRepoOutcome::Stay,
@@ -914,6 +979,7 @@ mod tests {
             clone_progress: None,
             git_auth_status: None,
             pending_clone_source: None,
+            git_auth_error: None,
             defaults: SessionDefaults::default(),
             favorites: FavoritesStore::default(),
         }
@@ -1180,7 +1246,28 @@ mod tests {
         // The three key hints the user can act on.
         assert!(text.contains("Retry"), "missing Retry hint in:\n{text}");
         assert!(text.contains("Skip"), "missing Skip hint in:\n{text}");
-        assert!(text.contains("Back"), "missing Back hint in:\n{text}");
+        assert!(text.contains("Dismiss"), "missing Dismiss hint in:\n{text}");
+    }
+
+    #[test]
+    fn not_authenticated_modal_shows_exact_error_even_with_no_rows() {
+        // The regression: a typed `owner/repo` with no local match leaves the
+        // filtered list empty (no selected row). The auth failure must still
+        // render — with the EXACT gh output — instead of hanging silently.
+        let mut s = mk_state_with_rows(vec![]);
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+        s.git_auth_error =
+            Some("You are not logged into any GitHub hosts. To log in, run: gh auth login".into());
+
+        let text = render_to_string(&s, 100, 24);
+
+        assert!(text.contains("auth required"), "modal not shown on empty list:\n{text}");
+        assert!(
+            text.contains("not logged into any GitHub hosts"),
+            "exact gh error not surfaced:\n{text}"
+        );
+        assert!(text.contains("Dismiss"), "missing Dismiss CTA:\n{text}");
     }
 
     #[test]
