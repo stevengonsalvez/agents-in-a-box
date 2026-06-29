@@ -101,7 +101,7 @@ fn install_cmd(id: &str, install: &Install, agent: Agent) -> Option<String> {
         | Install::Cargo(_)
         | Install::Curl(_)
         | Install::Ainb(_)
-        | Install::ClaudePlugin(_) => Some(install.hint()),
+        | Install::ClaudePlugin { .. } => Some(install.hint()),
         // Multi-step / no automatic installer — comment only.
         Install::Toolkit | Install::Manual(_) | Install::BundledWith(_) => None,
     }
@@ -238,8 +238,13 @@ fn dep_line(dep: &crate::setup::catalog::Dep, agent: Agent, commented: bool) -> 
                 dep.why
             ),
             // No simple binary to guard on (ainb subcommands, plugins) — the
-            // installer is itself idempotent.
-            None => format!("{prefix}{cmd}   # {}\n", dep.why),
+            // installer is itself idempotent. `cmd` may be multi-line (e.g. a
+            // ClaudePlugin that adds its marketplace first); prefix every line
+            // so the comment marker isn't dropped on a commented optional dep.
+            None => {
+                let cmd = cmd.replace('\n', &format!("\n{prefix}"));
+                format!("{prefix}{cmd}   # {}\n", dep.why)
+            }
         },
         // Manual / multi-step — always a comment with the hint.
         None => format!("# {} — {}: {}\n", dep.name, dep.why, dep.install.hint()),
@@ -305,6 +310,13 @@ mod tests {
         assert!(s.contains("@anthropic-ai/claude-code"));
         assert!(!s.contains("@openai/codex"));
         assert!(!s.contains("@google/gemini-cli"));
+        // reflect plugin: marketplace added over HTTPS (never SSH shorthand)
+        // before install, and retargeted to the ainb-reflect-memory marketplace.
+        assert!(s.contains(
+            "claude plugin marketplace add https://github.com/stevengonsalvez/ainb-reflect-memory.git 2>/dev/null || true"
+        ));
+        assert!(s.contains("claude plugin install reflect@ainb-reflect-memory"));
+        assert!(!s.contains("reflect@agents-in-a-box"));
     }
 
     #[test]

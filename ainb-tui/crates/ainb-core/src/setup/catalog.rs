@@ -116,8 +116,14 @@ pub enum Install {
     /// `ainb <args...>` — first-party provisioner (e.g. `reflect bootstrap
     /// --yes`, `rtk install`, `claudecode statusline install`).
     Ainb(&'static [&'static str]),
-    /// `claude plugin install <spec>` (Claude Code marketplace plugin).
-    ClaudePlugin(&'static str),
+    /// `claude plugin install <spec>` (Claude Code marketplace plugin). When
+    /// `marketplace` is set, the marketplace is added first via its **HTTPS**
+    /// clone URL — the `owner/repo` shorthand defaults to SSH and fails with
+    /// "Host key verification failed" on hosts without GitHub SSH keys.
+    ClaudePlugin {
+        spec: &'static str,
+        marketplace: Option<&'static str>,
+    },
     /// ainb-toolkit deploy via the skill manager (multi-step `ainb migrate`
     /// flow). Handled specially by the provisioner.
     Toolkit,
@@ -139,7 +145,7 @@ impl Install {
                 | Install::Uv(_)
                 | Install::Cargo(_)
                 | Install::Ainb(_)
-                | Install::ClaudePlugin(_)
+                | Install::ClaudePlugin { .. }
                 | Install::Toolkit
         )
     }
@@ -153,7 +159,12 @@ impl Install {
             Install::Curl(url) => format!("curl -LsSf {url} | sh"),
             Install::Cargo(c) => format!("cargo install {c}"),
             Install::Ainb(a) => format!("ainb {}", a.join(" ")),
-            Install::ClaudePlugin(s) => format!("claude plugin install {s}"),
+            Install::ClaudePlugin { spec, marketplace: Some(url) } => format!(
+                "claude plugin marketplace add {url} 2>/dev/null || true\nclaude plugin install {spec}"
+            ),
+            Install::ClaudePlugin { spec, marketplace: None } => {
+                format!("claude plugin install {spec}")
+            }
             Install::Toolkit => "ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit \
                 && ainb migrate --clean --backup --yes"
                 .to_string(),
@@ -461,7 +472,12 @@ pub fn catalog() -> Vec<Topic> {
                     "Claude Code plugin: SessionStart recall + PreCompact capture hooks (Codex: reflect codex adapter)",
                     Recommended,
                     Custom("claude-plugin:reflect"),
-                    ClaudePlugin("reflect@agents-in-a-box"),
+                    ClaudePlugin {
+                        spec: "reflect@ainb-reflect-memory",
+                        marketplace: Some(
+                            "https://github.com/stevengonsalvez/ainb-reflect-memory.git",
+                        ),
+                    },
                     &[Reflect],
                     &[],
                 ),
@@ -616,7 +632,10 @@ pub fn catalog() -> Vec<Topic> {
                     "multi-session fleet orchestration skills",
                     Suggested,
                     Custom("claude-plugin:ainb-fleet"),
-                    ClaudePlugin("ainb-fleet@agents-in-a-box"),
+                    ClaudePlugin {
+                        spec: "ainb-fleet@agents-in-a-box",
+                        marketplace: Some("https://github.com/stevengonsalvez/agents-in-a-box.git"),
+                    },
                     &[],
                     &[],
                 ),
@@ -626,7 +645,9 @@ pub fn catalog() -> Vec<Topic> {
                     "ultra-compressed token-saving response mode",
                     Suggested,
                     Custom("claude-plugin:caveman"),
-                    ClaudePlugin("caveman@caveman"),
+                    // External marketplace (not stevengonsalvez/*) — no known HTTPS
+                    // URL to pin, so leave the bare install; user adds it themselves.
+                    ClaudePlugin { spec: "caveman@caveman", marketplace: None },
                     &[],
                     &[],
                 ),
@@ -636,7 +657,10 @@ pub fn catalog() -> Vec<Topic> {
                     "caveman token-savings tracker + compaction survival",
                     Suggested,
                     Custom("claude-plugin:caveman-stats"),
-                    ClaudePlugin("caveman-stats@agents-in-a-box"),
+                    ClaudePlugin {
+                        spec: "caveman-stats@agents-in-a-box",
+                        marketplace: Some("https://github.com/stevengonsalvez/agents-in-a-box.git"),
+                    },
                     &[],
                     &[],
                 ),
@@ -646,7 +670,10 @@ pub fn catalog() -> Vec<Topic> {
                     "mascot-driven brand illustration workflow",
                     Suggested,
                     Custom("claude-plugin:illustration"),
-                    ClaudePlugin("illustration@agents-in-a-box"),
+                    ClaudePlugin {
+                        spec: "illustration@agents-in-a-box",
+                        marketplace: Some("https://github.com/stevengonsalvez/agents-in-a-box.git"),
+                    },
                     &[],
                     &[],
                 ),
