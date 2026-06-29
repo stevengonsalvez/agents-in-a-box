@@ -4814,7 +4814,12 @@ impl EventHandler {
                             .unwrap_or(0);
                     }
                     InputKind::AddSource => {
-                        let uri = input.buffer.trim().to_string();
+                        // Bare `owner/repo` is GitHub shorthand — resolve it to
+                        // `gh:owner/repo` so the user need not type the scheme.
+                        // Schemes / non-repo shapes pass through unchanged.
+                        let uri = crate::components::skill_manager_screen::normalize_source_input(
+                            &input.buffer,
+                        );
                         tracing::info!(uri = %uri, "SkillManager: add-source submit");
                         if uri.is_empty() {
                             return;
