@@ -193,6 +193,13 @@ pub struct SkillsScreenData {
     /// `MouseClick` on the edge and `MouseDragEnd`). Drives the bright
     /// edge highlight and gates `drag_resize`.
     pub resize_active: bool,
+    /// `Some(uri)` after the first `[r]` on a unit — arms a one-shot
+    /// confirm so a single keypress can't uninstall. A second `[r]` on
+    /// the *same* unit confirms; moving the cursor (which changes the
+    /// selected URI) re-arms for the new row, so a stray `r` never
+    /// removes the wrong unit. Cleared on any successful action via
+    /// [`Self::reload_from_disk`].
+    pub pending_remove_confirm: Option<String>,
 }
 
 impl Default for SkillsScreenData {
@@ -214,6 +221,7 @@ impl Default for SkillsScreenData {
             source_selected: 0,
             source_filter: None,
             resize_active: false,
+            pending_remove_confirm: None,
         }
     }
 }
@@ -1701,6 +1709,8 @@ impl SkillsScreenData {
         let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
         refresh_view_model_from_manifest(self, &manifest);
         self.detail = compute_detail_for_selected(self, &lockfile);
+        // Any disk-changing action invalidates a pending remove confirm.
+        self.pending_remove_confirm = None;
     }
 
     /// Indices into [`Self::units`] that match BOTH the active

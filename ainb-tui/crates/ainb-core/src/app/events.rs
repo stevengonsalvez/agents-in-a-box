@@ -4557,6 +4557,8 @@ impl EventHandler {
             }
             AppEvent::SkillManagerBack => {
                 tracing::info!("Returning to home from SkillManager (Esc/q)");
+                // Leaving the screen cancels any armed remove confirm.
+                state.skill_manager_state.pending_remove_confirm = None;
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::SkillManagerDiscoveryImport => {
@@ -4710,35 +4712,54 @@ impl EventHandler {
                     .map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
+                        state.skill_manager_state.pending_remove_confirm = None;
                         state.add_warning_notification("remove: no unit selected".to_string());
                     }
                     Some(uri) => {
-                        // Two-step uninstall:
-                        //   1. `skill remove --yes` tears down any deployed
-                        //      tool files recorded in the lockfile.
-                        //   2. drop the unit from the *manifest* so the
-                        //      Units table (which is manifest-driven) loses
-                        //      the row.
-                        // A manifest-declared unit that was never installed
-                        // has no lockfile entry, so step 1 reports "not in
-                        // the lockfile" — that's not a user-facing failure,
-                        // the unit still vanishes from the table. We only
-                        // surface an error when neither step removed anything.
-                        let cmd = ainb_cli::SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
-                            uri: uri.clone(),
-                            targets: None,
-                            yes: true,
-                            dry_run: false,
-                        });
-                        let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
-                        let manifest_dropped = drop_unit_from_manifest(&ainb_home, &uri);
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if lockfile_ok {
-                            state.add_success_notification(format!("removed: {msg}"));
-                        } else if manifest_dropped {
-                            state.add_success_notification(format!("removed: {uri}"));
+                        let armed = state
+                            .skill_manager_state
+                            .pending_remove_confirm
+                            .as_deref()
+                            == Some(uri.as_str());
+                        if !armed {
+                            // First `[r]`: arm a one-shot confirm for THIS unit.
+                            // Moving the cursor changes the selected URI and
+                            // re-arms for the new row, so a stray `r` can't
+                            // uninstall.
+                            state.skill_manager_state.pending_remove_confirm = Some(uri.clone());
+                            state.add_warning_notification(format!(
+                                "remove {uri}? press r again to confirm"
+                            ));
                         } else {
-                            state.add_error_notification(format!("remove failed: {msg}"));
+                            // Confirmed. Two-step uninstall:
+                            //   1. `skill remove --yes` tears down any deployed
+                            //      tool files recorded in the lockfile (per-file,
+                            //      never wipes config — guarded in convention.rs).
+                            //   2. drop the unit from the *manifest* so the
+                            //      Units table (which is manifest-driven) loses
+                            //      the row.
+                            // A manifest-declared unit that was never installed
+                            // has no lockfile entry, so step 1 reports "not in
+                            // the lockfile" — that's not a user-facing failure,
+                            // the unit still vanishes from the table. We only
+                            // surface an error when neither step removed anything.
+                            // reload_from_disk clears pending_remove_confirm.
+                            let cmd = ainb_cli::SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
+                                uri: uri.clone(),
+                                targets: None,
+                                yes: true,
+                                dry_run: false,
+                            });
+                            let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
+                            let manifest_dropped = drop_unit_from_manifest(&ainb_home, &uri);
+                            state.skill_manager_state.reload_from_disk(&ainb_home);
+                            if lockfile_ok {
+                                state.add_success_notification(format!("removed: {msg}"));
+                            } else if manifest_dropped {
+                                state.add_success_notification(format!("removed: {uri}"));
+                            } else {
+                                state.add_error_notification(format!("remove failed: {msg}"));
+                            }
                         }
                     }
                 }
@@ -7040,6 +7061,47 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// `[r]` in the Skill Manager must arm a confirm on the first press
+    /// (so a single keystroke can't uninstall), and leaving the screen
+    /// must cancel that arm. The actual removal (second press) is the
+    /// `skill remove` path, guarded + tested in convention.rs.
+    #[test]
+    fn skill_manager_remove_arms_on_first_r_and_back_cancels() {
+        let mut state = AppState::default();
+        state.skill_manager_state.units =
+            vec![crate::components::skill_manager_screen::UnitRow {
+                idx: 0,
+                name: "foo".to_string(),
+                kind: "skill".to_string(),
+                source: "gh:o/r".to_string(),
+                git_ref: "main".to_string(),
+                targets: vec!["claude".to_string()],
+                declared_uri: "gh:o/r@main/skills/foo".to_string(),
+            }];
+        state.skill_manager_state.selected = 0;
+        assert!(state.skill_manager_state.pending_remove_confirm.is_none());
+
+        // First [r]: arms for the selected unit; does NOT remove it.
+        EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
+        assert_eq!(
+            state.skill_manager_state.pending_remove_confirm.as_deref(),
+            Some("gh:o/r@main/skills/foo"),
+            "first r must arm the confirm"
+        );
+        assert_eq!(
+            state.skill_manager_state.units.len(),
+            1,
+            "the unit must still be present after the first r"
+        );
+
+        // Leaving the screen cancels the arm.
+        EventHandler::process_event(AppEvent::SkillManagerBack, &mut state);
+        assert!(
+            state.skill_manager_state.pending_remove_confirm.is_none(),
+            "SkillManagerBack must cancel a pending remove confirm"
+        );
     }
 
     /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
