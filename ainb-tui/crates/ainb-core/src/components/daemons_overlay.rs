@@ -208,7 +208,7 @@ fn build_notifyd_lines(
     )];
     if orphan_count > 0 {
         header.push(Span::styled(
-            format!("   · {orphan_count} to clean up (kill <pid>)"),
+            format!("   · {orphan_count} to clean up (run `ainb notifyd reap`)"),
             Style::default().fg(CLAY),
         ));
     }

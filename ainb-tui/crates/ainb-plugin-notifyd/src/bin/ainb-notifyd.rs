@@ -30,6 +30,8 @@ enum Cmd {
     Run,
     /// Stop a running daemon by PID file.
     Stop,
+    /// Kill orphan / wedged notifyd processes, sparing the live owner.
+    Reap,
     /// Install the ainb-hooks plugin for one or more agents.
     Install(AgentArgs),
     /// Uninstall the ainb-hooks plugin for one or more agents.
@@ -68,6 +70,7 @@ async fn main() -> ExitCode {
     let result: Result<()> = match cli.cmd.unwrap_or(Cmd::Run) {
         Cmd::Run => cli::cmd_run().await,
         Cmd::Stop => cli::cmd_stop(),
+        Cmd::Reap => cli::cmd_reap(false),
         Cmd::Install(a) => {
             cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
         }
