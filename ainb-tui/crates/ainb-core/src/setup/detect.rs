@@ -228,21 +228,46 @@ fn detect_custom(name: &str, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
-        // The reflect Claude Code plugin extracts into ~/.claude/plugins — detect
-        // it from disk so we don't re-suggest an already-installed plugin.
-        "claude-plugin:reflect" => {
-            if home_path_exists(".claude/plugins/reflect")
-                || home_path_exists(".claude/plugins/cache/reflect")
-            {
+        // Claude Code marketplace plugins are keyed `<plugin>@<marketplace>` in
+        // ~/.claude/plugins/installed_plugins.json and unpacked to
+        // cache/<marketplace>/<plugin>/<version> — NOT plugins/<plugin>. The
+        // registry is the only reliable presence signal across marketplace
+        // renames, so probe it instead of guessing a directory.
+        s if s.starts_with("claude-plugin:") => {
+            let plugin = &s["claude-plugin:".len()..];
+            if claude_plugin_installed(plugin) {
                 DepState::Ok(None)
             } else {
                 DepState::Missing
             }
         }
-        // Other marketplace plugins aren't reliably detectable from disk.
-        s if s.starts_with("claude-plugin:") => DepState::Unknown,
         _ => DepState::Unknown,
     }
+}
+
+/// True if a Claude Code plugin named `plugin` is in the installed registry
+/// (any marketplace). Reads `~/.claude/plugins/installed_plugins.json`, whose
+/// `plugins` object is keyed `<plugin>@<marketplace>`.
+fn claude_plugin_installed(plugin: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    match std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json")) {
+        Ok(text) => plugin_in_registry(&text, plugin),
+        Err(_) => false,
+    }
+}
+
+/// Pure registry lookup: does the `installed_plugins.json` text list a plugin
+/// whose name (the part before `@<marketplace>`) equals `plugin`? Split out so
+/// it's unit-testable without touching the real `~/.claude`.
+fn plugin_in_registry(registry_json: &str, plugin: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(registry_json)
+        .ok()
+        .as_ref()
+        .and_then(|json| json.get("plugins"))
+        .and_then(|p| p.as_object())
+        .is_some_and(|plugins| plugins.keys().any(|k| k.split('@').next() == Some(plugin)))
 }
 
 fn home_path_exists(rel: &str) -> bool {
@@ -414,14 +439,22 @@ mod tests {
     }
 
     #[test]
-    fn marketplace_plugins_are_unknown() {
-        let env = MockEnv {
-            present: vec![],
-            runs: HashMap::new(),
-        };
-        let status = detect_all(&env);
-        let cm = find(&status, "caveman");
-        assert!(matches!(cm.state, DepState::Unknown));
-        assert!(!cm.is_blocking());
+    fn plugin_registry_lookup_matches_name_across_marketplaces() {
+        // Claude keys plugins `<plugin>@<marketplace>`; we match on the name part
+        // so a marketplace rename (agents-in-a-box -> ainb-reflect-memory) still
+        // detects the same plugin.
+        let registry = r#"{
+            "version": 2,
+            "plugins": {
+                "reflect@ainb-reflect-memory": [{"scope": "user"}],
+                "caveman@caveman": [{"scope": "user"}]
+            }
+        }"#;
+        assert!(super::plugin_in_registry(registry, "reflect"));
+        assert!(super::plugin_in_registry(registry, "caveman"));
+        assert!(!super::plugin_in_registry(registry, "abtop"));
+        // Missing/garbage registry never panics, never false-positives.
+        assert!(!super::plugin_in_registry("not json", "reflect"));
+        assert!(!super::plugin_in_registry("{}", "reflect"));
     }
 }

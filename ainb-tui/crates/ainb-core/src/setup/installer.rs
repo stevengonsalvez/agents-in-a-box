@@ -305,9 +305,10 @@ mod tests {
 
     #[test]
     fn empty_host_script_installs_required_guarded_and_picks_agent_cli() {
-        // NOTE: brew/notifyd/statusline are Custom probes against the real FS,
-        // so MockEnv can't force them missing — assert only on mock-controlled
-        // (Bin/CommandOk) deps here.
+        // NOTE: brew/notifyd/statusline/claude-plugin are Custom probes against
+        // the real FS, so MockEnv can't force them missing — assert only on
+        // mock-controlled (Bin/CommandOk) deps here. The reflect-plugin line
+        // format is covered by `reflect_plugin_hint_*` against the catalog spec.
         let env = MockEnv { present: vec![] };
         let s = build_script(Agent::Claude, &env);
         assert!(s.starts_with("#!/usr/bin/env bash"));
@@ -319,13 +320,24 @@ mod tests {
         assert!(s.contains("@anthropic-ai/claude-code"));
         assert!(!s.contains("@openai/codex"));
         assert!(!s.contains("@google/gemini-cli"));
-        // reflect plugin: marketplace added over HTTPS (never SSH shorthand)
-        // before install, and retargeted to the ainb-reflect-memory marketplace.
-        assert!(s.contains(
+    }
+
+    /// reflect plugin: marketplace added over HTTPS (never the SSH `owner/repo`
+    /// shorthand) before install, retargeted to the ainb-reflect-memory
+    /// marketplace. Asserted on the catalog spec so it's independent of host FS.
+    #[test]
+    fn reflect_plugin_hint_uses_https_marketplace() {
+        let dep = crate::setup::catalog::catalog()
+            .into_iter()
+            .flat_map(|t| t.deps)
+            .find(|d| d.id == "reflect-plugin")
+            .expect("reflect-plugin in catalog");
+        let hint = dep.install.hint();
+        assert!(hint.contains(
             "claude plugin marketplace add https://github.com/stevengonsalvez/ainb-reflect-memory.git 2>/dev/null || true"
         ));
-        assert!(s.contains("claude plugin install reflect@ainb-reflect-memory"));
-        assert!(!s.contains("reflect@agents-in-a-box"));
+        assert!(hint.contains("claude plugin install reflect@ainb-reflect-memory"));
+        assert!(!hint.contains("reflect@agents-in-a-box"));
     }
 
     #[test]
