@@ -124,7 +124,10 @@ pub fn plan(install: &Install) -> InstallPlan {
         // Add the marketplace over HTTPS first (shorthand defaults to SSH and
         // fails without GitHub SSH keys), then install. `|| true` keeps the
         // already-added case from aborting.
-        Install::ClaudePlugin { spec, marketplace: Some(url) } => InstallPlan {
+        Install::ClaudePlugin {
+            spec,
+            marketplace: Some(url),
+        } => InstallPlan {
             argv: Some(vec![
                 s("sh"),
                 s("-c"),
@@ -136,7 +139,10 @@ pub fn plan(install: &Install) -> InstallPlan {
             consent: ConsentLevel::Auto,
             display,
         },
-        Install::ClaudePlugin { spec, marketplace: None } => InstallPlan {
+        Install::ClaudePlugin {
+            spec,
+            marketplace: None,
+        } => InstallPlan {
             argv: Some(vec![s("claude"), s("plugin"), s("install"), s(spec)]),
             consent: ConsentLevel::Auto,
             display,

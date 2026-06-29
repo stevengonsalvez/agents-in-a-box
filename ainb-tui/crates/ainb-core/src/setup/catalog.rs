@@ -159,10 +159,16 @@ impl Install {
             Install::Curl(url) => format!("curl -LsSf {url} | sh"),
             Install::Cargo(c) => format!("cargo install {c}"),
             Install::Ainb(a) => format!("ainb {}", a.join(" ")),
-            Install::ClaudePlugin { spec, marketplace: Some(url) } => format!(
+            Install::ClaudePlugin {
+                spec,
+                marketplace: Some(url),
+            } => format!(
                 "claude plugin marketplace add {url} 2>/dev/null || true\nclaude plugin install {spec}"
             ),
-            Install::ClaudePlugin { spec, marketplace: None } => {
+            Install::ClaudePlugin {
+                spec,
+                marketplace: None,
+            } => {
                 format!("claude plugin install {spec}")
             }
             Install::Toolkit => "ainb migrate --from-bootstrap --toolkit-root ./ainb-toolkit \
@@ -647,7 +653,10 @@ pub fn catalog() -> Vec<Topic> {
                     Custom("claude-plugin:caveman"),
                     // External marketplace (not stevengonsalvez/*) — no known HTTPS
                     // URL to pin, so leave the bare install; user adds it themselves.
-                    ClaudePlugin { spec: "caveman@caveman", marketplace: None },
+                    ClaudePlugin {
+                        spec: "caveman@caveman",
+                        marketplace: None,
+                    },
                     &[],
                     &[],
                 ),
