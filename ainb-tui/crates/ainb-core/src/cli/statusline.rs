@@ -216,6 +216,10 @@ pub fn render_powerline(cache: &LiveCache) -> String {
         parts.push(hr);
     }
 
+    if let Some(rtk) = rtk_segment() {
+        parts.push(rtk);
+    }
+
     parts.join(&format!(" {} ", ansi_fg(MUTED, "·")))
 }
 
@@ -247,6 +251,27 @@ fn headroom_segment() -> Option<String> {
         std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(40)).is_ok();
     let color = if live { GREEN } else { AMBER };
     Some(ansi_fg(color, "HR"))
+}
+
+/// RTK (Rust Token Killer) statusline pill. Like the `HR` segment, it
+/// reflects the ACTUAL wiring state rather than the stored per-session
+/// toggle: the pill shows only when the Claude Code PreToolUse hook is
+/// really wired. This statusline command is only ever invoked by Claude
+/// Code, so no agent-type gate is needed.
+///
+/// `rtk::is_wired()` spawns `rtk init --show`, so it is gated behind the
+/// cheap `is_installed()` PATH check — no subprocess on machines without
+/// rtk. ponytail: `is_wired()` checks the GLOBAL `~/.claude/settings.json`
+/// hook; a session wired only via a project-local hook won't light up.
+/// If that case matters, read the effective project settings instead.
+fn rtk_segment() -> Option<String> {
+    rtk_pill(crate::rtk::is_installed() && crate::rtk::is_wired())
+}
+
+/// Pure formatter for the RTK pill — split from `rtk_segment` so it is
+/// unit-testable without the `rtk` binary present.
+fn rtk_pill(wired: bool) -> Option<String> {
+    wired.then(|| ansi_fg(GREEN, "RTK"))
 }
 
 // Hand-rolled ANSI 24-bit escape sequences. Avoid pulling in a colored
@@ -598,6 +623,14 @@ mod tests {
         if let Some(v) = port_old {
             std::env::set_var("AINB_HEADROOM_PORT", v);
         }
+    }
+
+    #[test]
+    fn rtk_pill_shows_only_when_wired() {
+        // Wired → "RTK" label present; not wired → no segment. Pure formatter,
+        // so no `rtk` binary required (mirrors the HR pill's label assertion).
+        assert!(rtk_pill(true).as_deref().unwrap_or("").contains("RTK"));
+        assert!(rtk_pill(false).is_none());
     }
 
     /// `--cache-only`: cache is written, stdout payload is `None`
