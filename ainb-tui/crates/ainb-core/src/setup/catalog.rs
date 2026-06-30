@@ -657,7 +657,7 @@ pub fn catalog() -> Vec<Topic> {
         Topic {
             id: "suggested-plugins",
             label: "Suggested plugins",
-            description: "Claude: claude plugin install <name>@agents-in-a-box · Codex/Copilot: ainb skill install <uri> --targets codex,copilot",
+            description: "Claude: claude plugin install <name>@agents-in-a-box · Codex/Copilot: skill plugins (ainb-fleet, illustration) via ainb skill install <uri> --targets codex,copilot; caveman-stats is Claude-only",
             deps: vec![
                 dep(
                     "ainb-fleet",
@@ -770,21 +770,31 @@ mod tests {
         // install path for BOTH Codex and Copilot, not Claude-only.
         let topics = catalog();
         let sp = topics.iter().find(|t| t.id == "suggested-plugins").unwrap();
-        assert!(sp.description.contains("codex"), "must mention codex: {}", sp.description);
-        assert!(sp.description.contains("copilot"), "must mention copilot: {}", sp.description);
+        assert!(
+            sp.description.contains("codex"),
+            "must mention codex: {}",
+            sp.description
+        );
+        assert!(
+            sp.description.contains("copilot"),
+            "must mention copilot: {}",
+            sp.description
+        );
     }
 
     #[test]
     fn hooks_install_covers_every_agent() {
-        // F1 guard: onboarding must install ainb-hooks for Claude + Codex +
-        // Copilot. `--all` is the only target spec that covers Copilot; a
-        // `--claude --codex` regression would silently drop Copilot's Inbox.
+        // F1 guard: onboarding must install ainb-hooks for ALL agents in one
+        // shot. `--all` is the only spec that covers every agent; `--claude
+        // --codex` (the prior regression) or any single-agent subset would
+        // silently drop an Inbox, so assert `--all` exactly rather than a weak
+        // "mentions copilot" that a Claude-dropping subset could also satisfy.
         let topics = catalog();
         let hooks = topics.iter().flat_map(|t| &t.deps).find(|d| d.id == "ainb-hooks").unwrap();
         let hint = hooks.install.hint();
         assert!(
-            hint.contains("--all") || hint.contains("--copilot"),
-            "hooks install must reach Copilot, got: {hint}"
+            hint.contains("--all"),
+            "hooks install must use --all, got: {hint}"
         );
     }
 

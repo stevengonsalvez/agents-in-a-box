@@ -286,6 +286,12 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
     // also clears any prior "don't ask again" — the user is opting in.
     record.plugin_version = Some(embedded_plugin_version());
     record.prompt_dismissed = false;
+    // Per-agent install failures are isolated: one agent's filesystem error
+    // (e.g. an unwritable `~/.copilot`) must NOT abort the others or prevent
+    // the Claude plugin registration that runs after this returns. We collect
+    // failures, persist whatever succeeded, and surface warnings — never let a
+    // single `--all` target take the whole step down.
+    let mut failures: Vec<(Agent, anyhow::Error)> = Vec::new();
     for agent in agents {
         match agent {
             Agent::Claude => {
@@ -297,22 +303,31 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 record.claude_plugin_dir = None;
                 push_unique(&mut record.agents, Agent::Claude);
             }
-            Agent::Codex => {
-                let hooks_json = install_codex(home, &hook_script)?;
-                record.codex_hooks_json = Some(hooks_json);
-                push_unique(&mut record.agents, Agent::Codex);
-            }
-            Agent::Copilot => {
-                let hooks_json = install_copilot(home, &hook_script)?;
-                record.copilot_hooks_json = Some(hooks_json);
-                push_unique(&mut record.agents, Agent::Copilot);
-            }
+            Agent::Codex => match install_codex(home, &hook_script) {
+                Ok(hooks_json) => {
+                    record.codex_hooks_json = Some(hooks_json);
+                    push_unique(&mut record.agents, Agent::Codex);
+                }
+                Err(e) => failures.push((Agent::Codex, e)),
+            },
+            Agent::Copilot => match install_copilot(home, &hook_script) {
+                Ok(hooks_json) => {
+                    record.copilot_hooks_json = Some(hooks_json);
+                    push_unique(&mut record.agents, Agent::Copilot);
+                }
+                Err(e) => failures.push((Agent::Copilot, e)),
+            },
             // Unknown agents are owned by a newer build; skip without
             // disturbing an existing record entry.
             Agent::Unknown => {}
         }
     }
     record.save(paths)?;
+    for (agent, e) in &failures {
+        eprintln!(
+            "warning: notifyd hook install for {agent:?} failed (other agents unaffected): {e:#}"
+        );
+    }
     Ok(record)
 }
 

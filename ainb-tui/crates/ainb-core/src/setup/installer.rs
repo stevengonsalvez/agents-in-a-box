@@ -93,11 +93,13 @@ fn probe_bin(detect: &Detect) -> Option<&'static str> {
 }
 
 /// The runnable install command for a dep, or `None` if it's manual/bundled/
-/// multi-step (emitted as a comment instead). `ainb-hooks` is rewritten to the
-/// chosen agent's notifyd target.
-fn install_cmd(id: &str, install: &Install, agent: Agent) -> Option<String> {
+/// multi-step (emitted as a comment instead). `ainb-hooks` installs hooks for
+/// every agent (`--all`), not just the script's target: the notifyd inbox is
+/// shared, so whichever agent the user later runs should reach it. Wiring only
+/// the script's own agent silently leaves the others' Inbox dark.
+fn install_cmd(id: &str, install: &Install, _agent: Agent) -> Option<String> {
     if id == "ainb-hooks" {
-        return Some(format!("ainb notifyd install --{}", agent.slug()));
+        return Some("ainb notifyd install --all".to_string());
     }
     match install {
         Install::Brew(_)
