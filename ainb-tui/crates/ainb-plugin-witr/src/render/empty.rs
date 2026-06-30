@@ -62,6 +62,11 @@ const CURL_BASH_FALLBACK: &str =
 /// installing.
 const README_URL: &str = "https://github.com/pranshuparmar/witr#installation";
 
+/// ainb docsite page for the witr plugin — shows what it looks like inside ainb
+/// (screenshots). Full bare URL so terminals auto-linkify it and it stays
+/// copyable; left-aligned painting keeps it from truncating at >=80 cols.
+const DOCSITE_URL: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/witr/";
+
 /// Resolve an [`InstallHint`] for the current build target.
 ///
 /// Pure — no I/O, no syscalls. Defers to [`install_hint`] with the
@@ -189,7 +194,8 @@ fn compose_missing_layout(hint: &InstallHint, diagnostic: &str) -> Vec<String> {
         format!("  {}", hint.primary),
         format!("  {}", hint.fallback),
         String::new(),
-        format!("see {README_URL}"),
+        format!("install help: {README_URL}"),
+        format!("docs: {DOCSITE_URL}"),
         String::new(),
         "press r to re-check".to_string(),
     ]
@@ -210,7 +216,8 @@ fn compose_outdated_layout(hint: &InstallHint, found: &Version, minimum: &Versio
         format!("  {}", hint.primary),
         format!("  {}", hint.fallback),
         String::new(),
-        format!("see {README_URL}"),
+        format!("install help: {README_URL}"),
+        format!("docs: {DOCSITE_URL}"),
         String::new(),
         "press r to re-check".to_string(),
     ]
@@ -294,6 +301,11 @@ mod tests {
         assert!(buffer_contains(&buf, "press r to re-check"));
         // Curl-bash fallback is always present, regardless of platform.
         assert!(buffer_contains(&buf, "curl"));
+        // Docsite link present + untruncated at the 80-col minimum.
+        assert!(
+            buffer_contains(&buf, DOCSITE_URL),
+            "docsite URL truncated/missing on witr missing-state at 80 cols"
+        );
         // Buffer dimensions are preserved exactly as requested.
         assert_eq!(buf.width, 80);
         assert_eq!(buf.height, 20);
