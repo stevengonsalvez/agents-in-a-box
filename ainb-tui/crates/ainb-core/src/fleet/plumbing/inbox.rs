@@ -281,6 +281,23 @@ impl Inbox {
         self.drain_locked()
     }
 
+    /// Drain only the records that match `snapshot` by turn fingerprint.
+    ///
+    /// Used by ATC heartbeat after it has already rendered a peeked completion
+    /// snapshot into the body. A child can commit another completion between
+    /// that peek and the confirmed tmux send; this method consumes only the
+    /// fingerprints already present in the delivered body and leaves later
+    /// records in the JSONL for the next heartbeat.
+    pub fn drain_matching(&self, snapshot: &[InboxRecord]) -> Result<Vec<InboxRecord>> {
+        if snapshot.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expected: HashSet<String> =
+            snapshot.iter().map(|r| r.turn_fingerprint.clone()).collect();
+        let _guard = self.lock()?;
+        self.drain_matching_locked(&expected)
+    }
+
     /// The exactly-once drain body, assuming the caller already holds the inbox
     /// lock (e.g. [`Self::drain_with_budget`]). Never acquires the lock itself.
     fn drain_locked(&self) -> Result<Vec<InboxRecord>> {
@@ -307,6 +324,39 @@ impl Inbox {
         self.write_consumed_entries(entries)?;
         // Clear delivered records from the JSONL (removes the file when empty).
         self.rewrite(&[])?;
+        Ok(fresh)
+    }
+
+    /// Snapshot drain body, assuming the caller holds the inbox lock.
+    fn drain_matching_locked(&self, expected: &HashSet<String>) -> Result<Vec<InboxRecord>> {
+        let consumed = self.read_consumed();
+        let all = self.read_records();
+        let fresh: Vec<InboxRecord> = all
+            .iter()
+            .filter(|r| {
+                expected.contains(&r.turn_fingerprint) && !consumed.contains(&r.turn_fingerprint)
+            })
+            .cloned()
+            .collect();
+
+        if fresh.is_empty() {
+            return Ok(fresh);
+        }
+
+        let mut entries = self.read_consumed_entries();
+        for r in &fresh {
+            entries.push((r.ts, r.turn_fingerprint.clone()));
+        }
+        self.write_consumed_entries(entries)?;
+
+        let delivered: HashSet<String> = fresh.iter().map(|r| r.turn_fingerprint.clone()).collect();
+        let remaining: Vec<InboxRecord> = all
+            .into_iter()
+            .filter(|r| {
+                !delivered.contains(&r.turn_fingerprint) && !consumed.contains(&r.turn_fingerprint)
+            })
+            .collect();
+        self.rewrite(&remaining)?;
         Ok(fresh)
     }
 
@@ -518,6 +568,28 @@ mod tests {
         // A real drain then consumes it.
         assert_eq!(inbox.drain().unwrap().len(), 1);
         assert!(inbox.peek().is_empty());
+    }
+
+    #[test]
+    fn drain_matching_preserves_records_written_after_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let inbox = Inbox::open_in(dir.path(), "atc");
+        inbox.commit(&rec("c1", "atc", "sent in heartbeat", 1)).unwrap();
+        let snapshot = inbox.peek();
+        assert_eq!(snapshot.len(), 1);
+
+        // This completion arrives after the heartbeat body was built. It must
+        // not be consumed by the send-commit for the older snapshot.
+        inbox.commit(&rec("c2", "atc", "arrived later", 2)).unwrap();
+
+        let drained = inbox.drain_matching(&snapshot).unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].child_id, "c1");
+
+        let remaining = inbox.peek();
+        assert_eq!(remaining.len(), 1, "late completion must remain pending");
+        assert_eq!(remaining[0].child_id, "c2");
+        assert_eq!(remaining[0].summary, "arrived later");
     }
 
     #[test]

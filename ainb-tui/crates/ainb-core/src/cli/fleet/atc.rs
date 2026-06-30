@@ -494,7 +494,7 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
         // Encapsulated decision (unit-tested): drain exactly-once ONLY on a
         // confirmed send; on send failure leave the completions for a later
         // firing rather than consuming + losing them.
-        commit_delivery_on_send(&inbox, !completions.is_empty(), &send_result);
+        commit_delivery_on_send(&inbox, &completions, &send_result);
         if let Err(e) = send_result {
             tracing::warn!("atc heartbeat: tmux send failed, completions retained: {e}");
         }
@@ -543,21 +543,20 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     Ok(())
 }
 
-/// Drain the inbox exactly-once IFF the heartbeat was actually delivered.
+/// Drain the heartbeat snapshot exactly-once IFF it was actually delivered.
 ///
-/// This is the C-A1/C-A2 invariant in one place: a peeked completion is consumed
-/// (`drain`) ONLY after a confirmed send (`send_result.is_ok()`). On a send
-/// failure — or a dead/idle firing that never reached here — the completions are
-/// left in the inbox for a later, deliverable firing rather than consumed and
-/// lost. `had_completions` short-circuits the no-op empty case so a pure-poll
-/// heartbeat never touches the consumed marker.
+/// This is the C-A1/C-A2 invariant in one place: peeked completions are consumed
+/// ONLY after a confirmed send (`send_result.is_ok()`). Crucially, the drain is
+/// limited to `sent_completions`; a child can commit another completion between
+/// the heartbeat body being built and the successful tmux send, and that later
+/// record must stay pending for the next heartbeat.
 fn commit_delivery_on_send<E>(
     inbox: &plumbing::Inbox,
-    had_completions: bool,
+    sent_completions: &[plumbing::InboxRecord],
     send_result: &std::result::Result<(), E>,
 ) {
-    if had_completions && send_result.is_ok() {
-        let _ = inbox.drain();
+    if !sent_completions.is_empty() && send_result.is_ok() {
+        let _ = inbox.drain_matching(sent_completions);
     }
 }
 
@@ -1168,8 +1167,9 @@ mod tests {
         assert!(!inbox.is_empty());
 
         // Confirmed send → drains exactly-once.
+        let completions = inbox.peek();
         let ok: std::result::Result<(), String> = Ok(());
-        commit_delivery_on_send(&inbox, true, &ok);
+        commit_delivery_on_send(&inbox, &completions, &ok);
         assert!(inbox.is_empty(), "confirmed send must drain the completion");
     }
 
@@ -1183,8 +1183,9 @@ mod tests {
 
         // Send FAILED → must NOT drain; the completion is retained for a later
         // firing (C-A2: a send failure after a would-be drain must not lose it).
+        let completions = inbox.peek();
         let err: std::result::Result<(), String> = Err("tmux send failed".into());
-        commit_delivery_on_send(&inbox, true, &err);
+        commit_delivery_on_send(&inbox, &completions, &err);
         assert!(
             !inbox.is_empty(),
             "send failure must retain the completion, not consume it"
@@ -1198,8 +1199,45 @@ mod tests {
         let inbox = inbox_for(dir.path(), "atc");
         let ok: std::result::Result<(), String> = Ok(());
         // No completions → the consumed marker is never touched.
-        commit_delivery_on_send(&inbox, false, &ok);
+        commit_delivery_on_send(&inbox, &[], &ok);
         assert!(!dir.path().join("inbox").join("atc.consumed").exists());
+    }
+
+    #[test]
+    fn commit_delivery_drains_only_the_sent_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let inbox = inbox_for(dir.path(), "atc");
+        inbox
+            .commit(&plumbing::InboxRecord::new(
+                "c1",
+                "atc",
+                "included in body",
+                "Stop",
+                1,
+            ))
+            .unwrap();
+        let completions = inbox.peek();
+        assert_eq!(completions.len(), 1);
+
+        // A child finishes after the body was built but before the tmux send
+        // result is committed. That late completion was not sent to ATC yet.
+        inbox
+            .commit(&plumbing::InboxRecord::new(
+                "c2",
+                "atc",
+                "late completion",
+                "Stop",
+                2,
+            ))
+            .unwrap();
+
+        let ok: std::result::Result<(), String> = Ok(());
+        commit_delivery_on_send(&inbox, &completions, &ok);
+
+        let pending = inbox.peek();
+        assert_eq!(pending.len(), 1, "late completion must remain pending");
+        assert_eq!(pending[0].child_id, "c2");
+        assert_eq!(pending[0].summary, "late completion");
     }
 
     /// C-A1 end-to-end shape: a "dead session" firing never reaches the send, so
@@ -1224,7 +1262,7 @@ mod tests {
         let should_deliver = true;
         if session_live && should_deliver {
             let ok: std::result::Result<(), String> = Ok(());
-            commit_delivery_on_send(&inbox, !peeked.is_empty(), &ok);
+            commit_delivery_on_send(&inbox, &peeked, &ok);
         }
         // Dead session → completion is STILL pending for a later, live firing.
         assert!(
