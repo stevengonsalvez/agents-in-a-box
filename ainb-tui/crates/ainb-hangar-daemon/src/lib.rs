@@ -28,7 +28,7 @@ pub mod beads_adapter;
 pub mod beads_sync;
 /// Env allowlist config + task-env builder (P5.3).
 ///
-/// Loads/saves `~/.ainb/hangar/env.allow.toml` (foreign sections preserved,
+/// Loads/saves `~/.agents-in-a-box/hangar/env.allow.toml` (foreign sections preserved,
 /// atomic write) and exposes [`dispatch::build_task_env`] — the env-build seam
 /// the claim loop uses before spawning a provider: ambient env is filtered by
 /// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
@@ -185,7 +185,7 @@ pub mod worktree;
 /// Mirrors [`ainb_hangar_store::Store`]'s resolution so the database, the
 /// per-task env tree, the `hangar.sock` the RPC server binds, and the log dir
 /// all share one root: `$AINB_HANGAR_HOME` when set and non-empty, else
-/// `~/.ainb`.
+/// `~/.agents-in-a-box`.
 ///
 /// # Errors
 ///
@@ -196,13 +196,13 @@ pub fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
         Some(p) => Ok(std::path::PathBuf::from(p)),
         None => Ok(dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".ainb")),
+            .join(".agents-in-a-box")),
     }
 }
 
 /// Resolve the daemon's structured-log directory: `<hangar_home>/hangar/logs`.
 ///
-/// Defaults to `~/.ainb/hangar/logs`. The P8.1 rolling JSONL sink writes
+/// Defaults to `~/.agents-in-a-box/hangar/logs`. The P8.1 rolling JSONL sink writes
 /// `daemon.<date>` files here; the P8.6 CLI/TUI logs-tail surfaces read them
 /// back. Shares the one home resolution with [`hangar_dir`].
 ///
@@ -216,7 +216,7 @@ pub fn log_dir() -> anyhow::Result<std::path::PathBuf> {
 /// Boot the daemon: open the persistence layer and run the claim loop.
 ///
 /// Resolves the database directory the same way every Hangar consumer does
-/// (`$AINB_HANGAR_HOME` override, else `~/.ainb`), opens (creating if absent)
+/// (`$AINB_HANGAR_HOME` override, else `~/.agents-in-a-box`), opens (creating if absent)
 /// `hangar.db`, applies all embedded migrations, logs a `ready` line, then
 /// hands off to the [`run_loop`] FSM driver (claim → execute → finalize, plus
 /// the periodic sweepers).

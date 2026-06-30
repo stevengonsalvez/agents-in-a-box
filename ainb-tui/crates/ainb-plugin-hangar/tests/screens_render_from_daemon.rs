@@ -346,7 +346,7 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         let home = tempfile::tempdir().expect("home");
         // P5.6: this test asserts issue-list rendering, not the first-run
         // danger-full-access modal. Point the plugin's `state.toml` resolution at
-        // this isolated home (hermetic — no real `~/.ainb`) and pre-seed the
+        // this isolated home (hermetic — no real `~/.agents-in-a-box`) and pre-seed the
         // `first_run` ack so the modal is deterministically skipped. Single test
         // per binary, so the process-wide env set is race-free here.
         std::env::set_var("AINB_HANGAR_HOME", home.path());

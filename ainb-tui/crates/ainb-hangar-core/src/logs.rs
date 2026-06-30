@@ -38,7 +38,7 @@ const HANGAR_HOME_ENV: &str = "AINB_HANGAR_HOME";
 ///
 /// Mirrors `ainb_hangar_daemon::log_dir` without taking a dependency on the
 /// daemon crate (the plugin can't): `$AINB_HANGAR_HOME` when set + non-empty,
-/// else `~/.ainb`, then `/hangar/logs`. Returns `None` only when neither the
+/// else `~/.agents-in-a-box`, then `/hangar/logs`. Returns `None` only when neither the
 /// env var nor a home directory can be resolved.
 ///
 /// Both the `ainb hangar logs tail` CLI and the TUI `LogsScreen` resolve the
@@ -47,7 +47,7 @@ const HANGAR_HOME_ENV: &str = "AINB_HANGAR_HOME";
 pub fn default_log_dir() -> Option<PathBuf> {
     let home = match std::env::var_os(HANGAR_HOME_ENV).filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()?.join(".ainb"),
+        None => dirs::home_dir()?.join(".agents-in-a-box"),
     };
     Some(home.join("hangar").join("logs"))
 }

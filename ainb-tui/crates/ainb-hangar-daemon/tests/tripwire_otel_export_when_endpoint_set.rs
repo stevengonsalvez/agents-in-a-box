@@ -125,8 +125,8 @@ async fn task_claim_span_exported_over_otlp_when_endpoint_set() {
 
     // Isolated $HOME with a seeded DB the daemon will claim from.
     let home = tempfile::tempdir().expect("isolated HOME");
-    let hangar_dir = home.path().join(".ainb");
-    std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
     let (runtime_id, task_id) = seed_claimable(&hangar_dir).await;
 
     // A fake-claude so the post-claim execute path doesn't error on a missing

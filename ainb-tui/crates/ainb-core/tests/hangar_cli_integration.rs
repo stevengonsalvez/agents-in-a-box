@@ -3,8 +3,8 @@
 //! Drives the real `ainb` binary (located via `CARGO_BIN_EXE_ainb`) against an
 //! isolated `$AINB_HANGAR_HOME` so each test owns an ephemeral `hangar.db`. The
 //! store resolves `$AINB_HANGAR_HOME` as the directory that DIRECTLY holds the
-//! database (no `.ainb` segment), so a per-test tempdir keeps the real
-//! `~/.ainb/hangar.db` untouched.
+//! database (no `.agents-in-a-box` segment), so a per-test tempdir keeps the real
+//! `~/.agents-in-a-box/hangar.db` untouched.
 //!
 //! Covered:
 //! * `ainb hangar --help` lists every wired noun group.

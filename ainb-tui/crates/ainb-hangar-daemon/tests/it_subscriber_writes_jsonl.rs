@@ -1,5 +1,5 @@
 //! P8.1 observability tripwire: the daemon installs a `tracing` subscriber that
-//! writes structured JSON lines to `~/.ainb/hangar/logs/daemon.jsonl`.
+//! writes structured JSON lines to `~/.agents-in-a-box/hangar/logs/daemon.jsonl`.
 //!
 //! Spawns the `ainb-hangar-daemon` binary in one-shot mode against an isolated
 //! `$AINB_HANGAR_HOME` tempdir, with `RUST_LOG=info` and a test-only env seam

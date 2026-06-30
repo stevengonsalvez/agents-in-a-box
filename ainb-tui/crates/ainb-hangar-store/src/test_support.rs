@@ -53,7 +53,7 @@ pub fn lock_env() -> MutexGuard<'static, ()> {
 /// `f` receives the isolated home directory so it can assert the database landed
 /// under it. Because `AINB_HANGAR_HOME` is treated as the directory that
 /// directly holds the database, the db is created at `<home>/hangar.db` (no
-/// `.ainb` segment) by [`Store::open_default`].
+/// `.agents-in-a-box` segment) by [`Store::open_default`].
 ///
 /// # Panics
 ///

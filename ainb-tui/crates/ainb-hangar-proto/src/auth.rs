@@ -72,7 +72,7 @@ pub fn token_file_in(hangar_home: &Path) -> PathBuf {
 /// Resolve the daemon token file from the environment.
 ///
 /// Mirrors every other Hangar consumer's home resolution: `$AINB_HANGAR_HOME`
-/// when set and non-empty, else `$HOME/.ainb`. Returns `None` when neither is
+/// when set and non-empty, else `$HOME/.agents-in-a-box`. Returns `None` when neither is
 /// available. Both the daemon (writer) and the plugin/CLI clients (readers)
 /// run under the same `$HOME`, so this resolves to the one file the daemon
 /// wrote at boot.
@@ -80,7 +80,7 @@ pub fn token_file_in(hangar_home: &Path) -> PathBuf {
 pub fn default_token_file() -> Option<PathBuf> {
     let home = match std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|p| !p.is_empty())?).join(".ainb"),
+        None => PathBuf::from(std::env::var_os("HOME").filter(|p| !p.is_empty())?).join(".agents-in-a-box"),
     };
     Some(token_file_in(&home))
 }

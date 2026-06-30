@@ -63,7 +63,7 @@ const MOVE_TASK_ID: &str = "task-move-mvq001";
 /// Count `issue` rows carrying `title` in the daemon's `hangar.db` (the real
 /// proof an issue create landed — not just rendered).
 fn count_issues_with_title(home: &Path, title: &str) -> i64 {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -83,7 +83,7 @@ fn count_issues_with_title(home: &Path, title: &str) -> i64 {
 /// Read one task's `status` from the daemon's `agent_task_queue`, or `None` when
 /// the id is absent (the real proof a card-move transitioned the task in the DB).
 fn task_status(home: &Path, task_id: &str) -> Option<String> {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -106,7 +106,7 @@ fn task_status(home: &Path, task_id: &str) -> Option<String> {
 /// (`NULL`) so the partial-unique pending index can't collide with the fixture's
 /// `issue-1` task. Runs after [`prepare_pipeline`].
 fn seed_move_card(home: &Path) {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

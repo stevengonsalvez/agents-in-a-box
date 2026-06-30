@@ -12,7 +12,7 @@
 //!    in the same session stays quiet.
 //!
 //! A dismissed warning is recorded as a string key in `warnings_ack` of
-//! `~/.ainb/hangar/state.toml`. This module owns the **pure** half — the ack-key
+//! `~/.agents-in-a-box/hangar/state.toml`. This module owns the **pure** half — the ack-key
 //! shape and the show/skip predicates — so both the host (`ainb-plugin-runtime`,
 //! which renders the modal + persists the ack) and the daemon (which decides
 //! whether a provider invocation warrants a warning) share one source of truth

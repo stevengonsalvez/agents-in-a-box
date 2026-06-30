@@ -8,7 +8,7 @@
 //!    within the budget (the marker the prompt greps for),
 //! 3. send `y` to accept,
 //! 4. assert the modal is dismissed (the marker is gone) AND the `first_run` ack
-//!    was persisted to `~/.ainb/hangar/state.toml::warnings_ack`.
+//!    was persisted to `~/.agents-in-a-box/hangar/state.toml::warnings_ack`.
 //!
 //! ## Placement note
 //!
@@ -98,7 +98,7 @@ fn warning_shown_on_first_provider_use() {
     );
 
     // The `first_run` ack was persisted to state.toml (so a relaunch is quiet).
-    let state = pipe.home().join(".ainb").join("hangar").join("state.toml");
+    let state = pipe.home().join(".agents-in-a-box").join("hangar").join("state.toml");
     let ack_written = sess.poll_capture(Instant::now() + Duration::from_secs(5), |_| {
         std::fs::read_to_string(&state).is_ok_and(|raw| raw.contains("first_run"))
     });

@@ -53,7 +53,7 @@ const FALLBACK_VIEWPORT: (u16, u16) = (1, 1);
 /// The daemon socket path the plugin dials. The host `unix_socket_dial`
 /// cap expands `~` and canonicalizes before checking the manifest
 /// whitelist (which lists this exact path).
-const DAEMON_SOCKET_PATH: &str = "~/.ainb/hangar.sock";
+const DAEMON_SOCKET_PATH: &str = "~/.agents-in-a-box/hangar.sock";
 
 /// JSON-RPC id of the `auth/hello` frame the plugin sends FIRST on every
 /// connection (e38.1): the daemon rejects any other first frame. The token is
@@ -251,7 +251,7 @@ pub struct HangarPlugin {
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
 ///
 /// The home resolves exactly like [`crate::firstrun::state_path`]
-/// (`$AINB_HANGAR_HOME` when set and non-empty, else `$HOME/.ainb`) via the
+/// (`$AINB_HANGAR_HOME` when set and non-empty, else `$HOME/.agents-in-a-box`) via the
 /// shared [`ainb_hangar_proto::auth::default_token_file`] helper, so the file
 /// read here is the one the daemon wrote at boot. `None` when the file is
 /// missing or empty (the daemon then rejects the connection with a clear
@@ -2483,7 +2483,7 @@ impl Plugin for HangarPlugin {
 
     async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         // P5.6: decide whether to show the first-run danger-full-access modal
-        // from the recorded acks in `~/.ainb/hangar/state.toml`. A missing file
+        // from the recorded acks in `~/.agents-in-a-box/hangar/state.toml`. A missing file
         // (fresh machine) → no acks → the modal shows once.
         self.first_run = firstrun::state_path().map_or(FirstRunModal::Dismissed, |p| {
             FirstRunModal::from_acks(&firstrun::read_acks(&p))
@@ -2726,7 +2726,7 @@ mod tests {
         );
         assert_eq!(
             m.capabilities.unix_socket_dial.allow_list().unwrap(),
-            ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+            ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
         );
         assert_eq!(
             m.capabilities.secrets_read.allow_list().unwrap(),

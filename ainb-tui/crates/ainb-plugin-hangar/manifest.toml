@@ -27,7 +27,7 @@ event_stream_subscribe = ["workspace:*", "stream:*", "managed:*", "socket:*"]
 spawn_managed_subprocess = ["ainb-hangar-daemon"]
 # Dial exactly the hangar daemon socket. List form is mandatory; the host
 # canonicalizes + symlink-resolves the path before comparing.
-unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
 # Read provider API keys from the platform secret store. List form is the
 # allow-list of secret `key` names (per-scope; see host/secret_store_get).
 "secrets:read" = ["anthropic_api_key", "openai_api_key"]

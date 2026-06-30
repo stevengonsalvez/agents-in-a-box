@@ -43,7 +43,7 @@ hex = "0.4"
 # P8.6: the structured-log reader (`logs` module) is the one deliberate IO
 # exception to this crate's no-IO charter — it globs + reads the daemon's
 # `daemon.<date>` log files so the `ainb hangar logs tail` CLI and the TUI
-# `LogsScreen` share one parser. `dirs` resolves the default `~/.ainb` home the
+# `LogsScreen` share one parser. `dirs` resolves the default `~/.agents-in-a-box` home the
 # same way `ainb-hangar-daemon::hangar_dir` does (without a dep on the daemon,
 # which the plugin can't take).
 dirs = { workspace = true }

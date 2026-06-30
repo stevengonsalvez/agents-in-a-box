@@ -61,11 +61,11 @@ fn daemon_kill9_mid_task_recovers_orphan_row_against_same_db() {
         return;
     }
 
-    // Isolated $HOME → the daemon resolves `$HOME/.ainb/hangar.db` (no
+    // Isolated $HOME → the daemon resolves `$HOME/.agents-in-a-box/hangar.db` (no
     // AINB_HANGAR_HOME), the same db across both spawns.
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
-    let hangar_dir = home.path().join(".ainb");
-    std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
 
     // Seed the P4 fixture, free the fixture's running slot, and enqueue ONE
     // queued task the claim-enabled daemon will pick up and START (→ running).
@@ -239,7 +239,7 @@ fn spawn_daemon(home: &Path, fake_claude: &Path) -> Child {
         .expect("spawn ainb-hangar-daemon");
 
     // Wait for the RPC socket so the daemon has booted past migrations + bind.
-    let socket = home.join(".ainb").join("hangar.sock");
+    let socket = home.join(".agents-in-a-box").join("hangar.sock");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));

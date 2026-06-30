@@ -57,7 +57,7 @@ fn seed_second_workspace(home: &std::path::Path) {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

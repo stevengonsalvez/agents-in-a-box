@@ -34,7 +34,7 @@ const WARNINGS_KEY: &str = "warnings_ack";
 /// Resolve the daemon's `state.toml` path: `{hangar_home}/hangar/state.toml`.
 ///
 /// Mirrors [`crate::dispatch::default_allow_path`]'s home resolution
-/// (`$AINB_HANGAR_HOME`, else `~/.ainb`) so the daemon, the TUI host, and the
+/// (`$AINB_HANGAR_HOME`, else `~/.agents-in-a-box`) so the daemon, the TUI host, and the
 /// CLI all read/write one file.
 ///
 /// # Errors
@@ -46,7 +46,7 @@ pub fn default_state_path() -> anyhow::Result<PathBuf> {
         Some(p) => PathBuf::from(p),
         None => dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".ainb"),
+            .join(".agents-in-a-box"),
     };
     Ok(dir.join("hangar").join("state.toml"))
 }

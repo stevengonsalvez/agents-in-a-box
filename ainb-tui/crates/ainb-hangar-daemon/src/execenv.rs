@@ -5,7 +5,7 @@
 //! layout mirrors the reference's (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
 //!
 //! ```text
-//! {home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/
+//! {home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/
 //! ├── workdir/        # the agent's CWD (a git worktree for issue tasks)
 //! ├── output/         # emitted artifacts (patches, diffs)
 //! ├── logs/           # provider JSONL streams (claude.jsonl, …)
@@ -43,9 +43,9 @@ pub const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
 const GC_META_FILE: &str = ".gc_meta.json";
 
 /// The relative path from the Hangar home to the per-workspace task-dir tree:
-/// `{home}/.ainb/hangar/workspaces/`. The scheduled GC sweep
+/// `{home}/.agents-in-a-box/hangar/workspaces/`. The scheduled GC sweep
 /// ([`sweep_workspaces_gc`]) walks `<this>/{ws_slug}/{shortID}/`.
-const WORKSPACES_SUBPATH: [&str; 3] = [".ainb", "hangar", "workspaces"];
+const WORKSPACES_SUBPATH: [&str; 3] = [".agents-in-a-box", "hangar", "workspaces"];
 
 /// The per-task context file written into [`ExecEnv::workdir`] from the
 /// workspace's `context_prompt` (e38.21).
@@ -139,7 +139,7 @@ pub fn short_id(id: &str) -> &str {
 /// `.gc_meta.json` marker.
 ///
 /// The layout root is
-/// `{home}/.ainb/hangar/workspaces/{ws_slug}/{short_id(task.id)}/`. The call is
+/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{short_id(task.id)}/`. The call is
 /// **idempotent**: a second `prepare_env` on the same task reuses every dir
 /// (never wiping an existing `workdir/`) and only refreshes the marker's
 /// `last_seen_at` to `clock.now_ms()`, preserving the original `created_at`.
@@ -155,7 +155,7 @@ pub fn prepare_env(
     clock: &dyn HangarClock,
 ) -> io::Result<ExecEnv> {
     let root = home
-        .join(".ainb")
+        .join(".agents-in-a-box")
         .join("hangar")
         .join("workspaces")
         .join(ws_slug)
@@ -289,7 +289,7 @@ pub struct GcSweepReport {
 ///
 /// This is the **scheduled** counterpart to [`cleanup`] with
 /// [`CleanupKind::OrphanScan`]: rather than acting on a single known
-/// [`ExecEnv`], it enumerates `{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/`
+/// [`ExecEnv`], it enumerates `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/`
 /// and applies the same orphan rule to each `{shortID}` root —
 ///
 /// - **reclaim** (`rm -rf`) a root that has **no** `.gc_meta.json` marker AND

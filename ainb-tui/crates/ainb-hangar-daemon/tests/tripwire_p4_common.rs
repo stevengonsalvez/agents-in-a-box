@@ -15,7 +15,7 @@
 //! ## What the pipeline looks like now (P4.10 closed the gaps)
 //!
 //! ```text
-//! seed hangar.db ──▶ ainb-hangar-daemon (binds $HOME/.ainb/hangar.sock)
+//! seed hangar.db ──▶ ainb-hangar-daemon (binds $HOME/.agents-in-a-box/hangar.sock)
 //!                            ▲ snapshot RPCs
 //!  ainb tui (tmux) ──`g`──▶ HANGAR PluginScreen ──▶ hangar-tui plugin ──dial──┘
 //! ```
@@ -138,8 +138,8 @@ impl Drop for Pipeline {
 }
 
 /// Seed an isolated `$HOME`'s `hangar.db` with the P4 fixture and spawn the
-/// daemon against it. The daemon resolves `~/.ainb` from `$HOME` (no
-/// `AINB_HANGAR_HOME`), binding `$HOME/.ainb/hangar.sock` — the exact path the
+/// daemon against it. The daemon resolves `~/.agents-in-a-box` from `$HOME` (no
+/// `AINB_HANGAR_HOME`), binding `$HOME/.agents-in-a-box/hangar.sock` — the exact path the
 /// plugin dials. Polls for the socket file before returning so the TUI's first
 /// dial lands.
 ///
@@ -186,8 +186,8 @@ fn prepare_pipeline_seeded(
     pre_spawn_seed: impl FnOnce(&Path),
 ) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
-    let hangar_dir = home.path().join(".ainb");
-    std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
 
     // Onboarding skip: write a completed onboarding.toml so `ainb tui` lands on
     // the home screen rather than the wizard. Only the MAJOR version is gated, so
@@ -218,7 +218,7 @@ fn prepare_pipeline_seeded(
     // the daemon's first issue snapshot on slow CI runners.
     pre_spawn_seed(home.path());
 
-    // Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
+    // Spawn the daemon under the same $HOME (binds $HOME/.agents-in-a-box/hangar.sock).
     let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
     cmd.env("HOME", home.path())
@@ -242,10 +242,10 @@ fn prepare_pipeline_seeded(
 }
 
 /// The plugin's `state.toml` path under an isolated `$HOME`:
-/// `{home}/.ainb/hangar/state.toml` (the plugin resolves `$HOME/.ainb` when no
+/// `{home}/.agents-in-a-box/hangar/state.toml` (the plugin resolves `$HOME/.agents-in-a-box` when no
 /// `$AINB_HANGAR_HOME` is set, as the TUI session is launched).
 fn state_toml_path(home: &Path) -> PathBuf {
-    home.join(".ainb").join("hangar").join("state.toml")
+    home.join(".agents-in-a-box").join("hangar").join("state.toml")
 }
 
 /// Pre-seed the `first_run` warning ack so the danger-full-access modal is
@@ -347,7 +347,7 @@ fn seed_database(hangar_dir: &Path) {
 }
 
 /// Insert one extra task per non-`running` board column into an already-seeded
-/// `{home}/.ainb/hangar.db` so the Kanban board (`K`) has a card in every
+/// `{home}/.agents-in-a-box/hangar.db` so the Kanban board (`K`) has a card in every
 /// column.
 ///
 /// The P4 fixture (`seed_p4_fixture`) lands a single `running` task (`task-1`)
@@ -363,7 +363,7 @@ fn seed_database(hangar_dir: &Path) {
 /// same isolated `$HOME`. Panics on any insert failure (the caller is already
 /// gated by [`can_run_tripwire`]).
 pub fn seed_kanban_spread(home: &Path) {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -450,7 +450,7 @@ pub fn fake_claude_mixed(dir: &Path, fail_first: u32) -> PathBuf {
 /// (and thus the opened task detail) badge `pr_url`. Must run after
 /// [`prepare_pipeline`] and against the same isolated `$HOME`.
 pub fn seed_completed_task_with_pr(home: &Path, pr_url: &str) {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -473,7 +473,7 @@ pub fn seed_completed_task_with_pr(home: &Path, pr_url: &str) {
 }
 
 /// Enqueue `count` `queued` tasks (ids `seed-<prefix>-<i>`) on the seeded
-/// `runtime-1` / `agent-1` / `default` workspace into `{home}/.ainb/hangar.db`,
+/// `runtime-1` / `agent-1` / `default` workspace into `{home}/.agents-in-a-box/hangar.db`,
 /// so a claim-enabled daemon claims + executes them.
 ///
 /// `created_at` is set to wall-clock "now" (not the fixture's 1970-relative
@@ -482,7 +482,7 @@ pub fn seed_completed_task_with_pr(home: &Path, pr_url: &str) {
 /// index never collides. Used by the daemon-health tripwire to drive real
 /// completions into the throughput ring.
 pub fn enqueue_tasks(home: &Path, prefix: &str, count: usize) {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -516,7 +516,7 @@ pub fn enqueue_tasks(home: &Path, prefix: &str, count: usize) {
 }
 
 /// Raise the seeded `agent-1`'s `max_concurrent_tasks` to `cap` in
-/// `{home}/.ainb/hangar.db`.
+/// `{home}/.agents-in-a-box/hangar.db`.
 ///
 /// The P4 fixture seeds `agent-1` at the schema default cap of **1** and leaves
 /// its `task-1` in the `running` state — which fully consumes that single slot,
@@ -524,7 +524,7 @@ pub fn enqueue_tasks(home: &Path, prefix: &str, count: usize) {
 /// daemon-health tripwire raises the cap (and/or clears `task-1`) so the seeded
 /// queue actually drains, driving the throughput ring.
 pub fn set_agent_concurrency(home: &Path, cap: u32) {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -567,7 +567,7 @@ pub fn budget_scale() -> u64 {
         .unwrap_or(1)
 }
 
-/// Poll `{home}/.ainb/hangar.db` until at least `want` tasks with id prefix
+/// Poll `{home}/.agents-in-a-box/hangar.db` until at least `want` tasks with id prefix
 /// `seed-<prefix>-` have reached a terminal status (`done`/`failed`/`cancelled`),
 /// or `deadline` passes. Returns the terminal count actually observed.
 ///
@@ -575,7 +575,7 @@ pub fn budget_scale() -> u64 {
 /// finish executing the seeded tasks (driving the throughput ring) before
 /// opening the `D` screen.
 pub fn wait_for_terminal(home: &Path, prefix: &str, want: usize, deadline: Instant) -> usize {
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -602,7 +602,7 @@ pub fn wait_for_terminal(home: &Path, prefix: &str, want: usize, deadline: Insta
 }
 
 /// Seed one cron-scheduled autopilot (`daily-triage`, `0 9 * * *`, enabled)
-/// into an already-seeded `{home}/.ainb/hangar.db` so the autopilot-manager
+/// into an already-seeded `{home}/.agents-in-a-box/hangar.db` so the autopilot-manager
 /// screen (`5`) has a live row to render.
 ///
 /// Inserts via the P7.2 [`AutopilotRepo::create`] path — the same path the
@@ -631,7 +631,7 @@ pub fn seed_autopilot(home: &Path) {
     use ainb_hangar_core::ids::{AgentId, WorkspaceId};
     use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
 
-    let hangar_dir = home.join(".ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -674,7 +674,7 @@ pub const LOGS_TRIPWIRE_MARKER: &str = "LOGS_TRIPWIRE_MARKER_42";
 /// content to render.
 ///
 /// The Logs screen reads the **newest** `daemon.*` file in
-/// `{home}/.ainb/hangar/logs` by mtime ([`ainb_hangar_core::logs::read_tail`]).
+/// `{home}/.agents-in-a-box/hangar/logs` by mtime ([`ainb_hangar_core::logs::read_tail`]).
 /// The spawned daemon already writes its own `daemon.<utc-date>` file on boot;
 /// this **appends** the marker lines to that same dated file (creating it if the
 /// daemon hasn't flushed yet), in the exact P8.1 wire shape (top-level `level`,
@@ -688,7 +688,7 @@ pub const LOGS_TRIPWIRE_MARKER: &str = "LOGS_TRIPWIRE_MARKER_42";
 pub fn seed_logs(home: &Path) {
     use std::io::Write as _;
 
-    let log_dir = home.join(".ainb").join("hangar").join("logs");
+    let log_dir = home.join(".agents-in-a-box").join("hangar").join("logs");
     std::fs::create_dir_all(&log_dir).expect("create logs dir");
 
     // Match the daemon's daily-rotated filename: `daemon.<YYYY-MM-DD>` in UTC

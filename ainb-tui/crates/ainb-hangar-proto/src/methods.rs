@@ -1,7 +1,7 @@
 //! Daemon JSON-RPC method-name registry.
 //!
 //! These are the methods the Hangar **daemon** speaks over its
-//! `~/.ainb/hangar.sock` socket. They sit on the same JSON-RPC 2.0
+//! `~/.agents-in-a-box/hangar.sock` socket. They sit on the same JSON-RPC 2.0
 //! envelope ([`crate::RpcRequest`] / [`crate::RpcResponse`]) the host
 //! plugin caps mediate. P3.7's plugin connection state machine sends
 //! [`WORKSPACE_SUBSCRIBE`] right after dialling and renders

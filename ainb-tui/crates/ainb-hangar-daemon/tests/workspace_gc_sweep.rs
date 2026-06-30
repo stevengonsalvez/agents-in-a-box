@@ -7,7 +7,7 @@
 //! `.gc_meta.json`, mtime past the 72h grace) accumulated on disk forever.
 //!
 //! These tests pin the two halves of the fix:
-//! 1. [`sweep_workspaces_gc`] walks the live `{home}/.ainb/hangar/workspaces/`
+//! 1. [`sweep_workspaces_gc`] walks the live `{home}/.agents-in-a-box/hangar/workspaces/`
 //!    tree and reclaims every orphan root while retaining every live (marked) one
 //!    and every young orphan (inside the grace window).
 //! 2. [`spawn_gc_sweeper`] drives that walk on a periodic, clock-injected tick so
@@ -23,9 +23,9 @@ use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_daemon::execenv::{ORPHAN_GRACE_MS, sweep_workspaces_gc};
 use ainb_hangar_daemon::run_loop::spawn_gc_sweeper;
 
-/// The workspaces root the sweep walks: `{home}/.ainb/hangar/workspaces/`.
+/// The workspaces root the sweep walks: `{home}/.agents-in-a-box/hangar/workspaces/`.
 fn workspaces_root(home: &Path) -> PathBuf {
-    home.join(".ainb").join("hangar").join("workspaces")
+    home.join(".agents-in-a-box").join("hangar").join("workspaces")
 }
 
 /// Materialise a per-task `{shortID}` dir under `workspaces/{slug}/`, optionally

@@ -5,7 +5,7 @@
 //! landing screen, so the user acknowledges that agents run with
 //! `danger-full-access` (full FS + network, no sandbox) before any work starts.
 //! Pressing `y` dismisses it and records the `first_run` ack into
-//! `~/.ainb/hangar/state.toml::warnings_ack`; on every later launch the recorded
+//! `~/.agents-in-a-box/hangar/state.toml::warnings_ack`; on every later launch the recorded
 //! ack suppresses it.
 //!
 //! Split into two layers:
@@ -28,16 +28,16 @@ use ainb_hangar_core::warnings::{should_warn_first_run, FIRST_RUN_KEY};
 /// The `state.toml` array key holding dismissed-warning keys.
 const WARNINGS_KEY: &str = "warnings_ack";
 
-/// Resolve `~/.ainb/hangar/state.toml` from the environment.
+/// Resolve `~/.agents-in-a-box/hangar/state.toml` from the environment.
 ///
 /// Mirrors the daemon/host resolution: `$AINB_HANGAR_HOME` when set + non-empty,
-/// else `$HOME/.ainb`. The plugin runs under the same `$HOME` as the host it was
+/// else `$HOME/.agents-in-a-box`. The plugin runs under the same `$HOME` as the host it was
 /// spawned by, so the file it reads is the one the daemon + CLI write.
 #[must_use]
 pub fn state_path() -> Option<PathBuf> {
     let dir = match std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|p| !p.is_empty())?).join(".ainb"),
+        None => PathBuf::from(std::env::var_os("HOME").filter(|p| !p.is_empty())?).join(".agents-in-a-box"),
     };
     Some(dir.join("hangar").join("state.toml"))
 }

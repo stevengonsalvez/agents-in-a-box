@@ -17,7 +17,7 @@
 //! lines 432-435):
 //!
 //!   1. `ainb-hangar-daemon` does **not** yet open a `UnixListener` on
-//!      `~/.ainb/hangar.sock` — its `boot()` runs the claim-loop FSM only
+//!      `~/.agents-in-a-box/hangar.sock` — its `boot()` runs the claim-loop FSM only
 //!      (P1 socket-listener work is still open).
 //!   2. `ainb tui` does **not** yet discover + load the `hangar-tui`
 //!      subprocess plugin through the runtime, so no footer would ever paint.

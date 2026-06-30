@@ -12,9 +12,9 @@ use ainb_hangar_store::test_support::{lock_env, with_isolated_home, with_isolate
 fn home_helper_redirects_db_to_tempdir() {
     // The override directory points at a fresh tempdir, so the db cannot exist
     // before the open — capture that the redirect, not a stale file, is what we
-    // observe. Also snapshot whether the real `$HOME/.ainb/hangar.db` exists so
+    // observe. Also snapshot whether the real `$HOME/.agents-in-a-box/hangar.db` exists so
     // the negative control can prove the open did not freshly create it.
-    let real_home_db = dirs::home_dir().expect("home dir").join(".ainb").join("hangar.db");
+    let real_home_db = dirs::home_dir().expect("home dir").join(".agents-in-a-box").join("hangar.db");
     let real_home_db_existed_before = real_home_db.exists();
 
     with_isolated_home(|home| {
@@ -31,7 +31,7 @@ fn home_helper_redirects_db_to_tempdir() {
 
         // Contract (P0.md:222 — the P0.7 daemon tripwire): when
         // `AINB_HANGAR_HOME` is set, it is the directory that DIRECTLY holds
-        // `hangar.db` — no `.ainb` segment is appended. The `.ainb` sub-dir is
+        // `hangar.db` — no `.agents-in-a-box` segment is appended. The `.agents-in-a-box` sub-dir is
         // only used on the real-`$HOME` fallback path.
         assert!(
             expected.exists(),
@@ -39,18 +39,18 @@ fn home_helper_redirects_db_to_tempdir() {
         );
 
         // Negative control: the db must NOT have been created under the
-        // spec-divergent `.ainb` sub-path of the override.
-        let divergent = home.join(".ainb").join("hangar.db");
+        // spec-divergent `.agents-in-a-box` sub-path of the override.
+        let divergent = home.join(".agents-in-a-box").join("hangar.db");
         assert!(
             !divergent.exists(),
-            "override branch must not append .ainb (found db at {divergent:?})"
+            "override branch must not append .agents-in-a-box (found db at {divergent:?})"
         );
 
         drop(store);
     });
 
     // Negative control: opening with the override active must not have created
-    // a db in the real `$HOME/.ainb`. If it did not exist before, it must not
+    // a db in the real `$HOME/.agents-in-a-box`. If it did not exist before, it must not
     // exist now (a pre-existing real db on the dev box is left untouched and is
     // not a failure).
     if !real_home_db_existed_before {

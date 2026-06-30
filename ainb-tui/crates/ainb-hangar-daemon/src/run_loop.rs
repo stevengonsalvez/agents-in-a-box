@@ -291,7 +291,7 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
 /// Spawn the periodic workspace-GC sweeper as a background task (e38.22).
 ///
 /// On every `interval` tick it walks the live workspace tree under `home`
-/// (`{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/`) via
+/// (`{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/`) via
 /// [`sweep_workspaces_gc`], reclaiming each orphaned per-task dir — no
 /// `.gc_meta.json` marker AND mtime older than the 72h grace relative to the
 /// injected clock's `now_ms()` — while leaving every live (marked) dir and every
@@ -407,7 +407,7 @@ async fn execute_claimed(
     // P5.3: apply the configurable env-allowlist policy here (the authoritative
     // pass), layering keychain-resident API keys on top via
     // `dispatch::build_task_env`. The policy is loaded from
-    // `~/.ainb/hangar/env.allow.toml` (operator defaults when absent). The
+    // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent). The
     // keychain key list is empty until P5.2 wires `host/secret_store_get` into
     // dispatch; the seam is in place so adding keys is a one-line change. The
     // runner re-applies its own deny-by-default 12-var filter as
@@ -876,7 +876,7 @@ async fn persist_usage(
     }
 }
 
-/// Load the env-allowlist policy from `~/.ainb/hangar/env.allow.toml`.
+/// Load the env-allowlist policy from `~/.agents-in-a-box/hangar/env.allow.toml`.
 ///
 /// Falls back to the operator-default policy (the 12 built-ins + hardcoded deny)
 /// if the path can't be resolved or the file is unreadable — a missing/corrupt
@@ -896,7 +896,7 @@ fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
 /// Resolve the Hangar home directory the per-task env tree is rooted under.
 ///
 /// `$AINB_HANGAR_HOME` (when set and non-empty), else the user's home. The
-/// per-task layout then lives at `{home}/.ainb/hangar/workspaces/...` (see
+/// per-task layout then lives at `{home}/.agents-in-a-box/hangar/workspaces/...` (see
 /// [`crate::execenv::prepare_env`]). Mirrors [`ainb_hangar_store::Store`]'s home
 /// resolution so the daemon's env dirs and its database share a root.
 fn hangar_home() -> PathBuf {

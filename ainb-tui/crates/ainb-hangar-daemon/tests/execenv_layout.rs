@@ -7,7 +7,7 @@
 //! state, no env mutation), so the suite is parallel-safe without `ENV_LOCK`.
 //!
 //! Layout under test (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
-//! `{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID(task.id)}/`
+//! `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID(task.id)}/`
 //! with `workdir/`, `output/`, `logs/`, `.gc_meta.json` siblings.
 
 // The epoch-ms arithmetic below casts `Duration::as_millis()` (u128) to `i64`;
@@ -56,7 +56,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
 
 /// The expected per-task root under an isolated home.
 fn expected_root(home: &Path, slug: &str, task_id: &str) -> std::path::PathBuf {
-    home.join(".ainb")
+    home.join(".agents-in-a-box")
         .join("hangar")
         .join("workspaces")
         .join(slug)

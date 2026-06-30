@@ -68,7 +68,7 @@ fn hangar_issue_create_then_list_round_trip_in_tmux() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
-    // Isolate the hangar db under the tempdir so the real ~/.ainb is untouched.
+    // Isolate the hangar db under the tempdir so the real ~/.agents-in-a-box is untouched.
     // Create with priority + due + label so the round-trip proves those persist
     // through the real binary, not just the title.
     let title = "TmuxRoundtripIssue";

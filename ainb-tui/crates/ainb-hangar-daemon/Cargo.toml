@@ -72,7 +72,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # P8.1 observability: the non-blocking rolling JSONL sink. `rolling` builds the
-# daily-rotated `daemon.<date>` file under `~/.ainb/hangar/logs`; `non_blocking`
+# daily-rotated `daemon.<date>` file under `~/.agents-in-a-box/hangar/logs`; `non_blocking`
 # moves the actual writes onto a background thread and hands back a
 # `WorkerGuard` the daemon `main` must hold for the whole process lifetime
 # (dropping it early flushes and stops the writer, losing buffered lines).
@@ -105,7 +105,7 @@ chrono = { workspace = true }
 # (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
 # stop it within one tick.
 tokio-util = { workspace = true }
-# P5.3 env allowlist config: parse/serialise `~/.ainb/hangar/env.allow.toml`
+# P5.3 env allowlist config: parse/serialise `~/.agents-in-a-box/hangar/env.allow.toml`
 # while preserving foreign sections (the daemon reads its `[env]` table but
 # round-trips the rest of the document untouched).
 toml = { workspace = true }

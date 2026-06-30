@@ -154,7 +154,7 @@ fn sandbox_blocks_writing_outside_workdir() {
     // agent would tamper with. We never actually create it; the sandbox must
     // refuse the write so it stays absent.
     let home = dirs_home();
-    let target = home.join(".ainb-hangar-sandbox-write-probe");
+    let target = home.join(".agents-in-a-box-hangar-sandbox-write-probe");
     // Defensive: ensure a stale probe from a previous crashed run is gone.
     let _ = fs::remove_file(&target);
 

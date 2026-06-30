@@ -2,7 +2,7 @@
 //!
 //! Owns the `SQLite` schema (via embedded [`sqlx`] migrations) and the
 //! repository wrappers that the daemon and services build on. This crate is the
-//! single source of truth for the on-disk shape of `~/.ainb/hangar.db`.
+//! single source of truth for the on-disk shape of `~/.agents-in-a-box/hangar.db`.
 //!
 //! # Migrations
 //!

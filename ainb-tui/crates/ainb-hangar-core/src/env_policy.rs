@@ -79,7 +79,7 @@ const DEFAULT_ALLOW: &[&str] = &[
 ///
 /// Construct the operator-default policy via [`EnvPolicy::default`] (the 12
 /// [`DEFAULT_ALLOW`] entries) and extend [`EnvPolicy::allow`] with user
-/// overrides loaded from `~/.ainb/hangar/env.allow.toml`.
+/// overrides loaded from `~/.agents-in-a-box/hangar/env.allow.toml`.
 #[derive(Debug, Clone)]
 pub struct EnvPolicy {
     /// Allowlisted env-var names. An entry ending in `*` is a prefix glob (e.g.

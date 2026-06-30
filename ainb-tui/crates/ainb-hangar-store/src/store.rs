@@ -17,12 +17,12 @@ const DB_FILE_NAME: &str = "hangar.db";
 /// Sub-directory under the real `$HOME` that holds the Hangar database on the
 /// default (no-override) path. Not appended when [`Store::home_env`] override is
 /// set — the override value is the database directory verbatim.
-const HANGAR_DIR: &str = ".ainb";
+const HANGAR_DIR: &str = ".agents-in-a-box";
 
 /// Environment variable that overrides the resolved Hangar database directory.
 /// When set (and non-empty), [`Store::open_default`] treats its value as the
 /// directory that DIRECTLY holds the database — the file lives at
-/// `$AINB_HANGAR_HOME/hangar.db`, with NO `.ainb` segment appended. The `.ainb`
+/// `$AINB_HANGAR_HOME/hangar.db`, with NO `.agents-in-a-box` segment appended. The `.agents-in-a-box`
 /// sub-directory is only used on the real-`$HOME` fallback path. This contract
 /// is the one the P0.7 daemon tripwire asserts (`docs/hangar/phases/P0.md:222`).
 /// Used by tests via the `with_isolated_home` helper to keep the real `$HOME`
@@ -77,9 +77,9 @@ impl Store {
     ///
     /// The database directory is resolved as:
     /// 1. `$AINB_HANGAR_HOME` if set and non-empty — the db lives DIRECTLY at
-    ///    `$AINB_HANGAR_HOME/hangar.db` (no `.ainb` segment). This is the
+    ///    `$AINB_HANGAR_HOME/hangar.db` (no `.agents-in-a-box` segment). This is the
     ///    contract the P0.7 daemon tripwire asserts.
-    /// 2. otherwise `~/.ainb/hangar.db` via [`dirs::home_dir`].
+    /// 2. otherwise `~/.agents-in-a-box/hangar.db` via [`dirs::home_dir`].
     ///
     /// The directory is created (via [`Store::open_in`]) if it does not yet
     /// exist.
@@ -102,11 +102,11 @@ impl Store {
     /// Resolve the directory that should contain `hangar.db`.
     ///
     /// If `$AINB_HANGAR_HOME` is set and non-empty, it IS the database directory
-    /// verbatim (no `.ainb` segment appended) — this matches the P0.7 daemon
+    /// verbatim (no `.agents-in-a-box` segment appended) — this matches the P0.7 daemon
     /// tripwire contract. An empty `$AINB_HANGAR_HOME` is ignored (it would
     /// otherwise resolve to a relative path in the current working directory),
-    /// falling back to `~/.ainb`. The real-`$HOME` fallback nests the database
-    /// under the `.ainb` sub-directory.
+    /// falling back to `~/.agents-in-a-box`. The real-`$HOME` fallback nests the database
+    /// under the `.agents-in-a-box` sub-directory.
     fn default_dir() -> anyhow::Result<PathBuf> {
         match std::env::var_os(HOME_ENV).filter(|p| !p.is_empty()) {
             Some(p) => Ok(PathBuf::from(p)),

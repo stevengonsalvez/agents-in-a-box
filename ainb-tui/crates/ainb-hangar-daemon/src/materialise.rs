@@ -12,7 +12,7 @@
 //! # Where skills land — and the no-pollute-git invariant
 //!
 //! The per-task tree is
-//! `~/.ainb/hangar/workspaces/{ws}/{shortID}/` with `workdir/` (the git
+//! `~/.agents-in-a-box/hangar/workspaces/{ws}/{shortID}/` with `workdir/` (the git
 //! worktree) as one child. Provider "home" layouts (Claude/Codex/Cursor) write
 //! their skills under the *task root* — a **sibling** of `workdir/` — so the
 //! agent's git status stays clean: nothing is written inside the checked-out

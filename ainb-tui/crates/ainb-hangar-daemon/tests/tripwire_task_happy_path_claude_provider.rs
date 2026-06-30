@@ -105,7 +105,7 @@ async fn happy_path_claude_provider_walks_fsm_to_done() {
     let work_dir = work_dir.expect("work_dir populated");
     let expected_root = home
         .path()
-        .join(".ainb")
+        .join(".agents-in-a-box")
         .join("hangar")
         .join("workspaces")
         .join(&ids.workspace_slug);

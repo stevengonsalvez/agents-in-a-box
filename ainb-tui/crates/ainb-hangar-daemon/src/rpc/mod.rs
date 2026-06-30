@@ -1,6 +1,6 @@
 //! The daemon's `UnixListener` JSON-RPC server (P4.10).
 //!
-//! P3.7's plugin dials `~/.ainb/hangar.sock` through the host `unix_socket_dial`
+//! P3.7's plugin dials `~/.agents-in-a-box/hangar.sock` through the host `unix_socket_dial`
 //! cap and speaks the [`ainb_hangar_proto`] JSON-RPC envelope over LSP-style
 //! Content-Length framing. P1's daemon never opened that socket — its `boot()`
 //! ran the claim-loop FSM only. This module is the missing listener: it binds the
@@ -103,8 +103,8 @@ impl DaemonHealth {
 /// Resolve the daemon's socket path from the store directory.
 ///
 /// The socket lives beside the database: `{store_dir}/hangar.sock`. This mirrors
-/// the plugin's dial target (`~/.ainb/hangar.sock`) when the store resolves to
-/// the default `~/.ainb`, and follows `$AINB_HANGAR_HOME` when overridden so a
+/// the plugin's dial target (`~/.agents-in-a-box/hangar.sock`) when the store resolves to
+/// the default `~/.agents-in-a-box`, and follows `$AINB_HANGAR_HOME` when overridden so a
 /// test's isolated home gets an isolated socket.
 #[must_use]
 pub fn socket_path_in(store_dir: &Path) -> PathBuf {

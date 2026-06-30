@@ -4,7 +4,7 @@
 //! lives in [`ainb_hangar_core::env_policy`]):
 //!
 //! - [`load_allow_at`] / [`save_allow_at`] read and write
-//!   `~/.ainb/hangar/env.allow.toml`, reading only the `[env].allow` array while
+//!   `~/.agents-in-a-box/hangar/env.allow.toml`, reading only the `[env].allow` array while
 //!   **preserving every foreign section** of the document (per
 //!   `reference_toml_value_roundtrip_plugin_config`): the original
 //!   [`toml::Value`] is round-tripped untouched and only the `env.allow` array
@@ -61,7 +61,7 @@ impl EnvAllowConfig {
 
 /// Resolve the default config path: `{hangar_home}/hangar/env.allow.toml`.
 ///
-/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.ainb`),
+/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.agents-in-a-box`),
 /// so the config lives beside `hangar.db`.
 ///
 /// # Errors
@@ -73,7 +73,7 @@ pub fn default_allow_path() -> anyhow::Result<PathBuf> {
         Some(p) => PathBuf::from(p),
         None => dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".ainb"),
+            .join(".agents-in-a-box"),
     };
     Ok(dir.join("hangar").join("env.allow.toml"))
 }

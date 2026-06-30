@@ -68,7 +68,7 @@ struct Daemon {
 
 impl Daemon {
     fn hangar_dir(&self) -> PathBuf {
-        self.home.path().join(".ainb")
+        self.home.path().join(".agents-in-a-box")
     }
 }
 
@@ -284,8 +284,8 @@ fn spawn_seeded_daemon(
     extra_env: &[(&str, &str)],
 ) -> Daemon {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
-    let hangar_dir = home.path().join(".ainb");
-    std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
 
     seed_and_free_slot(&hangar_dir);
     let fake_claude = write_fake(home.path());
