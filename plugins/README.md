@@ -13,7 +13,9 @@ They are installable through the `agents-in-a-box` plugin marketplace
 
 ## What these are NOT
 
-These are **not** ainb-tui plugins.
+These are **not** ainb-tui plugins. For the canonical "two systems, same word"
+explainer, see [`docs/plugins/README.md`](../docs/plugins/README.md); the short
+version:
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
@@ -21,11 +23,11 @@ These are **not** ainb-tui plugins.
 │  extend the coding AGENT      │   vs   │  extend the ainb TUI itself   │
 │  Claude / Codex / Copilot     │        │  ratatui screens + commands   │
 │  skills · hooks · notifs      │        │  JSON-RPC subprocess, ABI v2  │
-│  installed via marketplace    │        │  compiled / bundled in `ainb` │
+│  installed via marketplace    │        │  spawned over stdio JSON-RPC  │
 └──────────────────────────────┘        └──────────────────────────────┘
 ```
 
-TUI plugins live in `ainb-tui/crates/ainb-plugin-*` (burndown, notifyd,
+TUI plugins live in `ainb-tui/crates/ainb-plugin-*` (burndown,
 session-reader, …) and are loaded by the TUI's plugin runtime, not by any
 agent harness. See `ainb-tui/CLAUDE.md` for that system.
 
@@ -34,10 +36,11 @@ agent harness. See `ainb-tui/CLAUDE.md` for that system.
 `plugins/hangar-tui/` is a **TUI plugin**, not a harness plugin. It is a Rust
 crate (`Cargo.toml` + `manifest.toml`, ABI v2, JSON-RPC over a Unix socket)
 and a member of the `ainb-tui` Cargo workspace
-(`ainb-tui/Cargo.toml` → `"../plugins/hangar-tui"`). It is **compiled into the
-`ainb` binary** — there is nothing to "install" from the marketplace. It sits
-here only because that's where its source path was placed; ignore it when
-reasoning about harness plugins.
+(`ainb-tui/Cargo.toml` → `"../plugins/hangar-tui"`). It builds as its own
+executable (`[[bin]] ainb-plugin-hangar`) that the host **spawns as a JSON-RPC
+subprocess** — it is *not* linked into the `ainb` binary, and there is nothing
+to "install" from the marketplace. It sits here only because that's where its
+source path was placed; ignore it when reasoning about harness plugins.
 
 ## The harness plugins
 
@@ -115,8 +118,10 @@ same functionality through these mechanisms:
   ainb notifyd install --all          # = --claude --codex --copilot
   ```
 
-  (`ainb-hooks` ships `codex/hooks.json` and `copilot/hooks.json` next to the
-  Claude manifest, plus a universal `notify.sh`.)
+  (`ainb notifyd …` and the standalone `ainb-notifyd …` binary are the same
+  entrypoint — the docsite's [plugin overview](../docs/toolkit/plugins/overview.md)
+  uses the `ainb-notifyd` form. `ainb-hooks` ships `codex/hooks.json` and
+  `copilot/hooks.json` next to the Claude manifest, plus a universal `notify.sh`.)
 
 ### Support matrix
 
@@ -124,12 +129,12 @@ same functionality through these mechanisms:
 |-----------------|-------------|----------------------|----------------------|----------------------------------------------------------------------|
 | `ainb-fleet`    | ✅          | ➜ via `skill install`| ➜ via `skill install`| skills are harness-portable Markdown                                 |
 | `ainb-hooks`    | ✅          | ✅                   | ✅                   | ships all three hook formats; `ainb notifyd install --all`           |
-| `caveman-stats` | ✅          | ❌                   | ❌                   | **Claude-first.** The hook *events* exist everywhere, but the code is Claude-coupled (reads Claude JSONL via `CLAUDE_CONFIG_DIR`, writes the Claude statusline file) and no Codex/Copilot statusline consumes the token-savings suffix — porting would be dead code |
+| `caveman-stats` | ✅          | ❌                   | ❌                   | **Claude-only** (matches the docsite plugin overview). The hook *events* exist everywhere, but the code is Claude-coupled (reads Claude JSONL via `CLAUDE_CONFIG_DIR`, writes the Claude statusline file) and no Codex/Copilot statusline consumes the token-savings suffix — porting would be dead code |
 | `illustration`  | ✅          | ➜ via `skill install`| ➜ via `skill install`| skills are harness-portable Markdown                                 |
-| `reflect`       | ✅          | ✅ Codex adapter     | ✅ Copilot adapter   | full parity; `plugin/adapters/{codex,copilot}` write native hook configs. Copilot ignores `userPromptSubmitted` output → per-prompt recall is manual `/recall` (SessionStart auto-recall works) |
+| `reflect`       | ✅          | ✅ Codex adapter     | ◑ Copilot adapter    | Codex + Copilot adapters ship (`plugin/adapters/{codex,copilot}` write native hook configs). One Copilot gap: it ignores `userPromptSubmitted` output, so per-prompt recall there is manual `/recall` — SessionStart auto-recall still fires |
 | `caveman`       | ✅          | ➜ via `skill install`| ➜ via `skill install`| external marketplace                                                 |
 
-Legend: ✅ first-class · ➜ supported via a sync/adapter step · ❌ not available / not worthwhile.
+Legend: ✅ first-class · ◑ works with one documented gap · ➜ supported via a sync/adapter step · ❌ not available / not worthwhile.
 
 ## Authoring a new harness plugin
 
