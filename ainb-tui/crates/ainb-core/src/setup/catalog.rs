@@ -639,14 +639,17 @@ pub fn catalog() -> Vec<Topic> {
         Topic {
             id: "hooks",
             label: "Hooks & notifications",
-            description: "Inbox screen + session-state badges (Claude Code + Codex)",
+            description: "Inbox screen + session-state badges (Claude Code + Codex + Copilot)",
             deps: vec![dep(
                 "ainb-hooks",
                 "ainb-hooks (notifyd)",
                 "lifecycle events powering the Inbox + badges",
                 Recommended,
                 Custom("notifyd-installed"),
-                Ainb(&["notifyd", "install", "--claude", "--codex"]),
+                // `--all` covers Claude + Codex + Copilot. The notifyd installer
+                // bakes plugins/ainb-hooks/{codex,copilot}/hooks.json for the
+                // non-Claude agents; dropping a target silently loses their Inbox.
+                Ainb(&["notifyd", "install", "--all"]),
                 &[],
                 &[],
             )],
@@ -654,7 +657,7 @@ pub fn catalog() -> Vec<Topic> {
         Topic {
             id: "suggested-plugins",
             label: "Suggested plugins",
-            description: "Claude: claude plugin install <name>@agents-in-a-box · Codex: ainb skill install <uri> --targets codex",
+            description: "Claude: claude plugin install <name>@agents-in-a-box · Codex/Copilot: skill plugins (ainb-fleet, illustration) via ainb skill install <uri> --targets codex,copilot; caveman-stats is Claude-only",
             deps: vec![
                 dep(
                     "ainb-fleet",
@@ -759,6 +762,40 @@ mod tests {
         let topics = catalog();
         let gemini = topics.iter().flat_map(|t| &t.deps).find(|d| d.id == "gemini").unwrap();
         assert_eq!(gemini.install.hint(), "npm install -g @google/gemini-cli");
+    }
+
+    #[test]
+    fn suggested_plugins_offer_codex_and_copilot() {
+        // F2 guard: the skill-plugin topic must surface the cross-harness
+        // install path for BOTH Codex and Copilot, not Claude-only.
+        let topics = catalog();
+        let sp = topics.iter().find(|t| t.id == "suggested-plugins").unwrap();
+        assert!(
+            sp.description.contains("codex"),
+            "must mention codex: {}",
+            sp.description
+        );
+        assert!(
+            sp.description.contains("copilot"),
+            "must mention copilot: {}",
+            sp.description
+        );
+    }
+
+    #[test]
+    fn hooks_install_covers_every_agent() {
+        // F1 guard: onboarding must install ainb-hooks for ALL agents in one
+        // shot. `--all` is the only spec that covers every agent; `--claude
+        // --codex` (the prior regression) or any single-agent subset would
+        // silently drop an Inbox, so assert `--all` exactly rather than a weak
+        // "mentions copilot" that a Claude-dropping subset could also satisfy.
+        let topics = catalog();
+        let hooks = topics.iter().flat_map(|t| &t.deps).find(|d| d.id == "ainb-hooks").unwrap();
+        let hint = hooks.install.hint();
+        assert!(
+            hint.contains("--all"),
+            "hooks install must use --all, got: {hint}"
+        );
     }
 
     #[test]

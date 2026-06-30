@@ -224,13 +224,25 @@ fn detect_custom(name: &str, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
-        // notifyd hook installed for any agent (Claude / Codex / Copilot).
+        // notifyd hook installed for every agent the user actually has. A hook
+        // present for one agent must NOT mask a missing one: an upgrader who
+        // has a Codex/Copilot home but no ainb hook there is reported Missing
+        // so the wizard re-runs `notifyd install --all` and wires the gap (the
+        // F1 cross-harness intent). Agents with no home dir aren't in use and
+        // don't count against the check.
         "notifyd-installed" => {
-            if home_path_exists(".claude/plugins/ainb-hooks")
-                || home_file_contains(".claude/settings.json", "ainb-hooks")
-                || home_path_exists(".codex/hooks.json")
-                || home_path_exists(".copilot/hooks/ainb.json")
-            {
+            let claude_hook = home_path_exists(".claude/plugins/ainb-hooks")
+                || home_file_contains(".claude/settings.json", "ainb-hooks");
+            let codex_hook = home_file_contains(".codex/hooks.json", "AINB_AGENT=codex");
+            let copilot_hook = home_path_exists(".copilot/hooks/ainb.json");
+            if notifyd_hooks_satisfied(
+                home_path_exists(".claude"),
+                claude_hook,
+                home_path_exists(".codex"),
+                codex_hook,
+                home_path_exists(".copilot"),
+                copilot_hook,
+            ) {
                 DepState::Ok(None)
             } else {
                 DepState::Missing
@@ -290,6 +302,29 @@ fn home_file_contains(rel: &str, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Decide whether the notifyd hooks are satisfied, given per-agent (home dir
+/// present, ainb hook present) facts. Pure so the tricky AND/OR/guard logic is
+/// unit-testable without touching `$HOME`.
+///
+/// Rule: every agent the user actually has (home dir present) must carry its
+/// ainb hook; agents with no home dir aren't in use and don't count. At least
+/// one hook must be present, so a machine where nothing is installed reports
+/// Missing rather than vacuously Ok.
+fn notifyd_hooks_satisfied(
+    claude_present: bool,
+    claude_hook: bool,
+    codex_present: bool,
+    codex_hook: bool,
+    copilot_present: bool,
+    copilot_hook: bool,
+) -> bool {
+    let claude_ok = !claude_present || claude_hook;
+    let codex_ok = !codex_present || codex_hook;
+    let copilot_ok = !copilot_present || copilot_hook;
+    let any_hook = claude_hook || codex_hook || copilot_hook;
+    any_hook && claude_ok && codex_ok && copilot_ok
+}
+
 /// Detect a single dependency's state against the host (public for the CLI
 /// install loop, which needs to re-probe one dep after provisioning it).
 pub fn detect_dep(dep: &crate::setup::catalog::Dep, env: &dyn Env) -> DepState {
@@ -333,6 +368,33 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn notifyd_satisfied_requires_every_present_agent() {
+        // (claude_present, claude_hook, codex_present, codex_hook, copilot_present, copilot_hook)
+        // Upgrader with a Copilot home but no Copilot hook → re-wire (Missing).
+        assert!(!notifyd_hooks_satisfied(
+            true, true, true, true, true, false
+        ));
+        // Same for a Codex gap.
+        assert!(!notifyd_hooks_satisfied(
+            true, true, true, false, false, false
+        ));
+        // Claude-only user (no codex/copilot homes) with the Claude hook → Ok.
+        assert!(notifyd_hooks_satisfied(
+            true, true, false, false, false, false
+        ));
+        // All three present and hooked → Ok.
+        assert!(notifyd_hooks_satisfied(true, true, true, true, true, true));
+        // Nothing installed anywhere → Missing (not vacuously Ok).
+        assert!(!notifyd_hooks_satisfied(
+            false, false, false, false, false, false
+        ));
+        // Claude present but un-hooked → Missing.
+        assert!(!notifyd_hooks_satisfied(
+            true, false, false, false, false, false
+        ));
+    }
 
     struct MockEnv {
         present: Vec<&'static str>,

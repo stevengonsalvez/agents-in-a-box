@@ -1449,6 +1449,7 @@ Usage: ainb claudecode statusline [OPTIONS]
 Options:
       --cache-only       Side-channel mode: write the cache only and emit nothing on stdout.
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --install          Wire the statusline into ~/.claude/settings.json (idempotent) instead of running the hook.
   -h, --help             Print help
 ```
 
