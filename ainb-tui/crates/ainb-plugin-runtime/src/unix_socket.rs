@@ -530,4 +530,85 @@ mod tests {
         let allow = vec![target.to_string_lossy().to_string()];
         assert!(path_allowed(&allow, &link.to_string_lossy()));
     }
+
+    /// Process-wide mutex serialising the `$AINB_HANGAR_HOME` mutations the
+    /// override tests below perform; cargo runs tests in-process + parallel,
+    /// and `expand_path` reads the live env, so an unguarded `set_var` races.
+    static HANGAR_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The Hangar manifest's `unix_socket_dial` allow-list (mirrors
+    /// `ainb-plugin-hangar/manifest.toml`). The middle entry is the
+    /// `$AINB_HANGAR_HOME`-relative socket added so a non-default home still
+    /// passes the cap gate.
+    const HANGAR_DIAL_ALLOW: [&str; 3] = [
+        "~/.agents-in-a-box/hangar.sock",
+        "${AINB_HANGAR_HOME}/hangar.sock",
+        "${XDG_RUNTIME_DIR}/ainb-hangar.sock",
+    ];
+
+    /// SECURITY (finding #1): when `$AINB_HANGAR_HOME` is set, the daemon binds
+    /// `{AINB_HANGAR_HOME}/hangar.sock`, the plugin dials the UNEXPANDED
+    /// `${AINB_HANGAR_HOME}/hangar.sock` template, and the host's `path_allowed`
+    /// cap gate must PERMIT it via the matching allow-list entry — otherwise a
+    /// non-default home is denied (-32001) and the TUI can never connect.
+    ///
+    /// Mutation-check: deleting the `${AINB_HANGAR_HOME}/hangar.sock` entry from
+    /// the allow-list (or making `daemon_socket_path` return the `~` form under
+    /// an override) makes this `assert!` fail — the override dial no longer
+    /// matches any allow-list entry.
+    #[test]
+    fn hangar_dial_allowed_under_hangar_home_override() {
+        let _guard = HANGAR_HOME_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var_os("AINB_HANGAR_HOME");
+
+        // A real tempdir as the override home, with the socket file present so
+        // both the dial string and the allow-list entry canonicalize to the
+        // same resolved path.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("hangar.sock"), b"").unwrap();
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+
+        let allow: Vec<String> = HANGAR_DIAL_ALLOW.iter().map(|s| (*s).to_string()).collect();
+        // The unexpanded template the plugin sends under an override.
+        assert!(
+            path_allowed(&allow, "${AINB_HANGAR_HOME}/hangar.sock"),
+            "the ${{AINB_HANGAR_HOME}}/hangar.sock dial must be permitted by the allow-list \
+             when $AINB_HANGAR_HOME is set"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("AINB_HANGAR_HOME", v),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
+
+    /// The new `${AINB_HANGAR_HOME}/hangar.sock` allow-list entry is HARMLESS
+    /// when the var is UNSET: `expand_path` of an unset `${VAR}` yields the
+    /// empty string, so the entry collapses to `/hangar.sock`, which must NOT
+    /// match the real default dial (`~/.agents-in-a-box/hangar.sock`). This
+    /// proves adding the entry does not widen the gate on the default path.
+    #[test]
+    fn hangar_home_override_entry_is_inert_when_unset() {
+        let _guard = HANGAR_HOME_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var_os("AINB_HANGAR_HOME");
+        std::env::remove_var("AINB_HANGAR_HOME");
+        std::env::set_var("HOME", "/home/cts");
+
+        // An unset override expands to `/hangar.sock` — never the real default.
+        assert_eq!(
+            expand_path("${AINB_HANGAR_HOME}/hangar.sock"),
+            PathBuf::from("/hangar.sock"),
+            "an unset ${{AINB_HANGAR_HOME}} must expand to the empty string, not panic"
+        );
+        assert_ne!(
+            canonical_for_compare(&expand_path("${AINB_HANGAR_HOME}/hangar.sock")),
+            canonical_for_compare(&expand_path("~/.agents-in-a-box/hangar.sock")),
+            "the inert override entry must NOT collide with the real default dial"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("AINB_HANGAR_HOME", v),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
 }

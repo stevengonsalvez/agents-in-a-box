@@ -51,7 +51,11 @@ fn discovery_finds_hangar_and_validates_all_four_caps() {
     );
     assert_eq!(
         caps.unix_socket_dial.allow_list().unwrap(),
-        ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"],
+        [
+            "~/.agents-in-a-box/hangar.sock",
+            "${AINB_HANGAR_HOME}/hangar.sock",
+            "${XDG_RUNTIME_DIR}/ainb-hangar.sock"
+        ],
         "unix_socket_dial cap must validate"
     );
     assert_eq!(

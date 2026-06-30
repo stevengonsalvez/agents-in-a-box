@@ -21,19 +21,19 @@
 //! daemon) and `secret_store_get` land in later phases.
 
 use ainb_hangar_proto::events::HangarEvent;
-use ainb_hangar_proto::{methods as daemon_methods, RpcId, RpcResponse};
+use ainb_hangar_proto::{RpcId, RpcResponse, methods as daemon_methods};
 use ainb_plugin_sdk::{
     CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
     RenderParams, Result, RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
 
-use crate::chrome::{render_footer, render_top_bar, Presence};
+use crate::chrome::{Presence, render_footer, render_top_bar};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
-use crate::firstrun::{self, reduce_first_run, FirstRunIntent, FirstRunModal};
-use crate::jsonrpc_over_socket::{encode_request, FrameDecoder};
+use crate::firstrun::{self, FirstRunIntent, FirstRunModal, reduce_first_run};
+use crate::jsonrpc_over_socket::{FrameDecoder, encode_request};
 use crate::screen::{
-    render_body, route_key, AppEvent, AppState, NavIntent, Screen, ScreenStates, WorkspaceAction,
+    AppEvent, AppState, NavIntent, Screen, ScreenStates, WorkspaceAction, render_body, route_key,
 };
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::settings::WorkspaceRow;
@@ -50,10 +50,37 @@ pub const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 /// viewport.
 const FALLBACK_VIEWPORT: (u16, u16) = (1, 1);
 
-/// The daemon socket path the plugin dials. The host `unix_socket_dial`
-/// cap expands `~` and canonicalizes before checking the manifest
-/// whitelist (which lists this exact path).
-const DAEMON_SOCKET_PATH: &str = "~/.agents-in-a-box/hangar.sock";
+/// The daemon socket path the plugin dials when `$AINB_HANGAR_HOME` is NOT set.
+/// The host `unix_socket_dial` cap expands `~` and canonicalizes before
+/// checking the manifest whitelist (which lists this exact unexpanded string).
+const DEFAULT_DAEMON_SOCKET_PATH: &str = "~/.agents-in-a-box/hangar.sock";
+
+/// The daemon socket path the plugin dials when `$AINB_HANGAR_HOME` IS set.
+/// Sent UNEXPANDED so the host (which owns env/`~` expansion for BOTH the dial
+/// request and the allow-list) resolves it the same way on both sides — the
+/// plugin must never expand it itself, or the canonicalized strings would
+/// diverge and the cap gate would deny the dial (-32001).
+const OVERRIDE_DAEMON_SOCKET_PATH: &str = "${AINB_HANGAR_HOME}/hangar.sock";
+
+/// Resolve the unexpanded socket-path string the plugin sends to
+/// `host/unix_socket_dial`.
+///
+/// The daemon binds its control socket under the resolved Hangar home
+/// (`{hangar_home}/hangar.sock`), so when `$AINB_HANGAR_HOME` is set the socket
+/// MOVES with it. This returns the matching allow-listed form: the
+/// `${AINB_HANGAR_HOME}/hangar.sock` template when the env var is set and
+/// non-empty (the host expands `${VAR}`), else the `~/.agents-in-a-box`
+/// default. Both forms are on the manifest `unix_socket_dial` allow-list, so
+/// the host's `path_allowed` gate permits whichever one we return. Returning
+/// the UNEXPANDED string (not a pre-expanded absolute path) is essential: the
+/// host expands the dial request and the allow-list entry with the same code,
+/// so a non-default home still passes the exact-match cap check.
+fn daemon_socket_path() -> &'static str {
+    match std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV) {
+        Some(v) if !v.is_empty() => OVERRIDE_DAEMON_SOCKET_PATH,
+        _ => DEFAULT_DAEMON_SOCKET_PATH,
+    }
+}
 
 /// JSON-RPC id of the `auth/hello` frame the plugin sends FIRST on every
 /// connection (e38.1): the daemon rejects any other first frame. The token is
@@ -405,9 +432,7 @@ impl HangarPlugin {
     /// handshake.
     async fn start_daemon_and_redial(&mut self, host: &HostClient) {
         if self.try_start_daemon() {
-            let _ = host
-                .log_info("hangar: [s] started daemon, re-dialing")
-                .await;
+            let _ = host.log_info("hangar: [s] started daemon, re-dialing").await;
             self.connect(host).await;
         } else if let Some(msg) = &self.daemon_start_error {
             let _ = host.log_info(format!("hangar: {msg}")).await;
@@ -423,7 +448,7 @@ impl HangarPlugin {
         self.decoder = FrameDecoder::new();
         self.conn.dialing();
 
-        let dial = match host.unix_socket_dial(DAEMON_SOCKET_PATH).await {
+        let dial = match host.unix_socket_dial(daemon_socket_path()).await {
             Ok(r) => r,
             Err(e) => {
                 self.conn.on_error(format!("dial failed: {e}"));
@@ -449,10 +474,7 @@ impl HangarPlugin {
                 return;
             }
         };
-        if let Err(e) = host
-            .unix_socket_send(dial.stream_id.clone(), auth_body)
-            .await
-        {
+        if let Err(e) = host.unix_socket_send(dial.stream_id.clone(), auth_body).await {
             self.conn.on_error(format!("send auth failed: {e}"));
             return;
         }
@@ -473,9 +495,7 @@ impl HangarPlugin {
             self.conn.on_error(format!("send subscribe failed: {e}"));
             return;
         }
-        let _ = host
-            .log_info("hangar: dialed daemon, auth + subscribe sent")
-            .await;
+        let _ = host.log_info("hangar: dialed daemon, auth + subscribe sent").await;
     }
 
     /// Feed an inbound `socket:<stream_id>` event into the connection.
@@ -568,8 +588,8 @@ impl HangarPlugin {
     /// pushed mutation (create / update / task lifecycle) re-renders within a
     /// tick, ahead of the reconciling snapshot re-pull (e38.29).
     fn apply_hangar_event(&mut self, event: HangarEvent) {
-        use crate::screen::issue_list::{reduce_issue_list, IssueListEvent};
-        use crate::screen::kanban::{reduce_kanban, KanbanEvent};
+        use crate::screen::issue_list::{IssueListEvent, reduce_issue_list};
+        use crate::screen::kanban::{KanbanEvent, reduce_kanban};
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
@@ -587,16 +607,14 @@ impl HangarPlugin {
             // the daemon is unreachable.
             RpcId::Number(AUTH_REQ_ID) => {
                 if let Some(err) = &resp.error {
-                    self.conn
-                        .on_error(format!("daemon auth rejected: {}", err.message));
+                    self.conn.on_error(format!("daemon auth rejected: {}", err.message));
                 }
             }
             // The subscribe ack completes the handshake and arms the snapshot
             // fetch (issued by `handle_event`, which holds the `host`).
             RpcId::Number(SUBSCRIBE_REQ_ID) => {
                 if resp.error.is_some() {
-                    self.conn
-                        .on_error("daemon rejected workspace/subscribe".to_string());
+                    self.conn.on_error("daemon rejected workspace/subscribe".to_string());
                 } else {
                     self.conn.on_subscribe_ack();
                     self.fetch_pending = true;
@@ -792,9 +810,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: inbox mark-read send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: inbox mark-read send failed: {e}")).await;
         }
     }
 
@@ -813,9 +829,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: search send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: search send failed: {e}")).await;
         }
     }
 
@@ -949,9 +963,7 @@ impl HangarPlugin {
                 continue;
             };
             if let Err(e) = host.unix_socket_send(stream_id.clone(), body).await {
-                let _ = host
-                    .log_info(format!("hangar: snapshot send failed: {e}"))
-                    .await;
+                let _ = host.log_info(format!("hangar: snapshot send failed: {e}")).await;
             }
         }
     }
@@ -1010,9 +1022,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: skill rpc send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: skill rpc send failed: {e}")).await;
         }
     }
 
@@ -1043,9 +1053,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: task transition send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: task transition send failed: {e}")).await;
         }
     }
 
@@ -1080,9 +1088,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: issue update send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: issue update send failed: {e}")).await;
         }
     }
 
@@ -1117,9 +1123,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: issue state move send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: issue state move send failed: {e}")).await;
         }
     }
 
@@ -1152,9 +1156,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: issue priority send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: issue priority send failed: {e}")).await;
         }
     }
 
@@ -1187,9 +1189,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: issue assignee send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: issue assignee send failed: {e}")).await;
         }
     }
 
@@ -1224,9 +1224,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: comment add send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: comment add send failed: {e}")).await;
         }
     }
 
@@ -1253,9 +1251,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: pr status refresh send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: pr status refresh send failed: {e}")).await;
         }
     }
 
@@ -1306,9 +1302,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: issue create send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: issue create send failed: {e}")).await;
         }
     }
 
@@ -1357,9 +1351,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: autopilot rpc send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: autopilot rpc send failed: {e}")).await;
         }
     }
 
@@ -1403,9 +1395,7 @@ impl HangarPlugin {
             }
         };
         if let Err(e) = result {
-            let _ = host
-                .log_info(format!("hangar: workspace action failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: workspace action failed: {e}")).await;
             return;
         }
         self.refresh_workspaces(host).await;
@@ -1857,9 +1847,7 @@ impl HangarPlugin {
                 }
                 // A same-column drag: reseat the card locally (display order only).
                 MouseIntent::ReorderCard { issue_id, to_index } => {
-                    self.screens
-                        .issue_list
-                        .reorder_within_column(&issue_id, to_index);
+                    self.screens.issue_list.reorder_within_column(&issue_id, to_index);
                 }
                 // A wheel-scroll over a column nudges that column's scroll offset.
                 MouseIntent::ScrollColumn { status, delta } => {
@@ -2078,12 +2066,8 @@ impl HangarPlugin {
         use crate::screen::list_context_menu::{
             ListContextMenuState, ListMenuAction, ListMenuItem,
         };
-        let Some(skill) = self
-            .screens
-            .skill_manager
-            .visible_skills()
-            .into_iter()
-            .find(|s| s.slug == slug)
+        let Some(skill) =
+            self.screens.skill_manager.visible_skills().into_iter().find(|s| s.slug == slug)
         else {
             return;
         };
@@ -2236,10 +2220,7 @@ impl HangarPlugin {
         else {
             return;
         };
-        let display_id = row
-            .display_id
-            .clone()
-            .unwrap_or_else(|| row.id.as_str().to_string());
+        let display_id = row.display_id.clone().unwrap_or_else(|| row.id.as_str().to_string());
         let status = ainb_hangar_proto::lifecycle::IssueLifecycle::for_state(&row.state);
         let actors: Vec<MenuActor> = self
             .screens
@@ -2315,12 +2296,8 @@ impl HangarPlugin {
             }
             NavIntent::OpenTaskForIssue(issue_id) => {
                 // Open task detail bound to the issue's row + the running task.
-                let issue = self
-                    .screens
-                    .issue_list
-                    .visible_rows()
-                    .find(|r| r.id == issue_id)
-                    .cloned();
+                let issue =
+                    self.screens.issue_list.visible_rows().find(|r| r.id == issue_id).cloned();
                 if let Some(issue) = issue {
                     // A synthetic task id keyed off the issue — the daemon binds
                     // the real running task to the issue, and the task-detail
@@ -2641,9 +2618,8 @@ impl Plugin for HangarPlugin {
         if std::mem::take(&mut self.first_run_ack_pending) {
             if let Some(path) = firstrun::state_path() {
                 if let Err(e) = firstrun::ack_first_run(&path) {
-                    let _ = host
-                        .log_info(format!("hangar: first-run ack persist failed: {e}"))
-                        .await;
+                    let _ =
+                        host.log_info(format!("hangar: first-run ack persist failed: {e}")).await;
                 }
             }
         }
@@ -2664,19 +2640,16 @@ impl Plugin for HangarPlugin {
         // existing action; the deferred RPCs they arm fire in the drains below.
         self.drain_board_mouse_intents();
         if let Some((issue_id, to_status)) = self.pending_issue_state_update.take() {
-            self.apply_issue_state_update(host, issue_id, to_status)
-                .await;
+            self.apply_issue_state_update(host, issue_id, to_status).await;
         }
         // 63l.5: fire any context-menu priority / assignee edit armed by a leaf.
         // Both reuse the `hangar/issue_update` seam (the daemon's `IssueUpdated`
         // push reconciles the optimistic local state), mirroring the state-move RPC.
         if let Some((issue_id, priority)) = self.pending_issue_priority_update.take() {
-            self.apply_issue_priority_update(host, issue_id, priority)
-                .await;
+            self.apply_issue_priority_update(host, issue_id, priority).await;
         }
         if let Some((issue_id, actor_ref)) = self.pending_issue_assignee_update.take() {
-            self.apply_issue_assignee_update(host, issue_id, actor_ref)
-                .await;
+            self.apply_issue_assignee_update(host, issue_id, actor_ref).await;
         }
         self.rebuild_hit_map(w, h);
         Ok(self.compose_frame(w, h))
@@ -2707,6 +2680,58 @@ mod tests {
         assert!(p.manifest().contains("name = \"hangar-tui\""));
     }
 
+    /// Process-wide mutex serialising `$AINB_HANGAR_HOME` mutations the dial-path
+    /// test performs; cargo runs tests in-process + parallel and
+    /// `daemon_socket_path` reads the live env, so an unguarded `set_var` races.
+    static DIAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Finding #1: the unexpanded dial-path string the plugin sends to
+    /// `host/unix_socket_dial` must track `$AINB_HANGAR_HOME`: the
+    /// `${AINB_HANGAR_HOME}/hangar.sock` template when it is set (so the host
+    /// expands it to the moved socket), else the `~/.agents-in-a-box` default.
+    /// Both forms are on the manifest allow-list, so whichever is returned
+    /// passes the host's cap gate.
+    ///
+    /// Mutation-check: collapsing `daemon_socket_path` to always return
+    /// `DEFAULT_DAEMON_SOCKET_PATH` (deleting the env branch) makes the
+    /// set-branch assertion fail — the override case would wrongly dial `~`.
+    #[test]
+    fn daemon_socket_path_tracks_hangar_home_env() {
+        let _guard = DIAL_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+
+        // Override set + non-empty → the host-expanded template (NOT pre-expanded
+        // by the plugin, and NOT the `~` default).
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, "/tmp/custom-home");
+        assert_eq!(
+            daemon_socket_path(),
+            OVERRIDE_DAEMON_SOCKET_PATH,
+            "a set $AINB_HANGAR_HOME must dial the ${{AINB_HANGAR_HOME}} template"
+        );
+        assert_eq!(daemon_socket_path(), "${AINB_HANGAR_HOME}/hangar.sock");
+
+        // Empty override is ignored → falls back to the `~` default.
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, "");
+        assert_eq!(
+            daemon_socket_path(),
+            DEFAULT_DAEMON_SOCKET_PATH,
+            "an empty $AINB_HANGAR_HOME must fall back to the ~ default"
+        );
+
+        // Unset → the `~` default.
+        std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        assert_eq!(
+            daemon_socket_path(),
+            DEFAULT_DAEMON_SOCKET_PATH,
+            "an unset $AINB_HANGAR_HOME must dial the ~/.agents-in-a-box default"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+    }
+
     #[test]
     fn manifest_parses_and_round_trips_all_four_caps() {
         let m: Manifest = toml::from_str(MANIFEST_TOML).expect("manifest parses");
@@ -2718,15 +2743,16 @@ mod tests {
             ["workspace:*", "stream:*", "managed:*", "socket:*"]
         );
         assert_eq!(
-            m.capabilities
-                .spawn_managed_subprocess
-                .allow_list()
-                .unwrap(),
+            m.capabilities.spawn_managed_subprocess.allow_list().unwrap(),
             ["ainb-hangar-daemon"]
         );
         assert_eq!(
             m.capabilities.unix_socket_dial.allow_list().unwrap(),
-            ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+            [
+                "~/.agents-in-a-box/hangar.sock",
+                "${AINB_HANGAR_HOME}/hangar.sock",
+                "${XDG_RUNTIME_DIR}/ainb-hangar.sock"
+            ]
         );
         assert_eq!(
             m.capabilities.secrets_read.allow_list().unwrap(),
@@ -3002,9 +3028,7 @@ mod tests {
         let ok = p.try_start_daemon();
         assert!(!ok, "failing starter must report failure");
         assert!(
-            p.daemon_start_error
-                .as_deref()
-                .is_some_and(|m| m.contains("start failed")),
+            p.daemon_start_error.as_deref().is_some_and(|m| m.contains("start failed")),
             "failure must be recorded for the empty-state, got {:?}",
             p.daemon_start_error
         );
@@ -3294,11 +3318,7 @@ mod tests {
         use ainb_plugin_sdk::{MouseButton, MouseKind};
         let mut p = connected_plugin_with_issue();
         p.rebuild_hit_map(120, 24);
-        let before = p
-            .screens
-            .issue_list
-            .selected_row()
-            .map(|r| r.id.as_str().to_string());
+        let before = p.screens.issue_list.selected_row().map(|r| r.id.as_str().to_string());
 
         // Press far outside any column (bottom-right corner of an 80-wide layout
         // region that has empty columns there).
@@ -3323,11 +3343,7 @@ mod tests {
                 .any(|i| matches!(i, crate::mouse::MouseIntent::ClickOpen(_))),
             "a press on empty space must not click-open a card"
         );
-        let after = p
-            .screens
-            .issue_list
-            .selected_row()
-            .map(|r| r.id.as_str().to_string());
+        let after = p.screens.issue_list.selected_row().map(|r| r.id.as_str().to_string());
         assert_eq!(
             before, after,
             "empty-space press leaves the selection alone"
@@ -3443,11 +3459,10 @@ mod tests {
 
         // Stash the MoveCard intent directly (the FSM origin is exercised by the
         // sibling drag test) and drain it.
-        p.pending_mouse_intents
-            .push(crate::mouse::MouseIntent::MoveCard {
-                issue_id: "issue-1".into(),
-                to_status: IssueLifecycle::InProgress,
-            });
+        p.pending_mouse_intents.push(crate::mouse::MouseIntent::MoveCard {
+            issue_id: "issue-1".into(),
+            to_status: IssueLifecycle::InProgress,
+        });
         p.drain_mouse_intents();
 
         // (a) The board moved the card optimistically: it now reads in In Progress.
@@ -3506,11 +3521,10 @@ mod tests {
         p.screens.set_issues(rows);
 
         // A wheel-scroll-down over the Todo column nudges its offset to 1.
-        p.pending_mouse_intents
-            .push(crate::mouse::MouseIntent::ScrollColumn {
-                status: IssueLifecycle::Todo,
-                delta: 1,
-            });
+        p.pending_mouse_intents.push(crate::mouse::MouseIntent::ScrollColumn {
+            status: IssueLifecycle::Todo,
+            delta: 1,
+        });
         // A hover over t1 sets the hover highlight.
         p.pending_mouse_intents
             .push(crate::mouse::MouseIntent::Hover(Some("t1".into())));
@@ -3611,16 +3625,13 @@ mod tests {
 
         let mut p = connected_plugin_with_two_cards();
         // A right-click on card-b raises the overlay (drained from the mouse intent).
-        p.pending_mouse_intents
-            .push(crate::mouse::MouseIntent::OpenContextMenu {
-                issue_id: "card-b".into(),
-                at: (40, 6),
-            });
+        p.pending_mouse_intents.push(crate::mouse::MouseIntent::OpenContextMenu {
+            issue_id: "card-b".into(),
+            at: (40, 6),
+        });
         p.drain_mouse_intents();
         assert!(
-            p.context_menu
-                .as_ref()
-                .is_some_and(|m| m.issue_id() == "card-b"),
+            p.context_menu.as_ref().is_some_and(|m| m.issue_id() == "card-b"),
             "a right-click raises the menu for the clicked card"
         );
 

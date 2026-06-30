@@ -310,7 +310,9 @@ mod tests {
                 read_paths: CapabilityGrant::List(vec!["~/.learnings".into()]),
                 event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
                 spawn_managed_subprocess: CapabilityGrant::List(vec!["ainb-hangar-daemon".into()]),
-                unix_socket_dial: CapabilityGrant::List(vec!["~/.agents-in-a-box/hangar.sock".into()]),
+                unix_socket_dial: CapabilityGrant::List(vec![
+                    "~/.agents-in-a-box/hangar.sock".into(),
+                ]),
                 secrets_read: CapabilityGrant::List(vec!["anthropic_api_key".into()]),
                 workspace_write: CapabilityGrant::Bool(true),
             },
@@ -493,12 +495,16 @@ version = "0.1.0"
 abi_version = 2
 
 [capabilities]
-unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${AINB_HANGAR_HOME}/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
 "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert_eq!(
             m.capabilities.unix_socket_dial.allow_list().unwrap(),
-            ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+            [
+                "~/.agents-in-a-box/hangar.sock",
+                "${AINB_HANGAR_HOME}/hangar.sock",
+                "${XDG_RUNTIME_DIR}/ainb-hangar.sock"
+            ]
         );
         let s = toml::to_string(&m).unwrap();
         let back: Manifest = toml::from_str(&s).unwrap();
