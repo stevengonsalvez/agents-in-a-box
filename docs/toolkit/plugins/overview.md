@@ -24,7 +24,7 @@ claude plugin install ainb-fleet@agents-in-a-box
 | [reflect](./reflect.md) | Agent self-improvement + retrieval — captures learnings and auto-injects relevant prior ones at session start. **(extracted → [ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory))** | `ainb reflect bootstrap` |
 | [ainb-fleet](./ainb-fleet.md) | LLM-facing skill bundle teaching agents to drive `ainb fleet …` multi-session orchestration (broadcast, sequence, needs, daemon). | `claude plugin install ainb-fleet@agents-in-a-box` |
 | [ainb-hooks](./ainb-hooks.md) | Emits Claude Code / Codex / Copilot lifecycle events to the ainb notification inbox (consumed by the [Inbox & notifications](../../tui/inbox-notifications.md) daemon — host code, not a plugin). | `ainb-notifyd install --claude --codex --copilot` |
-| `caveman-stats` | Lifecycle hooks for caveman mode: statusline token-savings suffix and compaction survival. | `claude plugin install caveman-stats@agents-in-a-box` |
+| `caveman-stats` | Lifecycle hooks for caveman mode: statusline token-savings suffix and compaction survival. **Claude-only** — the hook *events* exist in all three harnesses (see matrix), but the code reads Claude session JSONL (`CLAUDE_CONFIG_DIR`) and writes the Claude statusline suffix, and no Codex/Copilot statusline consumes it. | `claude plugin install caveman-stats@agents-in-a-box` |
 | `illustration` | Mascot-driven illustration skill bundle; no lifecycle hooks. | `claude plugin install illustration@agents-in-a-box` |
 
 ## Hook parity target
