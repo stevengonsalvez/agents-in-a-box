@@ -595,7 +595,7 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
                 writeln!(
                     out,
                     "  {}",
-                    crate::cli::statusline::render_powerline(&example_cache())
+                    crate::cli::statusline::render_powerline(&example_cache(), None)
                 )
                 .ok();
                 writeln!(out).ok();
