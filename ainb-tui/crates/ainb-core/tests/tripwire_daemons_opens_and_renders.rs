@@ -54,7 +54,7 @@ git_directories = []
 
     // Suppress the ainb-hooks first-run install dialog (it overlays home and
     // would swallow the `d` keystroke).
-    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
 
     // Seed a LIVE bridge heartbeat: pid = this test process (definitely alive),
@@ -104,6 +104,34 @@ where
 
 fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
+}
+
+fn send_key(session: &str, key: &str) {
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", session, key])
+        .status()
+        .expect("tmux send-keys");
+    assert!(status.success(), "tmux send-keys {key:?} failed");
+}
+
+fn poll_capture_resending<F>(
+    session: &str,
+    key: &str,
+    deadline: Instant,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        thread::sleep(Duration::from_millis(500));
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+    }
+    None
 }
 
 #[test]
@@ -163,19 +191,17 @@ fn daemons_opens_and_renders_four_rows() {
         "HomeScreen V2 sidebar missing Daemons tile — discoverability regression.\n{pre}"
     );
 
-    // Drive the daemons-open shortcut.
-    Command::new("tmux")
-        .args(["send-keys", "-t", &session, "d"])
-        .status()
-        .expect("send-keys d");
-
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let post_cap = poll_capture(&session, deadline, |c| {
-        c.contains("Daemons")
-            && c.contains("phone bridge")
-            && c.contains("notifyd")
-            && c.contains("fleet daemon")
-    });
+    let post_cap = poll_capture_resending(
+        &session,
+        "d",
+        Instant::now() + Duration::from_secs(30),
+        |c| {
+            c.contains("Daemons")
+                && c.contains("phone bridge")
+                && c.contains("notifyd")
+                && c.contains("fleet daemon")
+        },
+    );
     if post_cap.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);

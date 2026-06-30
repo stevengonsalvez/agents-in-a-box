@@ -1,4 +1,4 @@
-//! Tripwire: the Inbox screen opens via shift-`I` and renders the
+//! Tripwire: the Inbox screen opens via `b` and renders the
 //! ainb-hooks notification rows that ainb-plugin-notifyd persisted
 //! to `~/.agents-in-a-box/notifications.db`.
 //!
@@ -12,7 +12,7 @@
 //!    API the daemon uses — proving the schema + reader stay in
 //!    sync.
 //!
-//! Then sends `I` (capital — `i` is bound to Stats), polls the
+//! Then sends `b` ("in-Box" — `i` is bound to Stats), polls the
 //! pane capture for inbox chrome + both notification rows, and
 //! also confirms the bottom-menu badge shows `● 2 · I inbox`.
 //!
@@ -21,6 +21,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,11 @@ use serde_json::json;
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
+}
+
+fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 fn tmux_available() -> bool {
@@ -56,9 +62,11 @@ git_directories = []
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
-    // Suppress the ainb-hooks first-run install dialog — it overlays the
-    // home screen and swallows the `b` keystroke this tripwire sends.
-    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    // Suppress the ainb-hooks first-run install dialog — it overlays the home
+    // screen and swallows the `b` keystroke this tripwire sends. Keep the full
+    // record shape in sync with `ainb_plugin_notifyd::dismiss_prompt()`: a
+    // partial JSON blob fails deserialization and lets the modal reappear.
+    let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(
         home.join(".agents-in-a-box").join("install.json"),
         install_record,
@@ -100,20 +108,6 @@ git_directories = []
     };
     store.insert_and_prune(&claude, &no_retention).expect("seed claude row");
     store.insert_and_prune(&codex, &no_retention).expect("seed codex row");
-
-    // Seed an install.json marking hooks installed at the current
-    // version. A real machine with inbox data necessarily has the hooks
-    // installed (that's how the rows got there), so this matches
-    // reality — and crucially it makes `prompt_state` return `None`, so
-    // the first-run "install notification hooks?" dialog does NOT fire
-    // on startup. Without this the dialog pops on the HomeScreen and
-    // intercepts the `b` keypress before the Inbox can open.
-    let install_json = format!(
-        r#"{{"agents":["claude","codex"],"hook_script":"{}","plugin_version":"{}"}}"#,
-        paths.base.join("hooks/notify.sh").display(),
-        ainb_plugin_notifyd::embedded_plugin_version(),
-    );
-    fs::write(paths.base.join("install.json"), install_json).expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -149,8 +143,29 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
+fn poll_capture_resending<F>(
+    session: &str,
+    key: &str,
+    deadline: Instant,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        thread::sleep(Duration::from_millis(500));
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+    }
+    None
+}
+
 #[test]
 fn inbox_opens_and_renders_seeded_notifications() {
+    let _serial = serial_lock();
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;
@@ -212,23 +227,21 @@ fn inbox_opens_and_renders_seeded_notifications() {
          discoverability regression. Pre-capture:\n{pre}"
     );
 
-    // Drive the inbox open shortcut.
-    Command::new("tmux")
-        .args(["send-keys", "-t", &session, "b"])
-        .status()
-        .expect("send-keys b");
-
-    let inbox_deadline = Instant::now() + Duration::from_secs(30);
-    let post_cap = poll_capture(&session, inbox_deadline, |c| {
-        c.contains("📥 Inbox")
-            && c.contains("Notification:idle_prompt")
-            && c.contains("agent-turn-complete")
-    });
+    let post_cap = poll_capture_resending(
+        &session,
+        "b",
+        Instant::now() + Duration::from_secs(30),
+        |c| {
+            c.contains("📥 Inbox")
+                && c.contains("Notification:idle_prompt")
+                && c.contains("agent-turn-complete")
+        },
+    );
     if post_cap.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!(
-            "Inbox didn't render both seeded rows after pressing I; \
+            "Inbox didn't render both seeded rows after pressing b; \
              last capture:\n---\n{last}\n---"
         );
     }
@@ -281,6 +294,7 @@ fn on_inbox_screen(c: &str) -> bool {
 
 #[test]
 fn inbox_from_home_returns_home() {
+    let _serial = serial_lock();
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;
@@ -290,9 +304,9 @@ fn inbox_from_home_returns_home() {
     let session = format!("tripwire-inbox-home-{}", std::process::id());
     launch_to_home(&session, home_tmp.path());
 
-    send_key(&session, "b");
-    if poll_capture(
+    if poll_capture_resending(
         &session,
+        "b",
         Instant::now() + Duration::from_secs(30),
         on_inbox_screen,
     )
@@ -318,6 +332,7 @@ fn inbox_from_home_returns_home() {
 
 #[test]
 fn inbox_from_session_list_returns_to_session_list() {
+    let _serial = serial_lock();
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;
@@ -328,10 +343,12 @@ fn inbox_from_session_list_returns_to_session_list() {
     launch_to_home(&session, home_tmp.path());
 
     // Hop to the session list (`del-sel` is unique to its legend).
-    send_key(&session, "s");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("del-sel")
-    })
+    if poll_capture_resending(
+        &session,
+        "s",
+        Instant::now() + Duration::from_secs(40),
+        |c| c.contains("del-sel"),
+    )
     .is_none()
     {
         let last = capture_pane(&session);
@@ -340,9 +357,9 @@ fn inbox_from_session_list_returns_to_session_list() {
     }
 
     // Open the inbox from the session list (`b` is mirrored here).
-    send_key(&session, "b");
-    if poll_capture(
+    if poll_capture_resending(
         &session,
+        "b",
         Instant::now() + Duration::from_secs(30),
         on_inbox_screen,
     )
