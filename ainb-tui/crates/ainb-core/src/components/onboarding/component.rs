@@ -343,6 +343,24 @@ impl OnboardingComponent {
                 Span::styled("[ ]", Style::default().fg(MUTED_GRAY)),
                 Span::styled(" optional / suggested", Style::default().fg(MUTED_GRAY)),
             ]),
+            // Sample of what the Claude Code statusline looks like once wired —
+            // so the value is visible right on the setup screen.
+            Line::from(vec![
+                Span::styled("Claude statusline preview:  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    " 5h 42% ",
+                    Style::default().fg(DARK_BG).bg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " 7d 18% ",
+                    Style::default().fg(DARK_BG).bg(WARNING_YELLOW).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" $2.10 ", Style::default().fg(SOFT_WHITE).bg(SUBDUED_BORDER)),
+                Span::styled(
+                    " ctx 61% ",
+                    Style::default().fg(DARK_BG).bg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
+                ),
+            ]),
         ])
         .alignment(Alignment::Center);
         frame.render_widget(summary, content_layout[0]);
@@ -1338,6 +1356,18 @@ mod tests {
         let text = deps_step_text(&state, 100);
         assert!(text.contains("brew not found"), "error message missing");
         assert!(text.contains("try manually"), "manual-retry hint missing");
+    }
+
+    /// The deps screen shows a sample of the Claude Code statusline so its value
+    /// is visible right on the setup screen.
+    #[test]
+    fn deps_screen_shows_statusline_preview() {
+        let state = deps_state_focused_on_witr();
+        let text = deps_step_text(&state, 120);
+        assert!(
+            text.contains("Claude statusline preview"),
+            "deps screen missing the statusline preview:\n{text}"
+        );
     }
 
     /// The dep cursor never escapes the dep list bounds.
