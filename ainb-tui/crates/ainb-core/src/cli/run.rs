@@ -356,7 +356,7 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
 /// Build the agent CLI command with appropriate flags for the selected provider.
 ///
 /// **Model emission semantics (2026-05 refresh):**
-///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-7`) emitted ONLY
+///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-8`) emitted ONLY
 ///     when `model` resolves to a non-`SystemDefault` variant. The
 ///     `ClaudeModel::SystemDefault` variant (or `None`) causes the flag to be
 ///     omitted entirely so the installed `claude` CLI's default applies.
@@ -452,8 +452,10 @@ mod tests {
         assert_eq!(parse_model("opus"), ClaudeModel::Opus);
         assert_eq!(parse_model("haiku"), ClaudeModel::Haiku);
         assert_eq!(parse_model("claude-sonnet"), ClaudeModel::Sonnet);
-        // Canonical IDs (2026-05 refresh) also resolve.
-        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus);
+        // Canonical IDs (2026-06 refresh) also resolve.
+        assert_eq!(parse_model("claude-fable-5"), ClaudeModel::Fable);
+        assert_eq!(parse_model("claude-opus-4-8"), ClaudeModel::Opus);
+        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus47);
         assert_eq!(parse_model("claude-sonnet-4-6"), ClaudeModel::Sonnet);
         assert_eq!(parse_model("claude-haiku-4-5"), ClaudeModel::Haiku);
         assert_eq!(parse_model("opusplan"), ClaudeModel::OpusPlan);
@@ -507,7 +509,7 @@ mod tests {
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Opus));
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--model claude-opus-4-7"));
+        assert!(cmd.contains("--model claude-opus-4-8"));
         assert!(!cmd.contains("--dangerously-skip-permissions"));
     }
 

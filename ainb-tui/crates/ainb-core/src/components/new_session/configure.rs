@@ -2951,7 +2951,7 @@ mod tests {
     #[test]
     fn cycle_model_ring_for_claude_uses_new_canonical_ids() {
         // Custom + claude agent. Start at "default" → cycle once forward →
-        // canonical Opus id ("claude-opus-4-7"). The Configure render reads
+        // canonical Fable id ("claude-fable-5"). The Configure render reads
         // this field through ClaudeModel::parse for label rendering, but the
         // stored string is the canonical id.
         let mut s = mk_state();
@@ -2965,7 +2965,7 @@ mod tests {
         cycle_value_in_focused_row(&mut s, 1);
         assert_eq!(
             s.custom_overrides.as_ref().unwrap().agent_model,
-            "claude-opus-4-7"
+            "claude-fable-5"
         );
     }
 
