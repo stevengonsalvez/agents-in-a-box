@@ -14,7 +14,7 @@ impl HelpComponent {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let popup_area = self.centered_rect(60, 80, area);
+        let popup_area = self.centered_rect(60, 96, area);
 
         frame.render_widget(Clear, popup_area);
 
@@ -26,7 +26,6 @@ impl HelpComponent {
             ListItem::new("  ←          Previous workspace"),
             ListItem::new("  →          Next workspace"),
             ListItem::new("  Home/End   Top / bottom"),
-            ListItem::new(""),
             ListItem::new("Session Actions:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  n          New session (local or remote)"),
@@ -46,16 +45,13 @@ impl HelpComponent {
             ListItem::new("  f          Refresh workspaces"),
             ListItem::new("  x          Cleanup orphaned containers"),
             ListItem::new("  A          Re-authenticate credentials"),
-            ListItem::new(""),
             ListItem::new("Git Actions:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  g          Show git view"),
             ListItem::new("  p          Commit & push"),
-            ListItem::new(""),
             ListItem::new("Tools:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  c          Toggle Claude chat"),
-            ListItem::new(""),
             ListItem::new("Panels (closing returns here):")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  b          Inbox (Esc closes)"),
@@ -64,12 +60,10 @@ impl HelpComponent {
             ListItem::new("  k          Skills browser (Esc closes)"),
             ListItem::new("  m          Memory / learnings browser (Esc closes)"),
             ListItem::new("  t          Abtop agent monitor (quit abtop to return)"),
-            ListItem::new(""),
             ListItem::new("Views:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  Tab        Switch focus / views"),
             ListItem::new("  E          Expand / collapse all workspaces"),
-            ListItem::new(""),
             ListItem::new("General:")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ListItem::new("  ?/H        Toggle this help"),
