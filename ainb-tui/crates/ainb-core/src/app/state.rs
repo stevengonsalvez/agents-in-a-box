@@ -2721,6 +2721,10 @@ pub struct AppState {
     /// Daemons screen state (cached runtime-health snapshot + poll tick).
     pub daemons_state: crate::components::daemons::DaemonsState,
 
+    /// Fleet control-panel state (cached `current_state` rows + selection +
+    /// shared action-feedback cell).
+    pub fleet_panel_state: crate::components::fleet_panel::FleetPanelState,
+
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -3241,6 +3245,9 @@ impl Default for AppState {
 
             // Daemons observability (collects health on first/periodic render)
             daemons_state: crate::components::daemons::DaemonsState::default(),
+
+            // Fleet control panel (reads current_state on entry/tick)
+            fleet_panel_state: crate::components::fleet_panel::FleetPanelState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),

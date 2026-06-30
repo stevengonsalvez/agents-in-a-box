@@ -58,6 +58,11 @@ pub mod ids {
     /// Daemons observability screen — read-only runtime health of the phone
     /// bridge / notifyd / ATC / fleet daemon. Reached from home with `d`.
     pub const DAEMONS: &str = "daemons";
+    /// Fleet control panel — the interactive "who-needs-you" looking-glass.
+    /// Reads the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session)
+    /// and lets the human answer interviews + broadcast. Reached from home with
+    /// `f`.
+    pub const FLEET_PANEL: &str = "fleet_panel";
 }
 
 /// Outcome of a screen-handled event.

@@ -4,11 +4,14 @@ description: |
   ATC (Air Traffic Control) — the persistent orchestrating brain of the fleet.
   A plain `ainb` Claude session running a generated CLAUDE.md policy, woken on
   an OS-timer heartbeat (default 15 min) built from the LLM-free `fleet needs`
-  read. It auto-clears the safe/blocked sessions via the fleet verbs (confident
-  ASK → broadcast; ERR → continue within a retry cap) and escalates the
-  uncertain ones to the phone bridge. Poll-mode: no hook/inbox plumbing needed.
-  Supersedes the `daemon` skill for managed fleets. Use to provision / inspect /
-  tear down an ATC instance.
+  read — which is itself HOOKS-PRIMARY (event-sourced): ATC learns ASK/WAIT/IDLE
+  from the materialized `current_state` table, not by scraping panes, with a
+  tmux fallback for non-Claude agents. `atc setup` installs the global Claude
+  Code hooks into ~/.claude/settings.json. It auto-clears the safe/blocked
+  sessions via the fleet verbs (confident ASK → broadcast; ERR → continue within
+  a retry cap) and escalates the uncertain ones to the phone bridge. Supersedes
+  the `daemon` skill for managed fleets. Use to provision / inspect / tear down
+  an ATC instance.
 version: "0.1.0"
 user-invocable: true
 triggers:
@@ -33,11 +36,31 @@ cases itself, and pages you (via the phone bridge) only for the calls that
 genuinely need a human.
 
 ```
+hooks ─▶ events.jsonl ─▶ notifyd ─▶ current_state (ASK/ERR/WAIT/IDLE/RUNNING/DONE)
+                                          │  (materialized per session)
 OS timer ──[HEARTBEAT]──▶ ATC session ──reads──▶ ainb fleet needs --format json
-                              │                         (LLM-free scan)
+                              │             (hooks-primary, tmux fallback)
                               ├─ auto-clear ─▶ ainb fleet broadcast (answer / continue)
                               └─ escalate ───▶ phone bridge ─▶ your phone
 ```
+
+## How ATC learns a session is blocked — HOOKS-PRIMARY
+
+The `fleet needs` read ATC runs each heartbeat is **event-sourced**, not pane-
+scraped. Claude Code hooks append lifecycle events to `events.jsonl`; notifyd
+ingests them into a SQLite `current_state` table that materializes the latest
+stage per session (ASK / ERR / WAIT / IDLE / RUNNING / DONE). ATC reads that
+materialized state as the PRIMARY source — so it learns ASK/WAIT/IDLE/ERR from
+hooks, the instant they fire, **without scraping panes**. The tmux pane scan is
+only the **fallback** for sessions the hooks don't cover: non-Claude agents
+(Codex/Gemini fire no Claude hooks) and any session not yet materialized.
+
+**`ainb fleet atc setup` is what installs those global hooks** into
+`~/.claude/settings.json` (the `--no-hooks` flag skips it). The consumer skills
+(`needs`, `fleet-needs`, `standup`) do NOT install hooks — they only read the
+materialized state. So provisioning ATC is also what turns the whole fleet
+hooks-primary; without it (or without `atc setup`'s hook install), `fleet needs`
+falls back to the live pane scan everywhere and still works.
 
 ## Provision
 

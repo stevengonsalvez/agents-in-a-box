@@ -1685,7 +1685,7 @@ fn build_atc_command() -> Command {
         .subcommand(
             Command::new("hook")
                 .hide(true)
-                .about("Internal: lifecycle-hook side-effects (status file + inbox + Stop-drain)")
+                .about("Internal: lifecycle-hook side-effects (event append + inbox + Stop-drain)")
                 .arg(clap::Arg::new("event").long("event").required(true).help("Raw hook event name"))
                 .arg(
                     clap::Arg::new("session-id")
@@ -1693,7 +1693,13 @@ fn build_atc_command() -> Command {
                         .default_value("")
                         .help("Session that fired the hook"),
                 )
-                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd")),
+                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd"))
+                .arg(
+                    clap::Arg::new("matcher")
+                        .long("matcher")
+                        .default_value("")
+                        .help("Hook matcher (PreToolUse tool_name / Notification type / StopFailure error_type)"),
+                ),
         )
         .subcommand(
             Command::new("inbox")

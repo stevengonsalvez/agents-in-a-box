@@ -394,6 +394,7 @@ mod tests {
             enrich_key: String::new(),
             enriched: None,
             need_enrich: false,
+            source: None,
         }
     }
 
@@ -408,6 +409,7 @@ mod tests {
             enrich_key: String::new(),
             enriched: None,
             need_enrich: false,
+            source: None,
         }
     }
 
@@ -528,6 +530,7 @@ mod tests {
             enrich_key: String::new(),
             enriched: None,
             need_enrich: false,
+            source: None,
         }
     }
 

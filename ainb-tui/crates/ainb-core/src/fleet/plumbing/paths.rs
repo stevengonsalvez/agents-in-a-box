@@ -1,7 +1,7 @@
 // ABOUTME: Filesystem layout for the durable orchestration plumbing.
 //
 // All artefacts live under the ainb home (`$AINB_HOME`, else `~/.agents-in-a-box`):
-//   status/<session_id>.json     — per-session lifecycle status (status.rs)
+//   events.jsonl                  — append-only hook event log (notifyd ingests)
 //   inbox/<parent_id>.jsonl       — per-parent durable completion inbox (inbox.rs)
 //   inbox/<parent_id>.consumed    — exactly-once consumed-fingerprint marker
 //   inbox/<parent_id>.budget      — consecutive Stop-drain block budget
@@ -26,17 +26,6 @@ pub fn ainb_home() -> Result<PathBuf> {
     Ok(home.join(".agents-in-a-box"))
 }
 
-/// `<home>/status` — per-session status files.
-pub fn status_dir() -> Result<PathBuf> {
-    Ok(ainb_home()?.join("status"))
-}
-
-/// `<home>/status` under an explicit home.
-#[must_use]
-pub fn status_dir_in(home: &Path) -> PathBuf {
-    home.join("status")
-}
-
 /// `<home>/inbox` — per-parent inboxes + dead-letter sink.
 pub fn inbox_dir() -> Result<PathBuf> {
     Ok(ainb_home()?.join("inbox"))
@@ -55,7 +44,6 @@ mod tests {
     #[test]
     fn dirs_nest_under_home() {
         let home = Path::new("/tmp/x/.agents-in-a-box");
-        assert_eq!(status_dir_in(home), home.join("status"));
         assert_eq!(inbox_dir_in(home), home.join("inbox"));
     }
 

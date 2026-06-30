@@ -218,6 +218,14 @@ pub enum AppEvent {
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
     GoToDaemons,             // Navigate to the daemon runtime-health view
+    GoToFleetPanel,          // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,        // Fleet panel: move row selection up
+    FleetPanelMoveDown,      // Fleet panel: move row selection down
+    FleetPanelOptionNext,    // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,    // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer,        // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast,     // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelRefresh,       // Fleet panel: force-refresh from current_state (r)
     PanelBack,               // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,             // Inbox: move selection up one row
@@ -1056,6 +1064,12 @@ impl EventHandler {
         // GoToHomeScreen, which ignored the saved origin (L2).
         if state.current_screen == screen_ids::DAEMONS {
             return Self::handle_daemons_keys(key_event, state);
+        }
+
+        // Fleet control panel. Has its own list navigation + action keys; Esc/q
+        // pop back to the origin via PanelBack (same discipline as Daemons).
+        if state.current_screen == screen_ids::FLEET_PANEL {
+            return Self::handle_fleet_panel_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
@@ -2103,6 +2117,32 @@ impl EventHandler {
         }
     }
 
+    /// Fleet control-panel key dispatcher. The panel browses the event-sourced
+    /// `current_state` (ASK/ERR/WAIT/IDLE per session) and acts on it:
+    ///
+    ///   - ↑/↓ · k/j        move the row selection
+    ///   - Tab / BackTab    move the ASK option cursor (when the row is an ASK)
+    ///   - Enter / a        answer the selected ASK with the highlighted option
+    ///   - B                broadcast a ping prompt to the selected session
+    ///   - r                force-refresh from current_state
+    ///   - q / Esc          back to the screen it was opened from (PanelBack)
+    ///
+    /// Routed through `PanelBack` so it pops the `previous_screen` that
+    /// `GoToFleetPanel` saved, instead of hardcoding home (mirrors Daemons L2).
+    fn handle_fleet_panel_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
+            KeyCode::Tab => Some(AppEvent::FleetPanelOptionNext),
+            KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
+            KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
+            KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
+            KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
+            _ => None,
+        }
+    }
+
     // AINB 2.0: Home screen key handling (V2 with sidebar and card grid)
     fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         use crate::components::home_screen_v2::HomeScreenFocus;
@@ -2117,6 +2157,7 @@ impl EventHandler {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
+            KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
@@ -3561,6 +3602,10 @@ impl EventHandler {
                         // Same canonical-event routing as Inbox.
                         Self::process_event(AppEvent::GoToDaemons, state);
                     }
+                    SidebarItem::Fleet => {
+                        // Same canonical-event routing as Inbox/Daemons.
+                        Self::process_event(AppEvent::GoToFleetPanel, state);
+                    }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
@@ -3855,6 +3900,69 @@ impl EventHandler {
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
                 state.daemons_state.arm();
+            }
+            AppEvent::GoToFleetPanel => {
+                tracing::info!("Navigating to Fleet panel");
+                if state.current_screen != screen_ids::FLEET_PANEL {
+                    state.previous_screen = Some(state.current_screen.clone());
+                }
+                state.current_screen = screen_ids::FLEET_PANEL.to_string();
+                // Open the read-only store + load current_state so the first
+                // frame is populated. A single indexed SELECT over a small table
+                // — cheap on the event loop, same as Inbox's refresh-on-entry.
+                state.fleet_panel_state.arm();
+            }
+            AppEvent::FleetPanelMoveUp => state.fleet_panel_state.move_up(1),
+            AppEvent::FleetPanelMoveDown => state.fleet_panel_state.move_down(1),
+            AppEvent::FleetPanelOptionNext => state.fleet_panel_state.option_next(),
+            AppEvent::FleetPanelOptionPrev => state.fleet_panel_state.option_prev(),
+            AppEvent::FleetPanelRefresh => state.fleet_panel_state.refresh(),
+            AppEvent::FleetPanelAnswer => {
+                // Answer the selected ASK by sending the highlighted option's
+                // label to the target session via the EXISTING fleet send path
+                // (tmux send-keys), dispatched off the UI thread. The dispatch is
+                // guarded: in-flight + identical-resend debounce (C3), and the
+                // worker refuses an ambiguous-cwd answer (C1, `is_answer = true`).
+                if let Some((row, answer)) = state.fleet_panel_state.pending_answer() {
+                    if state.fleet_panel_state.guarded_dispatch(
+                        row.session_id,
+                        row.cwd,
+                        answer.clone(),
+                        "answered ask",
+                        true,
+                    ) {
+                        state
+                            .fleet_panel_state
+                            .set_feedback(format!("answering ask with '{answer}'…"));
+                    }
+                } else {
+                    state
+                        .fleet_panel_state
+                        .set_feedback("select an ASK row with options to answer".to_string());
+                }
+            }
+            AppEvent::FleetPanelBroadcast => {
+                // Broadcast a ping prompt to the selected session. v1 has no
+                // text-input widget on this screen, so the prompt is a fixed
+                // nudge; the send itself is real (same fleet send path). Same
+                // in-flight guard; `is_answer = false` (a ping is lower-harm but
+                // still refuses on an ambiguous cwd — the safe call).
+                if let Some(row) = state.fleet_panel_state.selected_row().cloned() {
+                    let prompt = "ping from fleet control panel — status?";
+                    if state.fleet_panel_state.guarded_dispatch(
+                        row.session_id,
+                        row.cwd,
+                        prompt.to_string(),
+                        "broadcast",
+                        false,
+                    ) {
+                        state.fleet_panel_state.set_feedback("broadcasting ping…".to_string());
+                    }
+                } else {
+                    state
+                        .fleet_panel_state
+                        .set_feedback("no session selected to broadcast to".to_string());
+                }
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -5526,6 +5634,72 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// Fleet control panel: navigating in saves the origin, and Esc/q route
+    /// through `PanelBack` to return there (same discipline as Daemons). Also
+    /// asserts the action keys map to their events so the panel is interactive,
+    /// not just a read-only view.
+    #[test]
+    fn fleet_panel_navigation_and_key_routing() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        assert_eq!(state.current_screen, ids::FLEET_PANEL);
+        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+
+        // Action + navigation keys resolve to the panel's events. (AppEvent has
+        // no PartialEq, so match each explicitly.)
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(matches!(
+            route(&mut state, KeyCode::Down),
+            Some(AppEvent::FleetPanelMoveDown)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Up),
+            Some(AppEvent::FleetPanelMoveUp)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Tab),
+            Some(AppEvent::FleetPanelOptionNext)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::BackTab),
+            Some(AppEvent::FleetPanelOptionPrev)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Enter),
+            Some(AppEvent::FleetPanelAnswer)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('a')),
+            Some(AppEvent::FleetPanelAnswer)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('B')),
+            Some(AppEvent::FleetPanelBroadcast)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('r')),
+            Some(AppEvent::FleetPanelRefresh)
+        ));
+
+        // Esc/q pop back to the saved origin, not hardcoded home.
+        let esc = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Esc), &mut state);
+        assert!(
+            matches!(esc, Some(AppEvent::PanelBack)),
+            "fleet panel Esc must resolve to PanelBack; got {esc:?}"
+        );
+        EventHandler::process_event(AppEvent::PanelBack, &mut state);
+        assert_eq!(
+            state.current_screen,
+            ids::SESSION_LIST,
+            "fleet panel must pop back to the screen it was opened from"
+        );
     }
 
     /// Learnings (memory) is a plugin screen — Esc on it resolves to

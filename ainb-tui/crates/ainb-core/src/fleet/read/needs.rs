@@ -70,6 +70,14 @@ pub struct NeedsRow {
     /// i.e. it should be drafted by the producer (inline or batched agent).
     #[serde(default)]
     pub need_enrich: bool,
+    /// Provenance of this row: `Some("hook")` when read from the event-sourced
+    /// `current_state` table, `Some("tmux")` when folded from a pane/transcript
+    /// scan, `None` for the legacy live-`classify()` path. Additive + optional
+    /// (`skip_serializing_if = None`) so the `fleet needs --format json` shape
+    /// is unchanged for existing consumers (the web proxy + `ainb-web`) — they
+    /// simply see one new optional field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -78,6 +86,15 @@ pub enum RouteHint {
     Broker,
     Tmux,
     None,
+}
+
+impl RouteHint {
+    /// Advisory routing hint for a session (see [`derive_route_hint`]). Exposed
+    /// so the `current_state` reader builds the same hint the classifier does.
+    #[must_use]
+    pub fn from_session(session: &Session) -> Self {
+        derive_route_hint(session)
+    }
 }
 
 /// Per-classifier dependency. We read everything we need up-front so the
@@ -197,7 +214,7 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
 /// Build a `NeedsRow`, stamping the content `enrich_key` from the serialized
 /// context. `enriched` / `need_enrich` are filled later by the orchestrator
 /// (it owns the cache lookup and the enable flag).
-fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> NeedsRow {
+pub(crate) fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> NeedsRow {
     let enrich_key = enrich_cache::ctx_key(&serde_json::to_string(&context).unwrap_or_default());
     NeedsRow {
         session,
@@ -206,6 +223,7 @@ fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> N
         enrich_key,
         enriched: None,
         need_enrich: false,
+        source: None,
     }
 }
 

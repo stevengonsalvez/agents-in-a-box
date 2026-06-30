@@ -23,6 +23,12 @@ pub struct Paths {
     /// the daemon is unreachable. The daemon ingests + truncates this
     /// file on startup.
     pub fallback: PathBuf,
+    /// The durable append-only event log the lifecycle hook appends one
+    /// canonical line to per managed event. The daemon's ingest tailer
+    /// folds it into the `events` table from a persisted byte offset
+    /// (crash-safe catch-up); unlike `fallback`, this file is never
+    /// truncated — the offset is the cursor.
+    pub events_jsonl: PathBuf,
     /// Lock file for the lazy-spawn race between concurrent first
     /// hook fires. The daemon never reads it; we expose it here so
     /// tests and the install verb can clean it up.
@@ -50,6 +56,7 @@ impl Paths {
             socket: base.join("notify.sock"),
             pid: base.join("notify.pid"),
             fallback: base.join("notify.fallback.jsonl"),
+            events_jsonl: base.join("events.jsonl"),
             spawn_lock: base.join("notify.spawn.lock"),
             log: base.join("notify.log"),
             base,
@@ -76,6 +83,8 @@ mod tests {
         assert!(p.socket.starts_with(dir.path()));
         assert!(p.pid.starts_with(dir.path()));
         assert!(p.fallback.starts_with(dir.path()));
+        assert!(p.events_jsonl.starts_with(dir.path()));
+        assert!(p.events_jsonl.ends_with("events.jsonl"));
         assert!(p.spawn_lock.starts_with(dir.path()));
         assert!(p.log.starts_with(dir.path()));
     }

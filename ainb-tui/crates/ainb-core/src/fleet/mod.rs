@@ -14,6 +14,7 @@
 
 pub mod atc;
 pub mod bridge;
+pub mod control;
 pub mod daemons;
 pub mod discover;
 pub mod enrich_cache;

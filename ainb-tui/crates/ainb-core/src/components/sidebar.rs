@@ -37,6 +37,7 @@ pub enum SidebarItem {
     Sessions,  // Session manager
     Inbox,     // ainb-hooks notification inbox
     Daemons,   // Daemon runtime-health observability
+    Fleet,     // Fleet control panel (current_state needs + actions)
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
@@ -59,6 +60,7 @@ impl SidebarItem {
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
             Self::Daemons => "⚙️",
+            Self::Fleet => "🛫",
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
@@ -81,6 +83,7 @@ impl SidebarItem {
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
             Self::Daemons => "Daemons",
+            Self::Fleet => "Fleet",
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
@@ -103,6 +106,7 @@ impl SidebarItem {
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
             Self::Daemons => "Runtime Health",
+            Self::Fleet => "Who Needs You",
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
@@ -125,6 +129,7 @@ impl SidebarItem {
             Self::Sessions => "s",
             Self::Inbox => "b",
             Self::Daemons => "d",
+            Self::Fleet => "f",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
@@ -147,6 +152,7 @@ impl SidebarItem {
             Self::Sessions,
             Self::Inbox,
             Self::Daemons,
+            Self::Fleet,
             Self::Recovery,
             Self::Logs,
             Self::Stats,
