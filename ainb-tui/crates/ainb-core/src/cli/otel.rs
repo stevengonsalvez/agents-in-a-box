@@ -67,6 +67,7 @@ async fn setup(args: SetupArgs) -> Result<()> {
 
     println!("OpenTelemetry setup — provider: Grafana Cloud");
     println!("{}", "\u{2501}".repeat(64));
+    println!("Docs (setup + example dashboards): {}\n", crate::docs::OTEL);
     println!(
         "Pipeline:  Claude Code --OTLP {ep}--> Grafana Alloy --(authenticated OTLP)--> Grafana Cloud",
         ep = otel::LOCAL_OTLP_ENDPOINT

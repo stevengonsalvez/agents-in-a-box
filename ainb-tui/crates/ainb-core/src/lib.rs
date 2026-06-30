@@ -12,6 +12,7 @@ pub mod clipboard;
 pub mod components;
 pub mod config;
 pub mod credentials;
+pub mod docs;
 pub mod docker;
 pub mod editors;
 pub mod fleet;

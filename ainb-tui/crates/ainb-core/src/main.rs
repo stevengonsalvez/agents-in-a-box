@@ -38,6 +38,7 @@ mod clipboard;
 mod components;
 mod config;
 mod credentials;
+mod docs;
 mod docker;
 mod editors;
 mod fleet;

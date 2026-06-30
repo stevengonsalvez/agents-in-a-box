@@ -592,7 +592,7 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(5), // What + how-to-get
+                Constraint::Length(6), // What + how-to-get + docs link
                 Constraint::Length(3), // endpoint field
                 Constraint::Length(3), // instance id field
                 Constraint::Length(3), // token field
@@ -618,6 +618,16 @@ impl OnboardingComponent {
                     Style::default().fg(MUTED_GRAY),
                 ),
             ]),
+            // Bare URL on its own line so it never truncates and terminals
+            // auto-linkify it (Cmd/Ctrl-click) — it's also mouse-selectable.
+            Line::from(Span::styled(
+                "Docs & example dashboards:",
+                Style::default().fg(GOLD),
+            )),
+            Line::from(Span::styled(
+                crate::docs::OTEL,
+                Style::default().fg(CORNFLOWER_BLUE),
+            )),
         ])
         .alignment(Alignment::Center);
         frame.render_widget(intro, content_layout[0]);
@@ -1133,5 +1143,36 @@ fn dep_state_detail(state: &DepState) -> String {
         DepState::TooOld(d) => format!(" — {d}"),
         DepState::Missing => String::new(),
         DepState::Unknown => " (?)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::onboarding::state::{OnboardingState, OnboardingStep};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn otel_step_text(width: u16) -> String {
+        let comp = OnboardingComponent::new();
+        let mut state = OnboardingState::new();
+        state.current_step = OnboardingStep::OtelSetup;
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|f| comp.render(f, f.size(), &state)).unwrap();
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The OTEL onboarding step must show the docsite URL in full — the bare
+    /// URL line is what terminals auto-linkify and the user copies, so any
+    /// truncation breaks the link. Assert the whole URL survives at the 80-col
+    /// minimum and a wide terminal.
+    #[test]
+    fn otel_step_shows_full_docs_url_without_truncation() {
+        for w in [80u16, 140] {
+            let text = otel_step_text(w);
+            assert!(
+                text.contains(crate::docs::OTEL),
+                "otel docs URL truncated/missing at {w} cols"
+            );
+        }
     }
 }
