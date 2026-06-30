@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$HOME_DIR/.ainb" "$HOME_DIR/.agents-in-a-box/config"
+mkdir -p "$HOME_DIR/.agents-in-a-box" "$HOME_DIR/.agents-in-a-box/config"
 # Skip onboarding wizard (only major version is gated; ainb is 1.x).
 cat > "$HOME_DIR/.agents-in-a-box/config/onboarding.toml" <<'TOML'
 completed = true
@@ -50,10 +50,10 @@ seed_issue "Refactor API surface for v2"
 seed_issue "Wire up payments webhook"
 seed_issue "Tighten retry backoff on task FSM"
 
-# Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
+# Spawn the daemon under the same $HOME (binds $HOME/.agents-in-a-box/hangar.sock).
 HOME="$HOME_DIR" HANGAR_DAEMON_DISABLE_CLAIM=1 "$DAEMON" >/dev/null 2>&1 &
 DAEMON_PID=$!
-SOCK="$HOME_DIR/.ainb/hangar.sock"
+SOCK="$HOME_DIR/.agents-in-a-box/hangar.sock"
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || { echo "daemon socket never appeared"; exit 1; }
 

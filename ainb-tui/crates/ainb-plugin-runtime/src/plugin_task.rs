@@ -396,7 +396,7 @@ struct PluginTask {
     /// inject an in-memory double.
     secret_backend: SharedSecretBackend,
     /// Shared host workspace store (DI). The `host/workspace_*` caps read /
-    /// write the active+default switch state in `~/.ainb/hangar/state.toml`
+    /// write the active+default switch state in `~/.agents-in-a-box/hangar/state.toml`
     /// and broadcast `WorkspaceChanged` through this; tests inject a double.
     workspace_store: SharedWorkspaceStore,
     /// Clone of this task's own [`Inbox`]. The unix-socket read loop holds

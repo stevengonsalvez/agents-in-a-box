@@ -18,7 +18,7 @@
 //!   path is canonicalized (symlinks resolved) and compared against the
 //!   allow-list before any `connect`. This defends a shared dev box
 //!   against arbitrary `AF_UNIX` abuse and against a symlink that resolves
-//!   `~/.ainb/hangar.sock` to, say, `/var/run/docker.sock`.
+//!   `~/.agents-in-a-box/hangar.sock` to, say, `/var/run/docker.sock`.
 //! - **Deterministic teardown.** Connections are keyed by which plugin
 //!   dialled them; on plugin shutdown / crash / quarantine the host drops
 //!   that plugin's sockets (aborting the read task + closing the stream)
@@ -370,7 +370,7 @@ pub fn canonical_for_compare(path: &Path) -> PathBuf {
 /// resolves symlinks) before an **exact** comparison — there is no
 /// wildcard / prefix semantics for socket dials. This is what defends
 /// against the symlink-redirect attack: a request for
-/// `~/.ainb/hangar.sock` that is a symlink to `/var/run/docker.sock`
+/// `~/.agents-in-a-box/hangar.sock` that is a symlink to `/var/run/docker.sock`
 /// canonicalizes to `/var/run/docker.sock`, which won't match the
 /// canonicalized allow-list entry.
 ///
@@ -452,8 +452,8 @@ mod tests {
     fn expand_path_tilde() {
         std::env::set_var("HOME", "/home/cts");
         assert_eq!(
-            expand_path("~/.ainb/hangar.sock"),
-            PathBuf::from("/home/cts/.ainb/hangar.sock")
+            expand_path("~/.agents-in-a-box/hangar.sock"),
+            PathBuf::from("/home/cts/.agents-in-a-box/hangar.sock")
         );
         assert_eq!(expand_path("~"), PathBuf::from("/home/cts"));
     }

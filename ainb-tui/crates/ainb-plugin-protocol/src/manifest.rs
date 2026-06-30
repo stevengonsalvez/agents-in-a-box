@@ -190,7 +190,7 @@ pub struct Capabilities {
     pub spawn_managed_subprocess: CapabilityGrant,
     /// Dial whitelisted `AF_UNIX` sockets via `host/unix_socket_dial`. List
     /// form is a mandatory allow-list of socket paths (e.g.
-    /// `["~/.ainb/hangar.sock"]`); a bool-true grant is rejected at
+    /// `["~/.agents-in-a-box/hangar.sock"]`); a bool-true grant is rejected at
     /// manifest validation (`-32003`) so there is no way to request an
     /// unrestricted "dial any socket" grant. The host canonicalizes the
     /// requested path (symlink resolution) before comparing it against the
@@ -210,7 +210,7 @@ pub struct Capabilities {
     #[serde(rename = "secrets:read", default)]
     pub secrets_read: CapabilityGrant,
     /// Mutate the host's workspace switching state (`active_workspace`,
-    /// `default_workspace` in `~/.ainb/hangar/state.toml`) via
+    /// `default_workspace` in `~/.agents-in-a-box/hangar/state.toml`) via
     /// `host/workspace_set_active` and `host/workspace_set_default`.
     ///
     /// This gates the *write* path only: `host/workspace_list` and
@@ -310,7 +310,7 @@ mod tests {
                 read_paths: CapabilityGrant::List(vec!["~/.learnings".into()]),
                 event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
                 spawn_managed_subprocess: CapabilityGrant::List(vec!["ainb-hangar-daemon".into()]),
-                unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
+                unix_socket_dial: CapabilityGrant::List(vec!["~/.agents-in-a-box/hangar.sock".into()]),
                 secrets_read: CapabilityGrant::List(vec!["anthropic_api_key".into()]),
                 workspace_write: CapabilityGrant::Bool(true),
             },
@@ -493,12 +493,12 @@ version = "0.1.0"
 abi_version = 2
 
 [capabilities]
-unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
 "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert_eq!(
             m.capabilities.unix_socket_dial.allow_list().unwrap(),
-            ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+            ["~/.agents-in-a-box/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
         );
         let s = toml::to_string(&m).unwrap();
         let back: Manifest = toml::from_str(&s).unwrap();

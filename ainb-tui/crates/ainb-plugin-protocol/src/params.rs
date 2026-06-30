@@ -789,7 +789,7 @@ pub struct SecretStoreGetResult {
 /// The `id` is the workspace's stable ULID (what `state.toml` is keyed by and
 /// what `set_active`/`set_default` switch on); `slug` is the short display
 /// handle (e.g. `default`); `name` is the human-readable label. `active` and
-/// `default` are resolved against `~/.ainb/hangar/state.toml` at list time —
+/// `default` are resolved against `~/.agents-in-a-box/hangar/state.toml` at list time —
 /// `active` reflects the effective active workspace (explicit active, else
 /// default, else first), so exactly one row is `active` in a non-empty list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
