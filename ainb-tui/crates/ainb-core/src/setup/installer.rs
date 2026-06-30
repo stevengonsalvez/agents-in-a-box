@@ -322,6 +322,23 @@ mod tests {
         assert!(!s.contains("@google/gemini-cli"));
     }
 
+    /// The Claude Code statusline is wired by a runnable `ainb` command (not a
+    /// manual hint), so the deps screen's `i` and the generated script can
+    /// install it. Asserted on the catalog spec (host-FS independent).
+    #[test]
+    fn claudecode_statusline_install_is_runnable() {
+        let dep = crate::setup::catalog::catalog()
+            .into_iter()
+            .flat_map(|t| t.deps)
+            .find(|d| d.id == "claudecode-statusline")
+            .expect("claudecode-statusline in catalog");
+        assert_eq!(dep.install.hint(), "ainb claudecode statusline --install");
+        assert!(
+            dep.install.auto_runnable(),
+            "statusline install should be auto-runnable, not a manual hint"
+        );
+    }
+
     /// reflect plugin: marketplace added over HTTPS (never the SSH `owner/repo`
     /// shorthand) before install, retargeted to the ainb-reflect-memory
     /// marketplace. Asserted on the catalog spec so it's independent of host FS.

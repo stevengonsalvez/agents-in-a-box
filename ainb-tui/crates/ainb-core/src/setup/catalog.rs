@@ -608,9 +608,9 @@ pub fn catalog() -> Vec<Topic> {
                     "5h burn + 7d window + cost in the Claude Code prompt bar",
                     Recommended,
                     Custom("claudecode-statusline"),
-                    Manual(
-                        "wired by `ainb init` (statusline step) or the TUI Budget panel (press W)",
-                    ),
+                    // Idempotent wire into ~/.claude/settings.json — runnable from
+                    // the deps screen (`i`) and the generated install script.
+                    Ainb(&["claudecode", "statusline", "--install"]),
                     &[],
                     &[],
                 ),

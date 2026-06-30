@@ -998,6 +998,15 @@ impl CliCommand for ClaudecodeCommand {
                                     "Side-channel mode: write the cache only and emit \
                                      nothing on stdout.",
                                 ),
+                        )
+                        .arg(
+                            clap::Arg::new("install")
+                                .long("install")
+                                .action(clap::ArgAction::SetTrue)
+                                .help(
+                                    "Wire the statusline into ~/.claude/settings.json \
+                                     (idempotent) instead of running the hook.",
+                                ),
                         ),
                 )
                 .after_help(
@@ -1009,12 +1018,39 @@ impl CliCommand for ClaudecodeCommand {
         )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        let (sub_name, cache_only) = match matches.subcommand() {
-            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("cache-only")),
-            _ => (None, false),
+        let (sub_name, cache_only, install) = match matches.subcommand() {
+            Some(("statusline", m)) => (
+                Some("statusline".to_string()),
+                m.get_flag("cache-only"),
+                m.get_flag("install"),
+            ),
+            _ => (None, false, false),
         };
         Box::pin(async move {
             match sub_name.as_deref() {
+                // `--install` wires the statusline into settings.json (used by the
+                // setup catalog's installer); otherwise run the hook.
+                Some("statusline") if install => {
+                    use crate::cli::statusline_install::{InstallOutcome, install_statusline};
+                    match install_statusline()? {
+                        InstallOutcome::Installed => {
+                            println!("✓ wired Claude Code statusline into ~/.claude/settings.json");
+                        }
+                        InstallOutcome::AlreadyInstalled => {
+                            println!("✓ Claude Code statusline already wired");
+                        }
+                        InstallOutcome::Migrated => {
+                            println!("✓ migrated Claude Code statusline to the current format");
+                        }
+                        InstallOutcome::ExistingDifferent { current_command } => {
+                            println!(
+                                "a different statusLine is already set ({current_command}) — left unchanged. \
+                                 Remove it from ~/.claude/settings.json first to switch."
+                            );
+                        }
+                    }
+                    Ok(())
+                }
                 Some("statusline") => crate::cli::statusline::execute(cache_only),
                 _ => Err(anyhow::anyhow!(
                     "claudecode requires a subcommand (e.g. `statusline`)"
