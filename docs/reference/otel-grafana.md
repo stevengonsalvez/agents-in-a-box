@@ -27,6 +27,18 @@ both the `ainb` CLI and the first-run TUI onboarding wizard.
 > (OTLP)** in your Grafana Cloud stack. The "Instance ID" there is the Basic-auth
 > username — it is NOT your org id.
 
+Example of the three values (yours differ by region/stack):
+
+```text
+OTLP endpoint  https://otlp-gateway-prod-us-east-0.grafana.net/otlp
+Instance ID    1234567
+API token      glc_eyJ...        (scope: metrics + logs + traces write)
+```
+
+> The OTLP endpoint is the **remote** Grafana Cloud URL Alloy ships to (ends in
+> `/otlp`) — **not** the local `http://localhost:4318` that Claude Code points at.
+> That local hop is wired automatically; you only supply the remote endpoint here.
+
 ## Setup (CLI)
 
 ```bash
@@ -78,3 +90,21 @@ ainb doctor             # alloy shows under the "otel" consumer group
 Alloy's local UI/health is at <http://127.0.0.1:12345>. Import the dashboards
 under `~/.agents-in-a-box/otel/dashboards/` into your Grafana Cloud stack to see
 the data.
+
+## Dashboards (what you get)
+
+`ainb otel setup` writes ready-to-import dashboards to
+`~/.agents-in-a-box/otel/dashboards/`. Import them in Grafana Cloud
+(**Dashboards → New → Import**) to land these views.
+
+**Claude Code — Usage & Cost** — total cost/tokens, sessions, active time, cost
+rate by model, tokens by type, cost by skill, cost-by-model share, plus recent
+traces and prompt text.
+
+![Claude Code Usage & Cost Grafana dashboard — cost, tokens, sessions, cost by model and by skill](../assets/screenshots/otel-grafana-claude-dashboard.png)
+
+**Codex CLI — Usage & Telemetry** — total tokens, conversation turns, tool/hook
+runs, WebSocket requests, tokens-per-turn and turn-latency p95, MCP tool-list
+latency, and the full `codex_*` series catalog.
+
+![Codex CLI Usage & Telemetry Grafana dashboard — tokens, turns, tool/hook runs, latency p95, series catalog](../assets/screenshots/otel-grafana-codex-dashboard.png)
