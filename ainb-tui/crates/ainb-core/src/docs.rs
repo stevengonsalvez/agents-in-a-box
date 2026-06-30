@@ -14,3 +14,24 @@ pub const ABTOP: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugi
 /// burndown usage/cost analytics plugin.
 pub const BURNDOWN: &str =
     "https://stevengonsalvez.github.io/agents-in-a-box/plugins/burndown/";
+/// Token-optimization tools (rtk + headroom).
+pub const TOKEN_OPT: &str =
+    "https://stevengonsalvez.github.io/agents-in-a-box/tui/token-optimization/";
+/// reflect long-term memory.
+pub const REFLECT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/knowledge/overview/";
+/// ainb-toolkit (skills + agents).
+pub const TOOLKIT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/toolkit/overview/";
+
+/// Docsite page for a setup-catalog dep id, if one exists. Used by the deps
+/// screen to show "what you get" on the focused row.
+pub fn docs_url_for(dep_id: &str) -> Option<&'static str> {
+    Some(match dep_id {
+        "witr" => WITR,
+        "abtop" => ABTOP,
+        "alloy" => OTEL,
+        "rtk" | "headroom" => TOKEN_OPT,
+        "reflect-kb" | "reflect-plugin" | "uv" => REFLECT,
+        "toolkit" => TOOLKIT,
+        _ => return None,
+    })
+}
