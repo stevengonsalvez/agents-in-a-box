@@ -1110,10 +1110,16 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
             Span::styled(format!("  {}", d.why), Style::default().fg(SUBDUED_BORDER)),
         ])));
         if !d.satisfied {
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled("       → ", Style::default().fg(CORNFLOWER_BLUE)),
-                Span::styled(d.install_hint.clone(), Style::default().fg(CORNFLOWER_BLUE)),
-            ])));
+            // Some install hints are multi-line (e.g. a Claude plugin adds its
+            // marketplace, then installs) — render each line on its own row so
+            // the embedded newline doesn't smash two commands into one
+            // ("…|| trueclaude plugin install…").
+            for line in d.install_hint.split('\n') {
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled("       → ", Style::default().fg(CORNFLOWER_BLUE)),
+                    Span::styled(line.to_string(), Style::default().fg(CORNFLOWER_BLUE)),
+                ])));
+            }
         }
     }
     // Blank spacer line between sections for visual separation.
