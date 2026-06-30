@@ -254,23 +254,19 @@ const DEFAULT_KEY: &str = "default_workspace";
 
 /// Resolve the default state-file path: `{hangar_home}/hangar/state.toml`.
 ///
-/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.agents-in-a-box`),
-/// so the file lives beside `hangar.db` / `env.allow.toml`.
+/// Delegates to the shared [`ainb_hangar_core::hangar_home`] resolver
+/// (`$AINB_HANGAR_HOME` verbatim when set, else `~/.agents-in-a-box`), so the
+/// file lives beside `hangar.db` / `env.allow.toml`.
 ///
 /// # Errors
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_state_path() -> std::io::Result<PathBuf> {
-    let dir = match std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "could not resolve home directory",
-                )
-            })?
-            .join(".agents-in-a-box"),
-    };
+    let dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not resolve home directory",
+        )
+    })?;
     Ok(dir.join("hangar").join("state.toml"))
 }
 

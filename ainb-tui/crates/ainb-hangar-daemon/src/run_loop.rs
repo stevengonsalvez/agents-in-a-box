@@ -893,17 +893,29 @@ fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
         )
 }
 
-/// Resolve the Hangar home directory the per-task env tree is rooted under.
+/// Resolve the BARE home root the per-task env tree is appended to.
 ///
-/// `$AINB_HANGAR_HOME` (when set and non-empty), else the user's home. The
-/// per-task layout then lives at `{home}/.agents-in-a-box/hangar/workspaces/...` (see
-/// [`crate::execenv::prepare_env`]). Mirrors [`ainb_hangar_store::Store`]'s home
-/// resolution so the daemon's env dirs and its database share a root.
+/// NOTE: this intentionally does NOT use [`ainb_hangar_core::hangar_home`].
+/// That helper resolves the *Hangar home* (`$AINB_HANGAR_HOME` verbatim, else
+/// `~/.agents-in-a-box`) — the dir that DIRECTLY holds `hangar.db`. The env
+/// tree, by contrast, is rooted at `{bare_home}/.agents-in-a-box/hangar/
+/// workspaces/...` ([`crate::execenv::prepare_env`] + the
+/// `tripwire_skill_import_and_dispatch` contract append the `.agents-in-a-box`
+/// segment themselves). So this returns the *bare* home: `$AINB_HANGAR_HOME`
+/// verbatim when set, else the user's home WITHOUT the `.agents-in-a-box`
+/// segment. Routing it through the shared helper would double the segment on
+/// the default path (`~/.agents-in-a-box/.agents-in-a-box/...`).
+///
+/// Falls back to the current directory only when the home itself cannot be
+/// resolved, preserving the daemon's prior infallible contract here (the env
+/// tree is best-effort; a missing home must not abort the loop).
 fn hangar_home() -> PathBuf {
-    std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()).map_or_else(
-        || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
-        PathBuf::from,
-    )
+    std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV)
+        .filter(|p| !p.is_empty())
+        .map_or_else(
+            || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+            PathBuf::from,
+        )
 }
 
 /// Warn about `danger-full-access` on the first invocation of `provider` in this

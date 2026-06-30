@@ -23,23 +23,21 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_hangar_core::warnings::{should_warn_first_run, FIRST_RUN_KEY};
+use ainb_hangar_core::warnings::{FIRST_RUN_KEY, should_warn_first_run};
 
 /// The `state.toml` array key holding dismissed-warning keys.
 const WARNINGS_KEY: &str = "warnings_ack";
 
 /// Resolve `~/.agents-in-a-box/hangar/state.toml` from the environment.
 ///
-/// Mirrors the daemon/host resolution: `$AINB_HANGAR_HOME` when set + non-empty,
-/// else `$HOME/.agents-in-a-box`. The plugin runs under the same `$HOME` as the host it was
-/// spawned by, so the file it reads is the one the daemon + CLI write.
+/// Delegates to the shared [`ainb_hangar_core::hangar_home`] resolver
+/// (`$AINB_HANGAR_HOME` when set + non-empty, else `~/.agents-in-a-box` via
+/// `dirs::home_dir`). The plugin runs under the same home as the daemon + CLI,
+/// so the file it reads is the one they write — going through the shared helper
+/// (not a private `$HOME` read) keeps that resolution identical on every side.
 #[must_use]
 pub fn state_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|p| !p.is_empty())?).join(".agents-in-a-box"),
-    };
-    Some(dir.join("hangar").join("state.toml"))
+    Some(ainb_hangar_core::hangar_home()?.join("hangar").join("state.toml"))
 }
 
 /// Read the `warnings_ack` array from `path` (missing file / key → empty).
@@ -53,12 +51,7 @@ pub fn read_acks(path: &Path) -> Vec<String> {
     };
     doc.get(WARNINGS_KEY)
         .and_then(toml::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(toml::Value::as_str).map(str::to_string).collect())
         .unwrap_or_default()
 }
 
@@ -90,11 +83,7 @@ pub fn ack_first_run(path: &Path) -> std::io::Result<()> {
     })?;
     table.insert(
         WARNINGS_KEY.to_string(),
-        toml::Value::Array(
-            acks.iter()
-                .map(|a| toml::Value::String(a.clone()))
-                .collect(),
-        ),
+        toml::Value::Array(acks.iter().map(|a| toml::Value::String(a.clone())).collect()),
     );
 
     let serialised = toml::to_string_pretty(&doc)

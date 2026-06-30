@@ -30,26 +30,18 @@ use std::path::{Path, PathBuf};
 /// glob this prefix rather than guessing the date.
 pub const LOG_FILE_PREFIX: &str = "daemon";
 
-/// The env var naming the Hangar home directory (mirrors
-/// `ainb_hangar_store::Store::home_env` / `ainb_hangar_daemon::hangar_dir`).
-const HANGAR_HOME_ENV: &str = "AINB_HANGAR_HOME";
-
 /// Resolve the daemon's structured-log directory: `<hangar_home>/hangar/logs`.
 ///
-/// Mirrors `ainb_hangar_daemon::log_dir` without taking a dependency on the
-/// daemon crate (the plugin can't): `$AINB_HANGAR_HOME` when set + non-empty,
-/// else `~/.agents-in-a-box`, then `/hangar/logs`. Returns `None` only when neither the
-/// env var nor a home directory can be resolved.
+/// Delegates to [`crate::hangar_home`] for the home contract
+/// (`$AINB_HANGAR_HOME` when set + non-empty, else `~/.agents-in-a-box`), then
+/// appends `/hangar/logs`. Returns `None` only when the home itself cannot be
+/// resolved.
 ///
 /// Both the `ainb hangar logs tail` CLI and the TUI `LogsScreen` resolve the
 /// log dir through this so they always read the same files the daemon writes.
 #[must_use]
 pub fn default_log_dir() -> Option<PathBuf> {
-    let home = match std::env::var_os(HANGAR_HOME_ENV).filter(|p| !p.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()?.join(".agents-in-a-box"),
-    };
-    Some(home.join("hangar").join("logs"))
+    Some(crate::hangar_home()?.join("hangar").join("logs"))
 }
 
 /// A single structured-log event, flattened from one JSON line.

@@ -182,9 +182,9 @@ pub mod worktree;
 
 /// Resolve the directory that holds `hangar.db`.
 ///
-/// Mirrors [`ainb_hangar_store::Store`]'s resolution so the database, the
-/// per-task env tree, the `hangar.sock` the RPC server binds, and the log dir
-/// all share one root: `$AINB_HANGAR_HOME` when set and non-empty, else
+/// Delegates to [`ainb_hangar_core::hangar_home`] so the database, the per-task
+/// env tree, the `hangar.sock` the RPC server binds, and the log dir all share
+/// one root: `$AINB_HANGAR_HOME` when set and non-empty, else
 /// `~/.agents-in-a-box`.
 ///
 /// # Errors
@@ -192,12 +192,8 @@ pub mod worktree;
 /// Returns an error if neither `$AINB_HANGAR_HOME` is set nor a home directory
 /// can be resolved.
 pub fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
-    match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty()) {
-        Some(p) => Ok(std::path::PathBuf::from(p)),
-        None => Ok(dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".agents-in-a-box")),
-    }
+    ainb_hangar_core::hangar_home()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))
 }
 
 /// Resolve the daemon's structured-log directory: `<hangar_home>/hangar/logs`.

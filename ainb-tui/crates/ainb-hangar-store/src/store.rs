@@ -14,11 +14,6 @@ use crate::apply_migrations;
 /// File name of the Hangar database within its home directory.
 const DB_FILE_NAME: &str = "hangar.db";
 
-/// Sub-directory under the real `$HOME` that holds the Hangar database on the
-/// default (no-override) path. Not appended when [`Store::home_env`] override is
-/// set — the override value is the database directory verbatim.
-const HANGAR_DIR: &str = ".agents-in-a-box";
-
 /// Environment variable that overrides the resolved Hangar database directory.
 /// When set (and non-empty), [`Store::open_default`] treats its value as the
 /// directory that DIRECTLY holds the database — the file lives at
@@ -27,7 +22,10 @@ const HANGAR_DIR: &str = ".agents-in-a-box";
 /// is the one the P0.7 daemon tripwire asserts (`docs/hangar/phases/P0.md:222`).
 /// Used by tests via the `with_isolated_home` helper to keep the real `$HOME`
 /// untouched.
-const HOME_ENV: &str = "AINB_HANGAR_HOME";
+///
+/// Re-exported from [`ainb_hangar_core::paths::HANGAR_HOME_ENV`] so the literal
+/// lives in exactly one place alongside the resolver that reads it.
+const HOME_ENV: &str = ainb_hangar_core::paths::HANGAR_HOME_ENV;
 
 /// Owned `SQLite` connection pool plus the migrations applied to it.
 ///
@@ -79,7 +77,8 @@ impl Store {
     /// 1. `$AINB_HANGAR_HOME` if set and non-empty — the db lives DIRECTLY at
     ///    `$AINB_HANGAR_HOME/hangar.db` (no `.agents-in-a-box` segment). This is the
     ///    contract the P0.7 daemon tripwire asserts.
-    /// 2. otherwise `~/.agents-in-a-box/hangar.db` via [`dirs::home_dir`].
+    /// 2. otherwise `~/.agents-in-a-box/hangar.db` via the shared
+    ///    [`ainb_hangar_core::hangar_home`] resolver.
     ///
     /// The directory is created (via [`Store::open_in`]) if it does not yet
     /// exist.
@@ -101,19 +100,15 @@ impl Store {
 
     /// Resolve the directory that should contain `hangar.db`.
     ///
-    /// If `$AINB_HANGAR_HOME` is set and non-empty, it IS the database directory
-    /// verbatim (no `.agents-in-a-box` segment appended) — this matches the P0.7 daemon
-    /// tripwire contract. An empty `$AINB_HANGAR_HOME` is ignored (it would
-    /// otherwise resolve to a relative path in the current working directory),
-    /// falling back to `~/.agents-in-a-box`. The real-`$HOME` fallback nests the database
-    /// under the `.agents-in-a-box` sub-directory.
+    /// Delegates to [`ainb_hangar_core::hangar_home`] for the home contract: if
+    /// `$AINB_HANGAR_HOME` is set and non-empty, it IS the database directory
+    /// verbatim (no `.agents-in-a-box` segment appended) — this matches the P0.7
+    /// daemon tripwire contract. An empty `$AINB_HANGAR_HOME` is ignored (it
+    /// would otherwise resolve to a relative path in the current working
+    /// directory), falling back to `~/.agents-in-a-box`.
     fn default_dir() -> anyhow::Result<PathBuf> {
-        match std::env::var_os(HOME_ENV).filter(|p| !p.is_empty()) {
-            Some(p) => Ok(PathBuf::from(p)),
-            None => Ok(dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-                .join(HANGAR_DIR)),
-        }
+        ainb_hangar_core::hangar_home()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))
     }
 
     /// The environment variable that overrides the Hangar home directory.

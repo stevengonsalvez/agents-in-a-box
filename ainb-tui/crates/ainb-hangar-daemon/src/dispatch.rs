@@ -61,21 +61,15 @@ impl EnvAllowConfig {
 
 /// Resolve the default config path: `{hangar_home}/hangar/env.allow.toml`.
 ///
-/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.agents-in-a-box`),
-/// so the config lives beside `hangar.db`.
+/// Delegates to [`crate::hangar_dir`] (and thus the shared
+/// [`ainb_hangar_core::hangar_home`]) so the config lives beside `hangar.db`
+/// under the one home contract.
 ///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_allow_path() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty())
-    {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".agents-in-a-box"),
-    };
-    Ok(dir.join("hangar").join("env.allow.toml"))
+    Ok(crate::hangar_dir()?.join("hangar").join("env.allow.toml"))
 }
 
 /// Load the allow config from `path`.

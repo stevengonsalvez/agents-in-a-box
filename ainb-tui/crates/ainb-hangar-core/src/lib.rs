@@ -27,6 +27,11 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// The single source of truth for the Hangar home directory
+/// ([`paths::hangar_home`], re-exported at the crate root). Every Hangar
+/// resolver delegates here so the `$AINB_HANGAR_HOME`-else-`~/.agents-in-a-box`
+/// contract lives in one place.
+pub mod paths;
 /// Parse the canonical `gh pr create` PR-URL line from agent stdout (P9.1).
 pub mod pr_url;
 /// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
@@ -58,3 +63,8 @@ pub mod warnings;
 /// (digest stored, plaintext returned once), and the optional event filter — all
 /// IO-free. The HTTP ingress + secret-file storage live in the daemon / store.
 pub mod webhook;
+
+/// The Hangar home resolver, re-exported at the crate root so every consumer
+/// can call `ainb_hangar_core::hangar_home()` without naming the `paths`
+/// module. This is the single source of truth for the home contract.
+pub use paths::hangar_home;
