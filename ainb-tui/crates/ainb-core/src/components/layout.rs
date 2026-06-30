@@ -328,7 +328,7 @@ impl LayoutComponent {
             // Attach / select group
             key("a", SELECTION_GREEN),
             desc("ttach "),
-            key("⇧A", SELECTION_GREEN),
+            key("→", SELECTION_GREEN),
             desc(" pane "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
@@ -451,7 +451,7 @@ impl LayoutComponent {
                 desc("ew  "),
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
-                key("⇧A", SELECTION_GREEN),
+                key("→", SELECTION_GREEN),
                 desc(" pane  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),

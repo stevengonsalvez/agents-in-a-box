@@ -1939,32 +1939,16 @@ impl EventHandler {
                     }
                 }
             }
-            KeyCode::Left => {
-                tracing::debug!("Left key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering PreviousWorkspace");
-                        Some(AppEvent::PreviousWorkspace)
-                    }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, no left/right scrolling");
-                        None // No left/right scrolling in logs
-                    }
-                }
-            }
-            KeyCode::Right => {
-                tracing::debug!("Right key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering NextWorkspace");
-                        Some(AppEvent::NextWorkspace)
-                    }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, no left/right scrolling");
-                        None // No left/right scrolling in logs
-                    }
-                }
-            }
+            // ← no longer switches workspace (use the mouse / sidebar for that);
+            // it's a no-op so it can't be mistaken for navigation.
+            KeyCode::Left => None,
+            // → attaches the selected session in a split pane (the in-place
+            // sibling of `a`/full-screen) — same verb as Shift+A. Workspace
+            // switching moved to the mouse.
+            KeyCode::Right => match state.focused_pane {
+                FocusedPane::Sessions => Some(AppEvent::EnterInteractivePane),
+                FocusedPane::LiveLogs | FocusedPane::Preview => None,
+            },
             KeyCode::Home => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToTop),
                 FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
