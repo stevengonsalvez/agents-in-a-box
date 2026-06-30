@@ -31,7 +31,6 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    Catalog,      // Browse catalog/marketplace
     Config,       // Settings & presets
     Sessions,     // Session manager
     Inbox,        // ainb-hooks notification inbox
@@ -54,7 +53,6 @@ impl SidebarItem {
     /// Get the display icon for this item (emoji)
     pub fn icon(&self) -> &'static str {
         match self {
-            Self::Catalog => "📦",
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
@@ -77,7 +75,6 @@ impl SidebarItem {
     /// Get the display label for this item
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Catalog => "Catalog",
             Self::Config => "Config",
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
@@ -88,7 +85,7 @@ impl SidebarItem {
             Self::Stats => "Stats",
             Self::Witr => "Witr",
             Self::Abtop => "abtop",
-            Self::Skills => "Skills",
+            Self::Skills => "Skills Catalogue",
             Self::SkillManager => "Skills (manager)",
             Self::Memory => "Memory",
             Self::Changelog => "Changelog",
@@ -100,7 +97,6 @@ impl SidebarItem {
     /// Get the description for this item
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Catalog => "Browse & Bootstrap",
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
@@ -123,7 +119,6 @@ impl SidebarItem {
     /// Get the keyboard shortcut for this item
     pub fn shortcut(&self) -> &'static str {
         match self {
-            Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
             Self::Inbox => "b",
@@ -134,7 +129,7 @@ impl SidebarItem {
             Self::Stats => "i",
             Self::Witr => "w",
             Self::Abtop => "t",
-            Self::Skills => "k",
+            Self::Skills => "c",
             // `m` is the Memory browser; SkillManager moved to `z` on merge.
             Self::SkillManager => "z",
             Self::Memory => "m",
@@ -147,7 +142,6 @@ impl SidebarItem {
     /// Get all items in order
     pub fn all() -> &'static [SidebarItem] {
         &[
-            Self::Catalog,
             Self::Config,
             Self::Sessions,
             Self::Inbox,
@@ -559,7 +553,7 @@ mod tests {
         // Collapsed items are exactly 1 row; the selected item expands to 2
         // (its description). So consecutive shortcut rows step by 1 everywhere
         // except a single step of 2 — the gap straddling the selected item.
-        for selected in [0usize, 6, 16] {
+        for selected in [0usize, 6, 15] {
             let rows: Vec<u16> = shortcut_columns(selected).iter().map(|(y, _)| *y).collect();
             assert_eq!(rows.len(), SidebarItem::all().len());
             let gaps: Vec<u16> = rows.windows(2).map(|w| w[1] - w[0]).collect();

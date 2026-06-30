@@ -223,7 +223,6 @@ pub enum AppEvent {
     WelcomePanelPageUp,      // Page up in welcome panel
     WelcomePanelPageDown,    // Page down in welcome panel
     WelcomePanelCopyContent, // Copy welcome panel content to clipboard (y)
-    GoToCatalog,             // Navigate to catalog view (coming soon)
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
@@ -2658,7 +2657,6 @@ impl EventHandler {
         // unused across every screen handler.
         match key_event.code {
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
-            KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
@@ -2669,7 +2667,7 @@ impl EventHandler {
             // keybinding open path the P3 tripwire drives.
             KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
             KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
-            KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('c') => return Some(AppEvent::GoToSkills),
             // `m` is the Memory/Learnings browser (main); SkillManager moved
             // to `z` to avoid the collision when the two features merged.
             KeyCode::Char('z') => return Some(AppEvent::GoToSkillManager),
@@ -4085,7 +4083,7 @@ impl EventHandler {
                             tracing::info!("Opening MCP pool overlay");
                             state.toggle_mcp_overlay();
                         }
-                        HomeTile::Catalog | HomeTile::Stats => {
+                        HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
                             state.add_info_notification(format!(
@@ -4129,9 +4127,6 @@ impl EventHandler {
                 tracing::debug!("HomeScreen V2 sidebar select");
                 let selected = state.home_screen_v2_state.sidebar.selected_item();
                 match selected {
-                    SidebarItem::Catalog => {
-                        state.add_info_notification("Skill catalog coming soon!".to_string());
-                    }
                     SidebarItem::Config => {
                         state.current_screen = screen_ids::CONFIG.to_string();
                     }
@@ -4380,9 +4375,6 @@ impl EventHandler {
                         state.add_error_notification(format!("Failed to copy: {}", e));
                     }
                 }
-            }
-            AppEvent::GoToCatalog => {
-                state.add_info_notification("Skill catalog coming soon!".to_string());
             }
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
@@ -6830,7 +6822,6 @@ fn is_known_screen_id(id: &str) -> bool {
         id,
         ids::HOME
             | ids::CONFIG
-            | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
             | ids::LEARNINGS
@@ -6936,7 +6927,6 @@ mod navigate_to_tests {
         for id in [
             ids::HOME,
             ids::CONFIG,
-            ids::CATALOG,
             ids::ANALYTICS,
             ids::WITR,
             ids::ABTOP,

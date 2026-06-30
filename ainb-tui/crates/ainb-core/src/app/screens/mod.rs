@@ -18,7 +18,6 @@ pub type ScreenId = String;
 pub mod ids {
     pub const HOME: &str = "home";
     pub const CONFIG: &str = "config";
-    pub const CATALOG: &str = "catalog";
     pub const ANALYTICS: &str = "analytics";
     /// Process-causality screen, owned by the `witr` plugin. Generic
     /// plugin-screen registration — no witr domain logic in the host;
@@ -107,7 +106,6 @@ mod tests {
         let all = [
             ids::HOME,
             ids::CONFIG,
-            ids::CATALOG,
             ids::ANALYTICS,
             ids::SESSION_LIST,
             ids::LOGS,

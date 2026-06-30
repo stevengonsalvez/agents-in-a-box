@@ -64,7 +64,7 @@ impl HelpComponent {
             row("b", "Inbox (Esc closes)"),
             row("i", "Stats / usage analytics (Esc closes)"),
             row("w", "Witr process browser (quit witr to return)"),
-            row("k", "Skills browser (Esc closes)"),
+            row("k", "Skills catalogue (Esc closes)"),
             row("m", "Memory / learnings browser (Esc closes)"),
             row("t", "Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),

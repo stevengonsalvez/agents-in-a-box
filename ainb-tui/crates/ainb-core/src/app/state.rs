@@ -1041,7 +1041,6 @@ pub(crate) fn daemons_sync_probe() -> (
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Catalog,      // Browse catalog/marketplace
     SkillManager, // Install / sync / doctor (spec §10.1)
     Config,       // Settings & presets
     Sessions,     // Session manager
@@ -1054,7 +1053,6 @@ pub enum HomeTile {
 impl HomeTile {
     pub fn all() -> Vec<HomeTile> {
         vec![
-            HomeTile::Catalog,
             HomeTile::SkillManager,
             HomeTile::Config,
             HomeTile::Sessions,
@@ -1067,7 +1065,6 @@ impl HomeTile {
 
     pub fn label(&self) -> &'static str {
         match self {
-            HomeTile::Catalog => "Catalog",
             HomeTile::SkillManager => "Skills (manager)",
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
@@ -1080,7 +1077,6 @@ impl HomeTile {
 
     pub fn description(&self) -> &'static str {
         match self {
-            HomeTile::Catalog => "Browse & Bootstrap",
             HomeTile::SkillManager => "Install / sync / doctor (Z)",
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
@@ -1093,7 +1089,6 @@ impl HomeTile {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            HomeTile::Catalog => "📦",
             HomeTile::SkillManager => "🧰",
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",

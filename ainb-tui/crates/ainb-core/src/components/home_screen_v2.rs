@@ -752,15 +752,15 @@ mod tests {
         state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
         let now = Instant::now();
 
-        // first_item_y = rect.y + 3 = 7. Catalog (item 0) is selected and 2 rows
-        // tall (rows 7-8), so Config (item 1) sits at row 9.
+        // first_item_y = rect.y + 3 = 7. Config (item 0) is selected and 2 rows
+        // tall (rows 7-8), so Sessions (item 1) sits at row 9.
         let first = state.click_sidebar_item_at(3, 9, now).unwrap();
-        assert_eq!(first.item, SidebarItem::Config);
+        assert_eq!(first.item, SidebarItem::Sessions);
         assert!(!first.double_click);
-        assert_eq!(state.sidebar.selected_item(), SidebarItem::Config);
+        assert_eq!(state.sidebar.selected_item(), SidebarItem::Sessions);
 
         let second = state.click_sidebar_item_at(3, 9, now + SIDEBAR_DOUBLE_CLICK_WINDOW).unwrap();
-        assert_eq!(second.item, SidebarItem::Config);
+        assert_eq!(second.item, SidebarItem::Sessions);
         assert!(second.double_click);
     }
 
