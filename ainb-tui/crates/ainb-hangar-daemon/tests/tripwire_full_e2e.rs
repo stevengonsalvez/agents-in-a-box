@@ -10,7 +10,7 @@
 //! ```text
 //!  crates/ainb-hangar-daemon/tests/tripwire_*.rs   (P4/P7/P8/P9 daemon set)
 //!  crates/ainb-hangar-store/tests/tripwire_*.rs    (P0 migration determinism)
-//!  plugins/hangar-tui/tests/tripwire_*.rs          (P3.8/P4.10 plugin roundtrip)
+//!  crates/ainb-plugin-hangar/tests/tripwire_*.rs          (P3.8/P4.10 plugin roundtrip)
 //!         │
 //!         ▼  walk dirs, count tripwire_*.rs (skip *_common.rs helpers)
 //!  assert discovered >= BASELINE
@@ -54,10 +54,7 @@ const BASELINE_TRIPWIRES: usize = 34;
 const TRIPWIRE_DIRS: &[&str] = &[
     "crates/ainb-hangar-daemon/tests",
     "crates/ainb-hangar-store/tests",
-    // The Hangar plugin lives OUTSIDE the cargo workspace, at repo-root
-    // `plugins/hangar-tui/` (sibling of `ainb-tui/`), so it is reached via the
-    // workspace root's parent.
-    "../plugins/hangar-tui/tests",
+    "crates/ainb-plugin-hangar/tests",
 ];
 
 /// Workspace root = the directory containing this daemon crate's parent

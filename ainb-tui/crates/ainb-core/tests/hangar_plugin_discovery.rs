@@ -6,7 +6,7 @@
 //! (in ainb-core plugin discovery): scan finds `hangar-tui`, parses
 //! manifest, all 4 new caps validated."
 //!
-//! This stages the *real* `plugins/hangar-tui/manifest.toml` (pulled in
+//! This stages the *real* `ainb-plugin-hangar/manifest.toml` (pulled in
 //! at compile time via `include_str!`, so a manifest edit that breaks
 //! the schema fails this test) into a tempdir laid out the way
 //! `discover_plugin_root()` expects — `<root>/<name>/manifest.toml` —
@@ -19,7 +19,7 @@ use ainb_plugin_runtime::registry::discover;
 
 /// The canonical manifest shipped with the plugin crate. Compiled in so
 /// the test tracks the real file, not a hand-maintained copy.
-const HANGAR_MANIFEST: &str = include_str!("../../../../plugins/hangar-tui/manifest.toml");
+const HANGAR_MANIFEST: &str = include_str!("../../ainb-plugin-hangar/manifest.toml");
 
 #[test]
 fn discovery_finds_hangar_and_validates_all_four_caps() {

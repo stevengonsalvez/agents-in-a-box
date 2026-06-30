@@ -8,7 +8,7 @@
 #                                                   + P8 kanban/health/otel
 #                                                   + P9 pr_capture/pr_badge + …
 #   crates/ainb-hangar-store/tests/tripwire_*.rs    P0 sqlx migration determinism
-#   plugins/hangar-tui/tests/tripwire_*.rs          P3.8/P4.10 plugin↔daemon roundtrip
+#   ainb-tui/crates/ainb-plugin-hangar/tests/tripwire_*.rs          P3.8/P4.10 plugin↔daemon roundtrip
 #
 # Conventions (deliberately mirroring the repo, NOT the stale P9 plan):
 #
@@ -133,8 +133,8 @@ for f in crates/ainb-hangar-store/tests/tripwire_*.rs; do
     run_one ainb-hangar-store "$name"
 done
 
-# ── plugins/hangar-tui: plugin↔daemon roundtrip (needs staged plugin + daemon).
-for f in "$REPO_ROOT"/plugins/hangar-tui/tests/tripwire_*.rs; do
+# ── ainb-plugin-hangar: plugin↔daemon roundtrip (needs staged plugin + daemon).
+for f in "$REPO_ROOT"/ainb-tui/crates/ainb-plugin-hangar/tests/tripwire_*.rs; do
     [ -e "$f" ] || continue
     name="$(basename "$f" .rs)"
     case "$name" in *_common) continue ;; esac

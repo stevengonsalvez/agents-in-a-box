@@ -6,7 +6,7 @@ on:
     paths:
       - "ainb-tui/**"
       - "plugins/ainb-hooks/**"
-      - "plugins/hangar-tui/**"
+      - "ainb-tui/crates/ainb-plugin-hangar/**"
       - "scripts/hangar/**"
       - "Cargo.*"
       - ".github/workflows/ci.yml"
@@ -15,7 +15,7 @@ on:
     paths:
       - "ainb-tui/**"
       - "plugins/ainb-hooks/**"
-      - "plugins/hangar-tui/**"
+      - "ainb-tui/crates/ainb-plugin-hangar/**"
       - "scripts/hangar/**"
       - "Cargo.*"
       - ".github/workflows/ci.yml"

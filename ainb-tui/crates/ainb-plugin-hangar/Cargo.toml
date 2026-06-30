@@ -1,10 +1,6 @@
 [package]
 name = "ainb-plugin-hangar"
 version = "0.1.0"
-# This crate lives outside the workspace root dir (`ainb-tui/`), so cargo
-# can't discover the workspace by walking parent dirs — point at it
-# explicitly so `*.workspace = true` inheritance resolves.
-workspace = "../../ainb-tui"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -28,12 +24,12 @@ name = "ainb-plugin-hangar"
 path = "src/main.rs"
 
 [dependencies]
-ainb-plugin-sdk-rust = { path = "../../ainb-tui/crates/ainb-plugin-sdk-rust" }
-ainb-hangar-proto = { path = "../../ainb-tui/crates/ainb-hangar-proto" }
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 # Pure, IO-free domain vocabulary (typed ids, actor refs). No SQLite/tokio,
 # so the plugin still "owns zero domain data" — it only borrows the type
 # names to address rows it pulls over RPC.
-ainb-hangar-core = { path = "../../ainb-tui/crates/ainb-hangar-core" }
+ainb-hangar-core = { path = "../ainb-hangar-core" }
 
 tokio = { workspace = true }
 async-trait = "0.1"
@@ -47,7 +43,7 @@ tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-ainb-plugin-protocol = { path = "../../ainb-tui/crates/ainb-plugin-protocol" }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
 tempfile = { workspace = true }
 # Event fixtures in the issue-list reducer tests carry `DateTime<Utc>` start
 # stamps (`TaskStarted`); the proto crate re-exports the types but tests build
