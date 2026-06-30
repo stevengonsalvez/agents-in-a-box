@@ -31,7 +31,6 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    Agents,       // Agent selection
     Catalog,      // Browse catalog/marketplace
     Config,       // Settings & presets
     Sessions,     // Session manager
@@ -55,7 +54,6 @@ impl SidebarItem {
     /// Get the display icon for this item (emoji)
     pub fn icon(&self) -> &'static str {
         match self {
-            Self::Agents => "🤖",
             Self::Catalog => "📦",
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
@@ -79,7 +77,6 @@ impl SidebarItem {
     /// Get the display label for this item
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Agents => "Agents",
             Self::Catalog => "Catalog",
             Self::Config => "Config",
             Self::Sessions => "Sessions",
@@ -103,7 +100,6 @@ impl SidebarItem {
     /// Get the description for this item
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Agents => "Select & Configure",
             Self::Catalog => "Browse & Bootstrap",
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
@@ -127,7 +123,6 @@ impl SidebarItem {
     /// Get the keyboard shortcut for this item
     pub fn shortcut(&self) -> &'static str {
         match self {
-            Self::Agents => "a",
             Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
@@ -152,7 +147,6 @@ impl SidebarItem {
     /// Get all items in order
     pub fn all() -> &'static [SidebarItem] {
         &[
-            Self::Agents,
             Self::Catalog,
             Self::Config,
             Self::Sessions,
@@ -565,7 +559,7 @@ mod tests {
         // Collapsed items are exactly 1 row; the selected item expands to 2
         // (its description). So consecutive shortcut rows step by 1 everywhere
         // except a single step of 2 — the gap straddling the selected item.
-        for selected in [0usize, 6, 17] {
+        for selected in [0usize, 6, 16] {
             let rows: Vec<u16> = shortcut_columns(selected).iter().map(|(y, _)| *y).collect();
             assert_eq!(rows.len(), SidebarItem::all().len());
             let gaps: Vec<u16> = rows.windows(2).map(|w| w[1] - w[0]).collect();
@@ -613,9 +607,9 @@ mod tests {
 
     #[test]
     fn test_sidebar_item_properties() {
-        let item = SidebarItem::Agents;
-        assert_eq!(item.label(), "Agents");
-        assert_eq!(item.icon(), "🤖");
+        let item = SidebarItem::Config;
+        assert_eq!(item.label(), "Config");
+        assert_eq!(item.icon(), "⚙️");
     }
 
     #[test]

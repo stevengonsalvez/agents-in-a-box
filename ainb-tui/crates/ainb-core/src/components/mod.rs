@@ -1,7 +1,6 @@
 // ABOUTME: UI components for the TUI interface including session list, logs viewer, and help
 
 pub mod action_card;
-pub mod agent_selection;
 pub mod attached_terminal;
 pub mod auth_provider_popup;
 pub mod auth_setup;
@@ -44,7 +43,6 @@ pub mod tmux_preview;
 pub mod welcome_panel;
 
 pub use action_card::{ActionCard, ActionCardGridState, ActionCardId};
-pub use agent_selection::AgentSelectionComponent;
 pub use attached_terminal::AttachedTerminalComponent;
 pub use auth_provider_popup::AuthProviderPopupComponent;
 pub use auth_setup::AuthSetupComponent;

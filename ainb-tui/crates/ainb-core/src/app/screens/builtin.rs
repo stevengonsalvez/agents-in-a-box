@@ -4,8 +4,7 @@ use ratatui::{Frame, layout::Rect};
 
 use super::{EventOutcome, Screen, ids};
 use crate::app::AppState;
-use crate::components::{
-    AgentSelectionComponent, AttachedTerminalComponent, AuthProviderPopupComponent,
+use crate::components::{ AttachedTerminalComponent, AuthProviderPopupComponent,
     AuthSetupComponent, ChangelogComponent, ConfigPopupComponent, ConfigScreenComponent,
     GitViewComponent, HomeScreenV2Component, LogHistoryViewerComponent, OnboardingComponent,
     SessionRecovery, SetupMenuComponent,
@@ -671,34 +670,6 @@ impl Screen for HomeScreen {
     }
 }
 
-pub struct AgentSelectionScreen {
-    component: AgentSelectionComponent,
-}
-
-impl AgentSelectionScreen {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            component: AgentSelectionComponent::new(),
-        }
-    }
-}
-
-impl Default for AgentSelectionScreen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Screen for AgentSelectionScreen {
-    fn id(&self) -> &str {
-        ids::AGENT_SELECTION
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        self.component.render(frame, area, state);
-    }
-}
-
 pub struct ConfigScreen {
     component: ConfigScreenComponent,
     auth_provider_popup: AuthProviderPopupComponent,
@@ -906,7 +877,6 @@ use super::super::registry::ScreenRegistry;
 /// in `LayoutComponent::render`.
 pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(HomeScreen::new()));
-    registry.register(Box::new(AgentSelectionScreen::new()));
     registry.register(Box::new(ConfigScreen::new()));
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
@@ -971,7 +941,6 @@ mod tests {
         // Every full-screen view gets a Screen impl.
         for id in [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
             ids::LOG_HISTORY,
             ids::CHANGELOG,

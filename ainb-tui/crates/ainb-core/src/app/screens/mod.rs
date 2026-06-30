@@ -17,7 +17,6 @@ pub type ScreenId = String;
 /// equality comparisons against `ScreenId` (`String`) without allocation.
 pub mod ids {
     pub const HOME: &str = "home";
-    pub const AGENT_SELECTION: &str = "agent_selection";
     pub const CONFIG: &str = "config";
     pub const CATALOG: &str = "catalog";
     pub const ANALYTICS: &str = "analytics";
@@ -107,7 +106,6 @@ mod tests {
     fn screen_ids_are_unique() {
         let all = [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
             ids::CATALOG,
             ids::ANALYTICS,

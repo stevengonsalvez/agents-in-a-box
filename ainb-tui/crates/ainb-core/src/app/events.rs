@@ -223,7 +223,6 @@ pub enum AppEvent {
     WelcomePanelPageUp,      // Page up in welcome panel
     WelcomePanelPageDown,    // Page down in welcome panel
     WelcomePanelCopyContent, // Copy welcome panel content to clipboard (y)
-    GoToAgentSelection,      // Navigate to agent selection view
     GoToCatalog,             // Navigate to catalog view (coming soon)
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
@@ -374,13 +373,6 @@ pub enum AppEvent {
     InboxCycleAgent,      // Inbox: cycle agent filter (p)
     InboxRefresh,         // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
-    AgentSelectionBack,         // Return to home screen (Esc)
-    AgentSelectionNextProvider, // Navigate to next provider
-    AgentSelectionPrevProvider, // Navigate to previous provider
-    AgentSelectionNextModel,    // Navigate to next model
-    AgentSelectionPrevModel,    // Navigate to previous model
-    AgentSelectionToggleExpand, // Toggle provider expand
-    AgentSelectionSelect,       // Select current agent (Enter)
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
     ConfigNextCategory,    // Navigate to next category
@@ -1438,9 +1430,6 @@ impl EventHandler {
         }
 
         // AINB 2.0: Handle agent selection view
-        if state.current_screen == screen_ids::AGENT_SELECTION {
-            return Self::handle_agent_selection_keys(key_event, state);
-        }
 
         // AINB 2.0: Handle auth provider popup (overlays config screen)
         if state.auth_provider_popup_state.show_popup {
@@ -2668,7 +2657,6 @@ impl EventHandler {
         // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
         // unused across every screen handler.
         match key_event.code {
-            KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
@@ -2730,33 +2718,6 @@ impl EventHandler {
 
         tracing::debug!("HomeScreen V2 key handler returning: {:?}", event);
         event
-    }
-
-    // AINB 2.0: Agent selection key handling
-    fn handle_agent_selection_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        let agent_state = &state.agent_selection_state;
-
-        // Check if a provider is expanded (showing models)
-        if agent_state.expanded_provider.is_some() {
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::AgentSelectionBack),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AgentSelectionPrevModel),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AgentSelectionNextModel),
-                KeyCode::Tab => Some(AppEvent::AgentSelectionNextProvider),
-                KeyCode::BackTab => Some(AppEvent::AgentSelectionPrevProvider),
-                KeyCode::Enter => Some(AppEvent::AgentSelectionSelect),
-                KeyCode::Char(' ') => Some(AppEvent::AgentSelectionToggleExpand),
-                _ => None,
-            }
-        } else {
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::AgentSelectionBack),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AgentSelectionPrevProvider),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AgentSelectionNextProvider),
-                KeyCode::Enter | KeyCode::Char(' ') => Some(AppEvent::AgentSelectionToggleExpand),
-                _ => None,
-            }
-        }
     }
 
     fn handle_config_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
@@ -4099,10 +4060,6 @@ impl EventHandler {
                 if let Some(tile) = state.home_screen_state.selected().cloned() {
                     tracing::info!("Selected tile: {:?}", tile);
                     match tile {
-                        HomeTile::Agents => {
-                            tracing::info!("Navigating to AgentSelection view");
-                            state.current_screen = screen_ids::AGENT_SELECTION.to_string();
-                        }
                         HomeTile::Sessions => {
                             tracing::info!("Navigating to SessionList view");
                             state.current_screen = screen_ids::SESSION_LIST.to_string();
@@ -4172,9 +4129,6 @@ impl EventHandler {
                 tracing::debug!("HomeScreen V2 sidebar select");
                 let selected = state.home_screen_v2_state.sidebar.selected_item();
                 match selected {
-                    SidebarItem::Agents => {
-                        state.current_screen = screen_ids::AGENT_SELECTION.to_string();
-                    }
                     SidebarItem::Catalog => {
                         state.add_info_notification("Skill catalog coming soon!".to_string());
                     }
@@ -4426,10 +4380,6 @@ impl EventHandler {
                         state.add_error_notification(format!("Failed to copy: {}", e));
                     }
                 }
-            }
-            AppEvent::GoToAgentSelection => {
-                tracing::info!("Navigating to AgentSelection");
-                state.current_screen = screen_ids::AGENT_SELECTION.to_string();
             }
             AppEvent::GoToCatalog => {
                 state.add_info_notification("Skill catalog coming soon!".to_string());
@@ -5190,49 +5140,7 @@ impl EventHandler {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
                 state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
-            }
-            // AINB 2.0: Agent selection events
-            AppEvent::AgentSelectionBack => {
-                state.current_screen = screen_ids::HOME.to_string();
-            }
-            AppEvent::AgentSelectionNextProvider => {
-                state.agent_selection_state.select_next_provider();
-            }
-            AppEvent::AgentSelectionPrevProvider => {
-                state.agent_selection_state.select_prev_provider();
-            }
-            AppEvent::AgentSelectionNextModel => {
-                state.agent_selection_state.select_next_model();
-            }
-            AppEvent::AgentSelectionPrevModel => {
-                state.agent_selection_state.select_prev_model();
-            }
-            AppEvent::AgentSelectionToggleExpand => {
-                state.agent_selection_state.toggle_expand();
-            }
-            AppEvent::AgentSelectionSelect => {
-                if state.agent_selection_state.is_current_available() {
-                    // Store selected agent and proceed to session creation
-                    state.add_success_notification(format!(
-                        "Selected: {} - {}",
-                        state
-                            .agent_selection_state
-                            .current_provider()
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("Unknown"),
-                        state
-                            .agent_selection_state
-                            .current_model()
-                            .map(|m| m.name.as_str())
-                            .unwrap_or("Unknown")
-                    ));
-                    // Go to session list or new session
-                    state.current_screen = screen_ids::SESSION_LIST.to_string();
-                } else {
-                    state.add_warning_notification("This agent is not available yet.".to_string());
-                }
-            }
-            // AINB 2.0: Config screen events
+            }            // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
                 state.current_screen = screen_ids::HOME.to_string();
@@ -6921,7 +6829,6 @@ fn is_known_screen_id(id: &str) -> bool {
     matches!(
         id,
         ids::HOME
-            | ids::AGENT_SELECTION
             | ids::CONFIG
             | ids::CATALOG
             | ids::ANALYTICS
@@ -7028,7 +6935,6 @@ mod navigate_to_tests {
     fn is_known_screen_id_accepts_all_builtin_ids() {
         for id in [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
             ids::CATALOG,
             ids::ANALYTICS,

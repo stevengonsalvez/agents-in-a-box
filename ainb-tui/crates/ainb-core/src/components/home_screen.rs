@@ -130,12 +130,6 @@ impl HomeScreenComponent {
         // Render tiles: Agents, Catalog, Config (row 1)
         self.render_tile(
             frame,
-            row1_cols[1],
-            &HomeTile::Agents,
-            home_state.selected_tile == 0,
-        );
-        self.render_tile(
-            frame,
             row1_cols[3],
             &HomeTile::Catalog,
             home_state.selected_tile == 1,

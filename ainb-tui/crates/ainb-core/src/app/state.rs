@@ -1041,7 +1041,6 @@ pub(crate) fn daemons_sync_probe() -> (
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Agents,       // Agent selection
     Catalog,      // Browse catalog/marketplace
     SkillManager, // Install / sync / doctor (spec §10.1)
     Config,       // Settings & presets
@@ -1055,7 +1054,6 @@ pub enum HomeTile {
 impl HomeTile {
     pub fn all() -> Vec<HomeTile> {
         vec![
-            HomeTile::Agents,
             HomeTile::Catalog,
             HomeTile::SkillManager,
             HomeTile::Config,
@@ -1069,7 +1067,6 @@ impl HomeTile {
 
     pub fn label(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "Agents",
             HomeTile::Catalog => "Catalog",
             HomeTile::SkillManager => "Skills (manager)",
             HomeTile::Config => "Config",
@@ -1083,7 +1080,6 @@ impl HomeTile {
 
     pub fn description(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "Select & Configure",
             HomeTile::Catalog => "Browse & Bootstrap",
             HomeTile::SkillManager => "Install / sync / doctor (Z)",
             HomeTile::Config => "Settings & Presets",
@@ -1097,7 +1093,6 @@ impl HomeTile {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "🤖",
             HomeTile::Catalog => "📦",
             HomeTile::SkillManager => "🧰",
             HomeTile::Config => "⚙️",
@@ -1440,92 +1435,6 @@ impl AgentProvider {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentSelectionState {
-    pub selected_provider: usize,
-    pub selected_model: usize,
-    pub providers: Vec<AgentProvider>,
-    pub expanded_provider: Option<usize>, // Which provider is expanded to show models
-}
-
-impl Default for AgentSelectionState {
-    fn default() -> Self {
-        Self {
-            selected_provider: 0,
-            selected_model: 0,
-            providers: AgentProvider::all(),
-            expanded_provider: Some(0), // Claude expanded by default
-        }
-    }
-}
-
-impl AgentSelectionState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn current_provider(&self) -> Option<&AgentProvider> {
-        self.providers.get(self.selected_provider)
-    }
-
-    pub fn current_model(&self) -> Option<&AgentModel> {
-        self.current_provider().and_then(|p| p.models.get(self.selected_model))
-    }
-
-    pub fn select_next_provider(&mut self) {
-        if !self.providers.is_empty() {
-            self.selected_provider = (self.selected_provider + 1) % self.providers.len();
-            self.selected_model = 0;
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn select_prev_provider(&mut self) {
-        if !self.providers.is_empty() {
-            self.selected_provider = if self.selected_provider == 0 {
-                self.providers.len() - 1
-            } else {
-                self.selected_provider - 1
-            };
-            self.selected_model = 0;
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn select_next_model(&mut self) {
-        if let Some(provider) = self.current_provider() {
-            if !provider.models.is_empty() {
-                self.selected_model = (self.selected_model + 1) % provider.models.len();
-            }
-        }
-    }
-
-    pub fn select_prev_model(&mut self) {
-        if let Some(provider) = self.current_provider() {
-            if !provider.models.is_empty() {
-                self.selected_model = if self.selected_model == 0 {
-                    provider.models.len() - 1
-                } else {
-                    self.selected_model - 1
-                };
-            }
-        }
-    }
-
-    pub fn toggle_expand(&mut self) {
-        if self.expanded_provider == Some(self.selected_provider) {
-            self.expanded_provider = None;
-        } else {
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn is_current_available(&self) -> bool {
-        self.current_provider()
-            .map(|p| p.status == ProviderStatus::Available)
-            .unwrap_or(false)
-    }
-}
 
 // ============================================================================
 // Configuration Screen State
@@ -3006,7 +2915,6 @@ pub struct AppState {
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
-    pub agent_selection_state: AgentSelectionState,
     pub config_screen_state: ConfigScreenState,
     pub auth_provider_popup_state: AuthProviderPopupState,
     /// Config popup state for choice/text input popups in config screen
@@ -3547,7 +3455,6 @@ impl Default for AppState {
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
             home_screen_v2_state,
-            agent_selection_state: AgentSelectionState::default(),
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
             auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
             config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
