@@ -503,11 +503,32 @@ fn load_or_generate_keys(dir: &Path, subject: &str) -> anyhow::Result<VapidKeys>
 /// Write `bytes` to `path` with `0600` perms on Unix (the private key must not
 /// be world-readable).
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)?;
     #[cfg(unix)]
     {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("vapid.json");
+        let tmp = path.with_file_name(format!("{file_name}.tmp.{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("vapid.json");
+        let tmp = path.with_file_name(format!("{file_name}.tmp.{}", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
     }
     Ok(())
 }
@@ -748,5 +769,22 @@ mod tests {
             "must resolve via cwd, not worktree_path"
         );
         assert!(p["title"].as_str().unwrap().contains("managed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_creates_vapid_file_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vapid.json");
+        write_private(&path, b"{\"private_key\":\"secret\"}").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "vapid private key must start private");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{\"private_key\":\"secret\"}"
+        );
     }
 }
