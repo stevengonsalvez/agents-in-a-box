@@ -360,7 +360,9 @@ async fn send_message(
     if html {
         payload["parse_mode"] = json!("HTML");
     }
-    let resp = client.post(&url).json(&payload).send().await.context("sendMessage request")?;
+    let resp = client.post(&url).json(&payload).send().await.map_err(|e| {
+        anyhow::anyhow!("sendMessage request failed: {}", describe_reqwest_error(&e))
+    })?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -598,6 +600,25 @@ mod tests {
         assert!(s.contains("phase=api"), "got: {s}");
         assert!(s.contains("ok=false"), "got: {s}");
         assert!(s.contains("Unauthorized"), "got: {s}");
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_description_does_not_include_telegram_token_url() {
+        let token = "123456789:AAHabcdefghijklmnopqrstuvwxyz123456";
+        let client =
+            reqwest::Client::builder().timeout(Duration::from_millis(100)).build().unwrap();
+        let err = client
+            .get(format!("http://127.0.0.1:9/bot{token}/sendMessage"))
+            .send()
+            .await
+            .expect_err("closed localhost port should fail");
+        let s = describe_reqwest_error(&err);
+        assert!(!s.contains(token), "token leaked in error: {s}");
+        assert!(!s.contains("/bot"), "bot URL path leaked in error: {s}");
+        assert!(
+            !s.contains("sendMessage"),
+            "request URL leaked in error: {s}"
+        );
     }
 
     // ── Relay runs OFF the poll loop; getUpdates keeps progressing ───────────

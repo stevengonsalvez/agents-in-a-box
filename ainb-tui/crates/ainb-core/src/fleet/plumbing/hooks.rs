@@ -44,6 +44,18 @@ pub const ATC_EVENTS: &[(&str, &str)] = &[
     ("StopFailure", ""),
 ];
 
+/// Single-quote a string for POSIX shell command interpolation.
+///
+/// Hook script paths can live under user homes with spaces or shell metacharacters,
+/// so the generated command must pass the path as one literal argv.
+#[must_use]
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the ATC-managed hook entry for `event` (scoped to `matcher`), pointing
 /// at `hook_script`.
 ///
@@ -55,6 +67,7 @@ pub const ATC_EVENTS: &[(&str, &str)] = &[
 /// settings shape (matcher `""` = all events of this type).
 #[must_use]
 pub fn managed_entry(event: &str, matcher: &str, hook_script: &str) -> Value {
+    let hook_script = shell_quote(hook_script);
     let command = format!(
         "AINB_HOOK_EVENT={event} AINB_HOOK_MATCHER={matcher} AINB_MANAGED=atc {hook_script}"
     );
@@ -291,6 +304,16 @@ mod tests {
         );
         // StopFailure installed (observational ERR source).
         assert!(merged["hooks"]["StopFailure"].is_array());
+    }
+
+    #[test]
+    fn managed_entry_shell_quotes_hook_script_path() {
+        let entry = managed_entry("Stop", "", "/Users/Stevie G/a'b/notify.sh");
+        let cmd = entry["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.ends_with("'/Users/Stevie G/a'\\''b/notify.sh'"),
+            "script path must be single shell argument: {cmd}"
+        );
     }
 
     #[test]
