@@ -186,6 +186,44 @@ fn program(argv0: &str) -> String {
     argv0.to_string()
 }
 
+/// Install one dependency, CAPTURING output (vs `provision`, which inherits
+/// stdio). For the TUI deps screen's `i` action: the press is the consent, so
+/// any dep with a runnable argv (incl. brew/curl) is run; manual/bundled deps
+/// return an error telling the user to run it themselves. On failure returns a
+/// short message (last stderr lines) for inline display. Blocking — call inside
+/// `spawn_blocking`.
+pub fn install_dep_capture(dep: &Dep) -> std::result::Result<(), String> {
+    let p = plan(&dep.install);
+    let Some(argv) = p.argv else {
+        return Err(format!("no automatic installer — run: {}", p.display));
+    };
+    let (head, rest) = argv
+        .split_first()
+        .ok_or_else(|| "empty install command".to_string())?;
+    let out = Command::new(program(head))
+        .args(rest)
+        .output()
+        .map_err(|e| format!("could not run {head}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+    let msg = tail
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(if msg.is_empty() {
+        format!("{head} exited with {}", out.status)
+    } else {
+        msg
+    })
+}
+
 /// Execute a plan's argv, inheriting stdio so the user sees installer output.
 fn execute(argv: &[String]) -> Result<()> {
     let (head, rest) = argv.split_first().ok_or_else(|| anyhow::anyhow!("empty argv"))?;

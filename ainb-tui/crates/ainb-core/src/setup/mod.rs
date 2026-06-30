@@ -14,5 +14,6 @@ pub use detect::{
 };
 pub use installer::{Agent, build_script, generate as generate_install_script};
 pub use provision::{
-    ConsentLevel, ProvisionMode, ProvisionOutcome, install_tmux_config, provision,
+    ConsentLevel, ProvisionMode, ProvisionOutcome, install_dep_capture, install_tmux_config,
+    provision,
 };
