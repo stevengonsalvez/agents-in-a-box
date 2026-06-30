@@ -13,6 +13,7 @@ If you're looking for a specific topic, start here:
 | [TUI](#tui) | The `ainb` terminal app + CLI |
 | [Toolkit](#toolkit) | Portable skills, agents, workflows (ainb-toolkit external repo) |
 | [Plugins](#plugins) | v2 subprocess plugin system |
+| [Observability](#observability) | Usage/cost, live processes, causality, telemetry |
 | [Knowledge](#knowledge) | `reflect` / `recall` GraphRAG + QMD |
 | [Contributing](#contributing) | Build, test, ship |
 | [Reference](#reference) | Architecture, glossary, deep dives |
@@ -58,6 +59,16 @@ The v2 subprocess plugin system for the ainb TUI:
 - [Authoring guide](plugins/authoring.md) — write your own
 - [Wire spec v2](plugins/spec-v2.md) — the JSON-RPC contract
 - [Changelog](plugins/changelog.md)
+
+## Observability
+
+See what your agents are doing, spending, and running.
+
+- [Overview](observability/overview.md) — which tool answers which question
+- [Usage analytics (burndown)](plugins/burndown.md) — spend by day / project / model
+- [abtop](plugins/abtop.md) — live agent-process monitor
+- [witr](plugins/witr.md) — process-causality tracing
+- [OpenTelemetry → Grafana Cloud](reference/otel-grafana.md) — ship metrics/logs/traces off-box, with example dashboards
 
 ## Knowledge
 
