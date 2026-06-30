@@ -79,6 +79,7 @@ impl HelpComponent {
             row("? / Shift+H", "Toggle this help"),
             row("q / Esc", "Quit / home"),
             row("Ctrl+C", "Force quit"),
+            row("Shift+drag", "Select text to copy (Opt+drag in some terminals)"),
         ];
 
         let help_list = List::new(help_items).block(
