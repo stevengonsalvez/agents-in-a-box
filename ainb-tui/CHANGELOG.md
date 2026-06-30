@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-06-30
+### Added
+- **docs**: map setup-catalog dep ids to docsite pages
+- **onboarding**: focus deps + per-row docs link and background install
+- **setup**: add install_dep_capture for in-TUI installs
+
+### Fixed
+- Merge pull request #371 from stevengonsalvez/o/rtk-pill-project-hook-detect
+- **onboarding**: render multi-line install hints line by line
+- **otel**: pin Alloy storage path so it doesn't litter the CWD
+- **statusline**: detect project-local RTK hook for the RTK pill
+
+### Documentation
+- **tui**: note Shift/Opt+drag to copy in the help overlay
+- feat(docs): map setup-catalog dep ids to docsite pages
+- test(tripwire): cover the deps-screen installer + fix stale arrow assert
+
+
 ## [1.10.0] - 2026-06-30
 ### Added
 - Merge pull request #360 from stevengonsalvez/f/notifyd-reap
