@@ -23,13 +23,18 @@ case "${GRAFANA_API_TOKEN:-}" in ""|__GRAFANA_*|REPLACE_*) echo "fill creds in $
 command -v alloy >/dev/null || { echo "alloy not installed — brew install grafana/grafana/alloy"; exit 1; }
 
 mkdir -p "$(dirname "$LOG")"
+# Alloy's WAL/data dir. Pin it under the otel home with an absolute
+# --storage.path so Alloy never creates a stray ./data-alloy in whatever
+# directory ainb happened to launch from.
+DATA_DIR="$OTEL_DIR/data-alloy"
+mkdir -p "$DATA_DIR"
 
 # Kill only our own named session, never the server.
 tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION"
 
 tmux new-session -d -s "$SESSION" -n alloy
 tmux send-keys -t "$SESSION:alloy" \
-  "export GRAFANA_OTLP_ENDPOINT='$GRAFANA_OTLP_ENDPOINT' GRAFANA_INSTANCE_ID='$GRAFANA_INSTANCE_ID' GRAFANA_API_TOKEN='$GRAFANA_API_TOKEN'; alloy run --stability.level=experimental --server.http.listen-addr=127.0.0.1:12345 '$CONFIG' 2>&1 | tee '$LOG'" C-m
+  "export GRAFANA_OTLP_ENDPOINT='$GRAFANA_OTLP_ENDPOINT' GRAFANA_INSTANCE_ID='$GRAFANA_INSTANCE_ID' GRAFANA_API_TOKEN='$GRAFANA_API_TOKEN'; alloy run --stability.level=experimental --server.http.listen-addr=127.0.0.1:12345 --storage.path '$DATA_DIR' '$CONFIG' 2>&1 | tee '$LOG'" C-m
 
 echo "Alloy starting in tmux session '$SESSION'"
 echo "  config:  $CONFIG"
