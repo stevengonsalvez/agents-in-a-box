@@ -113,12 +113,12 @@ fn onboarding_dependency_step_renders_topics() {
         post.contains("[recommended]") || post.contains("[optional]"),
         "no tier tags rendered (topic/tier model not active):\n{post}"
     );
-    // A fresh HOME leaves ainb-toolkit/statusline unsatisfied, so at least one
-    // install hint (the → arrow) must render — proves missing deps surface their
-    // provisioner, not just that everything happened to be installed.
+    // Install hints moved off each row (they truncated in the narrow columns)
+    // into the focused-dep detail band; the footer advertises the install
+    // affordance. Assert the new keymap footer is present.
     assert!(
-        post.contains('\u{2192}'),
-        "no install-hint arrow rendered:\n{post}"
+        post.contains("i install"),
+        "deps footer missing the install affordance:\n{post}"
     );
     // Negative: we are not stuck on the loading placeholder.
     assert!(
