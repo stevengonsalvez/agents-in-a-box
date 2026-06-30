@@ -6,6 +6,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.10.0] - 2026-06-30
+### Added
+- Merge pull request #360 from stevengonsalvez/f/notifyd-reap
+- Merge pull request #368 from stevengonsalvez/worktree-add-source-legend
+- Merge pull request #369 from stevengonsalvez/f/raycast-multi-host-ssh-paste
+- Merge pull request #370 from stevengonsalvez/o/rtk-statusline-pill
+- feat!: remove the destructive `ainb migrate` subcommand
+- **abtop**: link the docsite page from the empty/ready/missing states
+- **notifyd**: add `notifyd reap` CLI verb
+- **notifyd**: add process enumerator + orphan classifier
+- **notifyd**: reap orphan daemons, sparing the live owner
+- **otel**: surface the docsite link in otel setup (CLI + onboarding)
+- **raycast**: add Set SSH Host command to switch paste target
+- **raycast**: add shared host registry for cc-paste scripts
+- **raycast**: target a selectable host from clipboard SSH paste
+- **setup**: bootstrap node/cargo/uv toolchains in generated script
+- **setup**: check gh auth status in the GitHub setup section
+- **setup**: install ainb-owned tools by default in generated script
+- **skill-manager**: auto-gh add-source input + backend legend
+- **skill-manager**: confirm before removing a unit with [r]
+- **statusline**: add RTK pill to Claude Code statusline
+- **tui**: mark Shift chords with a glyph in the menu bar
+- **tui**: surface notifyd daemons and orphans in Daemons overlay
+- **witr**: link the docsite page from the empty/missing states
+
+### Fixed
+- Merge pull request #358 from stevengonsalvez/f/notifyd-orphan-view-and-spawn-hardening
+- Merge pull request #362 from stevengonsalvez/worktree-picker-clone-error-cta
+- Merge pull request #364 from stevengonsalvez/o/debug-errors
+- Merge pull request #366 from stevengonsalvez/f/codex-hooks-parity
+- **adapters**: refuse to uninstall protected user state
+- **new-session**: pin auth-modal CTA so long gh errors can't hide it
+- **new-session**: surface exact git-auth error in dismissible modal
+- **notifyd**: classify by live socket probe and exclude CLI calls
+- **notifyd**: harden lazy-spawn against orphan daemons
+- **notifyd**: reap spares the real socket holder, not the pid-file owner
+- **otel**: disambiguate local Alloy vs remote Grafana Cloud endpoint
+- **setup**: detect Claude plugins via installed_plugins.json registry
+- **setup**: install reflect plugin via HTTPS marketplace, retarget to ainb-reflect-memory
+- **setup**: point the toolkit install at additive `ainb skill sync`
+- **skill-manager**: reset unit cursor when the search filter changes
+- **tui**: bind capital S to star/unstar in session list
+- **tui**: cap notifyd overlay rows to height with overflow pointer
+- **tui**: correct stale help bindings + spell out Shift chords
+- **tui**: drop dead 'k kill' hint from session preview footer
+- **tui**: point orphan cleanup hint at `ainb notifyd reap`
+- **tui**: survive transient EINTR from terminal I/O on flaky links
+- align Codex notify hook parity
+
+### Documentation
+- **otel**: add Grafana dashboard examples + concrete endpoint
+- **plugins**: use HTTPS marketplace-add to avoid SSH default
+- group burndown/abtop/witr/otel under an Observability section
+- rewrite install as additive; drop the migrate --clean recipe
+
+### Other
+- pin reflect plugin to v5.0.4
+- **notifyd**: close nc liveness probe with -N
+- **tui**: drop the Boss/container option from new-session
+- **tui**: hide docker/boss/container from the setup surface
+
 ### Removed
 - **cli**: remove the `ainb migrate` subcommand. Its `--clean` mode wiped each
   tool's entire install root (e.g. all of `~/.claude`) before re-syncing from
