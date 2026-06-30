@@ -189,6 +189,19 @@ See `config/example.config.toml` for all available options with documentation.
 | `[ui_preferences]` | `show_container_status` | Show container mode icons |
 | `[ui_preferences]` | `show_git_status` | Show git changes in session list |
 
+## Conventions (paths & plugins)
+
+- **All ainb state lives under `~/.agents-in-a-box/`** — config, plus the Hangar
+  SQLite DB, control socket, daemon token, state and logs
+  (`~/.agents-in-a-box/hangar.db`, `~/.agents-in-a-box/hangar.sock`,
+  `~/.agents-in-a-box/hangar/…`). **Never `~/.ainb/`.** New persistence resolves
+  from `dirs::home_dir()?.join(".agents-in-a-box")` (or `$AINB_HANGAR_HOME`).
+- **TUI plugins live in `ainb-tui/crates/ainb-plugin-<name>/`** as workspace
+  members — folder name == package name (`ainb-plugin-hangar`, `ainb-plugin-witr`,
+  …). The repo-root `plugins/` directory is **only** for Claude Code harness
+  plugins (`ainb-fleet`, `ainb-hooks`, `reflect`); never put a TUI/subprocess
+  plugin there.
+
 ## Monorepo Context
 
 This TUI can reference packages from the parent `toolkit/` directory. Git operations work against the monorepo root.
