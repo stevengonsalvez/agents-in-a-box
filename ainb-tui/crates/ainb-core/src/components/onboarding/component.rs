@@ -9,8 +9,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::state::{OnboardingState, OnboardingStep};
+use super::state::{DepInstall, OnboardingState, OnboardingStep};
 use crate::setup::{DepReport, DepState, Tier, TopicReport};
+use std::collections::HashMap;
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -23,6 +24,7 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const ERROR_RED: Color = Color::Rgb(220, 80, 80);
 const WARNING_YELLOW: Color = Color::Rgb(220, 180, 80);
+const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 
 /// The main onboarding wizard component
 pub struct OnboardingComponent;
@@ -294,7 +296,8 @@ impl OnboardingComponent {
             .margin(1)
             .constraints([
                 Constraint::Length(3), // Status summary + one-liner legend
-                Constraint::Min(10),   // Dependency columns
+                Constraint::Min(8),    // Dependency columns
+                Constraint::Length(4), // Focused-dep detail band (docs link + install)
                 Constraint::Length(2), // Instructions
             ])
             .split(inner);
@@ -345,13 +348,16 @@ impl OnboardingComponent {
         frame.render_widget(summary, content_layout[0]);
 
         // Distribute topics across two columns, balanced by rendered height, so
-        // the whole width is used instead of one tall narrow list.
+        // the whole width is used instead of one tall narrow list. The focused
+        // dep is highlighted; its full docs link + install action live in the
+        // detail band below (full width, so long URLs never truncate).
+        let focused_id = state.focused_dep().map(|d| d.id);
         let mut col_items: [Vec<ListItem>; 2] = [Vec::new(), Vec::new()];
         let mut col_lines = [0usize, 0usize];
         for topic in &status.topics {
             let target = if col_lines[0] <= col_lines[1] { 0 } else { 1 };
             let before = col_items[target].len();
-            push_topic_items(&mut col_items[target], topic);
+            push_topic_items(&mut col_items[target], topic, focused_id, &state.install_states);
             col_lines[target] += col_items[target].len() - before;
         }
 
@@ -364,6 +370,11 @@ impl OnboardingComponent {
                 List::new(std::mem::take(&mut col_items[i])).style(Style::default().bg(PANEL_BG));
             frame.render_widget(list, *area);
         }
+
+        // Focused-dep detail band — the full-width home for the docs link and
+        // install action (the deps grid is too narrow for either).
+        let detail = focused_detail_lines(state.focused_dep(), &state.install_states);
+        frame.render_widget(Paragraph::new(detail), content_layout[2]);
 
         // Footer priority: agent picker (after G) > last action result (error >
         // success) > key hints.
@@ -382,20 +393,15 @@ impl OnboardingComponent {
                 msg.clone(),
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             )
-        } else if status.required_met() {
-            Span::styled(
-                "Enter continue • G generate install script • I tmux config • R re-check",
-                Style::default().fg(MUTED_GRAY),
-            )
         } else {
             Span::styled(
-                "Install required deps • G generate install script • I tmux config • R re-check",
+                "↑↓ focus • i install • t tmux • g script • r recheck • Enter next",
                 Style::default().fg(MUTED_GRAY),
             )
         };
 
         let instr_widget = Paragraph::new(instr_span).alignment(Alignment::Center);
-        frame.render_widget(instr_widget, content_layout[2]);
+        frame.render_widget(instr_widget, content_layout[3]);
     }
 
     /// Render git directories step
@@ -1074,7 +1080,12 @@ impl Default for OnboardingComponent {
 /// Render one topic (header + its deps) into a column's item list. Each dep
 /// shows its icon, name, detected detail, tier tag and a dimmed one-liner "why",
 /// plus an indented install hint when it's missing.
-fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
+fn push_topic_items(
+    items: &mut Vec<ListItem<'static>>,
+    topic: &TopicReport,
+    focused_id: Option<&str>,
+    install_states: &HashMap<String, DepInstall>,
+) {
     items.push(ListItem::new(Line::from(vec![
         Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
         Span::styled(
@@ -1090,13 +1101,28 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
         } else {
             format!(" [{}]", d.tier.label())
         };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("  ", Style::default()),
+        let is_focused = focused_id == Some(d.id);
+        // A live install marker so a row reflects its background install even
+        // when it isn't the focused row (the detail band carries the detail).
+        let (marker, marker_color) = match install_states.get(d.id) {
+            Some(DepInstall::Installing) => ("⟳ ", WARNING_YELLOW),
+            Some(DepInstall::Done) => ("✓ ", SELECTION_GREEN),
+            Some(DepInstall::Error(_)) => ("✗ ", ERROR_RED),
+            None => ("", MUTED_GRAY),
+        };
+        // The install command no longer rides each row (it truncated in the
+        // narrow column) — it lives full-width in the focused-dep detail band.
+        let line = Line::from(vec![
+            Span::styled(
+                if is_focused { "▶ " } else { "  " },
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 checkbox,
                 Style::default().fg(box_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" ", Style::default()),
+            Span::styled(marker, Style::default().fg(marker_color)),
             Span::styled(
                 d.name,
                 if d.satisfied {
@@ -1108,22 +1134,80 @@ fn push_topic_items(items: &mut Vec<ListItem<'static>>, topic: &TopicReport) {
             Span::styled(dep_state_detail(&d.state), Style::default().fg(MUTED_GRAY)),
             Span::styled(tier_tag, Style::default().fg(MUTED_GRAY)),
             Span::styled(format!("  {}", d.why), Style::default().fg(SUBDUED_BORDER)),
-        ])));
-        if !d.satisfied {
-            // Some install hints are multi-line (e.g. a Claude plugin adds its
-            // marketplace, then installs) — render each line on its own row so
-            // the embedded newline doesn't smash two commands into one
-            // ("…|| trueclaude plugin install…").
-            for line in d.install_hint.split('\n') {
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled("       → ", Style::default().fg(CORNFLOWER_BLUE)),
-                    Span::styled(line.to_string(), Style::default().fg(CORNFLOWER_BLUE)),
-                ])));
-            }
-        }
+        ]);
+        let item = ListItem::new(line);
+        items.push(if is_focused {
+            item.style(Style::default().bg(LIST_HIGHLIGHT_BG))
+        } else {
+            item
+        });
     }
     // Blank spacer line between sections for visual separation.
     items.push(ListItem::new(Line::from("")));
+}
+
+/// The full-width detail band under the dep columns: the focused dep's docs
+/// link (full bare URL — auto-linkified, copyable, untruncated) and its install
+/// action / status. The grid is too narrow for either, so they live here.
+fn focused_detail_lines(
+    dep: Option<&DepReport>,
+    install_states: &HashMap<String, DepInstall>,
+) -> Vec<Line<'static>> {
+    let Some(d) = dep else {
+        return vec![Line::from(Span::styled(
+            "↑/↓ to focus a dependency",
+            Style::default().fg(MUTED_GRAY),
+        ))];
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled("▶ ", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            d.name,
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {}", d.why), Style::default().fg(MUTED_GRAY)),
+    ])];
+    // Bare docs URL on its own line so it never truncates and terminals
+    // auto-linkify it (Cmd/Ctrl-click) — also mouse-selectable.
+    if let Some(url) = crate::docs::docs_url_for(d.id) {
+        lines.push(Line::from(Span::styled(
+            url,
+            Style::default().fg(CORNFLOWER_BLUE),
+        )));
+    }
+    // Install action / status.
+    match install_states.get(d.id) {
+        Some(DepInstall::Installing) => lines.push(Line::from(Span::styled(
+            format!("⟳ installing {}…", d.name),
+            Style::default().fg(WARNING_YELLOW),
+        ))),
+        Some(DepInstall::Done) => lines.push(Line::from(Span::styled(
+            "✓ installed — press r to re-check",
+            Style::default().fg(SELECTION_GREEN),
+        ))),
+        Some(DepInstall::Error(e)) => {
+            lines.push(Line::from(Span::styled(
+                format!("✗ {e}"),
+                Style::default().fg(ERROR_RED),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "try manually: {}",
+                    d.install_hint.lines().next().unwrap_or("")
+                ),
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+        None if !d.satisfied => lines.push(Line::from(vec![
+            Span::styled("press i to install: ", Style::default().fg(GOLD)),
+            Span::styled(
+                d.install_hint.lines().next().unwrap_or("").to_string(),
+                Style::default().fg(CORNFLOWER_BLUE),
+            ),
+        ])),
+        None => {}
+    }
+    lines
 }
 
 /// Checkbox + color for a dependency report: `[✓]` (green) when satisfied,
@@ -1180,5 +1264,93 @@ mod tests {
                 "otel docs URL truncated/missing at {w} cols"
             );
         }
+    }
+
+    use crate::components::onboarding::state::DepInstall;
+    use crate::setup::{DepReport, DepState, SetupStatus, Tier, TopicReport};
+
+    fn witr_report(satisfied: bool) -> DepReport {
+        DepReport {
+            id: "witr",
+            name: "witr",
+            why: "process causality tracing",
+            tier: Tier::Optional,
+            consumers: vec![],
+            install_hint: "brew install witr".to_string(),
+            auto_installable: true,
+            state: if satisfied {
+                DepState::Ok(None)
+            } else {
+                DepState::Missing
+            },
+            satisfied,
+        }
+    }
+
+    fn deps_state_focused_on_witr() -> OnboardingState {
+        let mut state = OnboardingState::new();
+        state.current_step = OnboardingStep::DependencyCheck;
+        state.dependency_status = Some(SetupStatus {
+            topics: vec![TopicReport {
+                id: "plugin-bins",
+                label: "Plugin binaries",
+                description: "",
+                deps: vec![witr_report(false)],
+            }],
+        });
+        state.dep_cursor = 0; // focuses witr
+        state
+    }
+
+    fn deps_step_text(state: &OnboardingState, width: u16) -> String {
+        let comp = OnboardingComponent::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|f| comp.render(f, f.size(), state)).unwrap();
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// Focusing a dep shows its full docsite URL + install hint in the detail
+    /// band, untruncated at the 80-col minimum and wide. This is the link the
+    /// user couldn't find before.
+    #[test]
+    fn focused_dep_detail_band_shows_full_docs_link() {
+        let state = deps_state_focused_on_witr();
+        for w in [80u16, 140] {
+            let text = deps_step_text(&state, w);
+            assert!(
+                text.contains(crate::docs::WITR),
+                "focused dep docs URL truncated/missing at {w} cols"
+            );
+            assert!(
+                text.contains("press i to install"),
+                "missing install affordance at {w} cols"
+            );
+        }
+    }
+
+    /// An install error shows inline with a 'try manually' suggestion.
+    #[test]
+    fn focused_dep_install_error_shows_inline_with_manual_hint() {
+        let mut state = deps_state_focused_on_witr();
+        state
+            .install_states
+            .insert("witr".to_string(), DepInstall::Error("brew not found".to_string()));
+        let text = deps_step_text(&state, 100);
+        assert!(text.contains("brew not found"), "error message missing");
+        assert!(text.contains("try manually"), "manual-retry hint missing");
+    }
+
+    /// The dep cursor never escapes the dep list bounds.
+    #[test]
+    fn dep_cursor_clamps_to_bounds() {
+        let mut state = deps_state_focused_on_witr(); // 1 dep
+        state.move_dep_cursor(5);
+        assert_eq!(state.dep_cursor, 0, "cursor past end should clamp");
+        state.move_dep_cursor(-5);
+        assert_eq!(state.dep_cursor, 0, "cursor before start should clamp");
+        // No deps at all → cursor pinned at 0.
+        let mut empty = OnboardingState::new();
+        empty.move_dep_cursor(3);
+        assert_eq!(empty.dep_cursor, 0);
     }
 }

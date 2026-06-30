@@ -3458,6 +3458,7 @@ pub enum AsyncAction {
     OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
     OnboardingCheckDeps, // Run dependency check during onboarding
+    OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
 }
 
 impl Default for AppState {
@@ -9274,6 +9275,42 @@ impl AppState {
                 action @ AsyncAction::OpenInEditor(_) => {
                     debug!("OpenInEditor action deferred to main loop");
                     self.pending_async_action = Some(action);
+                }
+                AsyncAction::OnboardingInstallDep(dep_id) => {
+                    use crate::components::onboarding::state::DepInstall;
+                    use crate::setup::{catalog, install_dep_capture};
+                    info!("Installing dependency '{dep_id}' from onboarding");
+                    // Own the catalog dep so it can move into spawn_blocking.
+                    let dep = catalog()
+                        .into_iter()
+                        .flat_map(|t| t.deps)
+                        .find(|d| d.id == dep_id);
+                    let result = match dep {
+                        Some(dep) => tokio::task::spawn_blocking(move || install_dep_capture(&dep))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string())),
+                        None => Err("unknown dependency".to_string()),
+                    };
+                    if let Some(os) = &mut self.onboarding_state {
+                        match result {
+                            Ok(()) => {
+                                // Mark done; the row keeps a ✓ marker until the
+                                // user presses `r` to re-check (which flips the
+                                // real checkbox green).
+                                os.install_states.insert(dep_id.clone(), DepInstall::Done);
+                                os.error_message = None;
+                                os.status_message =
+                                    Some(format!("✓ installed {dep_id} — press r to re-check"));
+                            }
+                            Err(msg) => {
+                                os.install_states
+                                    .insert(dep_id.clone(), DepInstall::Error(msg.clone()));
+                                os.status_message = None;
+                                os.error_message = Some(format!("✗ {dep_id}: {msg}"));
+                            }
+                        }
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");

@@ -267,6 +267,23 @@ pub struct OnboardingState {
     pub otel_api_token: String,
     /// OTEL: focused form field (0=endpoint, 1=instance, 2=token)
     pub otel_field: usize,
+    /// Dependency screen: index of the focused dep in the flattened (topic-order)
+    /// dep list. Drives the focused-row docs/install detail band + the `i`
+    /// install target.
+    pub dep_cursor: usize,
+    /// Per-dep install state, keyed by dep id (idle deps absent).
+    pub install_states: std::collections::HashMap<String, DepInstall>,
+}
+
+/// Background-install state for a single dependency on the deps screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DepInstall {
+    /// Install command running in the background.
+    Installing,
+    /// Finished successfully (the next re-detect should flip the checkbox).
+    Done,
+    /// Failed — carries a short error message to show inline.
+    Error(String),
 }
 
 impl OnboardingState {
@@ -294,7 +311,35 @@ impl OnboardingState {
             otel_instance_id: String::new(),
             otel_api_token: String::new(),
             otel_field: 0,
+            dep_cursor: 0,
+            install_states: std::collections::HashMap::new(),
         }
+    }
+
+    /// Deps flattened in topic order — the cursor indexes into this. Empty until
+    /// the dependency check has run.
+    pub fn flattened_deps(&self) -> Vec<&crate::setup::DepReport> {
+        match &self.dependency_status {
+            Some(status) => status.topics.iter().flat_map(|t| t.deps.iter()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The currently focused dep, if any.
+    pub fn focused_dep(&self) -> Option<&crate::setup::DepReport> {
+        self.flattened_deps().into_iter().nth(self.dep_cursor)
+    }
+
+    /// Move the dep cursor by `delta`, clamped to the dep list bounds.
+    pub fn move_dep_cursor(&mut self, delta: isize) {
+        let len = self.flattened_deps().len();
+        if len == 0 {
+            self.dep_cursor = 0;
+            return;
+        }
+        let max = len - 1;
+        let next = (self.dep_cursor as isize + delta).clamp(0, max as isize);
+        self.dep_cursor = next as usize;
     }
 
     /// Mutable handle to the currently focused OTEL field's string.

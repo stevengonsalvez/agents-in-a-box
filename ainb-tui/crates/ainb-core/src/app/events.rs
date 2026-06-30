@@ -458,7 +458,10 @@ pub enum AppEvent {
     OnboardingEditorUp,           // Move editor selection up
     OnboardingEditorDown,         // Move editor selection down
     OnboardingFinish,             // Complete onboarding
-    OnboardingInstallConfig,      // Install recommended config (I key)
+    OnboardingInstallConfig,      // Install recommended tmux config (t key)
+    OnboardingDepCursorUp,        // Move the focused-dep cursor up
+    OnboardingDepCursorDown,      // Move the focused-dep cursor down
+    OnboardingInstallFocusedDep,  // i key: install the focused dependency
     OnboardingScriptPrompt,       // G key: ask which agent to generate a script for
     OnboardingCancelScriptPrompt, // Esc out of the agent picker
     OnboardingGenerateScript(crate::setup::Agent), // Generate installer for agent
@@ -2292,11 +2295,17 @@ impl EventHandler {
                                 }
                             }
                             KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                            KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                                Some(AppEvent::OnboardingBack)
-                            }
+                            KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                            // ↑/↓ move the focused-dep cursor (the detail band
+                            // shows that dep's docs link + install action).
+                            KeyCode::Up => Some(AppEvent::OnboardingDepCursorUp),
+                            KeyCode::Down => Some(AppEvent::OnboardingDepCursorDown),
                             KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
+                            // `i` installs the focused dep; tmux config moved to `t`.
                             KeyCode::Char('i') | KeyCode::Char('I') => {
+                                Some(AppEvent::OnboardingInstallFocusedDep)
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
                                 Some(AppEvent::OnboardingInstallConfig)
                             } // Install tmux config
                             KeyCode::Char('g') | KeyCode::Char('G') => {
@@ -6375,6 +6384,37 @@ impl EventHandler {
             AppEvent::OnboardingOtelPrevField => {
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     onboarding_state.otel_prev_field();
+                }
+            }
+            AppEvent::OnboardingDepCursorUp => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.move_dep_cursor(-1);
+                }
+            }
+            AppEvent::OnboardingDepCursorDown => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.move_dep_cursor(1);
+                }
+            }
+            AppEvent::OnboardingInstallFocusedDep => {
+                use crate::components::onboarding::state::DepInstall;
+                // Snapshot the focused dep, then queue the install. The drain
+                // does the catalog lookup + run (and reports manual-only deps as
+                // an error via install_dep_capture).
+                let target = state.onboarding_state.as_ref().and_then(|os| {
+                    os.focused_dep().map(|d| (d.id.to_string(), d.name.to_string(), d.satisfied))
+                });
+                if let (Some((id, name, satisfied)), Some(os)) =
+                    (target, state.onboarding_state.as_mut())
+                {
+                    if satisfied {
+                        os.status_message = Some(format!("{name} is already installed"));
+                    } else {
+                        os.error_message = None;
+                        os.status_message = Some(format!("installing {name}…"));
+                        os.install_states.insert(id.clone(), DepInstall::Installing);
+                        state.pending_async_action = Some(AsyncAction::OnboardingInstallDep(id));
+                    }
                 }
             }
             AppEvent::OnboardingInstallConfig => {
