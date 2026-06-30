@@ -413,7 +413,7 @@ impl OnboardingComponent {
             )
         } else {
             Span::styled(
-                "↑↓ focus • i install • t tmux • g script • r recheck • Enter next",
+                "↑↓←→ focus • i install • Enter next • Esc back • r recheck • t tmux",
                 Style::default().fg(MUTED_GRAY),
             )
         };
@@ -1041,10 +1041,17 @@ impl OnboardingComponent {
 
         let mut spans = vec![Span::styled("  ", Style::default())];
 
+        // On the dependency step every arrow is navigation (move the focused-dep
+        // cursor), so Back is Esc there — not ↑/←. Other steps keep ↑/← Back.
+        let deps_step = state.current_step == OnboardingStep::DependencyCheck;
+
         // Back button (↑ works in all steps, ← works in most but not text input)
         if state.can_go_back() {
             spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
-            spans.push(Span::styled("↑/←", Style::default().fg(GOLD)));
+            spans.push(Span::styled(
+                if deps_step { "Esc" } else { "↑/←" },
+                Style::default().fg(GOLD),
+            ));
             spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
             spans.push(Span::styled(" Back", Style::default().fg(MUTED_GRAY)));
             spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
@@ -1077,12 +1084,20 @@ impl OnboardingComponent {
             },
         ));
 
-        // Escape hint — backs out to the Setup menu (see `onboarding_to_menu`)
+        // Third hint: deps step shows arrows = navigate (Esc already shown as
+        // Back above); other steps show Esc = Menu.
         spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
-        spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
-        spans.push(Span::styled("Esc", Style::default().fg(GOLD)));
-        spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
-        spans.push(Span::styled(" Menu", Style::default().fg(MUTED_GRAY)));
+        if deps_step {
+            spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled("↑↓←→", Style::default().fg(GOLD)));
+            spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled(" navigate", Style::default().fg(MUTED_GRAY)));
+        } else {
+            spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled("Esc", Style::default().fg(GOLD)));
+            spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled(" Menu", Style::default().fg(MUTED_GRAY)));
+        }
 
         let nav = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
         frame.render_widget(nav, inner);

@@ -2286,20 +2286,22 @@ impl EventHandler {
                         }
                     } else {
                         match key_event.code {
-                            KeyCode::Enter | KeyCode::Right => {
-                                // If deps not checked yet, check them; otherwise advance
+                            // All four arrows are navigation (move the focused-dep
+                            // cursor) — never a screen change, so they don't fight
+                            // each other. Enter advances, Esc goes back one screen.
+                            KeyCode::Enter => {
+                                // If deps not checked yet, check them; otherwise advance.
                                 if onboarding_state.dependency_status.is_none() {
                                     Some(AppEvent::OnboardingCheckDeps)
                                 } else {
                                     Some(AppEvent::OnboardingNext)
                                 }
                             }
-                            KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                            KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
-                            // ↑/↓ move the focused-dep cursor (the detail band
-                            // shows that dep's docs link + install action).
-                            KeyCode::Up => Some(AppEvent::OnboardingDepCursorUp),
-                            KeyCode::Down => Some(AppEvent::OnboardingDepCursorDown),
+                            KeyCode::Esc => Some(AppEvent::OnboardingBack),
+                            KeyCode::Up | KeyCode::Left => Some(AppEvent::OnboardingDepCursorUp),
+                            KeyCode::Down | KeyCode::Right => {
+                                Some(AppEvent::OnboardingDepCursorDown)
+                            }
                             KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
                             // `i` installs the focused dep; tmux config moved to `t`.
                             KeyCode::Char('i') | KeyCode::Char('I') => {
