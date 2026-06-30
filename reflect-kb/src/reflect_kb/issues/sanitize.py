@@ -142,7 +142,7 @@ _UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
-_LONG_HEX_RE = re.compile(r"\b[0-9a-f]{20,}\b")
+_LONG_HEX_RE = re.compile(r"\b[0-9a-f]{20,}\b", re.IGNORECASE)
 
 # Home/scratch paths. ``<user>`` is the placeholder; we keep the OS-specific
 # prefix (/Users vs /home) so the report still reads naturally.
@@ -153,7 +153,7 @@ _WORKTREE_RE = re.compile(r"(\.?worktrees)/[^/\s'\"]+")
 
 # ── audit (non-mutating) suspicious patterns ─────────────────────────────────
 _SUSPICIOUS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b[0-9a-f]{20,}\b"), "residual_long_hex"),
+    (re.compile(r"\b[0-9a-f]{20,}\b", re.IGNORECASE), "residual_long_hex"),
     (re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"), "possible_base64_blob"),
     (re.compile(r"\b\w+\s*=\s*\S{8,}"), "env_var_assignment"),
     (re.compile(r"\b\+?\d[\d\s\-().]{8,}\d\b"), "possible_phone_number"),

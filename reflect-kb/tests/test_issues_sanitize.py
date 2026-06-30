@@ -109,6 +109,15 @@ def test_uuid_and_long_hex_redacted():
     assert "<REDACTED:hash>" in out
 
 
+def test_uppercase_and_mixed_case_long_hex_redacted_and_not_audited():
+    token = "ABCDEF0123456789abcdef01"
+    res = sanitize(f"trace token {token}")
+    assert token not in res.text
+    assert "<REDACTED:hash>" in res.text
+    assert res.redactions.get("long_hex") == 1
+    assert all(f["kind"] != "residual_long_hex" for f in res.audit)
+
+
 def test_custom_maps_applied_first():
     out = sanitize("AcmeCorp had an outage", maps={"AcmeCorp": "<company>"}).text
     assert "AcmeCorp" not in out
