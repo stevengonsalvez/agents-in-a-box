@@ -3928,6 +3928,7 @@ impl EventHandler {
                         row.session_id,
                         row.cwd,
                         answer.clone(),
+                        Some(row.last_event_ts),
                         "answered ask",
                         true,
                     ) {
@@ -3953,6 +3954,7 @@ impl EventHandler {
                         row.session_id,
                         row.cwd,
                         prompt.to_string(),
+                        Some(row.last_event_ts),
                         "broadcast",
                         false,
                     ) {

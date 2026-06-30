@@ -31,6 +31,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ainb_plugin_notifyd::{Paths, StateRow, Store};
 use ratatui::{
@@ -58,6 +59,23 @@ const WAIT_AMBER: Color = Color::Rgb(220, 180, 90);
 /// single indexed `SELECT` over a small table behind WAL, so every-tick is
 /// cheap, but keeping a counter mirrors the Inbox screen's discipline.
 const POLL_TICKS: u64 = 1;
+/// Window in which an identical dispatch is treated as an accidental double tap.
+const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_secs(2);
+
+/// Last dispatch memo used for short-window duplicate suppression.
+#[derive(Debug, Clone)]
+pub struct DispatchMemo {
+    session_id: String,
+    text: String,
+    row_ts: Option<i64>,
+    at: Instant,
+}
+
+impl DispatchMemo {
+    fn matches(&self, session_id: &str, text: &str, row_ts: Option<i64>) -> bool {
+        self.session_id == session_id && self.text == text && self.row_ts == row_ts
+    }
+}
 
 /// All state owned by the Fleet panel. Stored at app-level (like
 /// `InboxState`/`DaemonsState`) so the selection + cached rows survive
@@ -90,10 +108,10 @@ pub struct FleetPanelState {
     /// spawning another worker / double-delivering (C3). Cleared by the worker
     /// on completion.
     pub in_flight: Arc<AtomicBool>,
-    /// The last `(session_id, text)` dispatched, used to debounce a rapid
-    /// IDENTICAL re-send (e.g. holding Enter on the same option) once the prior
-    /// one is no longer in flight.
-    pub last_dispatch: Option<(String, String)>,
+    /// Last dispatch, used to debounce only rapid identical re-sends. The row
+    /// timestamp distinguishes later prompts with the same label, and the time
+    /// window prevents a stale memo from rejecting legitimate future sends.
+    pub last_dispatch: Option<DispatchMemo>,
 }
 
 impl Default for FleetPanelState {
@@ -276,6 +294,7 @@ impl FleetPanelState {
         session_id: String,
         cwd: String,
         text: String,
+        row_ts: Option<i64>,
         kind_label: &'static str,
         is_answer: bool,
     ) -> bool {
@@ -283,15 +302,15 @@ impl FleetPanelState {
             self.set_feedback("send already in flight — wait for it to finish".to_string());
             return false;
         }
-        // Debounce an identical back-to-back re-send (same target + same text)
-        // that lands in the same idle gap — avoids accidentally double-answering
-        // an agent on a fast double-tap.
-        let key = (session_id.clone(), text.clone());
-        if self.last_dispatch.as_ref() == Some(&key) {
+        // Debounce an identical back-to-back re-send for a short window. The row
+        // timestamp is part of the identity so a later prompt in the same
+        // session with the same option label is a fresh answer.
+        let now = Instant::now();
+        if self.is_duplicate_dispatch(&session_id, &text, row_ts, now) {
             self.set_feedback("duplicate send ignored (same answer just sent)".to_string());
             return false;
         }
-        self.last_dispatch = Some(key);
+        self.remember_dispatch(session_id.clone(), text.clone(), row_ts, now);
         crate::fleet::control::dispatch_send(
             Arc::clone(&self.feedback),
             Arc::clone(&self.in_flight),
@@ -302,6 +321,34 @@ impl FleetPanelState {
             is_answer,
         );
         true
+    }
+
+    fn is_duplicate_dispatch(
+        &self,
+        session_id: &str,
+        text: &str,
+        row_ts: Option<i64>,
+        now: Instant,
+    ) -> bool {
+        self.last_dispatch.as_ref().is_some_and(|last| {
+            last.matches(session_id, text, row_ts)
+                && now.duration_since(last.at) < DUPLICATE_DISPATCH_WINDOW
+        })
+    }
+
+    fn remember_dispatch(
+        &mut self,
+        session_id: String,
+        text: String,
+        row_ts: Option<i64>,
+        at: Instant,
+    ) {
+        self.last_dispatch = Some(DispatchMemo {
+            session_id,
+            text,
+            row_ts,
+            at,
+        });
     }
 }
 
@@ -922,6 +969,36 @@ mod tests {
         assert_eq!(state.feedback_line(), "");
         state.set_feedback("answered ask → /work/x: sent via tmux (sess-1)");
         assert!(state.feedback_line().contains("sent via tmux"));
+    }
+
+    #[test]
+    fn duplicate_guard_is_limited_to_same_row_within_window() {
+        let mut state = FleetPanelState::default();
+        let now = Instant::now();
+        state.remember_dispatch("sess".into(), "Yes".into(), Some(100), now);
+
+        assert!(
+            state.is_duplicate_dispatch("sess", "Yes", Some(100), now + Duration::from_millis(500)),
+            "same row/text inside debounce window must be rejected"
+        );
+        assert!(
+            !state.is_duplicate_dispatch(
+                "sess",
+                "Yes",
+                Some(101),
+                now + Duration::from_millis(500)
+            ),
+            "new prompt row with same label must be accepted"
+        );
+        assert!(
+            !state.is_duplicate_dispatch(
+                "sess",
+                "Yes",
+                Some(100),
+                now + DUPLICATE_DISPATCH_WINDOW + Duration::from_millis(1)
+            ),
+            "same text after debounce window must be accepted"
+        );
     }
 
     #[test]
