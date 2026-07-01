@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_title_header_and_all_four_rows() {
+    fn renders_title_header_and_all_daemon_rows() {
         // Seed the shared snapshot so render reads a deterministic cache and never
         // touches the host's real ~/.agents-in-a-box state (H-D2: render does no
         // collect of its own).
@@ -316,6 +316,12 @@ mod tests {
                 Some("Telegram (@bot)"),
             ),
             status(DaemonKind::Notifyd, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::ApproveBroker,
+                DaemonState::Running,
+                true,
+                Some("approve socket"),
+            ),
             status(
                 DaemonKind::Atc,
                 DaemonState::Running,
@@ -331,6 +337,7 @@ mod tests {
         // Every daemon's display name renders as a row.
         assert!(out.contains("phone bridge"), "bridge row missing");
         assert!(out.contains("notifyd"), "notifyd row missing");
+        assert!(out.contains("approve broker"), "approve broker row missing");
         assert!(out.contains("ATC"), "ATC row missing");
         assert!(out.contains("fleet daemon"), "fleet daemon row missing");
         // State glyphs + a connected channel render.
@@ -365,11 +372,11 @@ mod tests {
     #[test]
     fn collect_into_publishes_into_the_shared_snapshot() {
         // The background collector's publish step populates the snapshot from a
-        // real collect() (always 4 daemons) without any render involved.
+        // real collect() (every daemon) without any render involved.
         let shared = Mutex::new(Snapshot::default());
         collect_into(&shared);
         let guard = shared.lock().unwrap();
-        assert_eq!(guard.rows.len(), 4, "collect publishes all four daemons");
+        assert_eq!(guard.rows.len(), 5, "collect publishes every daemon");
         assert!(
             guard.collected_at_ms > 0,
             "publish stamps the collect clock"
