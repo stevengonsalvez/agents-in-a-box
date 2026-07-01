@@ -1693,7 +1693,10 @@ mod tests {
             reason: "human approved".into(),
         });
         let v: serde_json::Value = serde_json::from_str(&allow).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
             v["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1706,7 +1709,10 @@ mod tests {
         });
         let v: serde_json::Value = serde_json::from_str(&deny).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "timed out");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "timed out"
+        );
     }
 
     #[test]
