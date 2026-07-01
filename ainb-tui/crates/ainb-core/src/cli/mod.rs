@@ -8,6 +8,7 @@
 
 pub mod attach;
 pub mod auth;
+pub mod codex_statusline;
 pub mod config_cmd;
 pub mod deps;
 pub mod diff_review;
@@ -16,14 +17,18 @@ pub mod favorites;
 pub mod fleet;
 pub mod git_cmd;
 pub mod hangar;
+pub mod headroom;
 pub mod init;
 pub mod list;
 pub mod logs;
+pub mod mcp;
+pub mod otel;
 pub mod plugin;
 pub mod presets;
 pub mod recover;
 pub mod reflect;
 pub mod registry;
+pub mod rtk;
 pub mod run;
 pub mod status;
 pub mod statusline;
@@ -45,7 +50,14 @@ EXAMPLES:
   ainb attach my-project          Drop into a running session
   ainb config get authentication.default_model
   ainb recover list               Find orphaned sessions
-  ainb completion zsh > _ainb     Generate zsh completions";
+  ainb completion zsh > _ainb     Generate zsh completions
+
+SKILL MANAGER:
+  ainb skill browse <query>        Search the skill catalog (skills.sh)
+  ainb skill install <uri>         Install a skill/agent/command unit
+  ainb skill sync                  Reconcile on-disk units with the manifest
+  ainb skill remove <uri>          Uninstall a unit (per-file, never wipes config)
+  ainb source / ainb search        (skill-manager — run with --help)";
 
 /// Build the root `clap::Command` for the `ainb` binary.
 ///
@@ -107,7 +119,11 @@ pub enum OutputFormat {
     Markdown,
 }
 
-/// Arguments for the run command
+// The user-facing command `about` is set in `cli/registry.rs` (`.about()`
+// applied after `augment_args` so it wins). Keep the doc-comment below a
+// SINGLE line — a multi-line doc-comment also becomes clap `long_about` and
+// would leak this note into `ainb run --help`.
+/// Spawn a new AI coding session.
 #[derive(clap::Args)]
 #[command(after_help = "\
 EXAMPLES:
@@ -162,9 +178,15 @@ pub struct RunArgs {
     /// Run in interactive mode (spawn tmux and attach)
     #[arg(long, short)]
     pub interactive: bool,
+
+    /// Parent session id — links this session to an orchestrator (e.g. ATC) so
+    /// its completions route to the parent's durable inbox (event-driven
+    /// plumbing). Exported into the session as `AINB_PARENT_SESSION`.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
-/// Arguments for the list command
+/// List sessions (running + idle). Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct ListArgs {
     /// Show only running sessions
@@ -176,7 +198,7 @@ pub struct ListArgs {
     pub workspace: Option<String>,
 }
 
-/// Arguments for the logs command
+/// View session output/logs. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct LogsArgs {
     /// Session ID or name
@@ -191,21 +213,21 @@ pub struct LogsArgs {
     pub lines: usize,
 }
 
-/// Arguments for the attach command
+/// Attach to a running session. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct AttachArgs {
     /// Session ID or name
     pub session: String,
 }
 
-/// Arguments for the status command
+/// Show a session's status/health. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct StatusArgs {
     /// Session ID or name
     pub session: String,
 }
 
-/// Arguments for the kill command
+/// Terminate a session. Description set in `cli/registry.rs`.
 #[derive(clap::Args)]
 pub struct KillArgs {
     /// Session ID or name

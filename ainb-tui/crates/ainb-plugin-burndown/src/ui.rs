@@ -7,11 +7,12 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table},
 };
 
 use ainb_plugin_types_sessions::ScanProgressEvent;
 
+use crate::data::savings::SavingsData;
 use crate::data::usage::{
     BranchUsage, current_quarter, first_of_month, next_month_first, next_quarter,
     previous_month_first, previous_quarter,
@@ -45,67 +46,6 @@ const TERMINAL_CYAN: Color = Color::Rgb(125, 211, 200);
 const BAR_THRESHOLD_HIGH: f64 = 0.66;
 const BAR_THRESHOLD_MED: f64 = 0.33;
 
-/// Which agent provider's usage to show
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UsageProvider {
-    #[default]
-    Claude,
-    Codex,
-    Gemini,
-    Copilot,
-}
-
-impl UsageProvider {
-    fn all() -> &'static [UsageProvider] {
-        &[
-            UsageProvider::Claude,
-            UsageProvider::Codex,
-            UsageProvider::Gemini,
-            UsageProvider::Copilot,
-        ]
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            UsageProvider::Claude => "✻ Claude Code",
-            UsageProvider::Codex => "✦ Codex CLI",
-            UsageProvider::Gemini => "✨ Gemini CLI",
-            UsageProvider::Copilot => "🐙 Copilot",
-        }
-    }
-
-    fn short_label(&self) -> &'static str {
-        match self {
-            UsageProvider::Claude => "Claude",
-            UsageProvider::Codex => "Codex",
-            UsageProvider::Gemini => "Gemini",
-            UsageProvider::Copilot => "Copilot",
-        }
-    }
-
-    pub fn has_data(&self) -> bool {
-        matches!(self, UsageProvider::Claude | UsageProvider::Codex)
-    }
-
-    fn next(&self) -> Self {
-        match self {
-            UsageProvider::Claude => UsageProvider::Codex,
-            UsageProvider::Codex => UsageProvider::Gemini,
-            UsageProvider::Gemini => UsageProvider::Copilot,
-            UsageProvider::Copilot => UsageProvider::Claude,
-        }
-    }
-
-    fn prev(&self) -> Self {
-        match self {
-            UsageProvider::Claude => UsageProvider::Copilot,
-            UsageProvider::Codex => UsageProvider::Claude,
-            UsageProvider::Gemini => UsageProvider::Codex,
-            UsageProvider::Copilot => UsageProvider::Gemini,
-        }
-    }
-}
-
 /// Which sub-tab is active in the usage view
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageTab {
@@ -115,6 +55,7 @@ pub enum UsageTab {
     Weekly,
     Projects,
     Optimize,
+    Savings,
 }
 
 impl UsageTab {
@@ -125,6 +66,7 @@ impl UsageTab {
             UsageTab::Weekly,
             UsageTab::Projects,
             UsageTab::Optimize,
+            UsageTab::Savings,
         ]
     }
 
@@ -135,6 +77,7 @@ impl UsageTab {
             UsageTab::Weekly => "Weekly",
             UsageTab::Projects => "By Project",
             UsageTab::Optimize => "Optimize",
+            UsageTab::Savings => "Savings",
         }
     }
 
@@ -144,17 +87,19 @@ impl UsageTab {
             UsageTab::Daily => UsageTab::Weekly,
             UsageTab::Weekly => UsageTab::Projects,
             UsageTab::Projects => UsageTab::Optimize,
-            UsageTab::Optimize => UsageTab::Burndown,
+            UsageTab::Optimize => UsageTab::Savings,
+            UsageTab::Savings => UsageTab::Burndown,
         }
     }
 
     fn prev(&self) -> Self {
         match self {
-            UsageTab::Burndown => UsageTab::Optimize,
+            UsageTab::Burndown => UsageTab::Savings,
             UsageTab::Daily => UsageTab::Burndown,
             UsageTab::Weekly => UsageTab::Daily,
             UsageTab::Projects => UsageTab::Weekly,
             UsageTab::Optimize => UsageTab::Projects,
+            UsageTab::Savings => UsageTab::Optimize,
         }
     }
 }
@@ -282,7 +227,6 @@ pub enum UsageFilterTarget {
 // snapshot tests for the zoom view.
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
-    pub provider: UsageProvider,
     pub active_tab: UsageTab,
     /// Most-recent parsed usage snapshot. Held as `Arc` so the plugin
     /// can share the same instance across `ui.data` and the cached
@@ -378,6 +322,12 @@ pub struct UsageViewState {
     /// behind a confirm because a hard refresh re-parses ALL session
     /// history from source — the CPU-heavy path.
     pub confirm_hard: bool,
+    /// Latest token-savings snapshot, populated asynchronously whenever
+    /// a new `sessions.usage_data` chunk finalises. `None` until the
+    /// first fetch completes. The renderer shows a brief loading state
+    /// while this is absent; after that it renders the last-known figures
+    /// (the fetch runs off the render path so stale data is fine).
+    pub savings_data: Option<SavingsData>,
 }
 
 /// Per-column width step applied by `<` / `>` in the zoom table.
@@ -389,7 +339,6 @@ const MIN_COL: u16 = 3;
 impl Default for UsageViewState {
     fn default() -> Self {
         Self {
-            provider: UsageProvider::Claude,
             active_tab: UsageTab::Burndown,
             data: None,
             fresh_pivot: false,
@@ -416,6 +365,7 @@ impl Default for UsageViewState {
             zoom_cols_panel: None,
             copy_flash: None,
             confirm_hard: false,
+            savings_data: None,
         }
     }
 }
@@ -429,36 +379,22 @@ enum StepDirection {
 }
 
 impl UsageViewState {
+    /// `▶` — step the single provider filter forward (wraps).
     pub fn next_provider(&mut self) {
-        self.provider = self.provider.next();
-        self.provider_filter = match self.provider {
-            UsageProvider::Claude => UsageProviderFilter::Claude,
-            UsageProvider::Codex => UsageProviderFilter::Codex,
-            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
-        };
+        self.provider_filter = self.provider_filter.next();
         self.scroll_offset = 0;
     }
 
+    /// `◀` — step the single provider filter backward (wraps).
     pub fn prev_provider(&mut self) {
-        self.provider = self.provider.prev();
-        self.provider_filter = match self.provider {
-            UsageProvider::Claude => UsageProviderFilter::Claude,
-            UsageProvider::Codex => UsageProviderFilter::Codex,
-            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
-        };
+        self.provider_filter = self.provider_filter.prev();
         self.scroll_offset = 0;
     }
 
+    /// `p` — alias for [`Self::next_provider`]; the filter is the one
+    /// provider control, so `p` and `▶` advance the same ring.
     pub fn cycle_provider_filter(&mut self) {
-        self.provider_filter = match self.provider_filter {
-            UsageProviderFilter::All => UsageProviderFilter::Claude,
-            UsageProviderFilter::Claude => UsageProviderFilter::Codex,
-            UsageProviderFilter::Codex => UsageProviderFilter::Cursor,
-            UsageProviderFilter::Cursor => UsageProviderFilter::Copilot,
-            UsageProviderFilter::Copilot => UsageProviderFilter::Gemini,
-            UsageProviderFilter::Gemini => UsageProviderFilter::All,
-        };
-        self.scroll_offset = 0;
+        self.next_provider();
     }
 
     pub fn set_period(&mut self, period: UsagePeriod) {
@@ -584,6 +520,8 @@ impl UsageViewState {
                         + data.models.len()
                 }
                 UsageTab::Optimize => optimize_usage(data).findings.len(),
+                // Savings renders a fixed 4-row summary card (3 sources + net).
+                UsageTab::Savings => 4,
             },
         }
     }
@@ -1027,23 +965,23 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Summary bar
-                Constraint::Length(3), // Provider selector
-                Constraint::Length(3), // Tab bar
-                Constraint::Length(1), // Scan banner (mid-scan only)
-                Constraint::Min(0),    // Table content
-                Constraint::Length(2), // Help bar
+                Constraint::Length(SUMMARY_BAR_H),  // Summary bar
+                Constraint::Length(PROVIDER_BAR_H), // Provider selector
+                Constraint::Length(TAB_BAR_H),      // Tab bar
+                Constraint::Length(1),              // Scan banner (mid-scan only)
+                Constraint::Min(0),                 // Table content
+                Constraint::Length(2),              // Help bar
             ])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Summary bar
-                Constraint::Length(3), // Provider selector
-                Constraint::Length(3), // Tab bar
-                Constraint::Min(0),    // Table content
-                Constraint::Length(2), // Help bar
+                Constraint::Length(SUMMARY_BAR_H),  // Summary bar
+                Constraint::Length(PROVIDER_BAR_H), // Provider selector
+                Constraint::Length(TAB_BAR_H),      // Tab bar
+                Constraint::Min(0),                 // Table content
+                Constraint::Length(2),              // Help bar
             ])
             .split(area)
     };
@@ -1071,7 +1009,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         }
     } else {
         let data = state.data.as_ref().unwrap();
-        if data.calls.is_empty() && !state.provider.has_data() {
+        if data.calls.is_empty() && !state.provider_filter.has_data() {
             render_no_data(buf, layout[content_idx], state);
         } else {
             match state.active_tab {
@@ -1086,6 +1024,9 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
                 }
                 UsageTab::Burndown => render_burndown(buf, layout[content_idx], data, state),
                 UsageTab::Optimize => render_optimize(buf, layout[content_idx], data),
+                UsageTab::Savings => {
+                    render_savings(buf, layout[content_idx], state.savings_data.as_ref())
+                }
             }
         }
     }
@@ -1224,7 +1165,7 @@ fn render_summary_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             ),
             Span::styled(" sessions", Style::default().fg(MUTED_GRAY)),
         ]);
-    } else if state.provider.has_data() {
+    } else if state.provider_filter.has_data() {
         spans.push(Span::styled(
             "  │  Loading...",
             Style::default().fg(MUTED_GRAY),
@@ -1247,32 +1188,30 @@ fn render_provider_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Style::default().fg(MUTED_GRAY),
     )];
 
-    for (i, provider) in UsageProvider::all().iter().enumerate() {
+    for (i, filter) in UsageProviderFilter::all().iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
         }
 
-        let is_active = *provider == state.provider;
+        let is_active = *filter == state.provider_filter;
         let style = if is_active {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else if provider.has_data() {
+        } else if filter.has_data() {
             Style::default().fg(SOFT_WHITE)
         } else {
             Style::default().fg(MUTED_GRAY)
         };
 
-        spans.push(Span::styled(provider.label(), style));
+        spans.push(Span::styled(provider_bar_label(*filter), style));
     }
 
     spans.push(Span::styled("    ", Style::default()));
     spans.push(Span::styled(
-        "◀/▶",
+        "◀/▶ p",
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(" switch", Style::default().fg(MUTED_GRAY)));
-    spans.push(Span::styled("  │  p ", Style::default().fg(GOLD)));
     spans.push(Span::styled(
-        format!("filter: {}", provider_filter_label(state.provider_filter)),
+        " switch provider",
         Style::default().fg(MUTED_GRAY),
     ));
     spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
@@ -1320,7 +1259,7 @@ fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                state.provider.label(),
+                provider_bar_label(state.provider_filter),
                 Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1343,33 +1282,92 @@ fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     ratatui::widgets::Widget::render(paragraph, inner, buf);
 }
 
+// ── Tab-bar geometry (shared by the renderer AND mouse hit-testing) ──────────
+// The usage view stacks fixed-height bars above the tab bar. Mouse hit-testing
+// needs the tab bar's row range, so `TAB_BAR_TOP` / `*_H` MUST match the render
+// layout heights below — guarded by `tab_bar_geometry_matches_render`.
+pub(crate) const SUMMARY_BAR_H: u16 = 3;
+pub(crate) const PROVIDER_BAR_H: u16 = 3;
+pub(crate) const TAB_BAR_H: u16 = 3;
+/// First viewport row occupied by the tab bar (below summary + provider bars).
+pub(crate) const TAB_BAR_TOP: u16 = SUMMARY_BAR_H + PROVIDER_BAR_H;
+/// Inner-left column of the tab-bar block (rounded border = 1 col).
+const TAB_BAR_INNER_X: u16 = 1;
+const TAB_DIVIDER: &str = " │ ";
+
+/// Per-tab hit zones on the tab-bar title row as `(start, end_inclusive, tab)`,
+/// derived from the tab titles + dividers. Single source of truth so the
+/// painted tabs and the clickable zones can never drift apart.
+fn tab_zones(inner_x: u16) -> Vec<(u16, u16, UsageTab)> {
+    let div_w = TAB_DIVIDER.chars().count() as u16;
+    let mut zones = Vec::with_capacity(UsageTab::all().len());
+    let mut x = inner_x;
+    for (i, t) in UsageTab::all().iter().enumerate() {
+        if i > 0 {
+            x += div_w;
+        }
+        let w = t.title().chars().count() as u16;
+        zones.push((x, x + w.saturating_sub(1), *t));
+        x += w;
+    }
+    zones
+}
+
+/// The tab whose title spans `col` on the tab-bar row, if any. Used by mouse
+/// click hit-testing to turn a column into a tab.
+pub(crate) fn tab_at_col(col: u16) -> Option<UsageTab> {
+    tab_zones(TAB_BAR_INNER_X)
+        .into_iter()
+        .find(|(s, e, _)| col >= *s && col <= *e)
+        .map(|(_, _, t)| t)
+}
+
 fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
-    let titles: Vec<Line> = UsageTab::all()
-        .iter()
-        .map(|t| {
-            let style = if *t == state.active_tab {
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                Style::default().fg(MUTED_GRAY)
-            };
-            Line::from(Span::styled(t.title(), style))
-        })
-        .collect();
-
-    let idx = UsageTab::all().iter().position(|t| *t == state.active_tab).unwrap_or(0);
-    let tabs = Tabs::new(titles)
-        .select(idx)
-        .highlight_style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .divider(Span::styled(" │ ", Style::default().fg(MUTED_GRAY)))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(CORNFLOWER_BLUE))
-                .style(Style::default().bg(DARK_BG)),
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG))
+        .title(
+            Line::from(Span::styled(
+                " [ ] switch tab ",
+                Style::default().fg(MUTED_GRAY),
+            ))
+            .right_aligned(),
         );
+    let inner = block.inner(area);
+    ratatui::widgets::Widget::render(block, area, buf);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
-    ratatui::widgets::Widget::render(tabs, area, buf);
+    // Paint titles + dividers at the exact columns `tab_zones` reports, so a
+    // click resolves to the same tab the user sees. We render manually (not the
+    // ratatui Tabs widget) precisely so render and hit-test share one formula.
+    // Every paint is clipped to the block's inner width: `buf.set_string` only
+    // clips at the buffer edge, so without this a long tab strip would overwrite
+    // the right border on a narrow viewport.
+    let y = inner.y;
+    let right = inner.x.saturating_add(inner.width); // exclusive inner-right edge
+    let div_w = TAB_DIVIDER.chars().count() as u16;
+    let div_style = Style::default().fg(MUTED_GRAY);
+    let clip =
+        |s: &str, x: u16| -> String { s.chars().take(right.saturating_sub(x) as usize).collect() };
+    for (i, (start, _end, t)) in tab_zones(inner.x).into_iter().enumerate() {
+        if start >= right {
+            break; // this tab — and every tab after it — is off the right edge
+        }
+        if i > 0 {
+            let div_x = start.saturating_sub(div_w);
+            buf.set_string(div_x, y, clip(TAB_DIVIDER, div_x), div_style);
+        }
+        let style = if t == state.active_tab {
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(MUTED_GRAY)
+        };
+        buf.set_string(start, y, clip(t.title(), start), style);
+    }
 }
 
 fn render_loading(buf: &mut Buffer, area: Rect) {
@@ -3040,7 +3038,8 @@ fn render_burndown_header(buf: &mut Buffer, area: Rect, data: &UsageData, period
     ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
-/// Build the "Period: …  Provider: …" labelled strip.
+/// Build the "Period: …" labelled strip. (Provider selection lives in
+/// the single top provider bar — see [`render_provider_bar`].)
 ///
 /// Period strip layout:
 /// ```text
@@ -3052,7 +3051,7 @@ fn render_burndown_header(buf: &mut Buffer, area: Rect, data: &UsageData, period
 ///
 /// Returned as a `Vec<Line>` so tests can assert chip ordering and
 /// active-marker placement without hitting the Frame.
-fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
+fn build_period_strip(state: &UsageViewState) -> Vec<Line<'static>> {
     let mut period_spans: Vec<Span<'static>> =
         vec![Span::styled("Period: ", Style::default().fg(MUTED_GRAY))];
 
@@ -3111,23 +3110,9 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
         matches!(state.period, UsagePeriod::Custom { .. }),
     ));
 
-    let mut provider_spans: Vec<Span<'static>> =
-        vec![Span::styled("Provider: ", Style::default().fg(MUTED_GRAY))];
-    let providers: [(&str, UsageProviderFilter); 3] = [
-        ("All", UsageProviderFilter::All),
-        ("Claude", UsageProviderFilter::Claude),
-        ("Codex", UsageProviderFilter::Codex),
-    ];
-    for (i, (label, value)) in providers.iter().enumerate() {
-        if i > 0 {
-            provider_spans.push(Span::styled("  ", Style::default()));
-        }
-        provider_spans.push(provider_chip_span(label, *value == state.provider_filter));
-    }
-    provider_spans.push(Span::styled("  (P)", Style::default().fg(MUTED_GRAY)));
-
-    // Two label rows so narrow terminals can wrap cleanly.
-    vec![Line::from(period_spans), Line::from(provider_spans)]
+    // Provider selection lives in the single top provider bar
+    // (`render_provider_bar`); this strip is period-only.
+    vec![Line::from(period_spans)]
 }
 
 /// Render `[◀ <label> ▶ <key> <name>]` for the inline Month/Quarter
@@ -3190,20 +3175,8 @@ fn period_chip_span(label: &str, key: char, active: bool) -> Span<'static> {
     }
 }
 
-fn provider_chip_span(label: &str, active: bool) -> Span<'static> {
-    let text = format!(" {label} ");
-    if active {
-        Span::styled(
-            text,
-            Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(text, Style::default().fg(MUTED_GRAY))
-    }
-}
-
 fn render_period_row(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
-    let lines = build_period_provider_strip(state);
+    let lines = build_period_strip(state);
     ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
@@ -3993,6 +3966,177 @@ fn render_optimize(buf: &mut Buffer, area: Rect, data: &UsageData) {
     render_panel(buf, area, "Optimize Findings", lines);
 }
 
+/// Render the Savings tab.
+///
+/// Three source rows (Headroom, RTK, Caveman) plus a NET total line.
+/// Each row shows: source name, saved token count, and a status badge.
+/// The Caveman row is always marked `(est)` — it is a modelled
+/// potential, not a measured figure.
+///
+/// When `savings_data` is `None` the panel shows a single "Fetching…"
+/// line — this is only visible for the brief window before the first
+/// async fetch completes after a data load.
+fn render_savings(
+    buf: &mut Buffer,
+    area: Rect,
+    savings: Option<&crate::data::savings::SavingsData>,
+) {
+    use crate::data::savings::CAVEMAN_OUTPUT_RATIO;
+
+    let block = ratatui::widgets::Block::default()
+        .title(ratatui::text::Span::styled(
+            " Token Savings ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    ratatui::widgets::Widget::render(block, area, buf);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let Some(sd) = savings else {
+        let fetching = Line::from(Span::styled(
+            "  ⏳ Fetching savings data…",
+            Style::default().fg(MUTED_GRAY),
+        ));
+        ratatui::widgets::Widget::render(Paragraph::new(fetching), inner, buf);
+        return;
+    };
+
+    // ── Row builders ──────────────────────────────────────────────────────
+
+    // Status dot: ● (live/installed) or ○ (down/not installed)
+    let headroom_dot = if sd.headroom_running {
+        Span::styled(
+            "● ",
+            Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("○ ", Style::default().fg(MUTED_GRAY))
+    };
+    let headroom_status = if sd.headroom_running {
+        Span::styled("live", Style::default().fg(TERMINAL_GOOD))
+    } else {
+        Span::styled("proxy down", Style::default().fg(MUTED_GRAY))
+    };
+
+    let rtk_dot = if sd.rtk_installed {
+        Span::styled(
+            "● ",
+            Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("○ ", Style::default().fg(MUTED_GRAY))
+    };
+    let rtk_status = if sd.rtk_installed {
+        Span::styled("installed", Style::default().fg(TERMINAL_GOOD))
+    } else {
+        Span::styled("not installed", Style::default().fg(MUTED_GRAY))
+    };
+
+    let pct_label = format!("×{:.2}", CAVEMAN_OUTPUT_RATIO);
+
+    // Column widths: source(14) + tokens(16) + status
+    let src_w = 14_usize;
+
+    let pad_source = |s: &str| -> String {
+        let mut out = s.to_string();
+        while out.len() < src_w {
+            out.push(' ');
+        }
+        out
+    };
+
+    let lines: Vec<Line> = vec![
+        // ── Header ────────────────────────────────────────────────────────
+        Line::from(vec![
+            Span::styled(
+                format!("  {:<src_w$}", "Source"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<16}", "Tokens Saved"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Status",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {}", "─".repeat((inner.width.saturating_sub(2)) as usize)),
+            Style::default().fg(CORNFLOWER_BLUE),
+        )),
+        // ── Headroom row ──────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            headroom_dot,
+            Span::styled(pad_source("Headroom"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.headroom_tokens_saved)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            headroom_status,
+        ]),
+        // ── RTK row ───────────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            rtk_dot,
+            Span::styled(pad_source("RTK"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.rtk_total_saved)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            rtk_status,
+        ]),
+        // ── Caveman row ───────────────────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("~ ", Style::default().fg(TERMINAL_ACCENT)),
+            Span::styled(pad_source("Caveman (est)"), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.caveman_est)),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("modelled {pct_label}"),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {}", "─".repeat((inner.width.saturating_sub(2)) as usize)),
+            Style::default().fg(CORNFLOWER_BLUE),
+        )),
+        // ── NET (real sources only) ───────────────────────────────────────
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("  {}", pad_source("NET (measured)")),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<16}", format_tokens_short(sd.net_real())),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Headroom + RTK", Style::default().fg(MUTED_GRAY)),
+        ]),
+        Line::from(""),
+        // ── Caveman disclaimer ────────────────────────────────────────────
+        Line::from(Span::styled(
+            "  (est) = modelled potential, not measured. Install Headroom/RTK for real data.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    ratatui::widgets::Widget::render(Paragraph::new(lines), inner, buf);
+}
+
 fn render_panel(buf: &mut Buffer, area: Rect, title: &str, rows: Vec<String>) {
     let lines: Vec<Line> = if rows.is_empty() {
         Vec::new()
@@ -4426,6 +4570,8 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let mut spans = vec![
         Span::styled(" ◀/▶ p", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("[ ]", Style::default().fg(GOLD)),
+        Span::styled(" switch tab  ", Style::default().fg(MUTED_GRAY)),
         Span::styled(
             "1 Today  2 7d  3 30d  4 90d  5 YTD  m Month  q Quarter  a All  D advanced  ",
             Style::default().fg(MUTED_GRAY),
@@ -4476,14 +4622,17 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     crate::ui_helpers::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
-fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
+/// Emoji label for a provider chip in the top provider bar. `All` and
+/// the no-data stubs (`Cursor`, `Gemini`) still render so the user can
+/// see — and select — every filter.
+fn provider_bar_label(filter: UsageProviderFilter) -> &'static str {
     match filter {
         UsageProviderFilter::All => "All",
-        UsageProviderFilter::Claude => "Claude",
-        UsageProviderFilter::Codex => "Codex",
-        UsageProviderFilter::Cursor => "Cursor",
-        UsageProviderFilter::Copilot => "Copilot",
-        UsageProviderFilter::Gemini => "Gemini",
+        UsageProviderFilter::Claude => "✻ Claude Code",
+        UsageProviderFilter::Codex => "✦ Codex CLI",
+        UsageProviderFilter::Cursor => "▸ Cursor",
+        UsageProviderFilter::Copilot => "🐙 Copilot",
+        UsageProviderFilter::Gemini => "✨ Gemini CLI",
     }
 }
 
@@ -4514,7 +4663,7 @@ fn format_cost(cost: Option<f64>) -> String {
 }
 
 #[cfg(test)]
-mod period_provider_strip_tests {
+mod period_strip_tests {
     use super::*;
 
     fn flatten(line: &Line<'_>) -> String {
@@ -4532,8 +4681,12 @@ mod period_provider_strip_tests {
     fn period_row_lists_all_options_with_key_hints() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::Week;
-        let lines = build_period_provider_strip(&state);
-        assert_eq!(lines.len(), 2);
+        let lines = build_period_strip(&state);
+        assert_eq!(
+            lines.len(),
+            1,
+            "strip is period-only; provider moved to the top bar"
+        );
         let row = flatten(&lines[0]);
         for needle in [
             "Period:",
@@ -4555,7 +4708,7 @@ mod period_provider_strip_tests {
     fn period_row_highlights_active_period() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::Today;
-        let lines = build_period_provider_strip(&state);
+        let lines = build_period_strip(&state);
         let active = highlighted_chip(&lines[0]).expect("a period chip should be highlighted");
         assert!(active.contains("Today"), "got {active}");
     }
@@ -4564,18 +4717,37 @@ mod period_provider_strip_tests {
     fn period_row_highlights_90d_chip_when_last_n_days_90() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::LastNDays(90);
-        let lines = build_period_provider_strip(&state);
+        let lines = build_period_strip(&state);
         let active = highlighted_chip(&lines[0]).expect("90d should be highlighted");
         assert!(active.contains("90d"), "got {active}");
     }
 
     #[test]
-    fn provider_row_highlights_active_provider_filter() {
+    fn provider_switch_is_a_single_control_cycling_the_full_filter_ring() {
+        // One provider control now: ◀/▶ and `p` all step
+        // `provider_filter` through every provider, Copilot included.
+        // (The old top ◀/▶ forced Gemini/Copilot back to `All`, and a
+        // second redundant provider row lived inside the period strip.)
         let mut state = UsageViewState::default();
-        state.provider_filter = UsageProviderFilter::Codex;
-        let lines = build_period_provider_strip(&state);
-        let active = highlighted_chip(&lines[1]).expect("a provider chip should be highlighted");
-        assert_eq!(active, "Codex");
+        assert_eq!(state.provider_filter, UsageProviderFilter::All);
+        let ring = [
+            UsageProviderFilter::Claude,
+            UsageProviderFilter::Codex,
+            UsageProviderFilter::Cursor,
+            UsageProviderFilter::Copilot,
+            UsageProviderFilter::Gemini,
+            UsageProviderFilter::All,
+        ];
+        for expected in ring {
+            state.next_provider();
+            assert_eq!(state.provider_filter, expected);
+        }
+        // `p` is an alias for ▶.
+        state.cycle_provider_filter();
+        assert_eq!(state.provider_filter, UsageProviderFilter::Claude);
+        // ◀ steps back.
+        state.prev_provider();
+        assert_eq!(state.provider_filter, UsageProviderFilter::All);
     }
 }
 
@@ -4679,6 +4851,7 @@ mod cross_filter_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: "alpha".into(),
+                    project_path: "/work/alpha".into(),
                     session_id: "sess-A".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -4687,6 +4860,7 @@ mod cross_filter_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: "beta".into(),
+                    project_path: "/work/beta".into(),
                     session_id: "sess-B".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -4788,6 +4962,7 @@ mod cross_filter_tests {
         let session_alpha = SessionUsage {
             provider: "claude".into(),
             project: "alpha".into(),
+            project_path: "/work/alpha".into(),
             session_id: "s1".into(),
             first_timestamp: now,
             last_timestamp: now,
@@ -4796,6 +4971,7 @@ mod cross_filter_tests {
         let session_beta = SessionUsage {
             provider: "claude".into(),
             project: "beta".into(),
+            project_path: "/work/beta".into(),
             session_id: "s1".into(),
             first_timestamp: now,
             last_timestamp: now,
@@ -5833,6 +6009,7 @@ mod zoom_table_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: LONG_PATH.into(),
+                    project_path: LONG_PATH.into(),
                     session_id: "01HXYZABCDEFGHJKMNPQRSTVWX".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -5841,6 +6018,7 @@ mod zoom_table_tests {
                 SessionUsage {
                     provider: "codex".into(),
                     project: "beta".into(),
+                    project_path: "/work/beta".into(),
                     session_id: "sess-B".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -5861,6 +6039,7 @@ mod zoom_table_tests {
             data.sessions.push(SessionUsage {
                 provider: "claude".into(),
                 project: format!("proj-{i}"),
+                project_path: format!("/work/proj-{i}"),
                 session_id: format!("sid-{i}"),
                 first_timestamp: now,
                 last_timestamp: now,
@@ -6220,5 +6399,211 @@ mod zoom_table_tests {
         state.zoom_row_up();
         state.zoom_row_up();
         assert_eq!(state.focus_row, 0);
+    }
+
+    // ── Savings tab observability (G1 tripwire for the Headroom/RTK card) ──
+    // These render the real `render_savings` into a TestBackend buffer and
+    // assert the VT100 truth the user sees — proving the proxy /stats figures
+    // (savings.total_tokens → headroom_tokens_saved) actually reach the screen,
+    // the gap that earlier let observability read 0 forever.
+
+    fn render_savings_flat(
+        sd: Option<&crate::data::savings::SavingsData>,
+        w: u16,
+        h: u16,
+    ) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                render_savings(frame.buffer_mut(), area, sd);
+            })
+            .expect("render_savings must not panic");
+        flatten(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn savings_tab_surfaces_live_headroom_tokens() {
+        use crate::data::savings::{CAVEMAN_OUTPUT_RATIO, SavingsData};
+        let sd = SavingsData {
+            headroom_running: true,
+            headroom_tokens_saved: 12_345,
+            rtk_installed: true,
+            rtk_total_saved: 6_789,
+            caveman_est: 1_000_000,
+        };
+        let flat = render_savings_flat(Some(&sd), 120, 16);
+
+        // Card chrome + columns.
+        assert!(flat.contains("Token Savings"), "card title:\n{flat}");
+        assert!(
+            flat.contains("Source") && flat.contains("Tokens Saved") && flat.contains("Status"),
+            "header row:\n{flat}"
+        );
+        // Headroom observability: live dot, "live" status, and the ACTUAL
+        // saved-token figure from /stats — the whole point of this tab.
+        assert!(flat.contains('●'), "live status dot:\n{flat}");
+        assert!(
+            flat.contains("Headroom") && flat.contains("live"),
+            "headroom row:\n{flat}"
+        );
+        assert!(
+            flat.contains(&format_tokens_short(12_345)),
+            "headroom tokens {} must render:\n{flat}",
+            format_tokens_short(12_345)
+        );
+        // RTK row.
+        assert!(
+            flat.contains("RTK") && flat.contains("installed"),
+            "rtk row:\n{flat}"
+        );
+        assert!(
+            flat.contains(&format_tokens_short(6_789)),
+            "rtk tokens:\n{flat}"
+        );
+        // Caveman is labelled a modelled estimate, never counted as real.
+        assert!(flat.contains("Caveman (est)"), "caveman row:\n{flat}");
+        assert!(
+            flat.contains(&format!("×{CAVEMAN_OUTPUT_RATIO:.2}")),
+            "caveman ratio label:\n{flat}"
+        );
+        // NET = real sources only (Headroom + RTK), not the estimate.
+        assert!(flat.contains("NET (measured)"), "net row:\n{flat}");
+        assert!(
+            flat.contains(&format_tokens_short(12_345 + 6_789)),
+            "net = headroom + rtk = {}:\n{flat}",
+            format_tokens_short(12_345 + 6_789)
+        );
+        assert!(
+            flat.contains("not measured"),
+            "estimate disclaimer:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn savings_tab_shows_offline_state_when_proxy_down() {
+        use crate::data::savings::SavingsData;
+        let sd = SavingsData {
+            headroom_running: false,
+            headroom_tokens_saved: 0,
+            rtk_installed: false,
+            rtk_total_saved: 0,
+            caveman_est: 0,
+        };
+        let flat = render_savings_flat(Some(&sd), 120, 16);
+        assert!(flat.contains('○'), "offline status dot:\n{flat}");
+        assert!(flat.contains("proxy down"), "headroom down status:\n{flat}");
+        assert!(
+            flat.contains("not installed"),
+            "rtk not-installed status:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn savings_tab_shows_fetching_placeholder_before_data_lands() {
+        let flat = render_savings_flat(None, 120, 6);
+        assert!(
+            flat.contains("Fetching savings"),
+            "fetching placeholder:\n{flat}"
+        );
+    }
+
+    // ── Tab-bar mouse geometry (click-to-switch hit zones) ──────────────────
+
+    #[test]
+    fn tab_zones_are_contiguous_with_3col_dividers() {
+        let zones = tab_zones(1);
+        assert_eq!(zones.len(), UsageTab::all().len());
+        assert_eq!(zones[0].0, 1, "first tab starts at inner_x");
+        for (i, (start, end, t)) in zones.iter().enumerate() {
+            let w = t.title().chars().count() as u16;
+            assert_eq!(*end, start + w - 1, "{t:?} zone width must equal its title");
+            if i > 0 {
+                assert_eq!(
+                    *start,
+                    zones[i - 1].1 + 1 + 3,
+                    "3-col ` │ ` divider before {t:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_at_col_resolves_tabs_and_divider_gaps() {
+        let zones = tab_zones(1);
+        let b = zones.iter().find(|(_, _, t)| *t == UsageTab::Burndown).unwrap();
+        let s = zones.iter().find(|(_, _, t)| *t == UsageTab::Savings).unwrap();
+        assert_eq!(tab_at_col(b.0), Some(UsageTab::Burndown));
+        assert_eq!(tab_at_col(s.0), Some(UsageTab::Savings));
+        assert_eq!(
+            tab_at_col(s.1),
+            Some(UsageTab::Savings),
+            "end col is inclusive"
+        );
+        assert_eq!(tab_at_col(b.1 + 1), None, "the divider gap is dead space");
+    }
+
+    /// Drift guard: the rendered tab titles must land exactly where
+    /// `tab_at_col` (and `TAB_BAR_TOP`) say they are, so a click resolves to
+    /// the tab the user sees. Catches both layout-height and tab-zone drift.
+    #[test]
+    fn tab_bar_geometry_matches_render() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let row = TAB_BAR_TOP + 1;
+        let render_at = |w: u16| {
+            let state = UsageViewState::default();
+            let backend = TestBackend::new(w, 24);
+            let mut terminal = Terminal::new(backend).expect("backend");
+            terminal
+                .draw(|f| {
+                    let a = f.size();
+                    render(f.buffer_mut(), a, &state);
+                })
+                .expect("render must not panic");
+            terminal.backend().buffer().clone()
+        };
+
+        // Wide: BOTH a fixed-position tab (Burndown @ col 1) AND a later tab
+        // whose start depends on every preceding divider (Savings) must render
+        // exactly at their hit zones — so a click resolves to the seen tab.
+        let wide = render_at(120);
+        for tab in [UsageTab::Burndown, UsageTab::Savings] {
+            let z = tab_zones(1).into_iter().find(|(_, _, t)| *t == tab).unwrap();
+            let got: String = (z.0..=z.1).map(|x| wide.get(x, row).symbol().to_string()).collect();
+            assert_eq!(
+                got,
+                tab.title(),
+                "{tab:?} must render at its hit-zone on row {row}"
+            );
+        }
+
+        // Narrow: the tab strip must not overwrite the block's right border.
+        let narrow = render_at(40);
+        assert_eq!(
+            narrow.get(40 - 1, row).symbol(),
+            "│",
+            "narrow tab bar must keep its right border (no title overflow)"
+        );
+    }
+
+    #[test]
+    fn help_bar_advertises_switch_tab_legend() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = UsageViewState::default();
+        let backend = TestBackend::new(160, 24);
+        let mut terminal = Terminal::new(backend).expect("backend");
+        terminal
+            .draw(|f| {
+                let a = f.size();
+                render(f.buffer_mut(), a, &state);
+            })
+            .expect("render must not panic");
+        let flat = flatten(terminal.backend().buffer());
+        assert!(
+            flat.contains("switch tab"),
+            "help bar must show the legend:\n{flat}"
+        );
     }
 }

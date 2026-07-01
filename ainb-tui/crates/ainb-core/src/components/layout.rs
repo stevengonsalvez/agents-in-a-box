@@ -27,6 +27,25 @@ use crate::app::{
     screens::{builtin::register_builtins, ids as screen_ids},
 };
 
+/// Cell size the embed gets under the interactive layout: the right pane's
+/// interior next to the user's CURRENT sidebar (the embed honors the sidebar
+/// — collapsed rail or full width — rather than forcing a layout). Used at
+/// entry (`EnterInteractivePane`) so the very first attach already matches
+/// what the first interactive frame will resize to — otherwise tmux reflows
+/// the session twice back-to-back (attach size → layout size).
+///
+/// Must mirror `render`'s split: vertical chrome is the status bar (3) +
+/// session info (3) + menu bar (6), and the pane border takes 2 more rows/
+/// cols off the interior. `sidebar_width` is the live
+/// `sessions_pane_state.effective_width(..)` for the same terminal width.
+pub fn interactive_embed_size(width: u16, height: u16, sidebar_width: u16) -> (u16, u16) {
+    const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
+    const PANE_BORDERS: u16 = 2;
+    let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
+    let cols = width.saturating_sub(sidebar_width.saturating_add(PANE_BORDERS)).max(1);
+    (rows, cols)
+}
+
 pub struct LayoutComponent {
     session_list: SessionListComponent,
     logs_viewer: LogsViewerComponent,
@@ -64,10 +83,18 @@ impl LayoutComponent {
         // owns its component(s) and renders any screen-specific overlays
         // (e.g. Config's auth-provider/config popups). Help overlay is
         // rendered post-screen as it's universal across full-screen views.
-        let frame_size = frame.size();
+        let frame_size = frame.area();
         if let Some(screen) = self.screens.get_mut(&state.current_screen) {
             tracing::debug!("Rendering screen via registry: {}", state.current_screen);
             screen.render(frame, frame_size, state);
+            // Notifications must render on registry-routed screens too —
+            // before this fix they only painted on the legacy
+            // fallthrough path, which silently masked any
+            // `state.add_*_notification` call from a screen-specific
+            // event handler (e.g. SkillManager's [s]→Sync routing,
+            // bead v12.1.T3). Painted before the help overlay so the
+            // help panel still wins z-order if both are visible.
+            self.render_notifications(frame, frame_size, state);
             if state.help_visible {
                 tracing::debug!("Rendering help overlay on {}", state.current_screen);
                 self.help.render(frame, frame_size);
@@ -79,6 +106,15 @@ impl LayoutComponent {
             // without this the dialog could be live + interactive but
             // invisible (e.g. the first-run notify-install prompt fired
             // on the HomeScreen).
+            // MCP pool overlay paints above the screen, below a confirmation
+            // dialog (so a stop confirmation sits on top of it).
+            if let Some(ref overlay) = state.mcp_overlay {
+                crate::components::mcp_overlay::render(frame, frame_size, overlay);
+            }
+            // Daemons overlay (read-only; same z-order as MCP overlay).
+            if let Some(ref overlay) = state.daemons_overlay {
+                crate::components::daemons_overlay::render(frame, frame_size, overlay);
+            }
             if state.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
@@ -93,12 +129,16 @@ impl LayoutComponent {
                 Constraint::Length(3), // Session info (single line + borders)
                 Constraint::Length(6), // Bottom menu bar (4 lines + borders)
             ])
-            .split(frame.size());
+            .split(frame.area());
 
         // Render top status bar
         self.render_status_bar(frame, main_layout[0], state);
 
-        // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
+        // Simple 2-panel layout: session list | logs (Claude chat is now a popup).
+        // The interactive embed honors whatever sidebar layout the user has
+        // (decision 2026-06-12: no forced collapse — the sidebar is a fixed
+        // ~40 cols, modern TUIs reflow cleanly, and `B` pre-collapses to the
+        // rail when maximum embed width is wanted).
         let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -124,8 +164,24 @@ impl LayoutComponent {
             .is_some()
             || state.selected_shell_session().is_some();
 
-        if selected_has_tmux {
-            // Render tmux preview pane
+        if state.is_interactive_pane() {
+            // Live interactive embed occupies the right pane. Resize the embed to
+            // the pane interior (minus the border) so the inner program reflows,
+            // then render the live terminal in place of the read-only preview.
+            let area = content_chunks[1];
+            let inner = area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            if let Some(e) = state.embed.as_mut() {
+                let _ = e.resize(inner.height, inner.width);
+            }
+            // Publish the interior so mouse events can be translated into
+            // 1-based pane-local SGR coordinates (see encode_mouse_event).
+            state.embed_pane_area = Some(inner);
+            self.tmux_preview.render_interactive(frame, area, state);
+        } else if selected_has_tmux {
+            // Render tmux preview pane (read-only capture)
             self.tmux_preview.render(frame, content_chunks[1], state);
         } else {
             // Render traditional live logs stream
@@ -140,34 +196,43 @@ impl LayoutComponent {
 
         // Render help overlay if visible
         if state.help_visible {
-            self.help.render(frame, frame.size());
+            self.help.render(frame, frame.area());
         }
 
         // Render new session overlay if visible
         if state.current_screen == screen_ids::NEW_SESSION
             || state.current_screen == screen_ids::SEARCH_WORKSPACE
         {
-            self.new_session.render(frame, frame.size(), state);
+            self.new_session.render(frame, frame.area(), state);
         }
 
         // Render Claude chat popup if visible
         if state.current_screen == screen_ids::CLAUDE_CHAT {
-            let popup_area = centered_rect(80, 80, frame.size());
+            let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
+        }
+
+        // MCP pool overlay (above the screen, below the confirmation dialog).
+        if let Some(ref overlay) = state.mcp_overlay {
+            crate::components::mcp_overlay::render(frame, frame.size(), overlay);
+        }
+        // Daemons overlay (read-only; same z-order as MCP overlay).
+        if let Some(ref overlay) = state.daemons_overlay {
+            crate::components::daemons_overlay::render(frame, frame.size(), overlay);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
         if state.confirmation_dialog.is_some() {
-            self.confirmation_dialog.render(frame, frame.size(), state);
+            self.confirmation_dialog.render(frame, frame.area(), state);
         }
 
         // Render quick commit dialog if visible
         if state.is_in_quick_commit_mode() {
-            self.render_quick_commit_dialog(frame, frame.size(), state);
+            self.render_quick_commit_dialog(frame, frame.area(), state);
         }
 
         // Render notifications (top-right corner)
-        self.render_notifications(frame, frame.size(), state);
+        self.render_notifications(frame, frame.area(), state);
     }
 
     /// Get mutable reference to live logs component for scroll handling
@@ -193,7 +258,11 @@ impl LayoutComponent {
                 "[+]",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
+            // 'B' is the keyboard twin of clicking [+] (hint next to control).
+            Line::from(Span::styled(
+                "B",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("E", Style::default().fg(CORNFLOWER_BLUE))),
             Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
@@ -233,17 +302,6 @@ impl LayoutComponent {
     }
 
     fn render_menu_bar_stacked(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        // Pure decision for which restart-shaped affordance to surface.
-        // See test below for the truth table.
-        // The session-action group's restart-shaped affordance is split
-        // across two keys with different semantics:
-        //   - `r` resumes a Stopped Interactive (tmux) session in-place.
-        //   - `e` restarts a Boss/Docker session into a fresh container.
-        // Show the binding that actually applies to the highlighted row
-        // so users don't press the wrong one. See events.rs:834 and
-        // events.rs:868 for the dispatch logic.
-        let (restart_key, restart_label) = restart_affordance(state.selected_session());
-
         // Premium styled command bar with separators - 3 lines for better
         // discoverability. Grouped: (1) navigation + selection, (2) session
         // actions, (3) git / tools / system. Every key that the home screen
@@ -262,7 +320,7 @@ impl LayoutComponent {
         let line1_spans = vec![
             key("n", GOLD),
             desc("ew "),
-            key("E", GOLD),
+            key("⇧E", GOLD),
             desc("xpand "),
             key("Tab", GOLD),
             desc(" focus"),
@@ -270,6 +328,8 @@ impl LayoutComponent {
             // Attach / select group
             key("a", SELECTION_GREEN),
             desc("ttach "),
+            key("→", SELECTION_GREEN),
+            desc(" pane "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
             key("Space", SELECTION_GREEN),
@@ -281,11 +341,11 @@ impl LayoutComponent {
 
         // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
         let line2_spans = vec![
-            key(restart_key, SELECTION_GREEN),
-            desc(restart_label),
+            key("r", SELECTION_GREEN),
+            desc(" resume "),
             key("d", red),
             desc("elete "),
-            key("D", red),
+            key("⇧D", red),
             desc(" del-sel "),
             key("o", SELECTION_GREEN),
             desc(" editor "),
@@ -306,13 +366,11 @@ impl LayoutComponent {
             desc("laude "),
             key("f", WARNING_ORANGE),
             desc(" refresh "),
-            key("F", WARNING_ORANGE),
+            key("⇧F", WARNING_ORANGE),
             desc(" filter "),
-            key("x", WARNING_ORANGE),
-            desc(" cleanup"),
             sep(),
-            key("A", MUTED_GRAY),
-            desc(" re-auth"),
+            key("u", MUTED_GRAY),
+            desc(" re-auth "),
         ];
 
         // Line 4: Panels + System. Every panel screen mirrors its
@@ -378,38 +436,13 @@ impl LayoutComponent {
 
     /// Wide-terminal legend: two columns separated by a vertical rule. The
     /// left column is everything that acts on a session/workspace; the right
-    /// column is the panels, views, and navigation. Two of the keys are
-    /// mode-specific — `x cleanup` only applies to Boss/container sessions and
-    /// `F filter` only to normal interactive sessions — so the inactive one is
-    /// dimmed based on the highlighted row (see `mode_dim_flags`).
+    /// column is the panels, views, and navigation.
     fn render_menu_bar_two_col(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        use ratatui::widgets::block::Title;
-
-        let (restart_key, restart_label) = restart_affordance(state.selected_session());
-        let (dim_filter, dim_cleanup) = mode_dim_flags(state.selected_session());
-
         let key = |k: &'static str, color: Color| {
             Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
         };
         let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
         let red = Color::Rgb(230, 100, 100);
-        // A mode key that doesn't apply to the highlighted session renders in
-        // the border colour so it reads as present-but-inactive rather than
-        // disappearing (which would make the bar twitch as the cursor moves).
-        let dim = |s: &'static str| Span::styled(s, Style::default().fg(SUBDUED_BORDER));
-
-        // `F filter` (normal-only) and `x cleanup` (Boss-only) dim when the
-        // highlighted session is the other mode — see `mode_dim_flags`.
-        let (filter_key, filter_desc) = if dim_filter {
-            (dim("F"), dim(" filter  "))
-        } else {
-            (key("F", WARNING_ORANGE), desc(" filter  "))
-        };
-        let (cleanup_key, cleanup_desc) = if dim_cleanup {
-            (dim("x"), dim(" cleanup  "))
-        } else {
-            (key("x", WARNING_ORANGE), desc(" cleanup  "))
-        };
 
         // ── Left column: session & workspace actions ──────────────────────
         let left_lines = vec![
@@ -418,17 +451,19 @@ impl LayoutComponent {
                 desc("ew  "),
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
+                key("→", SELECTION_GREEN),
+                desc(" pane  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
                 key("Space", SELECTION_GREEN),
                 desc(" select"),
             ]),
             Line::from(vec![
-                key(restart_key, SELECTION_GREEN),
-                desc(restart_label),
+                key("r", SELECTION_GREEN),
+                desc(" resume  "),
                 key("d", red),
                 desc("elete  "),
-                key("D", red),
+                key("⇧D", red),
                 desc(" del-sel  "),
                 key("s", GOLD),
                 desc("tar"),
@@ -446,12 +481,10 @@ impl LayoutComponent {
             Line::from(vec![
                 key("f", WARNING_ORANGE),
                 desc(" refresh  "),
-                filter_key,
-                filter_desc,
-                cleanup_key,
-                cleanup_desc,
-                key("A", MUTED_GRAY),
-                desc(" re-auth"),
+                key("⇧F", WARNING_ORANGE),
+                desc(" filter  "),
+                key("u", MUTED_GRAY),
+                desc(" re-auth  "),
             ]),
         ];
 
@@ -494,7 +527,7 @@ impl LayoutComponent {
                 desc("it  "),
                 key("c", WARNING_ORANGE),
                 desc("laude  "),
-                key("E", GOLD),
+                key("⇧E", GOLD),
                 desc("xpand"),
             ]),
             Line::from(vec![
@@ -516,20 +549,20 @@ impl LayoutComponent {
             .border_style(Style::default().fg(SUBDUED_BORDER))
             .style(Style::default().bg(PANEL_BG))
             .title(
-                Title::from(Line::from(vec![
+                Line::from(vec![
                     Span::styled(" ⌨ ", Style::default().fg(GOLD)),
                     Span::styled(
                         "Session actions ",
                         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                     ),
-                ]))
+                ])
                 .alignment(Alignment::Left),
             )
             .title(
-                Title::from(Line::from(vec![Span::styled(
+                Line::from(vec![Span::styled(
                     " Panels & views ",
                     Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                )]))
+                )])
                 .alignment(Alignment::Right),
             );
         let inner = block.inner(area);
@@ -566,83 +599,12 @@ impl LayoutComponent {
     fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         let mut status_spans: Vec<Span> = vec![];
 
-        // Current workspace/repo info
-        if let Some(workspace_idx) = state.selected_workspace_index {
-            if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                if let Some(repo_name) = workspace.path.file_name().and_then(|n| n.to_str()) {
-                    status_spans.push(Span::styled("📁 ", Style::default().fg(GOLD)));
-                    status_spans.push(Span::styled(
-                        repo_name.to_string(),
-                        Style::default().fg(SOFT_WHITE),
-                    ));
-                }
-            }
-        }
-
-        // Active session info
-        if let Some(_session_id) = state.get_selected_session_id() {
-            if let Some(workspace_idx) = state.selected_workspace_index {
-                if let Some(session_idx) = state.selected_session_index {
-                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        if let Some(session) = workspace.sessions.get(session_idx) {
-                            // Separator
-                            if !status_spans.is_empty() {
-                                status_spans.push(Span::styled(
-                                    "  │  ",
-                                    Style::default().fg(SUBDUED_BORDER),
-                                ));
-                            }
-
-                            // Branch info
-                            status_spans
-                                .push(Span::styled("🌿 ", Style::default().fg(SELECTION_GREEN)));
-                            status_spans.push(Span::styled(
-                                session.branch_name.clone(),
-                                Style::default().fg(SOFT_WHITE),
-                            ));
-
-                            // Container info
-                            if let Some(container_id) = &session.container_id {
-                                let short_id = &container_id[..8.min(container_id.len())];
-                                let (status_icon, status_color) = match session.status {
-                                    crate::models::SessionStatus::Running => {
-                                        ("🟢", SELECTION_GREEN)
-                                    }
-                                    crate::models::SessionStatus::Stopped => {
-                                        ("🔴", Color::Rgb(230, 100, 100))
-                                    }
-                                    crate::models::SessionStatus::Idle => ("🟡", WARNING_ORANGE),
-                                    crate::models::SessionStatus::Error(_) => {
-                                        ("❌", Color::Rgb(230, 100, 100))
-                                    }
-                                };
-                                status_spans.push(Span::styled(
-                                    "  │  ",
-                                    Style::default().fg(SUBDUED_BORDER),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("{} ", status_icon),
-                                    Style::default().fg(status_color),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("{} ", session.name),
-                                    Style::default().fg(SOFT_WHITE),
-                                ));
-                                status_spans.push(Span::styled(
-                                    format!("({})", short_id),
-                                    Style::default().fg(MUTED_GRAY),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Claude chat status
-        if !status_spans.is_empty() {
-            status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
-        }
+        // Claude-chat popup toggle — a small global indicator. The
+        // workspace / branch / session-status that used to live here were
+        // removed: they duplicated the bottom "Session Info" line. This
+        // top bar is now a dedicated, full-width live-quota line so both
+        // providers fit (and degrade gracefully) instead of being squeezed
+        // out by that duplicated content.
         if state.claude_chat_visible {
             status_spans.push(Span::styled("🗨️ ", Style::default().fg(SELECTION_GREEN)));
             status_spans.push(Span::styled("ON", Style::default().fg(SELECTION_GREEN)));
@@ -651,24 +613,17 @@ impl LayoutComponent {
             status_spans.push(Span::styled("OFF", Style::default().fg(MUTED_GRAY)));
         }
 
-        // Live OAuth window: append a compact widget when wired AND fresh,
-        // a red CTA when not wired (and the user hasn't declined).
-        // The status bar gracefully degrades on narrow terminals — we
-        // measure the existing content first and drop the live widget if
-        // it wouldn't fit.
-        let live_spans = build_live_status_spans(state);
-        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
-        // 4 chars for the " │  " separator we'd add
-        let live_w: usize = live_spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum::<usize>()
-            .saturating_add(5);
+        // Live OAuth quota (claude + codex). With the duplicated content
+        // gone the widget gets nearly the whole bar; it abbreviate-then-
+        // sheds to fit whatever columns remain (see `build_live_widget_spans`).
+        // The unwired case still falls back to the red CTA.
         let area_inner_w = area.width.saturating_sub(2) as usize; // borders
-        if !live_spans.is_empty() && existing_w + live_w <= area_inner_w {
-            if !status_spans.is_empty() {
-                status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
-            }
+        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
+        const SEP_W: usize = 5; // "  │  "
+        let avail = area_inner_w.saturating_sub(existing_w + SEP_W);
+        let live_spans = build_live_status_spans(state, avail);
+        if !live_spans.is_empty() {
+            status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
             status_spans.extend(live_spans);
         }
 
@@ -887,37 +842,6 @@ fn inbox_unread_badge(unread: u64) -> Option<String> {
     }
 }
 
-fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
-    use crate::models::{SessionMode, SessionStatus};
-    let stopped_interactive = matches!(
-        selected,
-        Some(s) if matches!(s.mode, SessionMode::Interactive)
-            && matches!(s.status, SessionStatus::Stopped)
-    );
-    if stopped_interactive {
-        ("r", " resume ")
-    } else {
-        ("e", " recreate ")
-    }
-}
-
-/// Decide which mode-specific legend keys to dim for the highlighted session.
-///
-/// Two keys only apply to one mode: `F filter` cycles the *normal interactive*
-/// session filter, and `x cleanup` reaps orphaned *Boss/container* sessions.
-/// Returns `(dim_filter, dim_cleanup)` — when a Boss session is selected the
-/// normal-only `filter` is dimmed, and when an Interactive session is selected
-/// the Boss-only `cleanup` is dimmed. With no selection (or any other row type)
-/// neither is dimmed, since both actions are still reachable.
-fn mode_dim_flags(selected: Option<&crate::models::Session>) -> (bool, bool) {
-    use crate::models::SessionMode;
-    match selected.map(|s| &s.mode) {
-        Some(SessionMode::Boss) => (true, false),
-        Some(SessionMode::Interactive) => (false, true),
-        None => (false, false),
-    }
-}
-
 impl Default for LayoutComponent {
     fn default() -> Self {
         Self::new()
@@ -931,7 +855,7 @@ impl Default for LayoutComponent {
 /// The settings.json read goes through [`AppState::statusline_status_cached`]
 /// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
 /// filesystem reads.
-pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
+pub fn build_live_status_spans(state: &mut AppState, max_width: usize) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
@@ -948,8 +872,13 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
     let live = state.live_window_watcher.snapshot();
-    if live.source == Source::Tier1Cache {
-        return build_live_widget_spans(&live);
+    // Render the widget when Claude Tier1 data is flowing OR Codex usage is
+    // present — Codex is overlaid independently (separate cache, its own
+    // poller), so a user who runs Codex but never wired the Claude
+    // statusline still sees their Codex burn instead of the CTA.
+    let has_codex = live.codex_five_hour_pct.is_some() || live.codex_seven_day_pct.is_some();
+    if live.source == Source::Tier1Cache || has_codex {
+        return build_live_widget_spans(&live, max_width);
     }
 
     match status {
@@ -961,60 +890,219 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
         Some(StatuslineStatus::NotConfigured | StatuslineStatus::Other(_))
             if decision != StatuslineDecision::Declined =>
         {
-            build_cta_spans()
+            // Vanish (don't clip) the CTA when it can't fit — parity with
+            // the quota widget's shed behaviour and with the old width gate.
+            let cta = build_cta_spans();
+            if spans_width(&cta) <= max_width {
+                cta
+            } else {
+                Vec::new()
+            }
         }
         _ => Vec::new(),
     }
 }
 
-fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
+/// Detail level for the live quota widget, richest → poorest. The renderer
+/// picks the richest level whose rendered width fits the available columns
+/// (abbreviate-then-shed): drop the reset dates, then abbreviate the labels
+/// + weekly into `cl 81%/24%`, then shed the weekly entirely to `cl81%`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaDetail {
+    /// `claude 5h 81% ↻ Jun 15 16:50 · wk 24% ↻ Jun 15 18:00`
+    FullDated,
+    /// `claude 5h 81% · wk 24%`
+    Full,
+    /// `cl 81%/24%` (5h%/wk%, abbreviated provider label)
+    Abbrev,
+    /// `cl81%` (5h only — last resort, both providers still visible)
+    Tiny,
+}
 
-    if let Some(pct) = live.five_hour_pct {
-        out.push(Span::styled("5h ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_5h(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.five_hour_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
+/// All detail levels, richest → poorest.
+const QUOTA_DETAIL_LADDER: [QuotaDetail; 4] = [
+    QuotaDetail::FullDated,
+    QuotaDetail::Full,
+    QuotaDetail::Abbrev,
+    QuotaDetail::Tiny,
+];
+
+/// Total display width (columns) of a span list.
+fn spans_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Best-fit live quota spans for `max_width` columns. Tries each detail
+/// level richest → poorest and returns the first that fits; if even the
+/// poorest overflows it is returned anyway (ratatui clips — showing a
+/// clipped `cl81% cx14%` beats a blank bar). Empty when there's no data.
+fn build_live_widget_spans(
+    live: &crate::models::live_window::LiveWindow,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    let mut poorest = Vec::new();
+    for detail in QUOTA_DETAIL_LADDER {
+        let spans = quota_spans(live, detail);
+        if spans.is_empty() {
+            return spans; // no data at all → nothing to render
         }
+        if spans_width(&spans) <= max_width {
+            return spans;
+        }
+        poorest = spans;
     }
-    if let Some(pct) = live.seven_day_pct {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled("wk ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(
-            mini_bar(pct),
-            Style::default().fg(bar_color_7d(pct)),
-        ));
-        out.push(Span::styled(
-            format!(" {pct}%"),
-            Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
-        ));
-        if let Some(reset) = live.seven_day_resets_at {
-            out.push(Span::styled(
-                format!(" ↻ {}", format_reset_at(reset)),
-                Style::default().fg(MUTED_GRAY),
-            ));
-        }
-    }
-    // today_cost_usd intentionally not rendered: Claude Code's
-    // /cost/total_cost_usd is the lifetime cost of a *single* session
-    // (whichever invoked the statusline most recently), not today's
-    // total. Misleading at a glance — keep the field on the cache
-    // schema but don't surface it. The old combined "⏱ Xh Ym" countdown
-    // was likewise dropped in favour of the absolute per-window reset
-    // instants ("↻ <date> <time>") rendered next to each bar above.
+    poorest
+}
+
+/// Build both provider clusters (`claude …   codex …`) at one detail level.
+fn quota_spans(
+    live: &crate::models::live_window::LiveWindow,
+    detail: QuotaDetail,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    push_provider(
+        &mut out,
+        ("claude", "cl"),
+        live.five_hour_pct,
+        live.five_hour_resets_at,
+        live.seven_day_pct,
+        live.seven_day_resets_at,
+        detail,
+    );
+    push_provider(
+        &mut out,
+        ("codex", "cx"),
+        live.codex_five_hour_pct,
+        live.codex_five_hour_resets_at,
+        live.codex_seven_day_pct,
+        live.codex_seven_day_resets_at,
+        detail,
+    );
     out
+}
+
+/// Render one provider cluster at `detail` onto `out`, separated from a
+/// preceding cluster by a gap. No-op when both windows are absent
+/// (hide-on-fail). `labels` is `(full, abbreviated)`.
+#[allow(clippy::too_many_arguments)]
+fn push_provider(
+    out: &mut Vec<Span<'static>>,
+    labels: (&str, &str),
+    five_pct: Option<u8>,
+    five_reset: Option<chrono::DateTime<chrono::Utc>>,
+    seven_pct: Option<u8>,
+    seven_reset: Option<chrono::DateTime<chrono::Utc>>,
+    detail: QuotaDetail,
+) {
+    if five_pct.is_none() && seven_pct.is_none() {
+        return;
+    }
+    let (full_label, abbr_label) = labels;
+    let label_style = Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD);
+    if !out.is_empty() {
+        let gap = match detail {
+            QuotaDetail::Abbrev | QuotaDetail::Tiny => "  ",
+            _ => "   ",
+        };
+        out.push(Span::styled(gap, Style::default()));
+    }
+
+    match detail {
+        QuotaDetail::FullDated | QuotaDetail::Full => {
+            let show_reset = detail == QuotaDetail::FullDated;
+            out.push(Span::styled(format!("{full_label} "), label_style));
+            let mut first = true;
+            push_quota_window(
+                out,
+                "5h",
+                five_pct,
+                bar_color_5h,
+                five_reset,
+                show_reset,
+                &mut first,
+            );
+            push_quota_window(
+                out,
+                "wk",
+                seven_pct,
+                bar_color_7d,
+                seven_reset,
+                show_reset,
+                &mut first,
+            );
+        }
+        QuotaDetail::Abbrev => {
+            // `cl 81%/24%`
+            out.push(Span::styled(format!("{abbr_label} "), label_style));
+            if let Some(p) = five_pct {
+                out.push(Span::styled(
+                    format!("{p}%"),
+                    Style::default().fg(bar_color_5h(p)).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some(p) = seven_pct {
+                if five_pct.is_some() {
+                    out.push(Span::styled("/", Style::default().fg(MUTED_GRAY)));
+                }
+                out.push(Span::styled(
+                    format!("{p}%"),
+                    Style::default().fg(bar_color_7d(p)).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        QuotaDetail::Tiny => {
+            // `cl81%` — 5h only (fall back to wk if 5h is absent) so the
+            // provider still shows a number in the tightest space.
+            out.push(Span::styled(abbr_label.to_string(), label_style));
+            let (pct, color): (u8, fn(u8) -> Color) = match (five_pct, seven_pct) {
+                (Some(p), _) => (p, bar_color_5h),
+                (None, Some(p)) => (p, bar_color_7d),
+                (None, None) => return,
+            };
+            out.push(Span::styled(
+                format!("{pct}%"),
+                Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+}
+
+/// Push one window — `5h NN%` (+ ` ↻ <reset>` when `show_reset`) — within a
+/// provider cluster, with a ` · ` separator before all but the first
+/// window. No-op when `pct` is `None`.
+#[allow(clippy::too_many_arguments)]
+fn push_quota_window(
+    out: &mut Vec<Span<'static>>,
+    label: &str,
+    pct: Option<u8>,
+    color: fn(u8) -> Color,
+    reset: Option<chrono::DateTime<chrono::Utc>>,
+    show_reset: bool,
+    first: &mut bool,
+) {
+    let Some(pct) = pct else {
+        return;
+    };
+    if !*first {
+        out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
+    }
+    *first = false;
+    out.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(MUTED_GRAY),
+    ));
+    out.push(Span::styled(
+        format!("{pct}%"),
+        Style::default().fg(color(pct)).add_modifier(Modifier::BOLD),
+    ));
+    if show_reset {
+        if let Some(reset) = reset {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
+    }
 }
 
 fn build_cta_spans() -> Vec<Span<'static>> {
@@ -1024,21 +1112,6 @@ fn build_cta_spans() -> Vec<Span<'static>> {
         Span::styled("Live Claude Code usage off", Style::default().fg(red)),
         Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
-}
-
-/// Three-cell mini-bar: ▰ for filled, ▱ for empty. Matches the brief.
-fn mini_bar(pct: u8) -> String {
-    let cells = ((pct as f64 / 100.0) * 3.0).round() as usize;
-    let filled = cells.min(3);
-    let empty = 3 - filled;
-    let mut s = String::with_capacity(3);
-    for _ in 0..filled {
-        s.push('▰');
-    }
-    for _ in 0..empty {
-        s.push('▱');
-    }
-    s
 }
 
 fn bar_color_5h(pct: u8) -> Color {
@@ -1102,9 +1175,11 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
-        let spans = build_live_widget_spans(&live);
+        let spans = build_live_widget_spans(&live, 1000);
         let text = flatten(&spans);
+        assert!(text.contains("claude"), "provider label present: {text}");
         assert!(text.contains("5h"));
         assert!(text.contains("40%"));
         assert!(text.contains("wk"));
@@ -1113,8 +1188,8 @@ mod live_widget_tests {
         // it's a single session's lifetime cost, not today's total.
         assert!(!text.contains("$"));
         assert!(!text.contains("today"));
-        // The combined "⏱ Xh Ym" countdown is gone; each window now carries
-        // its own absolute reset stamp prefixed by ↻ (local-tz date+time).
+        // The combined "⏱ Xh Ym" countdown is gone; each window carries its
+        // own absolute reset stamp prefixed by ↻ (local-tz date+time).
         assert!(!text.contains("⏱"));
         assert_eq!(text.matches('↻').count(), 2, "one reset stamp per window");
     }
@@ -1131,9 +1206,11 @@ mod live_widget_tests {
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
+            ..Default::default()
         };
-        let spans = build_live_widget_spans(&live);
+        let spans = build_live_widget_spans(&live, 1000);
         let text = flatten(&spans);
+        assert!(text.contains("claude"));
         assert!(text.contains("5h"));
         assert!(!text.contains("wk"));
         assert!(!text.contains("$"));
@@ -1142,12 +1219,140 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn mini_bar_clamps_and_buckets() {
-        assert_eq!(mini_bar(0), "▱▱▱");
-        assert_eq!(mini_bar(33), "▰▱▱");
-        assert_eq!(mini_bar(50), "▰▰▱");
-        assert_eq!(mini_bar(99), "▰▰▰");
-        assert_eq!(mini_bar(100), "▰▰▰");
+    fn live_widget_renders_codex_windows_next_to_claude() {
+        use chrono::{TimeZone, Utc};
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            source: Source::Tier1Cache,
+            codex_five_hour_pct: Some(10),
+            codex_five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 15, 0, 21, 0).unwrap()),
+            codex_seven_day_pct: Some(44),
+            codex_seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap()),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        // Both provider clusters render: `claude 5h 40% · wk 8%   codex …`.
+        assert!(text.contains("claude"), "claude cluster present: {text}");
+        assert!(text.contains("40%"));
+        assert!(text.contains("8%"));
+        assert!(text.contains("codex"), "codex cluster present: {text}");
+        assert!(text.contains("10%"));
+        assert!(text.contains("44%"));
+        // Claude leads, Codex follows (overlaid second).
+        assert!(text.starts_with("claude"), "claude leads: {text}");
+        let (claude_at, codex_at) = (text.find("claude").unwrap(), text.find("codex").unwrap());
+        assert!(claude_at < codex_at, "claude before codex: {text}");
+        // Only the two Codex windows carry reset instants here → two ↻.
+        assert_eq!(text.matches('↻').count(), 2);
+    }
+
+    #[test]
+    fn live_widget_renders_codex_only_when_claude_absent() {
+        // User runs Codex but never wired the Claude statusline.
+        let live = LiveWindow {
+            source: Source::None,
+            codex_five_hour_pct: Some(10),
+            codex_seven_day_pct: Some(44),
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        // Codex is the first (and only) cluster — no Claude cluster precedes it.
+        assert!(
+            text.starts_with("codex"),
+            "codex leads when Claude absent: {text}"
+        );
+        assert!(!text.contains("claude"));
+    }
+
+    #[test]
+    fn live_widget_omits_codex_when_absent() {
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            source: Source::Tier1Cache,
+            ..Default::default()
+        };
+        let text = flatten(&build_live_widget_spans(&live, 1000));
+        assert!(text.contains("claude"));
+        assert!(!text.contains("codex"));
+    }
+
+    /// Both providers, all four windows + resets, for the degradation tests.
+    fn both_providers_live() -> LiveWindow {
+        use chrono::{TimeZone, Utc};
+        LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap()),
+            seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 12, 5, 0, 0).unwrap()),
+            source: Source::Tier1Cache,
+            codex_five_hour_pct: Some(10),
+            codex_five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 15, 0, 21, 0).unwrap()),
+            codex_seven_day_pct: Some(44),
+            codex_seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn degrade_full_dated_when_room() {
+        // Wide → richest: full labels, all four windows, four ↻ reset stamps.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 1000));
+        assert!(text.contains("claude") && text.contains("codex"));
+        assert!(text.contains("5h ") && text.contains("wk "));
+        assert_eq!(
+            text.matches('↻').count(),
+            4,
+            "all four reset stamps: {text}"
+        );
+    }
+
+    #[test]
+    fn degrade_drops_dates_first() {
+        // 60 cols fits the no-dates form (~45) but not the dated one (~100+).
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 60));
+        assert!(text.contains("claude") && text.contains("codex"));
+        assert!(text.contains("40%") && text.contains("8%"));
+        assert!(text.contains("wk "), "weekly still shown: {text}");
+        assert!(!text.contains('↻'), "reset dates dropped first: {text}");
+    }
+
+    #[test]
+    fn degrade_abbreviates_then() {
+        // 30 cols fits the abbreviated `cl 40%/8%  cx 10%/44%` (~21) only.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 30));
+        assert!(text.contains("cl ") && text.contains("cx "));
+        assert!(!text.contains("claude") && !text.contains("codex"));
+        assert!(
+            text.contains("40%") && text.contains("8%"),
+            "5h+wk kept: {text}"
+        );
+        assert!(text.contains('/'), "abbreviated 5h/wk: {text}");
+        assert!(!text.contains('↻'));
+    }
+
+    #[test]
+    fn degrade_tiny_keeps_both_providers() {
+        // 15 cols fits only `cl40% cx10%` (~12): 5h-only, both providers.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 15));
+        assert!(text.contains("cl40%"), "claude 5h kept: {text}");
+        assert!(text.contains("cx10%"), "codex 5h kept: {text}");
+        assert!(!text.contains('/'), "weekly shed: {text}");
+        assert!(!text.contains("wk"));
+    }
+
+    #[test]
+    fn degrade_tiny_is_floor_even_if_overflowing() {
+        // Absurdly narrow → still return the Tiny floor (clipped), not blank.
+        let text = flatten(&build_live_widget_spans(&both_providers_live(), 1));
+        assert!(!text.is_empty(), "floor renders rather than blanking");
+        assert!(text.contains("cl40%"));
+    }
+
+    #[test]
+    fn degrade_empty_when_no_data() {
+        let text = flatten(&build_live_widget_spans(&LiveWindow::empty(), 1000));
+        assert!(text.is_empty(), "no data → nothing, regardless of width");
     }
 
     #[test]
@@ -1222,8 +1427,7 @@ mod live_widget_tests {
 
 #[cfg(test)]
 mod menu_bar_tests {
-    use super::{inbox_unread_badge, restart_affordance};
-    use crate::models::{Session, SessionMode, SessionStatus};
+    use super::inbox_unread_badge;
 
     #[test]
     fn inbox_badge_hidden_when_zero() {
@@ -1246,54 +1450,6 @@ mod menu_bar_tests {
             assert_eq!(badge, "● 99+ ");
             assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
         }
-    }
-
-    fn stopped_interactive() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Interactive;
-        s.status = SessionStatus::Stopped;
-        s
-    }
-
-    fn running_interactive() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Interactive;
-        s.status = SessionStatus::Running;
-        s
-    }
-
-    fn stopped_boss() -> Session {
-        let mut s = Session::new("t".to_string(), "/tmp".to_string());
-        s.mode = SessionMode::Boss;
-        s.status = SessionStatus::Stopped;
-        s
-    }
-
-    #[test]
-    fn stopped_interactive_shows_r_resume() {
-        let s = stopped_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("r", " resume "));
-    }
-
-    #[test]
-    fn running_interactive_shows_e_recreate() {
-        // `r` only resumes a *stopped* interactive session, so surfacing
-        // `r resume` for a running one would be wrong. Fall back to the
-        // Docker/Boss `e recreate` affordance.
-        let s = running_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
-    }
-
-    #[test]
-    fn stopped_boss_shows_e_recreate() {
-        // Boss/Docker sessions use the Docker container recreate path.
-        let s = stopped_boss();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
-    }
-
-    #[test]
-    fn no_selection_shows_e_recreate() {
-        assert_eq!(restart_affordance(None), ("e", " recreate "));
     }
 
     /// Render the menu bar at the conventional 80-column minimum and assert
@@ -1320,35 +1476,35 @@ mod menu_bar_tests {
         let rendered: String =
             terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
 
-        // With no session selected the restart slot shows `e recreate`.
+        // The restart slot shows `r resume`.
         for token in [
-            "ew",       // new
-            "xpand",    // expand
-            "focus",    // Tab focus
-            "ttach",    // attach
-            "1-9",      // quick attach
-            "Space",    // multi-select
-            "tar",      // star
-            "recreate", // e — Boss/Docker recreate (no selection)
-            "del-sel",  // D bulk delete
-            "editor",   // o
-            "shell",    // $
-            "F2",       // rename
-            "git",      // g (rendered as g + "it")
-            "commit",   // p
-            "laude",    // c claude
-            "refresh",  // f
-            "filter",   // F  ← the key that was missing before
-            "cleanup",  // x
-            "re-auth",  // A (moved off r)
-            "?/H",      // help
-            "home",     // q
-            "inbox",    // b
-            "stats",    // i — analytics panel
-            "witr",     // w — process-causality browser
-            "skills",   // k — skills browser
-            "memory",   // m — learnings KB browser
-            "abtop",    // t — top-for-agents monitor
+            "ew",      // new
+            "xpand",   // expand
+            "focus",   // Tab focus
+            "ttach",   // attach
+            "pane",    // A — in-pane interactive embed
+            "1-9",     // quick attach
+            "Space",   // multi-select
+            "tar",     // star
+            "resume",  // r — resume a stopped tmux session
+            "del-sel", // D bulk delete
+            "editor",  // o
+            "shell",   // $
+            "F2",      // rename
+            "git",     // g (rendered as g + "it")
+            "commit",  // p
+            "laude",   // c claude
+            "refresh", // f
+            "filter",  // F  ← the key that was missing before
+            "re-auth", // u (moved off A for in-pane attach)
+            "?/H",     // help
+            "home",    // q
+            "inbox",   // b
+            "stats",   // i — analytics panel
+            "witr",    // w — process-causality browser
+            "skills",  // k — skills browser
+            "memory",  // m — learnings KB browser
+            "abtop",   // t — top-for-agents monitor
         ] {
             assert!(
                 rendered.contains(token),
@@ -1371,27 +1527,6 @@ mod menu_bar_tests {
                  left={left:?} right={right:?}"
             );
         }
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_filter_for_boss() {
-        // Boss/container row → the normal-only `F filter` is the inactive key.
-        let s = stopped_boss();
-        assert_eq!(super::mode_dim_flags(Some(&s)), (true, false));
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_cleanup_for_interactive() {
-        // Interactive row → the Boss-only `x cleanup` is the inactive key.
-        let s = running_interactive();
-        assert_eq!(super::mode_dim_flags(Some(&s)), (false, true));
-    }
-
-    #[test]
-    fn mode_dim_flags_dims_nothing_without_selection() {
-        // No highlighted session → both mode actions stay reachable, so
-        // neither is dimmed.
-        assert_eq!(super::mode_dim_flags(None), (false, false));
     }
 
     /// On a wide terminal the legend switches to the two-column split. Assert
@@ -1434,33 +1569,33 @@ mod menu_bar_tests {
         );
 
         for token in [
-            "ew",       // new
-            "ttach",    // attach
-            "1-9",      // quick attach
-            "Space",    // multi-select
-            "tar",      // star
-            "recreate", // e — Boss/Docker recreate (no selection)
-            "del-sel",  // D bulk delete
-            "editor",   // o
-            "shell",    // $
-            "F2",       // rename
-            "commit",   // p
-            "refresh",  // f
-            "filter",   // F (dimmed when a Boss row is selected, still present)
-            "cleanup",  // x (dimmed when an Interactive row is selected)
-            "re-auth",  // A
-            "inbox",    // b
-            "stats",    // i
-            "witr",     // w
-            "skills",   // k
-            "memory",   // m
-            "abtop",    // t
-            "git",      // g
-            "claude",   // c
-            "xpand",    // E expand
-            "focus",    // Tab focus
-            "?/H",      // help
-            "home",     // q
+            "ew",      // new
+            "ttach",   // attach
+            "pane",    // A — in-pane interactive embed
+            "1-9",     // quick attach
+            "Space",   // multi-select
+            "tar",     // star
+            "resume",  // r — resume a stopped tmux session
+            "del-sel", // D bulk delete
+            "editor",  // o
+            "shell",   // $
+            "F2",      // rename
+            "commit",  // p
+            "refresh", // f
+            "filter",  // F
+            "re-auth", // u
+            "inbox",   // b
+            "stats",   // i
+            "witr",    // w
+            "skills",  // k
+            "memory",  // m
+            "abtop",   // t
+            "git",     // g
+            "claude",  // c
+            "xpand",   // E expand
+            "focus",   // Tab focus
+            "?/H",     // help
+            "home",    // q
         ] {
             assert!(
                 rendered.contains(token),
@@ -1494,7 +1629,7 @@ mod menu_bar_tests {
             rendered.contains('│'),
             "no divider at threshold:\n{rendered}"
         );
-        for token in ["re-auth", "recreate", "del-sel", "abtop", "home", "witr"] {
+        for token in ["re-auth", "resume", "del-sel", "abtop", "home", "witr"] {
             assert!(
                 rendered.contains(token),
                 "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
@@ -1531,4 +1666,27 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod interactive_embed_size_tests {
+    use super::interactive_embed_size;
+
+    #[test]
+    fn matches_the_interactive_layout_interior() {
+        // 120x30 terminal: chrome = 3+3+6 plus the pane border (2) → rows 16.
+        // Cols follow the user's CURRENT sidebar: the default 40-col sidebar
+        // plus the border (2) → 78; pre-collapsed to the 5-col rail → 113.
+        // Must equal what the first interactive frame resizes the embed to
+        // (the tripwire drives the real render path against this).
+        assert_eq!(interactive_embed_size(120, 30, 40), (16, 78));
+        assert_eq!(interactive_embed_size(120, 30, 5), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24, 5), (10, 73));
+    }
+
+    #[test]
+    fn never_returns_zero_cells() {
+        assert_eq!(interactive_embed_size(0, 0, 5), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14, 40), (1, 1));
+    }
 }

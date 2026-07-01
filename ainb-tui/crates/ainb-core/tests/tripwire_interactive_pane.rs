@@ -1,0 +1,401 @@
+// ABOUTME: Capstone tripwire for the interactive in-place tmux pane (goal validation
+// B5/B6/B8). Drives the REAL render path (TmuxPreviewPane::render_interactive) against a
+// REAL tmux session via AppState::enter_interactive_pane, asserting on the rendered
+// ratatui buffer — the user-visible output — rather than internal state alone.
+//
+// REAL tmux — creates + destroys its own named session (kill-session by exact name only,
+// never kill-server/wildcard, per the tmux safety rule).
+
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use ainb::app::events::{AppEvent, EventHandler};
+use ainb::app::state::{AppState, FocusedPane};
+use ainb::components::{LayoutComponent, TmuxPreviewPane};
+use ainb::models::OtherTmuxSession;
+use ainb::tmux::{encode_key_event, encode_mouse_event};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+fn tmux_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn new_session(tag: &str) -> String {
+    let name = format!("ainb-itw-{}-{}", tag, std::process::id());
+    let _ = Command::new("tmux").args(["kill-session", "-t", &name]).output();
+    let ok = Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &name,
+            "-x",
+            "100",
+            "-y",
+            "26",
+            "sh",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ok, "failed to create tmux session {name}");
+    name
+}
+
+fn kill_session(name: &str) {
+    let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
+}
+
+fn session_alive(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn buffer_text(term: &Terminal<TestBackend>) -> String {
+    term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+}
+
+#[test]
+fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+
+    let session = new_session("render");
+
+    // Select the real tmux session as an "other tmux" row (the same resolution
+    // path `a`/`l` use). selected_tmux_name() must resolve to it.
+    let mut state = AppState::new();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    assert_eq!(
+        state.selected_tmux_name().as_deref(),
+        Some(session.as_str()),
+        "selection should resolve to the tmux session name"
+    );
+
+    // ── B5: 'A' (in-pane attach) enters → the live render shows the INTERACTIVE focus badge ──
+    assert!(
+        state.enter_interactive_pane(26, 100),
+        "enter_interactive_pane should attach"
+    );
+    assert!(
+        state.is_interactive_pane(),
+        "should be interactive after enter"
+    );
+
+    let pane = TmuxPreviewPane::new();
+    let mut term = Terminal::new(TestBackend::new(100, 26)).expect("test terminal");
+    term.draw(|f| pane.render_interactive(f, f.area(), &state)).expect("draw");
+    let badge_frame = buffer_text(&term);
+    assert!(
+        badge_frame.contains("INTERACTIVE"),
+        "interactive focus badge not rendered:\n{badge_frame}"
+    );
+
+    // ── B6: typed input reaches the session and renders live in the pane ──
+    state
+        .embed
+        .as_ref()
+        .expect("embed")
+        .write_input(b"printf 'TRIPWIRE_OK\\n'\n")
+        .expect("write input");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut found = false;
+    while Instant::now() < deadline {
+        term.draw(|f| pane.render_interactive(f, f.area(), &state)).expect("draw");
+        if buffer_text(&term).contains("TRIPWIRE_OK") {
+            found = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let last_frame = buffer_text(&term);
+
+    // ── B8: Ctrl+Q release reverts out of interactive AND the session survives ──
+    state.release_interactive_pane();
+    let released = !state.is_interactive_pane() && state.embed.is_none();
+    let alive = session_alive(&session);
+
+    kill_session(&session);
+
+    assert!(
+        found,
+        "typed input never rendered live in the embed pane:\n{last_frame}"
+    );
+    assert!(
+        released,
+        "release_interactive_pane should drop focus + the embed client"
+    );
+    assert!(
+        alive,
+        "releasing the embed must NOT kill the tmux session (it survives)"
+    );
+}
+
+/// B7 (amended 2026-06-12): the embed honors the user's sidebar instead of
+/// forcing a collapse. With the default 40-col sidebar the embed gets the
+/// pane next to it; pre-collapsing via `B` (the rail) hands it near-full
+/// width. Driving the full LayoutComponent render resizes the embed to the
+/// pane interior, so the embed's cell width reflects the user's layout.
+#[test]
+fn interactive_embed_width_follows_the_sidebar_state() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("expand");
+    let mut state = AppState::new();
+    // session_list is a split-pane (non-registry) screen, so layout takes the
+    // split path that renders the preview/embed pane.
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    // Pin the sidebar to a known width: AppState::new() restores the
+    // developer's persisted preference from the real config, which would make
+    // the expected interior widths env-dependent.
+    state.sessions_pane_state.restore(Some(40), false);
+    assert!(
+        state.enter_interactive_pane(28, 80),
+        "enter_interactive_pane"
+    );
+
+    let mut layout = LayoutComponent::new();
+    let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+
+    // 40-col sidebar: the embed gets the remaining pane interior —
+    // 120 − 40 − 2 (border) = 78 — NOT a forced near-full-width expansion.
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let (_, cols_with_sidebar) = state.embed.as_ref().expect("embed").size();
+
+    // Pre-collapsed rail (what `B` toggles): near-full width — 120 − 5 − 2.
+    state.sessions_pane_state.collapsed = true;
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let (_, cols_with_rail) = state.embed.as_ref().expect("embed").size();
+
+    state.release_interactive_pane();
+    kill_session(&session);
+
+    assert_eq!(
+        cols_with_sidebar, 78,
+        "embed must honor the default 40-col sidebar (120 − 40 − 2)"
+    );
+    assert_eq!(
+        cols_with_rail, 113,
+        "embed must take near-full width once the sidebar is the collapsed rail (120 − 5 − 2)"
+    );
+}
+
+/// Re-target: pressing the attach key on a DIFFERENT row while an embed is
+/// live must release the stale client and attach to the new target — not
+/// silently refocus the old one (which would render session X under a row
+/// selecting session Y). Both sessions must survive the swap (release kills
+/// clients, never sessions).
+#[test]
+fn reentering_on_a_different_row_retargets_the_embed() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let first = new_session("retarget-a");
+    let second = new_session("retarget-b");
+
+    let mut state = AppState::new();
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![
+        OtherTmuxSession::new(first.clone(), false, 1),
+        OtherTmuxSession::new(second.clone(), false, 1),
+    ];
+    state.selected_other_tmux_index = Some(0);
+    assert!(state.enter_interactive_pane(26, 100), "attach to first");
+    let initial_target = state.embed_session.clone();
+
+    // Same row again = self-healing no-op, embed target unchanged.
+    assert!(state.enter_interactive_pane(26, 100), "same-row re-entry");
+    let same_row_target = state.embed_session.clone();
+
+    // Different row: must swap the embed onto the newly selected session.
+    state.selected_other_tmux_index = Some(1);
+    assert!(state.enter_interactive_pane(26, 100), "re-target to second");
+    let swapped_target = state.embed_session.clone();
+    let interactive_after = state.is_interactive_pane();
+
+    state.release_interactive_pane();
+    let both_alive = session_alive(&first) && session_alive(&second);
+
+    kill_session(&first);
+    kill_session(&second);
+
+    assert_eq!(initial_target.as_deref(), Some(first.as_str()));
+    assert_eq!(
+        same_row_target.as_deref(),
+        Some(first.as_str()),
+        "same-row re-entry must not re-attach"
+    );
+    assert_eq!(
+        swapped_target.as_deref(),
+        Some(second.as_str()),
+        "different-row re-entry must release the stale embed and attach to the selected session"
+    );
+    assert!(interactive_after, "still interactive after the swap");
+    assert!(
+        both_alive,
+        "re-targeting kills only the ephemeral client — both tmux sessions survive"
+    );
+}
+
+/// Mode-boundary tripwire: while the embed is interactive, host mouse handling
+/// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
+/// of opening the slash palette, and after release the host owns the mouse
+/// again. Drives the REAL state-level handlers (EventHandler::handle_mouse_event,
+/// encode_key_event/encode_mouse_event + write_input — exactly what the event
+/// loop calls) against a REAL tmux session.
+#[test]
+fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("boundary");
+    let mut state = AppState::new();
+    // session_list: the split-pane screen the embed lives on (poll_embed_exit
+    // releases on any other screen) and the screen whose mouse handler owns
+    // pane focus.
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    assert!(
+        state.enter_interactive_pane(26, 100),
+        "enter_interactive_pane"
+    );
+
+    // One full layout render publishes embed_pane_area + the sessions/preview
+    // rects the mouse handler consults.
+    let mut layout = LayoutComponent::new();
+    let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let inner = state
+        .embed_pane_area
+        .expect("interactive render must publish the embed pane interior");
+
+    // A point inside the embed interior under the interactive layout AND
+    // inside the preview pane under the normal layout (for the post-release
+    // check) — middle of the right pane.
+    let (px, py) = (80u16, 10u16);
+    assert!(
+        px > inner.x && px < inner.x + inner.width && py > inner.y && py < inner.y + inner.height,
+        "test point must be inside the embed interior {inner:?}"
+    );
+
+    // ── (a) mouse click through the real state-level handler: swallowed ──
+    let click = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    let click_swallowed = click.is_none();
+    let still_interactive_after_click = state.is_interactive_pane() && state.embed.is_some();
+
+    // ── (b) ':' through the interactive key path reaches the PTY ──
+    // Runs BEFORE the wheel check: a forwarded wheel-up legitimately puts
+    // tmux into copy-mode (that's the scrollback feature), where ':' opens
+    // the goto-line prompt instead of echoing in the shell.
+    // The slash palette lives in main.rs's loop AFTER the interactive
+    // intercept, so it can never see this key; here we pin the encode+write
+    // path the intercept uses and that the byte lands in the live session.
+    let marker = format!("TRIPWIRE_BOUNDARY_{}", std::process::id());
+    let pre_frame = {
+        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        buffer_text(&term)
+    };
+    assert!(
+        !pre_frame.contains(&marker),
+        "negative placeholder: marker must not pre-exist in the pane"
+    );
+    let colon = KeyEvent {
+        code: KeyCode::Char(':'),
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    };
+    let colon_bytes = encode_key_event(&colon).expect("':' must encode");
+    assert_eq!(colon_bytes, b":".to_vec());
+    let embed = state.embed.as_ref().expect("embed");
+    embed.write_input(&colon_bytes).expect("write ':'");
+    // `: <marker>` — the shell no-op builtin; the echoed input line carries
+    // the marker into the rendered pane.
+    embed.write_input(format!(" {marker}\n").as_bytes()).expect("write marker");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut colon_reached_pty = false;
+    while Instant::now() < deadline {
+        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        if buffer_text(&term).contains(&marker) {
+            colon_reached_pty = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let last_frame = buffer_text(&term);
+    let still_interactive_after_colon = state.is_interactive_pane();
+
+    // ── (c) wheel over the pane: encodes + forwards, mode still holds ──
+    let wheel = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: px,
+        row: py,
+        modifiers: KeyModifiers::NONE,
+    };
+    let wheel_bytes = encode_mouse_event(&wheel, inner).expect("wheel inside the pane must encode");
+    state
+        .embed
+        .as_ref()
+        .expect("embed")
+        .write_input(&wheel_bytes)
+        .expect("forward wheel");
+    let still_interactive_after_wheel = state.is_interactive_pane();
+
+    // ── (d) after release, host mouse handling works again ──
+    state.release_interactive_pane();
+    // Next frame re-lays-out the normal split; (80,10) sits in the preview
+    // pane, so a click there must move focus to LiveLogs.
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    let _ = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    let host_mouse_back = state.focused_pane == FocusedPane::LiveLogs;
+
+    kill_session(&session);
+
+    assert!(
+        click_swallowed,
+        "host mouse handler must not act while interactive"
+    );
+    assert!(
+        still_interactive_after_click,
+        "a click inside the pane must not break interactive mode"
+    );
+    assert!(
+        still_interactive_after_wheel,
+        "a wheel over the pane must not break interactive mode"
+    );
+    assert!(
+        colon_reached_pty,
+        "':' never reached the live session (palette boundary broken?):\n{last_frame}"
+    );
+    assert!(
+        still_interactive_after_colon,
+        "typing ':' must not break interactive mode"
+    );
+    assert!(
+        host_mouse_back,
+        "after release, a preview click must move focus to LiveLogs again"
+    );
+}

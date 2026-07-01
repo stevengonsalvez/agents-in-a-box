@@ -62,6 +62,8 @@ pub struct InteractiveSession {
     pub created_at: DateTime<Utc>,
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     pub model: Option<ClaudeModel>,   // Claude model for this session (only for Claude agent)
+    pub headroom_enabled: bool,       // Route this session's CLI through the local Headroom proxy
+    pub rtk_enabled: bool,            // RTK PreToolUse hook wired in session's worktree
 }
 
 /// Persisted session metadata for discovery across restarts
@@ -79,6 +81,10 @@ pub struct SessionMetadata {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub agent_type: SessionAgentType,
+    #[serde(default)]
+    pub headroom_enabled: bool,
+    #[serde(default)]
+    pub rtk_enabled: bool,
 }
 
 /// Storage for all persisted session metadata
@@ -130,7 +136,16 @@ impl SessionStore {
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        std::fs::write(&path, content)?;
+        // Atomic write: tmp + rename so a crash / full disk mid-write can't
+        // truncate the store and lose every tracked session. With the proxy
+        // watchdog, session-create and the `H` downgrade all writing here,
+        // an in-place truncating write would widen the corruption window.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, content)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
         debug!("Saved {} sessions to {:?}", self.sessions.len(), path);
         Ok(())
     }
@@ -176,6 +191,37 @@ impl SessionStore {
     /// Get all tmux session names that are tracked
     pub fn tracked_tmux_names(&self) -> Vec<&str> {
         self.sessions.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+/// Default port for the ainb-managed Headroom compression proxy.
+pub const HEADROOM_DEFAULT_PORT: u16 = 8787;
+
+/// Base URL of the local Headroom proxy. Port overridable via `AINB_HEADROOM_PORT`.
+pub fn headroom_base_url() -> String {
+    let port = std::env::var("AINB_HEADROOM_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(HEADROOM_DEFAULT_PORT);
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Shell `export … && ` prefix that routes a session's CLI through the local
+/// Headroom proxy. Empty when disabled or for providers that can't be proxied
+/// (Gemini/Copilot). One source of truth for both initial launch
+/// (`build_env_setup_for_provider`) and restart, so the two never drift.
+pub fn headroom_env_prefix(agent_type: SessionAgentType, enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
+    match agent_type {
+        SessionAgentType::Claude => {
+            format!("export ANTHROPIC_BASE_URL='{}' && ", headroom_base_url())
+        }
+        SessionAgentType::Codex => {
+            format!("export OPENAI_BASE_URL='{}/v1' && ", headroom_base_url())
+        }
+        _ => String::new(),
     }
 }
 
@@ -225,6 +271,8 @@ impl InteractiveSessionManager {
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
         codex_model: Option<CodexModel>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
@@ -253,6 +301,19 @@ impl InteractiveSessionManager {
 
         info!("Created worktree at: {}", worktree_info.path.display());
 
+        // Step 1b: Wire RTK project-local hook (best-effort — failure is
+        // non-fatal). Claude only: the hook lives in `.claude/settings.json`,
+        // which Codex/Gemini/Copilot never read — wiring it for them writes a
+        // file nothing consumes.
+        if rtk_enabled && agent_type == SessionAgentType::Claude {
+            if let Err(e) = wire_rtk_project_hook(&worktree_info.path) {
+                warn!(
+                    "Failed to wire RTK hook in worktree: {} — session launches without RTK",
+                    e
+                );
+            }
+        }
+
         // Step 2: Create tmux session name (format: tmux_{folder}_{branch})
         let worktree_folder = Self::extract_worktree_folder(&worktree_info.path);
         let tmux_session_name = Self::generate_tmux_name(&worktree_folder, &branch_name);
@@ -278,6 +339,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    headroom_enabled,
                 )
                 .await?;
             }
@@ -298,6 +360,8 @@ impl InteractiveSessionManager {
             created_at,
             agent_type,
             model,
+            headroom_enabled,
+            rtk_enabled,
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -310,6 +374,8 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
+            headroom_enabled,
+            rtk_enabled,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -361,6 +427,8 @@ impl InteractiveSessionManager {
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
         codex_model: Option<CodexModel>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?}, codex_model={:?})",
@@ -399,6 +467,18 @@ impl InteractiveSessionManager {
             std::os::unix::fs::symlink(&existing_worktree_path, &session_path).ok();
         }
 
+        // Step 0b: Wire RTK project-local hook (best-effort — failure is
+        // non-fatal). Claude only: see create_session — `.claude/settings.json`
+        // is a Claude Code surface, ignored by other agents.
+        if rtk_enabled && agent_type == SessionAgentType::Claude {
+            if let Err(e) = wire_rtk_project_hook(&existing_worktree_path) {
+                warn!(
+                    "Failed to wire RTK hook in worktree: {} — session launches without RTK",
+                    e
+                );
+            }
+        }
+
         // Step 1: Create tmux session name (format: tmux_{folder}_{branch})
         let worktree_folder = Self::extract_worktree_folder(&existing_worktree_path);
         let tmux_session_name = Self::generate_tmux_name(&worktree_folder, &branch_name);
@@ -424,6 +504,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    headroom_enabled,
                 )
                 .await?;
             }
@@ -445,6 +526,8 @@ impl InteractiveSessionManager {
             created_at,
             agent_type,
             model,
+            headroom_enabled,
+            rtk_enabled,
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -457,6 +540,8 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
+            headroom_enabled,
+            rtk_enabled,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -583,6 +668,8 @@ impl InteractiveSessionManager {
                     created_at: metadata.created_at,
                     agent_type,
                     model: None,
+                    headroom_enabled: metadata.headroom_enabled,
+                    rtk_enabled: metadata.rtk_enabled,
                 });
             } else {
                 debug!(
@@ -631,6 +718,8 @@ impl InteractiveSessionManager {
                     created_at: Utc::now(),
                     agent_type,
                     model: None,
+                    headroom_enabled: false,
+                    rtk_enabled: false,
                 });
             }
         }
@@ -905,6 +994,16 @@ impl InteractiveSessionManager {
             // Continue anyway - removal was successful
         }
 
+        // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
+        // proxy so it doesn't linger after the last consumer is gone.
+        // `headroom::stop()` is a no-op when the proxy wasn't ainb-spawned (no
+        // pid file), so a user's own `headroom proxy` is never touched.
+        let remaining_headroom = store.sessions.values().filter(|m| m.headroom_enabled).count();
+        if remaining_headroom == 0 {
+            info!("No Headroom sessions remain — reaping shared proxy");
+            crate::headroom::stop();
+        }
+
         info!(
             "<<< InteractiveSessionManager::remove_session() COMPLETE: {}",
             session_id
@@ -1171,6 +1270,7 @@ impl InteractiveSessionManager {
         codex_model: Option<CodexModel>,
         agent_type: SessionAgentType,
         resume_transcript: Option<PathBuf>,
+        headroom_enabled: bool,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
 
@@ -1191,8 +1291,42 @@ impl InteractiveSessionManager {
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
-        // Build environment setup for API key injection
-        let env_setup = Self::build_env_setup_for_provider(agent_type);
+        // Ensure the shared Headroom proxy is running before we build the env
+        // that points the CLI at it. On error we log a warning and continue —
+        // the session still launches, just without working compression.
+        //
+        // #951 (Claude Code daemon bypass): NOT reproduced in ainb's launch
+        // model. We respawn the pane with `export ANTHROPIC_BASE_URL=… && exec
+        // claude`, so the CLI process inherits the override directly. Live-
+        // verified 2026-06-19: routing a call through the proxy incremented its
+        // request counter, so the env reaches the upstream request. The
+        // headroom-issue fix (killing Claude Code's global daemon) is
+        // deliberately NOT done here — it would disrupt unrelated sessions to
+        // solve a problem we cannot reproduce. The statusline reflects ACTUAL
+        // routing, so any real bypass would surface there rather than silently.
+        //
+        // Idle-reap is handled in `remove_session()` (stops the shared proxy
+        // when the last Headroom session closes).
+        // The toggle being on is *intent*; routing only happens if the proxy is
+        // actually healthy. If ensure fails (binary missing, port 8787 taken,
+        // crash), DEGRADE to direct — do NOT inject a base URL pointing at a
+        // dead port, which would brick the session with connection-refused.
+        let mut headroom_active = headroom_enabled
+            && matches!(
+                agent_type,
+                SessionAgentType::Claude | SessionAgentType::Codex
+            );
+        if headroom_active {
+            if let Err(e) = crate::headroom::ensure_proxy_running().await {
+                warn!("headroom proxy unavailable — running DIRECT, no compression: {e}");
+                headroom_active = false;
+            }
+        }
+
+        // Build environment setup for API key injection. `headroom_active`
+        // (not the raw toggle) decides injection, so a failed proxy degrades to
+        // direct rather than a dead-port URL.
+        let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_active);
 
         // Build the CLI command with appropriate flags
         let mut cmd_parts = vec![provider.command().to_string()];
@@ -1346,37 +1480,37 @@ impl InteractiveSessionManager {
     }
 
     /// Build environment setup for injecting API key based on provider
-    fn build_env_setup_for_provider(agent_type: SessionAgentType) -> String {
+    fn build_env_setup_for_provider(
+        agent_type: SessionAgentType,
+        headroom_enabled: bool,
+    ) -> String {
         use crate::credentials;
 
-        match agent_type {
-            SessionAgentType::Claude => {
-                // Use existing logic for Claude
-                Self::build_env_setup()
-            }
+        let headroom_prefix = headroom_env_prefix(agent_type, headroom_enabled);
+
+        let base = match agent_type {
+            SessionAgentType::Claude => Self::build_env_setup(),
             SessionAgentType::Codex => {
-                // Inject OpenAI API key if available
                 if let Ok(Some(api_key)) = credentials::get_openai_api_key() {
                     info!("Injecting OPENAI_API_KEY for Codex CLI");
-                    return format!("export OPENAI_API_KEY='{}' && ", api_key);
+                    format!("export OPENAI_API_KEY='{}' && ", api_key)
+                } else {
+                    String::new()
                 }
-                String::new()
             }
             SessionAgentType::Gemini => {
-                // Inject Gemini API key if available
                 if let Ok(Some(api_key)) = credentials::get_gemini_api_key() {
                     info!("Injecting GEMINI_API_KEY for Gemini CLI");
-                    return format!("export GEMINI_API_KEY='{}' && ", api_key);
+                    format!("export GEMINI_API_KEY='{}' && ", api_key)
+                } else {
+                    String::new()
                 }
-                String::new()
             }
-            SessionAgentType::Copilot => {
-                // Copilot uses gh OAuth — no API key injection needed
-                // gh auth handles authentication transparently
-                String::new()
-            }
+            SessionAgentType::Copilot => String::new(),
             _ => String::new(),
-        }
+        };
+
+        format!("{headroom_prefix}{base}")
     }
 }
 
@@ -1404,9 +1538,164 @@ impl InteractiveSession {
     }
 }
 
+/// Write an RTK `PreToolUse` hook entry into `<worktree>/.claude/settings.json`.
+///
+/// Merge-only, idempotent: reads existing JSON, appends only when no rtk hook
+/// is already present, and preserves all other settings (never clobbers).
+/// Best-effort — call sites log warn on error but must not propagate it.
+fn wire_rtk_project_hook(worktree: &std::path::Path) -> anyhow::Result<()> {
+    let Some(cmd) = crate::rtk::project_hook_command() else {
+        warn!("rtk binary not found — skipping project hook wiring");
+        return Ok(());
+    };
+    wire_rtk_project_hook_with_cmd(worktree, &cmd)
+}
+
+/// Inner merge, parameterised on the resolved hook `cmd` so tests can exercise
+/// the real read-merge-write path without rtk on PATH.
+fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let claude_dir = worktree.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    let mut root: serde_json::Value = if settings_path.exists() {
+        let raw = std::fs::read_to_string(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            // Never overwrite a settings.json we couldn't parse — it may hold
+            // the user's own hooks/config. Leave it untouched; the session
+            // just launches without the rtk hook.
+            Err(e) => {
+                warn!(
+                    "{} is not valid JSON ({e}) — leaving it untouched, session launches without rtk hook",
+                    settings_path.display()
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    // Ensure hooks.PreToolUse is an array.
+    let pre_tool_use = root
+        .as_object_mut()
+        .context("settings.json root is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::Value::Array(vec![]));
+
+    let arr = pre_tool_use.as_array_mut().context("PreToolUse is not an array")?;
+
+    // Idempotent: skip if an rtk hook is already wired. Match the exact command
+    // or any command containing `rtk hook claude` (the install path may differ)
+    // — tighter than a bare "hook claude" substring, which would false-match
+    // unrelated user commands.
+    let already_present = arr.iter().any(|entry| {
+        entry.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
+            hooks.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map_or(false, |c| c == cmd || c.contains("rtk hook claude"))
+            })
+        })
+    });
+
+    // Nothing to add → don't touch the file (avoids mtime churn / reformatting
+    // a user's compact JSON on every launch).
+    if already_present {
+        return Ok(());
+    }
+
+    arr.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": cmd}]
+    }));
+
+    std::fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("create dir {}", claude_dir.display()))?;
+
+    let content = serde_json::to_string_pretty(&root).context("serialize settings.json")?;
+
+    // Atomic write: tmp in the same dir + rename, so a crash / full disk
+    // mid-write can't truncate a settings.json that may hold unrelated user
+    // hooks. rename(2) is atomic on POSIX within a filesystem.
+    let tmp = settings_path.with_extension("json.tmp");
+    if let Err(e) =
+        std::fs::write(&tmp, &content).and_then(|_| std::fs::rename(&tmp, &settings_path))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        warn!(
+            "failed to write {}: {} — session launches without rtk hook",
+            settings_path.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headroom_env_prefix_routes_claude_and_codex_only() {
+        use crate::models::session::SessionAgentType;
+
+        // Hold the shared env lock + force the default port so the base URL is
+        // deterministic regardless of other tests mutating AINB_HEADROOM_PORT.
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let old = std::env::var_os("AINB_HEADROOM_PORT");
+        std::env::remove_var("AINB_HEADROOM_PORT");
+
+        // Disabled → no injection for any provider.
+        assert_eq!(headroom_env_prefix(SessionAgentType::Claude, false), "");
+        assert_eq!(headroom_env_prefix(SessionAgentType::Codex, false), "");
+
+        // Enabled → Claude routes via ANTHROPIC_BASE_URL, Codex via OPENAI_BASE_URL/v1.
+        let base = headroom_base_url();
+        assert_eq!(
+            headroom_env_prefix(SessionAgentType::Claude, true),
+            format!("export ANTHROPIC_BASE_URL='{base}' && ")
+        );
+        assert_eq!(
+            headroom_env_prefix(SessionAgentType::Codex, true),
+            format!("export OPENAI_BASE_URL='{base}/v1' && ")
+        );
+
+        // Providers Headroom can't proxy → empty even when enabled (gating).
+        assert_eq!(headroom_env_prefix(SessionAgentType::Gemini, true), "");
+        assert_eq!(headroom_env_prefix(SessionAgentType::Copilot, true), "");
+
+        if let Some(v) = old {
+            std::env::set_var("AINB_HEADROOM_PORT", v);
+        }
+    }
+
+    #[test]
+    fn headroom_base_url_honors_port_override() {
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let key = "AINB_HEADROOM_PORT";
+        let old = std::env::var_os(key);
+
+        // Unset → documented default 8787.
+        std::env::remove_var(key);
+        assert!(headroom_base_url().ends_with(&HEADROOM_DEFAULT_PORT.to_string()));
+
+        // Override → reflected in the base URL.
+        std::env::set_var(key, "9191");
+        assert!(headroom_base_url().ends_with(":9191"));
+
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     #[test]
     fn test_derive_workspace_name() {
@@ -1512,5 +1801,133 @@ mod tests {
     fn test_session_manager_creation() {
         let manager = InteractiveSessionManager::new();
         assert!(manager.is_ok(), "Should create manager without Docker");
+    }
+
+    /// Verify the SessionStore headroom flip: if a session has headroom_enabled=true,
+    /// mutating the field to false and saving results in false when re-loaded.
+    /// This covers the pure store-manipulation leg of `downgrade_headroom_session`
+    /// without requiring tmux.
+    #[test]
+    fn session_store_headroom_flip_persists() {
+        use crate::models::session::SessionAgentType;
+        use chrono::Utc;
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        // Point AINB_HOME at our temp dir so SessionStore::storage_path() uses it.
+        std::env::set_var("AINB_HOME", dir.path());
+
+        let tmux_name = "ainb-test-headroom-flip".to_string();
+        let session_id = uuid::Uuid::new_v4();
+
+        // Seed: headroom_enabled = true
+        let mut store = SessionStore::load();
+        store.upsert(SessionMetadata {
+            session_id,
+            tmux_session_name: tmux_name.clone(),
+            worktree_path: PathBuf::from("/tmp/fake"),
+            workspace_name: "test".to_string(),
+            created_at: Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: true,
+            rtk_enabled: false,
+        });
+        store.save().expect("save");
+
+        // Flip: headroom_enabled = false (mirrors downgrade_headroom_session step 3)
+        let mut store2 = SessionStore::load();
+        let meta = store2.sessions.get(&tmux_name).expect("meta present");
+        assert!(meta.headroom_enabled, "precondition: headroom was on");
+        store2.sessions.get_mut(&tmux_name).unwrap().headroom_enabled = false;
+        store2.save().expect("save after flip");
+
+        // Reload and verify persistence
+        let store3 = SessionStore::load();
+        let reloaded = store3.sessions.get(&tmux_name).expect("still present");
+        assert!(
+            !reloaded.headroom_enabled,
+            "headroom should be off after flip"
+        );
+
+        // Cleanup env
+        std::env::remove_var("AINB_HOME");
+    }
+
+    /// Two wires yield exactly one rtk entry — exercises the real function.
+    #[test]
+    fn wire_rtk_project_hook_merges_idempotently() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        let cmd = "/usr/local/bin/rtk hook claude";
+
+        wire_rtk_project_hook_with_cmd(dir.path(), cmd).expect("first wire");
+        wire_rtk_project_hook_with_cmd(dir.path(), cmd).expect("second wire");
+
+        let settings_path = dir.path().join(".claude/settings.json");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "two wires must produce exactly one rtk entry");
+        assert_eq!(arr[0]["hooks"][0]["command"], cmd);
+    }
+
+    /// The real function appends rtk while preserving unrelated hooks + settings.
+    #[test]
+    fn wire_rtk_project_hook_merge_preserves_existing() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
+
+        let initial = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Read",
+                        "hooks": [{"type": "command", "command": "/usr/local/bin/other hook"}]
+                    }
+                ]
+            },
+            "someOtherSetting": true
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&initial).unwrap(),
+        )
+        .unwrap();
+
+        wire_rtk_project_hook_with_cmd(dir.path(), "/opt/rtk hook claude").expect("wire");
+
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(root["someOtherSetting"], serde_json::Value::Bool(true));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "pre-existing hook kept + rtk appended");
+        assert_eq!(arr[0]["matcher"], "Read");
+        assert_eq!(arr[1]["matcher"], "Bash");
+    }
+
+    /// A settings.json we can't parse is left byte-for-byte untouched — we must
+    /// never clobber a file that may hold the user's own hooks/config.
+    #[test]
+    fn wire_rtk_project_hook_preserves_unparseable_settings() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
+
+        let garbage = "{ not valid json, // with a comment\n";
+        std::fs::write(&settings_path, garbage).unwrap();
+
+        wire_rtk_project_hook_with_cmd(dir.path(), "/opt/rtk hook claude").expect("must not error");
+
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(
+            after, garbage,
+            "unparseable settings must be left untouched"
+        );
     }
 }

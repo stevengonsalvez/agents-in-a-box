@@ -11,8 +11,9 @@ If you're looking for a specific topic, start here:
 |---|---|
 | [Product](#product) | What agents-in-a-box is, value, high-level architecture |
 | [TUI](#tui) | The `ainb` terminal app + CLI |
-| [Toolkit](#toolkit) | Portable skills, agents, workflows |
+| [Toolkit](#toolkit) | Portable skills, agents, workflows (ainb-toolkit external repo) |
 | [Plugins](#plugins) | v2 subprocess plugin system |
+| [Observability](#observability) | Usage/cost, live processes, causality, telemetry |
 | [Knowledge](#knowledge) | `reflect` / `recall` GraphRAG + QMD |
 | [Contributing](#contributing) | Build, test, ship |
 | [Reference](#reference) | Architecture, glossary, deep dives |
@@ -32,6 +33,7 @@ The `ainb` terminal app and its CLI.
 - [Overview](tui/overview.md)
 - [Install](tui/install.md)
 - [First session quickstart](tui/quickstart.md)
+- [Attaching to sessions](tui/attach.md) — full-screen and in-pane tmux attach
 - [CLI reference](tui/cli.md) — every subcommand, every flag
 - [Keyboard shortcuts](tui/keyboard-shortcuts.md)
 - [Architecture](tui/architecture.md)
@@ -39,7 +41,7 @@ The `ainb` terminal app and its CLI.
 
 ## Toolkit
 
-Portable AI-coding agent toolkit. Skills, agents, workflows — deployed to 9 AI tools.
+Portable AI-coding agent toolkit. Skills, agents, workflows — deployed to 9 AI tools. The canonical source is the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb consumes it as a pinned external source.
 
 - [Overview](toolkit/overview.md)
 - [Skills (86)](toolkit/skills.md)
@@ -57,6 +59,16 @@ The v2 subprocess plugin system for the ainb TUI:
 - [Authoring guide](plugins/authoring.md) — write your own
 - [Wire spec v2](plugins/spec-v2.md) — the JSON-RPC contract
 - [Changelog](plugins/changelog.md)
+
+## Observability
+
+See what your agents are doing, spending, and running.
+
+- [Overview](observability/overview.md) — which tool answers which question
+- [Usage analytics (burndown)](plugins/burndown.md) — spend by day / project / model
+- [abtop](plugins/abtop.md) — live agent-process monitor
+- [witr](plugins/witr.md) — process-causality tracing
+- [OpenTelemetry → Grafana Cloud](reference/otel-grafana.md) — ship metrics/logs/traces off-box, with example dashboards
 
 ## Knowledge
 
@@ -86,7 +98,7 @@ The pre-restructure layout had docs scattered across three places. Here's the ma
 |---|---|
 | `docs/tui/cli.md` | `ainb-tui/docs/CLI.md` |
 | `docs/tui/faq.md` | `ainb-tui/docs/FAQ.md` |
-| `docs/toolkit/overview.md` | `toolkit/README.md` (TOC + intro) |
+| `docs/toolkit/overview.md` | `toolkit/README.md` (TOC + intro — the toolkit itself has since moved to the standalone `stevengonsalvez/ainb-toolkit` repo) |
 | `docs/plugins/overview.md` | new — disambiguates |
 | `docs/plugins/user-guide.md` | `docs/plugins.md` |
 | `docs/plugins/authoring.md` | `docs/plugin-authoring.md` |

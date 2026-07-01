@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
+    "crates/ainb-web",
     "crates/ainb-plugin-burndown",
     "crates/ainb-plugin-learnings",
     "crates/ainb-plugin-notifyd",
@@ -12,6 +13,13 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-skill-core",
+    "crates/ainb-fetch",
+    "crates/ainb-adapters-source",
+    "crates/ainb-adapters-tool",
+    "crates/ainb-diff",
+    "crates/ainb-cli",
+    "crates/ainb-usage",
     "crates/ainb-plugin-witr",
     "crates/ainb-plugin-abtop",
     "crates/ainb-hangar-core",
@@ -29,7 +37,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.6.1"
+version = "1.10.1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"
@@ -42,8 +50,8 @@ tokio = { version = "1.36", features = ["full"] }
 # (ainb-hangar-daemon inbound beads sync, P2.4). The default `sync` feature
 # carries `CancellationToken`.
 tokio-util = "0.7"
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Docker
 bollard = "0.16"
@@ -51,7 +59,9 @@ futures-util = "0.3"
 tar = "0.4"
 
 # Tmux/PTY support
-portable-pty = "0.8"
+portable-pty = "0.9"
+vt100 = "0.16"
+tui-term = "0.3.4"
 
 # Git operations (vendored-openssl for cross-compilation support)
 git2 = { version = "0.18", features = ["vendored-openssl"] }
@@ -60,6 +70,7 @@ git2 = { version = "0.18", features = ["vendored-openssl"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 toml = "0.8"
 toml_edit = "0.22"
 
@@ -67,6 +78,13 @@ toml_edit = "0.22"
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
 async-stream = "0.3"
 tokio-stream = "0.1"
+# Slack socket-mode WebSocket transport for the native phone bridge
+# (`ainb fleet bridge`). rustls-only (no OpenSSL) to match reqwest above and
+# keep the single-binary build cross-compilable.
+tokio-tungstenite = { version = "0.21", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
 
 # Utils
 shell-escape = "0.1"
@@ -82,6 +100,12 @@ clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 tempfile = "3.8"
 nix = { version = "0.27", features = ["user", "signal"] }
+# Process-identity cross-check for the Daemons liveness probe: a bare
+# `kill(pid,0)` can't tell a live daemon from a recycled pid, so we read the
+# live process's real start time and match it against the heartbeat's
+# `started_at`. Portable across macOS (kinfo_proc) and Linux (/proc/<pid>/stat);
+# `system` feature only (no disk/network/component collectors).
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 arboard = "3.3"
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 regex = "1.10"
@@ -92,12 +116,20 @@ url = "2.5"
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"
 syntect = "5.2"
-ansi-to-tui = "4"
+ansi-to-tui = "8.0.1"
 # Code Review diff surface: structured + word-level diff (similar),
 # Dracula theme + extra grammars (two-face). syntect→ratatui span conversion
-# is inlined (ainb pins ratatui 0.26; syntect-tui targets a newer ratatui).
+# is inlined.
 similar = { version = "2", features = ["inline"] }
 two-face = "0.5"
+# TRANSITIVE VERSION CAP, not a real dependency: time 0.3.48 (released
+# 2026-06-11/12) fails to compile against this graph — E0119 "conflicting
+# implementations of From<HourBase>" the moment ratatui-core's blanket impls
+# are in scope (reproduced locally AND the cause of every red CI run since
+# 2026-06-11; no Cargo.lock is tracked, so CI always resolves the latest).
+# time reaches us via syntect→plist and ratatui-widgets. Remove this cap when
+# a fixed time release (>0.3.48) compiles: `cargo update -p time` + build.
+time = ">=0.3.36, <0.3.48"
 
 # Persistent usage analytics cache
 # Bumped 0.31 -> 0.32 so `libsqlite3-sys` (links = "sqlite3") resolves to a
@@ -116,11 +148,20 @@ fs2 = "0.4"
 # Filesystem watch for fleet JSONL transcript tail
 notify = "6.1"
 
+# Web dashboard (`ainb web` / ainb-web crate): axum HTTP + SSE, tower
+# middleware, and rust-embed for the no-build-step vanilla-JS frontend.
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+subtle = "2.6"
+
 # Dev / test
 mockall = "0.12"
 pretty_assertions = "1.4"
 rexpect = "0.5"
-vt100 = "0.15"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

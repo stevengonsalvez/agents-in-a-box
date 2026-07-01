@@ -1,0 +1,16 @@
+{
+  "name": "illustration",
+  "version": "1.0.0",
+  "description": "Explanatory & brand illustration skill starring Popa — a pink blob with a green sprout and a notepad — drawn as intricate hand-drawn sketchnotes. Workflow: digest → shot list → per-image generation → QA → deliver, with likeness-locked references. Invoke `illustration` or `illustration:popa`.",
+  "author": {
+    "name": "stevengonsalvez"
+  },
+  "keywords": [
+    "illustration",
+    "mascot",
+    "image-generation",
+    "explainer",
+    "sketchnote",
+    "popa"
+  ]
+}

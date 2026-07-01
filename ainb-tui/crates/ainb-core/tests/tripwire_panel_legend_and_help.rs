@@ -47,7 +47,7 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
-    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(
         home.join(".agents-in-a-box").join("install.json"),
         install_record,
@@ -82,6 +82,26 @@ fn send_key(session: &str, key: &str) {
         .args(["send-keys", "-t", session, key])
         .status()
         .expect("tmux send-keys");
+}
+
+fn poll_capture_resending<F>(
+    session: &str,
+    key: &str,
+    deadline: Instant,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        thread::sleep(Duration::from_millis(500));
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+    }
+    None
 }
 
 fn kill_session(session: &str) {
@@ -125,12 +145,14 @@ fn session_list_legend_advertises_every_panel() {
     let session = format!("tripwire-legend-{}", std::process::id());
     launch_to_home(&session, home_tmp.path());
 
-    send_key(&session, "s");
     // The panel line renders the six shortcuts together; wait for the
     // whole group so we don't race a half-painted legend.
-    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("b inbox") && c.contains("t abtop")
-    });
+    let cap = poll_capture_resending(
+        &session,
+        "s",
+        Instant::now() + Duration::from_secs(40),
+        |c| c.contains("b inbox") && c.contains("t abtop"),
+    );
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
     kill_session(&session);
 

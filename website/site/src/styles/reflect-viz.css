@@ -1,0 +1,208 @@
+/*
+ * reflect-memory viz components — explainer-style matrix + Obsidian-style
+ * callout cards for the dense comparison/recall pages. Theme-aware: built on
+ * the --ainb-*/--sl-* tokens so light and dark both work. The goal is to stop
+ * wide markdown tables from squeezing their last column into a one-word sliver:
+ *   - comparison data  -> .rm-matrix  (horizontal scroll, never squeezed)
+ *   - per-feature data -> .rm-cards   (callout cards, wrap naturally)
+ */
+
+/* ---- horizontal-scroll matrix (wide comparisons) ---- */
+.sl-markdown-content .rm-matrix {
+  overflow-x: auto;
+  max-width: 100%;            /* never spill past the content column / under the TOC */
+  margin: 1.5rem 0;
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+  border-radius: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+/* Override the global .sl-markdown-content table rules (fit-content/max-width)
+   so the table keeps its natural width and the wrapper scrolls instead. */
+.sl-markdown-content .rm-matrix table {
+  width: max-content;
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.sl-markdown-content .rm-matrix th,
+.sl-markdown-content .rm-matrix td {
+  white-space: nowrap;
+  vertical-align: top;
+  font-size: 0.82rem;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 15%, transparent);
+  background: transparent;
+}
+.sl-markdown-content .rm-matrix th {
+  color: var(--ainb-accent-gold);
+  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 50%, transparent);
+}
+/* descriptive cells that should wrap rather than force scroll */
+.sl-markdown-content .rm-matrix td.wrap,
+.sl-markdown-content .rm-matrix th.wrap {
+  white-space: normal;
+  min-width: 16ch;
+  max-width: 26ch;
+}
+/* sticky first column so the row label stays visible while scrolling */
+.sl-markdown-content .rm-matrix :is(th, td).rowh {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--ainb-bg-panel);
+  color: var(--ainb-text-primary);
+  font-weight: 700;
+  white-space: normal;
+  min-width: 13ch;
+  border-right: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+}
+.sl-markdown-content .rm-matrix tr:last-child td { border-bottom: 0; }
+.sl-markdown-content .rm-matrix tr.tot :is(td, .rowh) {
+  font-weight: 700;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 70%, transparent);
+}
+/* reflect row marker — uniform opaque tint (mixed with the surface, not transparent,
+   so it never bleeds/gradients over the page); never painted over a heatmap cell. */
+.sl-markdown-content .rm-matrix tr.me .rowh {
+  background: color-mix(in srgb, var(--ainb-accent-gold) 15%, var(--ainb-bg-panel));
+}
+.sl-markdown-content .rm-matrix tr.me td:not(.s1):not(.s2):not(.s3):not(.s4):not(.s5) {
+  background: color-mix(in srgb, var(--ainb-accent-gold) 7%, var(--ainb-bg-panel));
+}
+
+/* heatmap score tints — semantic, derived from accent tokens so they theme */
+.sl-markdown-content .rm-matrix td.s5 { background: color-mix(in srgb, var(--ainb-accent-green) 30%, transparent); }
+.sl-markdown-content .rm-matrix td.s4 { background: color-mix(in srgb, var(--ainb-accent-green) 16%, transparent); }
+.sl-markdown-content .rm-matrix td.s3 { background: color-mix(in srgb, var(--ainb-accent-gold) 16%, transparent); }
+.sl-markdown-content .rm-matrix td.s2 { background: color-mix(in srgb, #C0563E 18%, transparent); }
+.sl-markdown-content .rm-matrix td.s1 { background: color-mix(in srgb, #C0563E 30%, transparent); }
+
+/* ---- callout cards (per-feature; Obsidian-style) ---- */
+.sl-markdown-content .rm-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+  margin: 1.25rem 0;
+}
+@media (min-width: 56rem) {
+  .sl-markdown-content .rm-cards.two { grid-template-columns: 1fr 1fr; }
+}
+/* Full border + surface tint + a leading gold id as the visual anchor —
+   deliberately NOT a left side-stripe (the #1 AI-design tell). */
+.sl-markdown-content .rm-card {
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 50%, transparent);
+  padding: 0.9rem 1.1rem;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.sl-markdown-content .rm-card:hover {
+  border-color: color-mix(in srgb, var(--ainb-border) 55%, transparent);
+  background: color-mix(in srgb, var(--ainb-bg-panel) 70%, transparent);
+}
+.sl-markdown-content .rm-card .h {
+  font-family: var(--ainb-font-display);
+  font-weight: 700;
+  color: var(--ainb-accent-gold);
+  margin-bottom: 0.4rem;
+  line-height: 1.3;
+}
+.sl-markdown-content .rm-card .h .id {
+  color: var(--ainb-border);
+  margin-right: 0.5ch;
+}
+.sl-markdown-content .rm-card .h code { font-size: 0.8em; }
+.sl-markdown-content .rm-card p { margin: 0.3rem 0; font-size: 0.9rem; line-height: 1.5; }
+.sl-markdown-content .rm-card .lbl {
+  font-weight: 700;
+  color: var(--ainb-text-muted);
+  text-transform: uppercase;
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  margin-right: 0.5ch;
+}
+.sl-markdown-content .rm-card .without .lbl { color: #C0563E; }
+
+/* ---- fitted ASCII diagram box ----
+   Plain ASCII art, sized down so it fits the content column without the janky
+   default code-frame scrollbar, in a tidy themed box. Use raw <pre class="rm-ascii">
+   instead of a fenced code block for diagrams (keeps the art, drops the overflow). */
+.sl-markdown-content pre.rm-ascii {
+  font-family: var(--ainb-font-mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  padding: 1rem 1.1rem;
+  color: var(--ainb-text-primary);
+  background: var(--ainb-bg-panel);   /* theme-aware surface (not the always-dark code bg) so the line-art stays readable in light mode */
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
+  border-radius: 10px;
+  font-feature-settings: 'liga' 0;
+}
+@media (max-width: 30rem) {
+  .sl-markdown-content pre.rm-ascii { font-size: 0.62rem; }
+}
+
+/* ---- option cards (the 8 systems) — docsite port of the explainer card design.
+   Top accent only (never a left side-stripe); gold for reflect, cornflower for the rest. */
+.sl-markdown-content .rm-opts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.9rem;
+  margin: 1.5rem 0;
+}
+.sl-markdown-content .rm-opt {
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--ainb-bg-panel) 50%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 28%, transparent);
+  border-top: 3px solid color-mix(in srgb, var(--ainb-border) 70%, transparent);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+.sl-markdown-content .rm-opt.me {
+  border-top-color: var(--ainb-accent-gold);
+  background: color-mix(in srgb, var(--ainb-accent-gold) 7%, var(--ainb-bg-panel));
+}
+.sl-markdown-content .rm-opt .lab {
+  font-family: var(--ainb-font-mono);
+  font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--ainb-text-muted); margin-bottom: 0.4rem;
+}
+.sl-markdown-content .rm-opt h4 {
+  font-family: var(--ainb-font-display);
+  font-size: 1.05rem; line-height: 1.2; color: var(--ainb-text-primary); margin: 0 0 0.15rem;
+}
+.sl-markdown-content .rm-opt h4 a { color: var(--ainb-text-primary); text-decoration: none; }
+.sl-markdown-content .rm-opt h4 a:hover { color: var(--ainb-accent-gold); }
+.sl-markdown-content .rm-opt .lic {
+  font-family: var(--ainb-font-mono); font-size: 0.66rem;
+  color: var(--ainb-text-muted); margin-bottom: 0.65rem;
+}
+.sl-markdown-content .rm-opt .desc {
+  font-size: 0.82rem; line-height: 1.5; color: var(--ainb-text-primary); margin: 0 0 0.85rem;
+}
+.sl-markdown-content .rm-opt .bars { display: grid; gap: 0.34rem; margin-bottom: 0.85rem; }
+.sl-markdown-content .rm-opt .brow {
+  display: grid; grid-template-columns: 4.6rem 1fr 1.2ch; align-items: center; gap: 0.5rem;
+  font-family: var(--ainb-font-mono); font-size: 0.62rem;
+}
+.sl-markdown-content .rm-opt .brow .bl { color: var(--ainb-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sl-markdown-content .rm-opt .track { height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--ainb-text-faint) 35%, transparent); }
+.sl-markdown-content .rm-opt .fill { display: block; height: 100%; border-radius: 3px; background: var(--ainb-border); }
+.sl-markdown-content .rm-opt.me .fill { background: var(--ainb-accent-gold); }
+.sl-markdown-content .rm-opt .brow .bv { color: var(--ainb-text-primary); text-align: right; }
+.sl-markdown-content .rm-opt .tot {
+  margin-top: auto; padding-top: 0.7rem;
+  border-top: 1px dashed color-mix(in srgb, var(--ainb-border) 25%, transparent);
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.sl-markdown-content .rm-opt .tot .tl { font-family: var(--ainb-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ainb-text-muted); }
+.sl-markdown-content .rm-opt .tot .tn { font-family: var(--ainb-font-display); font-size: 1.5rem; color: var(--ainb-text-primary); }
+.sl-markdown-content .rm-opt .tot .tn small { font-size: 0.8rem; color: var(--ainb-text-muted); }

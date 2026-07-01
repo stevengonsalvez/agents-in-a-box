@@ -31,10 +31,13 @@ You're on the **Sessions** screen. Start an agent session, or open Setup.
 ## Start here
 
 - `n`         **New session** — pick a repo and launch an agent
+- `s`         **Sessions** — go to your running sessions
 - `Enter`     Open / attach the selected session
 - `1`–`9`     Jump straight to a session by number
 - `?`         Help — every key for this screen
 - `q`         Quit
+
+To attach: `a` full-screen, `→` in a split pane, or `Enter`.
 
 Each session runs in its own git worktree + tmux + agent, fully isolated.
 

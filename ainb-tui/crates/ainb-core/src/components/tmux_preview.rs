@@ -63,6 +63,50 @@ impl TmuxPreviewPane {
         }
     }
 
+    /// Render the live interactive embed (the pane that IS the tmux session).
+    /// Draws the embedded vt100 screen via tui-term inside a focus-cued block
+    /// (distinct border + `● INTERACTIVE — Ctrl+Q release` badge). Falls back to
+    /// a placeholder if the embed/screen is momentarily unavailable.
+    pub fn render_interactive(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let title = Line::from(vec![
+            Span::styled(
+                " ● ",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "INTERACTIVE ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("— ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "Ctrl+Q",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" release ", Style::default().fg(MUTED_GRAY)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SELECTION_GREEN))
+            .style(Style::default().bg(DARK_BG))
+            .title(title);
+
+        match state.embed.as_ref() {
+            Some(embed) => {
+                let parser = embed.parser();
+                let guard = parser.read();
+                match guard {
+                    Ok(g) => {
+                        let term = tui_term::widget::PseudoTerminal::new(g.screen()).block(block);
+                        frame.render_widget(term, area);
+                    }
+                    Err(_) => frame.render_widget(block, area),
+                }
+            }
+            None => frame.render_widget(block, area),
+        }
+    }
+
     /// Render the preview pane
     ///
     /// # Arguments
@@ -70,31 +114,46 @@ impl TmuxPreviewPane {
     /// * `area` - The area to render the component in
     /// * `state` - The application state
     pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
+        use crate::app::state::FocusedPane;
+        // Focused pane gets a green border; unfocused panes a subtle grey one,
+        // consistent with the session list + live logs.
+        let is_focused = matches!(state.focused_pane, FocusedPane::Preview);
         // First check for regular Claude sessions
         if let Some(session) = state.selected_session() {
             if session.is_attached {
                 self.render_attached_notice(frame, area);
             } else {
-                self.render_preview(frame, area, session);
+                self.render_preview(frame, area, session, is_focused);
             }
         // Then check for shell sessions
         } else if let Some(shell_session) = state.selected_shell_session() {
-            self.render_shell_preview(frame, area, shell_session);
+            self.render_shell_preview(frame, area, shell_session, is_focused);
         } else {
             self.render_empty_state(frame, area);
         }
     }
 
     /// Render the preview content for a session
-    fn render_preview(&mut self, frame: &mut Frame, area: Rect, session: &Session) {
+    fn render_preview(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &Session,
+        is_focused: bool,
+    ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Session Preview: {}", session.name),
             PreviewMode::Scroll => format!("Session Preview: {} [SCROLL MODE]", session.name),
         };
 
-        let border_color = match self.preview_mode {
-            PreviewMode::Normal => Color::Cyan,
-            PreviewMode::Scroll => Color::Yellow,
+        // Grey when unfocused; green when focused (gold while in scroll mode).
+        let border_color = if !is_focused {
+            SUBDUED_BORDER
+        } else {
+            match self.preview_mode {
+                PreviewMode::Normal => SELECTION_GREEN,
+                PreviewMode::Scroll => GOLD,
+            }
         };
 
         // Split area for content and footer
@@ -127,16 +186,21 @@ impl TmuxPreviewPane {
         frame: &mut Frame,
         area: Rect,
         shell_session: &ShellSession,
+        is_focused: bool,
     ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Shell: {}", shell_session.name),
             PreviewMode::Scroll => format!("Shell: {} [SCROLL MODE]", shell_session.name),
         };
 
-        // Shell sessions get a distinct green border to differentiate from Claude sessions
-        let border_color = match self.preview_mode {
-            PreviewMode::Normal => SELECTION_GREEN,
-            PreviewMode::Scroll => Color::Yellow,
+        // Grey when unfocused; green when focused (gold while in scroll mode).
+        let border_color = if !is_focused {
+            SUBDUED_BORDER
+        } else {
+            match self.preview_mode {
+                PreviewMode::Normal => SELECTION_GREEN,
+                PreviewMode::Scroll => GOLD,
+            }
         };
 
         // Split area for content and footer
@@ -229,7 +293,7 @@ impl TmuxPreviewPane {
 
             frame.render_stateful_widget(
                 scrollbar,
-                area.inner(&Margin {
+                area.inner(Margin {
                     vertical: 1,
                     horizontal: 0,
                 }),
@@ -245,7 +309,7 @@ impl TmuxPreviewPane {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
+                    .border_style(Style::default().fg(SUBDUED_BORDER)),
             )
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
@@ -261,7 +325,7 @@ impl TmuxPreviewPane {
                 Block::default()
                     .title("Session Preview")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
+                    .border_style(Style::default().fg(SUBDUED_BORDER)),
             )
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
@@ -329,16 +393,16 @@ impl TmuxPreviewPane {
                 Span::styled(" attach ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
+                    " A",
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" pane ", Style::default().fg(SOFT_WHITE)),
+                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                Span::styled(
                     " Shift+↑↓",
                     Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" scroll mode ", Style::default().fg(SOFT_WHITE)),
-                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(
-                    " k",
-                    Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" kill ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(
                     " Ctrl+B D",

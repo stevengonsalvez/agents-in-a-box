@@ -1,14 +1,15 @@
 /*
  * agents-in-a-box — design tokens
  *
- * Locked to the TUI palette (see ../../../BRIEF.md §5.2). No light mode in v1.
+ * Locked to the TUI palette (see ../../../BRIEF.md §5.2).
  * Override Starlight's CSS variables to project the TUI identity through the
- * docs hub.
+ * docs hub. Dark is the default; the light palette below re-points only the
+ * `--ainb-*` leaf tokens (every `--sl-*` mapping lives on `:root`, which always
+ * matches, so the leaf override cascades through them).
  */
 
 :root,
-:root[data-theme='dark'],
-:root[data-theme='light'] {
+:root[data-theme='dark'] {
   /* ---- Palette ---- */
   --ainb-bg-deep:        #0F0F18;
   --ainb-bg-panel:       #191923;
@@ -81,6 +82,32 @@
   --sl-content-width:            48rem;
 }
 
+/*
+ * Light mode — same TUI identity (cornflower frame, goldenrod accent, green),
+ * re-toned for a light surface. Only the `--ainb-*` leaves change; the
+ * `--sl-*` mappings on `:root` above pick these up automatically. Code blocks
+ * intentionally stay on a dark surface (a readable dark island on a light page).
+ */
+:root[data-theme='light'] {
+  --ainb-bg-deep:        #FAFAFC;
+  --ainb-bg-panel:       #EEEEF4;
+  --ainb-bg-raised:      #E4E4EE;
+  --ainb-bg-highlight:   #DCDCEC;
+
+  --ainb-border:         #2F5C99;  /* darker cornflower — contrast on light */
+  --ainb-accent-gold:    #9A6B00;  /* dark goldenrod — gold is unreadable on light */
+  --ainb-accent-green:   #2E7D32;
+
+  --ainb-text-primary:   #16161E;
+  --ainb-text-muted:     #54546A;
+  --ainb-text-faint:     #8C8CA0;
+
+  --ainb-syntax-keyword: #9A6B00;
+  --ainb-syntax-string:  #2E7D32;
+  --ainb-syntax-comment: #54546A;
+  --ainb-syntax-number:  #2F5C99;
+}
+
 /* Headings: use display font and a touch more presence. */
 h1, .sl-heading-1 {
   font-family: var(--ainb-font-display);
@@ -136,20 +163,48 @@ a:not(.sl-link-card):not([class*='sl-flex']):hover {
   font-size: 0.875em;
 }
 
-/* Tables — cornflower borders, zebra body. */
+/* Tables — cornflower frame, padded cells, subtle zebra + hover. */
 .sl-markdown-content table {
+  /* Hug the content (capped at the container) instead of stretching to 100%:
+     narrow 2-column tables otherwise leave a large blank region on the right
+     inside the frame. Wide tables still grow up to max-width. */
+  width: fit-content;
+  max-width: 100%;
+  margin: 1.15rem 0;
   border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
-  border-collapse: collapse;
+  border-radius: 8px;
+  border-collapse: separate; /* separate so border-radius clips cleanly */
+  border-spacing: 0;
   overflow: hidden;
+}
+/* Consistent breathing room so content never touches the cell edges. */
+.sl-markdown-content th,
+.sl-markdown-content td {
+  padding: 0.55rem 0.9rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 18%, transparent);
 }
 .sl-markdown-content th {
   background: var(--ainb-bg-panel);
   color: var(--ainb-accent-gold);
   font-weight: 700;
-  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 60%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 55%, transparent);
 }
-.sl-markdown-content tr:nth-child(even) td {
+/* Drop the last row's separator so it doesn't double up with the frame. */
+.sl-markdown-content tbody tr:last-child td {
+  border-bottom: none;
+}
+.sl-markdown-content tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--ainb-bg-panel) 45%, transparent);
+}
+.sl-markdown-content tbody tr:hover td {
   background: var(--ainb-bg-panel);
+}
+/* Keep inline <kbd> chips off the cell edge / each other. */
+.sl-markdown-content td kbd,
+.sl-markdown-content th kbd {
+  vertical-align: baseline;
 }
 
 /* Blockquotes — cornflower bar, muted text. */

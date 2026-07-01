@@ -5,22 +5,28 @@
     "url": "https://github.com/stevengonsalvez"
   },
   "metadata": {
-    "description": "Marketplace for plugins shipped with the agents-in-a-box toolkit. Plugins live under toolkit/packages/plugins/ and are installable via `claude plugin install <name>@agents-in-a-box`.",
+    "description": "Marketplace for plugins shipped with agents-in-a-box. Plugins live under plugins/ at the repo root and are installable via `claude plugin install <name>@agents-in-a-box`.",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "reflect",
-      "source": "./plugins/reflect",
-      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect:cost, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
+      "source": {
+        "source": "github",
+        "repo": "stevengonsalvez/ainb-reflect-memory",
+        "path": "plugin",
+        "ref": "v5.0.4"
+      },
+      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings via SessionStart/UserPromptSubmit hooks. PostToolUse arms low-cost mini-learning capture; Stop enqueues short-session reflection. Philosophy: Correct once, never again; recall everything next time.",
       "strict": false,
       "keywords": [
-        "self-improvement",
-        "learnings",
-        "graphrag",
         "memory",
         "recall",
-        "retrieval"
+        "learnings",
+        "graphrag",
+        "self-improvement",
+        "retrieval",
+        "long-term-memory"
       ]
     },
     {
@@ -42,7 +48,7 @@
     {
       "name": "ainb-hooks",
       "source": "./plugins/ainb-hooks",
-      "description": "Emit actionable Claude Code lifecycle events to the ainb notification inbox: Notification (awaiting-input / permission) and Stop (turn finished) are delivered to ainb-notifyd over a Unix socket, surfacing as native OS banners, the ainb-tui Inbox screen, and the per-session waiting marker. Telemetry events are intentionally not hooked. Install via `/plugin install ainb-hooks@agents-in-a-box` (Claude); Codex wiring is handled by `ainb notifyd install`.",
+      "description": "Emit actionable host-agent lifecycle events to the ainb notification inbox: Claude/Copilot Notification, Codex PermissionRequest, and Stop/agentStop are delivered to ainb-notifyd over a Unix socket, surfacing as native OS banners, the ainb-tui Inbox screen, and per-session attention markers. Telemetry events are intentionally not hooked. Install via `/plugin install ainb-hooks@agents-in-a-box` (Claude); Codex/Copilot wiring is handled by `ainb notifyd install`.",
       "strict": false,
       "keywords": [
         "ainb",
@@ -52,6 +58,34 @@
         "notifyd",
         "claude-code",
         "awaiting-input"
+      ]
+    },
+    {
+      "name": "caveman-stats",
+      "source": "./plugins/caveman-stats",
+      "description": "Caveman mode lifecycle hooks. PostToolUse watermark-tracks output tokens per session and writes .caveman-statusline-suffix so the statusline badge updates live. PreCompact re-injects the full caveman ruleset into the compaction summary so mode survives context compaction. Pair with caveman@caveman for full caveman setup.",
+      "strict": false,
+      "keywords": [
+        "caveman",
+        "statusline",
+        "hooks",
+        "token-savings",
+        "compaction",
+        "caveman-mode"
+      ]
+    },
+    {
+      "name": "illustration",
+      "source": "./plugins/illustration",
+      "description": "Explanatory & brand illustration skill starring Popa — a pink blob with a notepad — drawn as intricate hand-drawn sketchnotes. Digest → shot list → per-image generation → QA → deliver. Invoke `illustration` or `illustration:popa`.",
+      "strict": false,
+      "keywords": [
+        "illustration",
+        "mascot",
+        "image-generation",
+        "explainer",
+        "sketchnote",
+        "popa"
       ]
     }
   ]

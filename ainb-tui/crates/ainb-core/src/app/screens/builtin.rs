@@ -5,10 +5,9 @@ use ratatui::{Frame, layout::Rect};
 use super::{EventOutcome, Screen, ids};
 use crate::app::AppState;
 use crate::components::{
-    AgentSelectionComponent, AttachedTerminalComponent, AuthProviderPopupComponent,
-    AuthSetupComponent, ChangelogComponent, ConfigPopupComponent, ConfigScreenComponent,
-    GitViewComponent, HomeScreenV2Component, LogHistoryViewerComponent, OnboardingComponent,
-    SessionRecovery, SetupMenuComponent,
+    AttachedTerminalComponent, AuthProviderPopupComponent, AuthSetupComponent, ChangelogComponent,
+    ConfigPopupComponent, ConfigScreenComponent, GitViewComponent, HomeScreenV2Component,
+    LogHistoryViewerComponent, OnboardingComponent, SessionRecovery, SetupMenuComponent,
 };
 
 /// Centred sub-rect helper, mirroring `components::layout::centered_rect`.
@@ -510,14 +509,15 @@ impl Screen for PluginScreen {
             if coord.x >= area.width || coord.y >= area.height {
                 continue;
             }
-            let target = buf.get_mut(area.x + coord.x, area.y + coord.y);
-            target.set_symbol(&cell.symbol);
-            target.set_fg(rgb_to_color(cell.fg));
-            target.set_bg(rgb_to_color(cell.bg));
-            target.set_style(
-                ratatui::style::Style::default()
-                    .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
-            );
+            if let Some(target) = buf.cell_mut((area.x + coord.x, area.y + coord.y)) {
+                target.set_symbol(&cell.symbol);
+                target.set_fg(rgb_to_color(cell.fg));
+                target.set_bg(rgb_to_color(cell.bg));
+                target.set_style(
+                    ratatui::style::Style::default()
+                        .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
+                );
+            }
         }
     }
 
@@ -567,6 +567,17 @@ impl Screen for SkillsScreen {
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         crate::components::skills::render(frame, area, &state.skills_state);
+    }
+}
+
+#[derive(Default)]
+pub struct SkillManagerScreen;
+impl Screen for SkillManagerScreen {
+    fn id(&self) -> &str {
+        ids::SKILL_MANAGER
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
     }
 }
 
@@ -621,6 +632,40 @@ impl Screen for InboxScreen {
     }
 }
 
+/// Daemons screen — read-only runtime health of every long-running ainb daemon
+/// (phone bridge / notifyd / ATC / fleet daemon). Renders from
+/// `fleet::daemons::collect` via the shared component, refreshing live on the
+/// render tick. State lives on `AppState::daemons_state` so the cached snapshot
+/// survives cross-screen navigation.
+#[derive(Default)]
+pub struct DaemonsScreen;
+
+impl Screen for DaemonsScreen {
+    fn id(&self) -> &str {
+        ids::DAEMONS
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+    }
+}
+
+/// Fleet control panel — the interactive "who-needs-you" looking-glass. Reads
+/// the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session) via the
+/// shared component, refreshing on the render tick, and acts (answer
+/// interviews / broadcast) through the existing fleet send path. State lives on
+/// `AppState::fleet_panel_state` so selection survives cross-screen navigation.
+#[derive(Default)]
+pub struct FleetPanelScreen;
+
+impl Screen for FleetPanelScreen {
+    fn id(&self) -> &str {
+        ids::FLEET_PANEL
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::fleet_panel::render(frame, area, &mut state.fleet_panel_state);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stateful screens — own their component instance
 // ---------------------------------------------------------------------------
@@ -656,34 +701,6 @@ impl Screen for HomeScreen {
             &state.workspaces,
             state.is_loading_workspaces,
         );
-    }
-}
-
-pub struct AgentSelectionScreen {
-    component: AgentSelectionComponent,
-}
-
-impl AgentSelectionScreen {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            component: AgentSelectionComponent::new(),
-        }
-    }
-}
-
-impl Default for AgentSelectionScreen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Screen for AgentSelectionScreen {
-    fn id(&self) -> &str {
-        ids::AGENT_SELECTION
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        self.component.render(frame, area, state);
     }
 }
 
@@ -894,7 +911,6 @@ use super::super::registry::ScreenRegistry;
 /// in `LayoutComponent::render`.
 pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(HomeScreen::new()));
-    registry.register(Box::new(AgentSelectionScreen::new()));
     registry.register(Box::new(ConfigScreen::new()));
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
@@ -904,6 +920,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(PluginScreen::new(ids::ABTOP)));
     registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
+    registry.register(Box::new(SkillManagerScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
     registry.register(Box::new(SessionRecoveryScreen::default()));
     registry.register(Box::new(OnboardingScreen::new()));
@@ -911,6 +928,8 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
     registry.register(Box::new(InboxScreen));
+    registry.register(Box::new(DaemonsScreen));
+    registry.register(Box::new(FleetPanelScreen));
 }
 
 #[cfg(test)]
@@ -958,7 +977,6 @@ mod tests {
         // Every full-screen view gets a Screen impl.
         for id in [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
             ids::LOG_HISTORY,
             ids::CHANGELOG,
@@ -967,12 +985,16 @@ mod tests {
             ids::ABTOP,
             ids::HANGAR,
             ids::SKILLS,
+            ids::SKILL_MANAGER,
             ids::GIT_VIEW,
             ids::SESSION_RECOVERY,
             ids::ONBOARDING,
             ids::SETUP_MENU,
             ids::AUTH_SETUP,
             ids::ATTACHED_TERMINAL,
+            ids::INBOX,
+            ids::DAEMONS,
+            ids::FLEET_PANEL,
         ] {
             assert!(r.contains(id), "registry missing built-in screen {id}");
         }

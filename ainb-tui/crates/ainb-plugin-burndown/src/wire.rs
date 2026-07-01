@@ -97,6 +97,7 @@ pub fn wire_to_local(w: W::UsageData) -> UsageData {
             .map(|s| L::SessionUsage {
                 provider: s.provider.as_str().to_string(),
                 project: s.project,
+                project_path: s.project_path,
                 session_id: s.session_id,
                 first_timestamp: s.first_timestamp,
                 last_timestamp: s.last_timestamp,

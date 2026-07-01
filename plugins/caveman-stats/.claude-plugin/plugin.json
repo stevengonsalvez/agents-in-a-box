@@ -1,0 +1,36 @@
+{
+  "name": "caveman-stats",
+  "version": "1.0.0",
+  "description": "Caveman mode lifecycle hooks: PostToolUse updates .caveman-statusline-suffix with token savings estimate; PreCompact re-injects caveman ruleset so mode survives context compaction.",
+  "author": {
+    "name": "stevengonsalvez"
+  },
+  "//": "PostToolUse is async (fire-and-forget, 3s timeout) — watermark-based so it reads only new JSONL bytes per tool call. PreCompact is synchronous (5s) — output injected into compaction summary. No SessionStart hook here; caveman activation is handled by the caveman@caveman marketplace plugin's own SessionStart.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/caveman_posttooluse.js",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/caveman_precompact.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

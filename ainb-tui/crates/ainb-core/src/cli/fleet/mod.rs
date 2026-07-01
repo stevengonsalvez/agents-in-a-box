@@ -8,8 +8,13 @@ use anyhow::{Result, bail};
 
 use crate::cli::OutputFormat;
 
+pub mod atc;
+pub mod bridge;
 pub mod broadcast;
+pub mod budget_alert;
+pub mod cost;
 pub mod daemon;
+pub mod daemons;
 pub mod enrich_cache;
 pub mod needs;
 pub mod sequence;
@@ -21,7 +26,11 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("broadcast", sub)) => broadcast::execute(sub, format).await,
         Some(("sequence", sub)) => sequence::execute(sub, format).await,
         Some(("needs", sub)) => needs::execute(sub, format).await,
+        Some(("cost", sub)) => cost::execute(sub, format).await,
         Some(("daemon", sub)) => daemon::execute(sub, format).await,
+        Some(("daemons", sub)) => daemons::execute(sub, format).await,
+        Some(("atc", sub)) => atc::execute(sub, format).await,
+        Some(("bridge", sub)) => bridge::execute(sub, format).await,
         Some(("enrich-cache", sub)) => enrich_cache::execute(sub, format).await,
         _ => bail!("unknown `ainb fleet` subcommand — try `ainb fleet --help`"),
     }

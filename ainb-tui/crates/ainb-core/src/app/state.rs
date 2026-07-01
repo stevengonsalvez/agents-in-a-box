@@ -424,6 +424,7 @@ impl Notification {
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
+    Preview,  // Right pane - interactive embedded tmux attach (in-place)
 }
 
 pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
@@ -431,6 +432,137 @@ pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+
+impl AppState {
+    /// Enter interactive mode: attach a live embed client to the selected
+    /// session's tmux session and focus the preview pane. Returns false (no-op)
+    /// if the selection has no tmux session or the attach fails — the pane stays
+    /// on the read-only preview.
+    pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
+        if self.embed.is_some() {
+            if self.selected_tmux_name() == self.embed_session {
+                // Self-healing re-entry on the SAME row: a live embed with
+                // focus drifted off the preview pane is a leaked state —
+                // restore the mode invariant instead of silently no-opping.
+                self.focused_pane = FocusedPane::Preview;
+                return true;
+            }
+            // Different row: the user means "attach HERE" — release the stale
+            // client and fall through to a fresh attach, instead of
+            // refocusing an embed that renders some other session.
+            self.release_interactive_pane();
+        }
+        let Some(name) = self.selected_tmux_name() else {
+            self.add_warning_notification("No tmux session on this row".to_string());
+            return false;
+        };
+        // tmux mirrors a session to every attached client, but all clients
+        // fight over its size — attaching alongside an existing client is the
+        // user's call, so allow it and warn (never block).
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
+        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
+            Ok(client) => {
+                self.embed = Some(client);
+                self.embed_session = Some(name);
+                self.focused_pane = FocusedPane::Preview;
+                if attached_elsewhere {
+                    self.add_warning_notification(
+                        "Note: session attached elsewhere — screen sizes may fight".to_string(),
+                    );
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("failed to attach interactive embed to {name}: {e}");
+                self.add_error_notification(format!("Live attach to '{name}' failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Whether the current selection's tmux session already has another client
+    /// attached. Every kind that tracks attachment reports it (Claude and SSH
+    /// rows via `is_attached`, other-tmux rows via tmux's attached flag);
+    /// shell selections have no liveness flag and report false.
+    fn selected_session_attached_elsewhere(&self) -> bool {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().map(|s| s.is_attached).unwrap_or(false)
+        } else if self.shell_selected {
+            false
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
+        } else {
+            self.get_selected_session().map(|s| s.is_attached).unwrap_or(false)
+        }
+    }
+
+    /// Release interactive mode: kill the ephemeral embed client (NEVER the tmux
+    /// session) and return focus to the session list.
+    pub fn release_interactive_pane(&mut self) {
+        if let Some(mut client) = self.embed.take() {
+            client.shutdown();
+        }
+        self.embed_session = None;
+        self.embed_pane_area = None;
+        if self.focused_pane == FocusedPane::Preview {
+            self.focused_pane = FocusedPane::Sessions;
+        }
+    }
+
+    /// Resolve the tmux session name for whatever is currently selected, across
+    /// session kinds (Claude session, other-tmux, SSH, workspace shell). Mirrors
+    /// the resolution in the `a` (AttachTmuxSession) handler so `l` attaches the
+    /// same target `a` would.
+    pub fn selected_tmux_name(&self) -> Option<String> {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().and_then(|s| s.tmux_session_name.clone())
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.name.clone())
+        } else if self.shell_selected {
+            self.selected_workspace_index
+                .and_then(|i| self.workspaces.get(i))
+                .and_then(|w| w.shell_session.as_ref())
+                .map(|sh| sh.tmux_session_name.clone())
+        } else {
+            self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
+        }
+    }
+
+    /// True while an interactive embed is focused.
+    pub fn is_interactive_pane(&self) -> bool {
+        self.embed.is_some() && self.focused_pane == FocusedPane::Preview
+    }
+
+    /// If the embed has ended (detach / session gone / EOF), auto-release so the
+    /// pane reverts to the read-only preview rather than a dead screen. Also
+    /// releases defensively when the current screen is no longer the session
+    /// list — keys must never be forwarded to an invisible PTY.
+    ///
+    /// Returns true when it released (the layout changed → repaint needed).
+    pub fn poll_embed_exit(&mut self) -> bool {
+        if self.embed.is_none() {
+            return false;
+        }
+        let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
+        let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        if exited || invisible {
+            self.release_interactive_pane();
+            if exited {
+                self.add_info_notification("Live session ended — released".to_string());
+            }
+            return true;
+        }
+        false
+    }
+
+    /// New embed output since the last call? Clears the embed's dirty flag.
+    /// The render loop polls this as a repaint trigger: live PTY output
+    /// arrives without host input, so the dirty-gate (perf bead `wai`) would
+    /// otherwise hold the pane at the 250ms animation floor.
+    pub fn embed_take_dirty(&self) -> bool {
+        self.embed.as_ref().is_some_and(|e| e.take_dirty())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
@@ -682,10 +814,225 @@ pub enum ConfirmAction {
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
     DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
+    McpStopServer(String), // Stop one pooled MCP server (reaps its child)
+    McpStopDaemon,     // Stop the whole MCP pool daemon
     SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) then open abtop
     OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
     DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+// ============================================================================
+// MCP Pool observability overlay
+// ============================================================================
+
+/// Result of one off-thread fetch of the daemon's control-socket `status`.
+#[derive(Debug, Clone)]
+pub struct McpFetchResult {
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub error: Option<String>,
+    /// One-shot status line for an action that produced this result (e.g.
+    /// `import`). `None` for plain refreshes — the overlay keeps its prior
+    /// `last_action` so a refresh doesn't wipe the import summary.
+    pub action_msg: Option<String>,
+}
+
+/// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
+/// the overlay is open; dropping it (on close) stops all refresh activity —
+/// nothing polls the daemon when the overlay isn't showing.
+pub struct McpOverlayState {
+    pub pool_enabled: bool,
+    pub daemon_running: bool,
+    pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
+    pub selected: usize,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Auto-refresh cadence while open; 0 = on-open + manual (`r`) only.
+    pub refresh_secs: u64,
+    /// Receiver for the in-flight fetch (None when no fetch is pending — the
+    /// one-outstanding-request guard).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
+    /// Status line from the last in-overlay action (e.g. `import`). Sticky
+    /// across plain refreshes; cleared only when the overlay closes.
+    pub last_action: Option<String>,
+}
+
+impl std::fmt::Debug for McpOverlayState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOverlayState")
+            .field("pool_enabled", &self.pool_enabled)
+            .field("daemon_running", &self.daemon_running)
+            .field("servers", &self.servers.len())
+            .field("selected", &self.selected)
+            .field("loading", &self.loading)
+            .field("fetch_pending", &self.fetch_rx.is_some())
+            .field("last_action", &self.last_action)
+            .finish()
+    }
+}
+
+impl McpOverlayState {
+    pub fn selected_server_name(&self) -> Option<String> {
+        self.servers.get(self.selected).map(|s| s.name.clone())
+    }
+}
+
+/// Blocking control-socket fetch — always run via `spawn_blocking`. Probes the
+/// daemon and parses its `status` JSON into the snapshot.
+pub(crate) fn mcp_fetch_blocking() -> McpFetchResult {
+    if !crate::mcp_pool::client::daemon_alive() {
+        return McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: None,
+            action_msg: None,
+        };
+    }
+    match crate::mcp_pool::client::daemon_status() {
+        Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => {
+                let servers = v
+                    .get("servers")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or_default();
+                McpFetchResult {
+                    daemon_running: true,
+                    servers,
+                    error: None,
+                    action_msg: None,
+                }
+            }
+            Err(e) => McpFetchResult {
+                daemon_running: true,
+                servers: Vec::new(),
+                error: Some(format!("parse status: {e}")),
+                action_msg: None,
+            },
+        },
+        Err(e) => McpFetchResult {
+            daemon_running: false,
+            servers: Vec::new(),
+            error: Some(e.to_string()),
+            action_msg: None,
+        },
+    }
+}
+
+/// Blocking `import` action for the overlay — runs `ainb mcp import` (project
+/// scope, or user config when `to_user`), then makes the freshly-imported
+/// servers show up in the table immediately: if the pool daemon is already
+/// running they're registered with it; if it isn't, the daemon is started
+/// (it loads every configured server — including the new import — on boot).
+/// Without this an import into a down pool wrote config but left the overlay
+/// empty, which read as a no-op. Always run via `spawn_blocking`. Returns a
+/// fresh status snapshot tagged with a summary.
+pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
+    let summary = match crate::mcp_pool::import::execute(to_user) {
+        Ok(report) => {
+            let mut extra = String::new();
+            if !report.imported.is_empty() {
+                if crate::mcp_pool::client::daemon_alive() {
+                    // Daemon up: push the new definitions so they appear now,
+                    // without waiting for a new session.
+                    if let Ok(config) = crate::config::AppConfig::load() {
+                        let fresh: Vec<_> = crate::mcp_pool::pooled_servers(&config)
+                            .into_iter()
+                            .filter(|s| report.imported.contains(&s.name))
+                            .collect();
+                        if !fresh.is_empty() {
+                            let _ = crate::mcp_pool::client::register_servers(&fresh);
+                        }
+                    }
+                } else {
+                    // Daemon down: start it. ensure_daemon spawns it detached
+                    // and polls until its control socket is up (~3s), and the
+                    // daemon registers every configured server on boot — so the
+                    // just-imported one is live by the time we re-fetch below.
+                    extra = match crate::mcp_pool::client::ensure_daemon() {
+                        Ok(()) => " · started pool".to_string(),
+                        Err(e) => format!(" · pool start failed: {e}"),
+                    };
+                }
+            }
+            let mut parts = Vec::new();
+            if report.imported.is_empty() {
+                parts.push("nothing new to import".to_string());
+            } else {
+                parts.push(format!("imported {}", report.imported.join(", ")));
+            }
+            if !report.skipped_existing.is_empty() {
+                parts.push(format!(
+                    "already configured: {}",
+                    report.skipped_existing.join(", ")
+                ));
+            }
+            if !report.skipped_unresolvable.is_empty() {
+                parts.push(format!(
+                    "skipped (not on host): {}",
+                    report.skipped_unresolvable.join(", ")
+                ));
+            }
+            format!(
+                "{}{} → {}",
+                parts.join(" · "),
+                extra,
+                report.target.display()
+            )
+        }
+        Err(e) => format!("import failed: {e}"),
+    };
+    let mut result = mcp_fetch_blocking();
+    result.action_msg = Some(summary);
+    result
+}
+
+// ============================================================================
+// Daemons overlay (MCP pool + Headroom proxy — read-only status)
+// ============================================================================
+
+/// Fetched snapshot delivered through the daemons overlay channel.
+#[derive(Debug, Clone)]
+pub struct DaemonsFetchResult {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+    /// Every running `notifyd` process, classified live / stale / orphan.
+    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+}
+
+/// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
+/// the overlay is open; dropping it stops all refresh activity.
+#[derive(Debug)]
+pub struct DaemonsOverlayState {
+    pub mcp_alive: bool,
+    pub headroom: crate::headroom::ProxyStatus,
+    pub headroom_consumers: Vec<String>,
+    /// Every running `notifyd` process, classified live / stale / orphan.
+    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    pub loading: bool,
+    pub last_refreshed: Option<std::time::Instant>,
+    /// Receiver for the in-flight fetch (None = no fetch pending).
+    pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+}
+
+/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
+/// + notifyd process scan. These are sync calls (the notifyd scan shells out
+/// to `ps`) so they run on the blocking thread pool.
+pub(crate) fn daemons_sync_probe() -> (
+    bool,
+    Vec<String>,
+    Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+) {
+    let mcp_alive = crate::mcp_pool::client::daemon_alive();
+    let headroom_consumers = crate::interactive::SessionStore::load()
+        .sessions
+        .into_values()
+        .filter(|m| m.headroom_enabled)
+        .map(|m| m.tmux_session_name.clone())
+        .collect::<Vec<_>>();
+    let notifyd = ainb_plugin_notifyd::scan_daemons();
+    (mcp_alive, headroom_consumers, notifyd)
 }
 
 // ============================================================================
@@ -694,23 +1041,23 @@ pub enum ConfirmAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Agents,   // Agent selection
-    Catalog,  // Browse catalog/marketplace
-    Config,   // Settings & presets
-    Sessions, // Session manager
-    Recovery, // Recover orphaned sessions
-    Stats,    // Analytics & usage
-    Help,     // Docs & guides
+    SkillManager, // Install / sync / doctor (spec §10.1)
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Recovery,     // Recover orphaned sessions
+    Mcp,          // Shared MCP pool overlay
+    Stats,        // Analytics & usage
+    Help,         // Docs & guides
 }
 
 impl HomeTile {
     pub fn all() -> Vec<HomeTile> {
         vec![
-            HomeTile::Agents,
-            HomeTile::Catalog,
+            HomeTile::SkillManager,
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
+            HomeTile::Mcp,
             HomeTile::Stats,
             HomeTile::Help,
         ]
@@ -718,11 +1065,11 @@ impl HomeTile {
 
     pub fn label(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "Agents",
-            HomeTile::Catalog => "Catalog",
+            HomeTile::SkillManager => "Skills (manager)",
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
+            HomeTile::Mcp => "MCP",
             HomeTile::Stats => "Stats",
             HomeTile::Help => "Help",
         }
@@ -730,11 +1077,11 @@ impl HomeTile {
 
     pub fn description(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "Select & Configure",
-            HomeTile::Catalog => "Browse & Bootstrap",
+            HomeTile::SkillManager => "Install / sync / doctor (Z)",
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
+            HomeTile::Mcp => "Shared Pool",
             HomeTile::Stats => "Usage & Analytics",
             HomeTile::Help => "Docs & Guides",
         }
@@ -742,11 +1089,11 @@ impl HomeTile {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            HomeTile::Agents => "🤖",
-            HomeTile::Catalog => "📦",
+            HomeTile::SkillManager => "🧰",
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
+            HomeTile::Mcp => "🧬",
             HomeTile::Stats => "📊",
             HomeTile::Help => "❓",
         }
@@ -1009,7 +1356,10 @@ impl AgentProvider {
                     false,
                 ),
             ],
-            status: ProviderStatus::Available,
+            // Greyed-out / non-launchable in the Agents picker for now —
+            // `is_current_available()` blocks selection of non-Available
+            // providers (kept consistent with the new-session Configure wizard).
+            status: ProviderStatus::Disabled,
         }
     }
 
@@ -1080,93 +1430,6 @@ impl AgentProvider {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentSelectionState {
-    pub selected_provider: usize,
-    pub selected_model: usize,
-    pub providers: Vec<AgentProvider>,
-    pub expanded_provider: Option<usize>, // Which provider is expanded to show models
-}
-
-impl Default for AgentSelectionState {
-    fn default() -> Self {
-        Self {
-            selected_provider: 0,
-            selected_model: 0,
-            providers: AgentProvider::all(),
-            expanded_provider: Some(0), // Claude expanded by default
-        }
-    }
-}
-
-impl AgentSelectionState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn current_provider(&self) -> Option<&AgentProvider> {
-        self.providers.get(self.selected_provider)
-    }
-
-    pub fn current_model(&self) -> Option<&AgentModel> {
-        self.current_provider().and_then(|p| p.models.get(self.selected_model))
-    }
-
-    pub fn select_next_provider(&mut self) {
-        if !self.providers.is_empty() {
-            self.selected_provider = (self.selected_provider + 1) % self.providers.len();
-            self.selected_model = 0;
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn select_prev_provider(&mut self) {
-        if !self.providers.is_empty() {
-            self.selected_provider = if self.selected_provider == 0 {
-                self.providers.len() - 1
-            } else {
-                self.selected_provider - 1
-            };
-            self.selected_model = 0;
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn select_next_model(&mut self) {
-        if let Some(provider) = self.current_provider() {
-            if !provider.models.is_empty() {
-                self.selected_model = (self.selected_model + 1) % provider.models.len();
-            }
-        }
-    }
-
-    pub fn select_prev_model(&mut self) {
-        if let Some(provider) = self.current_provider() {
-            if !provider.models.is_empty() {
-                self.selected_model = if self.selected_model == 0 {
-                    provider.models.len() - 1
-                } else {
-                    self.selected_model - 1
-                };
-            }
-        }
-    }
-
-    pub fn toggle_expand(&mut self) {
-        if self.expanded_provider == Some(self.selected_provider) {
-            self.expanded_provider = None;
-        } else {
-            self.expanded_provider = Some(self.selected_provider);
-        }
-    }
-
-    pub fn is_current_available(&self) -> bool {
-        self.current_provider()
-            .map(|p| p.status == ProviderStatus::Available)
-            .unwrap_or(false)
-    }
-}
-
 // ============================================================================
 // Configuration Screen State
 // ============================================================================
@@ -1179,6 +1442,7 @@ pub enum ConfigCategory {
     AgentDefaults,
     Editor,
     Plugins,
+    McpPool,
     Permissions,
     Appearance,
     Analytics,
@@ -1193,6 +1457,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults,
             ConfigCategory::Editor,
             ConfigCategory::Plugins,
+            ConfigCategory::McpPool,
             ConfigCategory::Permissions,
             ConfigCategory::Appearance,
             ConfigCategory::Analytics,
@@ -1207,6 +1472,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Agent Defaults",
             ConfigCategory::Editor => "Editor",
             ConfigCategory::Plugins => "Plugins",
+            ConfigCategory::McpPool => "MCP Pool",
             ConfigCategory::Permissions => "Permissions",
             ConfigCategory::Appearance => "Appearance",
             ConfigCategory::Analytics => "Analytics",
@@ -1221,6 +1487,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "🤖",
             ConfigCategory::Editor => "📝",
             ConfigCategory::Plugins => "🔌",
+            ConfigCategory::McpPool => "🧬",
             ConfigCategory::Permissions => "🛡️",
             ConfigCategory::Appearance => "🎨",
             ConfigCategory::Analytics => "📊",
@@ -1235,6 +1502,7 @@ impl ConfigCategory {
             ConfigCategory::AgentDefaults => "Model, temperature, max tokens",
             ConfigCategory::Editor => "Preferred code editor for sessions",
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
+            ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
             ConfigCategory::Permissions => "File write, shell, git approval",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
             ConfigCategory::Analytics => "Usage tracking, cost alerts",
@@ -1577,6 +1845,27 @@ impl Default for ConfigScreenState {
             }],
         );
 
+        // MCP Pool (per-server `shared.*` toggles appended in from_app_config)
+        settings.insert(
+            ConfigCategory::McpPool,
+            vec![
+                ConfigSetting {
+                    key: "pool_enabled".to_string(),
+                    label: "Shared MCP Pool".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "One MCP server process shared across all host sessions"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "idle_grace_secs".to_string(),
+                    label: "Idle Grace (seconds)".to_string(),
+                    value: ConfigValue::Number(300),
+                    description: "Reap a pooled server this long after its last session detaches"
+                        .to_string(),
+                },
+            ],
+        );
+
         // Analytics
         settings.insert(
             ConfigCategory::Analytics,
@@ -1843,6 +2132,34 @@ impl ConfigScreenState {
             }
         }
 
+        // Update MCP Pool from config + append one shared-toggle per server
+        if let Some(settings) = state.settings.get_mut(&ConfigCategory::McpPool) {
+            for setting in settings.iter_mut() {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        setting.value = ConfigValue::Bool(config.mcp_pool.enabled);
+                    }
+                    "idle_grace_secs" => {
+                        setting.value = ConfigValue::Number(config.mcp_pool.idle_grace_secs as i64);
+                    }
+                    _ => {}
+                }
+            }
+            let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+            names.sort();
+            for name in names {
+                let server = &config.mcp_servers[name];
+                settings.push(ConfigSetting {
+                    key: format!("shared.{name}"),
+                    label: format!("Share: {name}"),
+                    value: ConfigValue::Bool(server.shared),
+                    description: format!(
+                        "Pool '{name}' across sessions (disable for stateful servers)"
+                    ),
+                });
+            }
+        }
+
         // Update Analytics from config
         if let Some(settings) = state.settings.get_mut(&ConfigCategory::Analytics) {
             for setting in settings.iter_mut() {
@@ -1952,6 +2269,33 @@ impl ConfigScreenState {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Apply MCP Pool settings
+        if let Some(settings) = self.settings.get(&ConfigCategory::McpPool) {
+            for setting in settings {
+                match setting.key.as_str() {
+                    "pool_enabled" => {
+                        if let ConfigValue::Bool(enabled) = &setting.value {
+                            config.mcp_pool.enabled = *enabled;
+                        }
+                    }
+                    "idle_grace_secs" => {
+                        if let ConfigValue::Number(secs) = &setting.value {
+                            config.mcp_pool.idle_grace_secs = (*secs).max(0) as u64;
+                        }
+                    }
+                    key => {
+                        if let (Some(name), ConfigValue::Bool(shared)) =
+                            (key.strip_prefix("shared."), &setting.value)
+                        {
+                            if let Some(server) = config.mcp_servers.get_mut(name) {
+                                server.shared = *shared;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2453,6 +2797,10 @@ pub struct AppState {
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
+    // Shared MCP pool observability overlay (None = closed; no refresh runs).
+    pub mcp_overlay: Option<McpOverlayState>,
+    // Daemons status overlay (MCP pool + Headroom proxy, read-only).
+    pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -2461,6 +2809,26 @@ pub struct AppState {
 
     // Focus management for panes
     pub focused_pane: FocusedPane,
+    // Live interactive embedded tmux-attach client for the preview pane.
+    // Enforced invariants (focus can drift, so none of these are assumed):
+    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
+    //    (embed Some AND focused_pane == Preview).
+    //  - Ctrl+Q releases whenever the embed exists, regardless of focus/mode.
+    //  - `poll_embed_exit` (run before every draw) releases on client death
+    //    or when the session-list screen is no longer current, so keys are
+    //    never forwarded to an invisible PTY.
+    // Dropping it kills the ephemeral tmux client (never the session).
+    pub embed: Option<crate::tmux::EmbedClient>,
+    // The tmux session name the live embed is attached to. Some iff `embed`
+    // is Some. Re-entering on a DIFFERENT row releases the old client and
+    // attaches to the new target instead of silently refocusing the stale
+    // one (see `enter_interactive_pane`).
+    pub embed_session: Option<String>,
+    // Interior screen rect (inside the border) the embed's PseudoTerminal
+    // occupies, published by the interactive render branch each frame. Drives
+    // mouse-coordinate translation into 1-based pane-local SGR sequences.
+    // None whenever the embed is not rendering.
+    pub embed_pane_area: Option<Rect>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -2477,6 +2845,9 @@ pub struct AppState {
     pub last_log_check: Option<std::time::Instant>,
     // Track the last time we checked for OAuth token refresh
     pub last_token_refresh_check: Option<std::time::Instant>,
+    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
+    // session is live but the proxy died).
+    pub last_headroom_watchdog: Option<std::time::Instant>,
     // Claude chat integration
     pub claude_chat_state: Option<ClaudeChatState>,
     // Live logs from Docker containers
@@ -2538,7 +2909,6 @@ pub struct AppState {
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
-    pub agent_selection_state: AgentSelectionState,
     pub config_screen_state: ConfigScreenState,
     pub auth_provider_popup_state: AuthProviderPopupState,
     /// Config popup state for choice/text input popups in config screen
@@ -2565,6 +2935,13 @@ pub struct AppState {
     /// Inbox screen state (ainb-hooks notifications: selection,
     /// filters, in-process SQLite store handle).
     pub inbox_state: crate::components::inbox::InboxState,
+
+    /// Daemons screen state (cached runtime-health snapshot + poll tick).
+    pub daemons_state: crate::components::daemons::DaemonsState,
+
+    /// Fleet control-panel state (cached `current_state` rows + selection +
+    /// shared action-feedback cell).
+    pub fleet_panel_state: crate::components::fleet_panel::FleetPanelState,
 
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
@@ -2650,6 +3027,16 @@ pub struct AppState {
     /// Present only while a scan is in flight; `tick()` drains it.
     pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
 
+    // Skill-manager screen state (spec §10.1)
+    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
+    /// Background drift-poll receiver. Present only while a drift scan
+    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
+    /// drains it into `skill_manager_state.drift_cache`.
+    pub drift_load_receiver: Option<
+        mpsc::UnboundedReceiver<
+            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
+        >,
+    >,
     /// Background base-branch refresh for the Configure picker. The fetch +
     /// re-list runs on `spawn_blocking`; the result lands here and is applied
     /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
@@ -2908,6 +3295,8 @@ struct ConfigureLaunchSnapshot {
     /// The base-branch popup pick (2026-06). `None` = legacy base policy:
     /// HEAD for local repos, origin/HEAD for remote/star launches.
     base: Option<crate::components::new_session::configure::BaseSelection>,
+    headroom_enabled: bool,
+    rtk_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2954,8 +3343,13 @@ pub enum AsyncAction {
     AuthSetupApiKey,                       // Save API key authentication
     ReauthenticateCredentials,             // Re-authenticate Claude credentials
     RestartSession(Uuid),                  // Restart a stopped session with new container
-    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
+    /// Flip headroom off in the SessionStore, then respawn the session's CLI
+    /// process with `tmux respawn-pane -k` (no proxy env) so the running
+    /// process is replaced. Claude gets `--continue` to preserve the
+    /// conversation; Codex restarts fresh (no continue flag exists).
+    DowngradeHeadroom(Uuid),
+    CleanupOrphaned,           // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
     AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
     SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
@@ -2972,7 +3366,8 @@ pub enum AsyncAction {
     // Editor action
     OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
-    OnboardingCheckDeps, // Run dependency check during onboarding
+    OnboardingCheckDeps,          // Run dependency check during onboarding
+    OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
 }
 
 impl Default for AppState {
@@ -3006,9 +3401,14 @@ impl Default for AppState {
             pending_async_action: None,
             async_operation_cancelled: false,
             confirmation_dialog: None,
+            mcp_overlay: None,
+            daemons_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
+            embed: None,
+            embed_session: None,
+            embed_pane_area: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
@@ -3017,6 +3417,7 @@ impl Default for AppState {
             log_last_updated: HashMap::new(),
             last_log_check: None,
             last_token_refresh_check: None,
+            last_headroom_watchdog: None,
             claude_chat_state: None,
             live_logs: HashMap::new(),
             claude_manager: None,
@@ -3055,7 +3456,6 @@ impl Default for AppState {
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
             home_screen_v2_state,
-            agent_selection_state: AgentSelectionState::default(),
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
             auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
             config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
@@ -3081,6 +3481,12 @@ impl Default for AppState {
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
             inbox_state: crate::components::inbox::InboxState::default(),
 
+            // Daemons observability (collects health on first/periodic render)
+            daemons_state: crate::components::daemons::DaemonsState::default(),
+
+            // Fleet control panel (reads current_state on entry/tick)
+            fleet_panel_state: crate::components::fleet_panel::FleetPanelState::default(),
+
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),
             plugin_render_areas: std::collections::HashMap::new(),
@@ -3096,6 +3502,10 @@ impl Default for AppState {
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
 
+            // Skill-manager screen state (spec §10.1)
+            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
+            ),
+            drift_load_receiver: None,
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
@@ -3579,6 +3989,34 @@ impl AppState {
                 self.app_config.ui_preferences.preferred_editor = Some(editor);
             }
 
+            // Optional OpenTelemetry -> Grafana Cloud setup. Best-effort: a
+            // failure here must never block finishing onboarding. The TUI does
+            // NOT brew-install Alloy (interactive brew in the alt-screen is
+            // hostile) — if Alloy is missing we still write the config and the
+            // user finishes with `ainb otel setup` / `ainb otel start` later.
+            if state.otel_should_setup() {
+                let creds = crate::otel::GrafanaCloudCreds {
+                    otlp_endpoint: state.otel_otlp_endpoint.trim().to_string(),
+                    instance_id: state.otel_instance_id.trim().to_string(),
+                    api_token: state.otel_api_token.trim().to_string(),
+                };
+                let host = crate::otel::detect_host_name();
+                let result = (|| -> anyhow::Result<()> {
+                    crate::otel::write_assets()?;
+                    crate::otel::write_env_file(&creds, &host)?;
+                    crate::otel::ensure_settings_env()?;
+                    let _ = crate::otel::ensure_shell_rc_sources_env();
+                    if crate::otel::alloy_installed() {
+                        let _ = crate::otel::start_alloy();
+                    }
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => info!("OTEL setup written (host.name={host})"),
+                    Err(e) => warn!("OTEL setup during onboarding failed (non-fatal): {e}"),
+                }
+            }
+
             if let Err(e) = self.app_config.save() {
                 warn!(
                     "Failed to save app config during onboarding completion: {}",
@@ -3603,6 +4041,20 @@ impl AppState {
     pub fn cancel_onboarding(&mut self) {
         self.onboarding_state = None;
         self.current_screen = screen_ids::HOME.to_string();
+    }
+
+    /// Leave the onboarding wizard and drop into the Setup menu.
+    ///
+    /// This is the wizard's `Esc` behaviour: rather than abandoning setup all
+    /// the way back to Home, the user lands on the Setup menu where they can
+    /// pick a specific step (re-run wizard, check deps, configure paths, …) or
+    /// back out to Home from there. The menu state is reset so the landing is
+    /// always clean (selection at the top, no stale confirmation open).
+    pub fn onboarding_to_menu(&mut self) {
+        use crate::components::setup_menu::SetupMenuState;
+        self.onboarding_state = None;
+        self.setup_menu_state = SetupMenuState::new();
+        self.current_screen = screen_ids::SETUP_MENU.to_string();
     }
 
     /// Refresh OAuth tokens using the refresh token
@@ -4141,6 +4593,367 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// Kick off a background drift scan against `home` (the ainb data
+    /// dir holding `manifest.yaml` + `lock.yaml`), using `backend` as
+    /// the DriftBackend. Skipped if a scan is already in flight
+    /// (`drift_load_receiver` is `Some`). Returns true if a new scan
+    /// was spawned, false if coalesced.
+    ///
+    /// Called by the `GoToSkillManager` handler on every screen-open
+    /// so out-of-band edits to the manifest / lockfile show up the
+    /// next tick. Tests inject a `MockBackend`; the production
+    /// dispatch uses `GitLsRemoteBackend`.
+    pub fn start_background_drift_load(
+        &mut self,
+        home: &std::path::Path,
+        backend: std::sync::Arc<dyn ainb_skill_core::drift::DriftBackend + Send + Sync>,
+    ) -> bool {
+        if self.drift_load_receiver.is_some() {
+            return false;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.drift_load_receiver = Some(rx);
+        let home = home.to_path_buf();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                use ainb_skill_core::lockfile::Lockfile;
+                use ainb_skill_core::manifest::Manifest;
+                use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
+                let manifest = Manifest::load_from(&manifest_path_in(&home)).unwrap_or_default();
+                let lockfile = Lockfile::load_from(&lockfile_path_in(&home)).unwrap_or_default();
+                ainb_skill_core::drift::detect_all(&manifest, &lockfile, backend.as_ref())
+            })
+            .await;
+            match result {
+                Ok(map) => {
+                    let _ = tx.send(map);
+                }
+                Err(e) => {
+                    warn!("Drift detect task failed: {e}");
+                }
+            }
+        });
+        true
+    }
+
+    /// Poll the background drift scan. Returns true if results were
+    /// applied this tick. Drains a single message — backend returns
+    /// the whole map in one go so a single drain is enough.
+    pub fn check_drift_load_complete(&mut self) -> bool {
+        if let Some(ref mut receiver) = self.drift_load_receiver {
+            match receiver.try_recv() {
+                Ok(map) => {
+                    self.skill_manager_state.drift_cache = map;
+                    self.drift_load_receiver = None;
+                    true
+                }
+                Err(mpsc::error::TryRecvError::Empty) => false,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.drift_load_receiver = None;
+                    warn!("Drift detect task dropped its sender without delivering data");
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    // ── Shared MCP pool overlay ────────────────────────────────────────────
+    // The overlay is opened on demand and refreshed lazily. All daemon I/O
+    // runs off-thread (spawn_blocking); the render loop only reads the cached
+    // snapshot. Nothing polls while the overlay is closed.
+
+    /// Toggle the MCP pool overlay. Opening seeds config + fires the first
+    /// fetch; closing drops the snapshot (and thus all refresh activity).
+    pub fn toggle_mcp_overlay(&mut self) {
+        if self.mcp_overlay.is_some() {
+            self.mcp_overlay = None;
+            return;
+        }
+        let config = crate::config::AppConfig::load().unwrap_or_default();
+        self.mcp_overlay = Some(McpOverlayState {
+            pool_enabled: config.mcp_pool.enabled,
+            daemon_running: false,
+            servers: Vec::new(),
+            selected: 0,
+            loading: true,
+            last_refreshed: None,
+            refresh_secs: config.mcp_pool.monitor_refresh_secs,
+            fetch_rx: None,
+            last_action: None,
+        });
+        self.spawn_mcp_fetch();
+    }
+
+    pub fn close_mcp_overlay(&mut self) {
+        self.mcp_overlay = None;
+    }
+
+    pub fn mcp_overlay_move(&mut self, delta: i32) {
+        if let Some(o) = self.mcp_overlay.as_mut() {
+            if o.servers.is_empty() {
+                return;
+            }
+            let n = o.servers.len() as i32;
+            o.selected = ((o.selected as i32 + delta).rem_euclid(n)) as usize;
+        }
+    }
+
+    /// Spawn one off-thread fetch of the daemon status, unless one is already
+    /// in flight (the one-outstanding-request guard). The blocking control
+    /// socket call runs on the blocking pool so the executor never stalls.
+    pub fn spawn_mcp_fetch(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return; // a fetch is already pending
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed fetch and, while the overlay is open, fire the next
+    /// lazy refresh when the cadence has elapsed. Cheap and non-blocking:
+    /// `try_recv` never waits, and no fetch is spawned when one is pending or
+    /// the cadence is disabled. Called from the 250ms app tick.
+    pub fn check_mcp_overlay(&mut self) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.daemon_running = result.daemon_running;
+                o.servers = result.servers;
+                // Sticky: only an action (import) sets a message; plain
+                // refreshes carry None and leave the prior summary in place.
+                if result.action_msg.is_some() {
+                    o.last_action = result.action_msg;
+                }
+                o.last_refreshed = Some(std::time::Instant::now());
+                if o.selected >= o.servers.len() {
+                    o.selected = o.servers.len().saturating_sub(1);
+                }
+            }
+        }
+
+        // Lazy auto-refresh: only while open, only when nothing is pending,
+        // only if a cadence is configured and it has elapsed.
+        let due = o.refresh_secs > 0
+            && o.fetch_rx.is_none()
+            && o.last_refreshed
+                .map(|t| t.elapsed().as_secs() >= o.refresh_secs)
+                .unwrap_or(false);
+        if due {
+            self.spawn_mcp_fetch();
+        }
+    }
+
+    /// Stop the selected pooled server (off-thread), then refresh.
+    pub fn mcp_stop_server(&mut self, name: &str) {
+        let name = name.to_string();
+        self.mcp_stop_then_refresh(move || {
+            let _ = crate::mcp_pool::client::stop_server(&name);
+        });
+    }
+
+    /// Import MCP servers into ainb config (off-thread), register the new
+    /// ones with the live daemon, then refresh the table. `to_user` targets
+    /// the user config (`~/.agents-in-a-box/config/config.toml`) instead of
+    /// the project's `./.ainb/config.toml`. Never blocks the TUI — the
+    /// import + control-socket calls run on the blocking pool and the result
+    /// (summary + fresh snapshot) is delivered through the overlay channel.
+    pub fn mcp_import(&mut self, to_user: bool) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch
+        o.loading = true;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || mcp_import_blocking(to_user))
+                .await
+                .unwrap_or_else(|e| McpFetchResult {
+                    daemon_running: false,
+                    servers: Vec::new(),
+                    error: Some(format!("import task failed: {e}")),
+                    action_msg: Some(format!("import failed: {e}")),
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Stop the whole pool daemon (off-thread), then refresh.
+    pub fn mcp_stop_daemon(&mut self) {
+        self.mcp_stop_then_refresh(|| {
+            let _ = crate::mcp_pool::client::daemon_stop();
+        });
+    }
+
+    /// Run a blocking stop action off-thread, then fetch fresh status and
+    /// deliver it through the overlay's channel — so the table reflects the
+    /// change as soon as the stop completes (no immediate-fetch race that
+    /// reads pre-stop state).
+    fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
+        let Some(o) = self.mcp_overlay.as_mut() else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx); // replaces any in-flight fetch (its result is discarded)
+        o.loading = true;
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(stop).await;
+            let result =
+                tokio::task::spawn_blocking(mcp_fetch_blocking).await.unwrap_or_else(|e| {
+                    McpFetchResult {
+                        daemon_running: false,
+                        servers: Vec::new(),
+                        error: Some(format!("fetch task failed: {e}")),
+                        action_msg: None,
+                    }
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    // ── Daemons overlay ──────────────────────────────────────────────────────
+
+    /// Open the Daemons overlay and fire the first fetch; idempotent (toggle).
+    pub fn toggle_daemons_overlay(&mut self) {
+        if self.daemons_overlay.is_some() {
+            self.daemons_overlay = None;
+            return;
+        }
+        self.daemons_overlay = Some(DaemonsOverlayState {
+            mcp_alive: false,
+            headroom: crate::headroom::ProxyStatus {
+                running: false,
+                port: crate::headroom::proxy_port(),
+                pid: None,
+                tokens_saved: None,
+            },
+            headroom_consumers: Vec::new(),
+            notifyd: Vec::new(),
+            loading: true,
+            last_refreshed: None,
+            fetch_rx: None,
+        });
+        self.spawn_daemons_fetch();
+    }
+
+    pub fn close_daemons_overlay(&mut self) {
+        self.daemons_overlay = None;
+    }
+
+    /// Spawn one off-thread fetch of both daemon statuses (one-outstanding guard).
+    /// Runs MCP + SessionStore probes on the blocking pool; headroom::status()
+    /// is async so it runs directly in the spawned task.
+    pub fn spawn_daemons_fetch(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.fetch_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.fetch_rx = Some(rx);
+        o.loading = true;
+        tokio::spawn(async move {
+            // Blocking I/O (control socket + file read + `ps` scan) on the
+            // blocking pool.
+            let (mcp_alive, headroom_consumers, notifyd) = tokio::task::spawn_blocking(
+                daemons_sync_probe,
+            )
+            .await
+            .unwrap_or((false, Vec::new(), Vec::new()));
+            // Async HTTP probe of the Headroom /health + /stats endpoints.
+            let headroom = crate::headroom::status().await;
+            let result = DaemonsFetchResult {
+                mcp_alive,
+                headroom,
+                headroom_consumers,
+                notifyd,
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed daemons fetch. Called from the 250ms app tick.
+    pub fn check_daemons_overlay(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if let Some(rx) = o.fetch_rx.as_mut() {
+            if let Ok(result) = rx.try_recv() {
+                o.fetch_rx = None;
+                o.loading = false;
+                o.mcp_alive = result.mcp_alive;
+                o.headroom = result.headroom;
+                o.headroom_consumers = result.headroom_consumers;
+                o.notifyd = result.notifyd;
+                o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
+    /// shared proxy went down, re-ensure it. Throttled to ~10s, async, and
+    /// best-effort so it never blocks the render loop.
+    ///
+    /// This is a self-heal, not a zero-loss guarantee: a request a session
+    /// makes while the proxy is down (before the next ~10s tick respawns it)
+    /// fails at the CLI and is retried by the agent/user — recovery is "the
+    /// next request succeeds", not "the in-flight request is rescued". The
+    /// statusline reflects actual routing, so an outage surfaces rather than
+    /// silently dropping compression.
+    ///
+    /// In-loop tick, NOT a separate daemon — surfaced as the "watched" marker
+    /// on the Headroom row of the Daemons screen, per the daemons-screen rule.
+    pub fn headroom_watchdog(&mut self) {
+        const INTERVAL_SECS: u64 = 10;
+        let now = std::time::Instant::now();
+        let due = self
+            .last_headroom_watchdog
+            .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_headroom_watchdog = Some(now);
+
+        let has_headroom_session = crate::interactive::SessionStore::load()
+            .sessions
+            .values()
+            .any(|m| m.headroom_enabled);
+        if !has_headroom_session {
+            return;
+        }
+
+        tokio::spawn(async {
+            if !crate::headroom::is_healthy().await {
+                warn!("Headroom proxy down with a live session — watchdog respawning");
+                let _ = crate::headroom::ensure_proxy_running().await;
+            }
+        });
     }
 
     /// Open the Configure screen's base-branch popup: seed entries from
@@ -6350,6 +7163,8 @@ impl AppState {
             session_model,
             codex_model,
             base: spec.base.clone(),
+            headroom_enabled: spec.headroom_enabled,
+            rtk_enabled: spec.rtk_enabled,
         };
 
         // Boss mode builds its own Docker workspace from `repo_path` and
@@ -6504,6 +7319,8 @@ impl AppState {
                 snapshot.codex_model,
                 existing_worktree,
                 base_start_point,
+                snapshot.headroom_enabled,
+                snapshot.rtk_enabled,
             )
             .await;
 
@@ -6719,29 +7536,48 @@ impl AppState {
 
         // Bound the probe: a hung `gh` (network stall, credential helper
         // wedged) must not leave the picker stuck in `Checking` forever.
-        // Timeout and task-panic both fail closed → NotAuthenticated, with a
-        // warning so the cause is visible in the logs.
+        // Timeout and task-panic both fail closed → NotAuthenticated. Capture
+        // the EXACT `gh auth status` output (stderr+stdout) so the failure
+        // modal can show the real reason instead of a generic "auth failed".
         let auth_check = tokio::task::spawn_blocking(|| {
-            std::process::Command::new("gh")
+            match std::process::Command::new("gh")
                 .args(["auth", "status", "--hostname", "github.com"])
                 .env("GIT_TERMINAL_PROMPT", "0")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+                .output()
+            {
+                Ok(out) => {
+                    // gh writes its human status to stderr; fold in stdout too
+                    // in case a future version moves it.
+                    let mut msg = String::from_utf8_lossy(&out.stderr).into_owned();
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if !stdout.trim().is_empty() {
+                        if !msg.is_empty() && !msg.ends_with('\n') {
+                            msg.push('\n');
+                        }
+                        msg.push_str(&stdout);
+                    }
+                    (out.status.success(), msg.trim().to_string())
+                }
+                Err(e) => (
+                    false,
+                    format!(
+                        "could not run `gh`: {e}\nInstall the GitHub CLI: https://cli.github.com"
+                    ),
+                ),
+            }
         });
-        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
-            Ok(Ok(ok)) => ok,
-            Ok(Err(join_err)) => {
-                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
-                false
-            }
-            Err(_) => {
-                tracing::warn!("GitHub auth check timed out after 5s");
-                false
-            }
-        };
+        let (auth_ok, auth_msg) =
+            match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+                Ok(Ok(res)) => res,
+                Ok(Err(join_err)) => {
+                    tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                    (false, format!("auth check task panicked: {join_err}"))
+                }
+                Err(_) => {
+                    tracing::warn!("GitHub auth check timed out after 5s");
+                    (false, "`gh auth status` timed out after 5s".to_string())
+                }
+            };
 
         if let Some(pick) =
             self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
@@ -6749,6 +7585,7 @@ impl AppState {
             if auth_ok {
                 tracing::info!("GitHub auth check passed");
                 pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                pick.git_auth_error = None;
                 // Auto-advance: take the pending source and emit StartClone
                 // via the advance-to-configure path. We replicate the
                 // AdvanceTo → Configure transition inline here.
@@ -6757,8 +7594,9 @@ impl AppState {
                     self.advance_pick_repo_to_configure(source);
                 }
             } else {
-                tracing::warn!("GitHub auth check failed");
+                tracing::warn!(error = %auth_msg, "GitHub auth check failed");
                 pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+                pick.git_auth_error = Some(auth_msg);
             }
         }
         self.ui_needs_refresh = true;
@@ -7126,6 +7964,8 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -7140,6 +7980,8 @@ impl AppState {
                     codex_model,
                     existing_worktree,
                     base_start_point,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
             }
@@ -7180,6 +8022,8 @@ impl AppState {
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
+        headroom_enabled: bool,
+        rtk_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -7239,6 +8083,8 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         } else {
@@ -7255,6 +8101,8 @@ impl AppState {
                     agent_type,
                     model,
                     codex_model,
+                    headroom_enabled,
+                    rtk_enabled,
                 )
                 .await
         };
@@ -7957,6 +8805,7 @@ impl AppState {
                     codex_model,
                     metadata.agent_type,
                     transcript.clone(),
+                    metadata.headroom_enabled,
                 )
                 .await?;
 
@@ -8022,7 +8871,7 @@ impl AppState {
     /// Then prefix with `-` (callers do this).
     ///
     /// Mirror of `find_transcript_path()` in
-    /// `toolkit/packages/utilities/utils/spawn-agent-lib.sh:30-69`.
+    /// `ainb-toolkit utilities/utils/spawn-agent-lib.sh:30-69`.
     pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
         let s = worktree_path.to_string_lossy();
         let stripped = s.strip_prefix('/').unwrap_or(&s);
@@ -8282,6 +9131,16 @@ impl AppState {
                         error!("Failed to restart session: {}", e);
                     }
                 }
+                AsyncAction::DowngradeHeadroom(session_id) => {
+                    info!("Downgrading Headroom for session {}", session_id);
+                    if let Err(e) = self.downgrade_headroom_session(session_id).await {
+                        error!(
+                            "Failed to downgrade Headroom for session {}: {}",
+                            session_id, e
+                        );
+                        self.add_error_notification(format!("Failed to downgrade Headroom: {}", e));
+                    }
+                }
                 AsyncAction::CleanupOrphaned => {
                     info!("Starting cleanup of orphaned containers");
                     if let Err(e) = self.cleanup_orphaned_containers().await {
@@ -8349,11 +9208,44 @@ impl AppState {
                     debug!("OpenInEditor action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
+                AsyncAction::OnboardingInstallDep(dep_id) => {
+                    use crate::components::onboarding::state::DepInstall;
+                    use crate::setup::{catalog, install_dep_capture};
+                    info!("Installing dependency '{dep_id}' from onboarding");
+                    // Own the catalog dep so it can move into spawn_blocking.
+                    let dep = catalog().into_iter().flat_map(|t| t.deps).find(|d| d.id == dep_id);
+                    let result = match dep {
+                        Some(dep) => tokio::task::spawn_blocking(move || install_dep_capture(&dep))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string())),
+                        None => Err("unknown dependency".to_string()),
+                    };
+                    if let Some(os) = &mut self.onboarding_state {
+                        match result {
+                            Ok(()) => {
+                                // Mark done; the row keeps a ✓ marker until the
+                                // user presses `r` to re-check (which flips the
+                                // real checkbox green).
+                                os.install_states.insert(dep_id.clone(), DepInstall::Done);
+                                os.error_message = None;
+                                os.status_message =
+                                    Some(format!("✓ installed {dep_id} — press r to re-check"));
+                            }
+                            Err(msg) => {
+                                os.install_states
+                                    .insert(dep_id.clone(), DepInstall::Error(msg.clone()));
+                                os.status_message = None;
+                                os.error_message = Some(format!("✗ {dep_id}: {msg}"));
+                            }
+                        }
+                    }
+                    self.ui_needs_refresh = true;
+                }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");
-                    use crate::components::onboarding::DependencyChecker;
+                    use crate::setup::{RealEnv, detect_all};
                     // Run blocking I/O on dedicated thread pool to avoid blocking async runtime
-                    match tokio::task::spawn_blocking(DependencyChecker::check_all).await {
+                    match tokio::task::spawn_blocking(|| detect_all(&RealEnv)).await {
                         Ok(status) => {
                             if let Some(ref mut onboarding_state) = self.onboarding_state {
                                 onboarding_state.dependency_status = Some(status);
@@ -9076,11 +9968,12 @@ impl AppState {
 
     /// The ainb-hooks `agent` string a session's events are recorded
     /// under, or `None` for session types that don't emit hook events
-    /// (plain shell / SSH, and the not-yet-wired Gemini/Copilot/Kiro).
+    /// (plain shell / SSH, and the not-yet-wired Gemini/Kiro).
     const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
         match agent {
             SessionAgentType::Claude => Some("claude"),
             SessionAgentType::Codex => Some("codex"),
+            SessionAgentType::Copilot => Some("copilot"),
             _ => None,
         }
     }
@@ -9289,7 +10182,12 @@ impl AppState {
 
             let is_selected = selected_session_id == Some(*session_id);
 
-            if is_selected {
+            // While the interactive embed is live, the selected session's
+            // pane renders straight from the embed's vt100 screen — the full
+            // capture would be pure subprocess waste. Fall through to the
+            // cheap status-dot check instead (the collapsed rail still needs
+            // those for every session).
+            if is_selected && !self.is_interactive_pane() {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
@@ -9445,7 +10343,39 @@ impl AppState {
         if skip_permissions {
             cmd_parts.push(provider.skip_permissions_flag().to_string());
         }
-        let cli_cmd = cmd_parts.join(" ");
+        // Preserve per-session Headroom routing across restart. `send-keys`
+        // bypasses build_env_setup_for_provider, so re-derive the proxy export
+        // from the persisted SessionMetadata (keyed by tmux name) and prepend
+        // it — otherwise a restarted HR session would silently stop routing
+        // through the proxy.
+        //
+        // Mirror the launch path (`start_cli_in_tmux`): the stored flag is
+        // *intent*; only inject the base URL when the proxy is actually
+        // healthy. Injecting a dead-port URL would brick the restarted CLI on
+        // connection-refused. Ensure the proxy first; degrade to direct on
+        // failure rather than pointing the session at a closed port.
+        let mut headroom_active = crate::interactive::SessionStore::load()
+            .sessions
+            .get(&tmux_session_name)
+            .map(|m| m.headroom_enabled)
+            .unwrap_or(false)
+            && matches!(
+                agent_type,
+                SessionAgentType::Claude | SessionAgentType::Codex
+            );
+        if headroom_active {
+            if let Err(e) = crate::headroom::ensure_proxy_running().await {
+                warn!(
+                    "headroom proxy unavailable on restart — running DIRECT, no compression: {e}"
+                );
+                headroom_active = false;
+            }
+        }
+        let cli_cmd = format!(
+            "{}{}",
+            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_active),
+            cmd_parts.join(" ")
+        );
 
         info!(
             "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",
@@ -9475,6 +10405,167 @@ impl AppState {
             tmux_session_name
         );
         Ok(provider.display_name().to_string())
+    }
+
+    /// Flip headroom off for a running session and replace its CLI process.
+    ///
+    /// Steps:
+    /// 1. Resolve the session and validate it is Claude or Codex.
+    /// 2. Load the SessionStore; check that headroom_enabled is true.
+    /// 3. Set headroom_enabled = false and save the store.
+    /// 4. Build the resume command: `[provider] [--skip-perms] [--continue for Claude]`.
+    ///    No env prefix (headroom is now off → `headroom_env_prefix(…, false)` == "").
+    /// 5. Replace the running CLI with `tmux respawn-pane -k` using the same
+    ///    `sh -c '…exec cli …'` shape as `start_cli_in_tmux`.
+    ///    `respawn-pane -k` kills the running process and starts fresh in-place,
+    ///    which is the only way to clear env vars from a running process.
+    ///    Codex has no `--continue` flag — it restarts fresh (noted in notification).
+    async fn downgrade_headroom_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        use crate::config::CliProvider;
+        use crate::models::session::SessionAgentType;
+        use anyhow::Context;
+        use tokio::process::Command;
+
+        // --- 1. Resolve session ---
+        let session = self
+            .find_session(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+
+        let tmux_session_name = session
+            .tmux_session_name
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No tmux session associated with this session"))?
+            .clone();
+
+        let agent_type = session.agent_type;
+        let skip_permissions = session.skip_permissions;
+
+        // --- 1a. Only Claude/Codex are Headroom-capable ---
+        let provider = match agent_type {
+            SessionAgentType::Claude => CliProvider::Claude,
+            SessionAgentType::Codex => CliProvider::Codex,
+            other => {
+                self.add_warning_notification(format!(
+                    "Headroom is Claude/Codex only — {:?} does not use the proxy",
+                    other
+                ));
+                return Ok(());
+            }
+        };
+
+        // --- 2. Check and flip headroom_enabled in SessionStore ---
+        let mut store = crate::interactive::SessionStore::load();
+        match store.sessions.get(&tmux_session_name) {
+            None => {
+                self.add_warning_notification(
+                    "Session not found in store — Headroom state unknown".to_string(),
+                );
+                return Ok(());
+            }
+            Some(meta) if !meta.headroom_enabled => {
+                self.add_info_notification("Session is already direct (Headroom off)".to_string());
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // --- 3. Persist headroom_enabled = false ---
+        if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
+            meta.headroom_enabled = false;
+        }
+        if let Err(e) = store.save() {
+            // Non-fatal: we still attempt the respawn; the flag will be
+            // re-read from a stale store on the next restart, so log clearly.
+            warn!(
+                "Failed to persist headroom_enabled=false for {}: {}",
+                tmux_session_name, e
+            );
+        }
+
+        // --- 4. Build the resume command (no env prefix — headroom is off) ---
+        //
+        // env_setup is intentionally empty: `headroom_env_prefix(…, false)` == ""
+        // and we are not injecting an API key here (the original launch path
+        // already injected it into the pane's environment; `respawn-pane -k`
+        // inherits from the ainb-tui process which has the correct key).
+        let mut cmd_parts: Vec<String> = vec![provider.command().to_string()];
+        if skip_permissions {
+            cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+        // Claude: `--continue` (-c) resumes the most recent conversation in the cwd.
+        // Codex: no continue/resume flag exists — restarts fresh.
+        let codex_fresh_note = if agent_type == SessionAgentType::Claude {
+            cmd_parts.push("--continue".to_string());
+            ""
+        } else {
+            " (Codex restarted fresh — no --continue flag)"
+        };
+
+        let cli_cmd = cmd_parts.join(" ");
+
+        info!(
+            "Downgrading Headroom for {} in '{}': cmd={}",
+            provider.display_name(),
+            tmux_session_name,
+            cli_cmd
+        );
+
+        // --- 5. Replace the running CLI via tmux respawn-pane -k ---
+        //
+        // Mirrors `start_cli_in_tmux` exactly:
+        //   - `remain-on-exit on` first so any startup error stays visible.
+        //   - `respawn-pane -k -t <name> sh -c 'exec <cmd>'`
+        //     The `exec` replaces `sh` itself; the pane ends up running only
+        //     the CLI binary (same as the original launch). Because env_setup
+        //     is empty we could use the argv path, but wrapping in `sh -c 'exec …'`
+        //     is consistent with start_cli_in_tmux and future-proof.
+        let target = tmux_session_name.clone();
+
+        // Set remain-on-exit so startup errors stay visible (best-effort).
+        let _ = Command::new("tmux")
+            .args(["set-option", "-w", "-t", &target, "remain-on-exit", "on"])
+            .output()
+            .await;
+
+        let full_line = format!("exec {cli_cmd}");
+        let output = Command::new("tmux")
+            .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
+            .output()
+            .await
+            .context("Failed to invoke tmux respawn-pane for Headroom downgrade")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Restore the headroom flag in the store so the next manual
+            // restart picks it back up (best-effort).
+            let mut store2 = crate::interactive::SessionStore::load();
+            if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
+                meta.headroom_enabled = true;
+            }
+            let _ = store2.save();
+            anyhow::bail!(
+                "tmux respawn-pane failed for {}: {}",
+                tmux_session_name,
+                stderr
+            );
+        }
+
+        // Update in-memory status.
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(crate::models::SessionStatus::Running);
+        }
+
+        self.add_success_notification(format!(
+            "Headroom OFF for this session — resumed direct (no compression){}",
+            codex_fresh_note
+        ));
+
+        info!(
+            "Headroom downgraded for {} in tmux session '{}'",
+            provider.display_name(),
+            tmux_session_name
+        );
+        Ok(())
     }
 
     /// Helper to find a session by ID across all workspaces
@@ -9966,10 +11057,23 @@ impl App {
             self.state.ui_needs_refresh = true;
         }
 
+        // Check for completed background drift scan
+        // (skill-manager v1.2 bead v12.E.4).
+        if self.state.check_drift_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;
         }
+
+        // Drain + lazily refresh the MCP pool overlay (no-op when closed).
+        self.state.check_mcp_overlay();
+        // Drain completed daemons overlay fetch (no-op when closed).
+        self.state.check_daemons_overlay();
+        // Re-ensure the Headroom proxy if a Headroom session is live but the
+        // proxy died (throttled, async, best-effort).
+        self.state.headroom_watchdog();
 
         // Periodic OAuth token refresh check (every 5 minutes)
         let now = Instant::now();

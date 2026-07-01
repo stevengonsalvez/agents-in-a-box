@@ -1,4 +1,5 @@
 // @ts-check
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightImageZoom from 'starlight-image-zoom';
@@ -8,6 +9,30 @@ export default defineConfig({
   site: 'https://stevengonsalvez.github.io',
   base: '/agents-in-a-box',
   trailingSlash: 'never',
+  // Old recall page moved under the dedicated reflect-memory section.
+  // NB: static meta-refresh redirects don't get `base` prepended automatically,
+  // so the destination is written with the `/agents-in-a-box` base explicitly.
+  redirects: {
+    '/knowledge/recall-by-example': '/agents-in-a-box/knowledge/reflect-memory/recall',
+  },
+  // Docs live in the repo-root `docs/` tree (outside this site dir), so MDX
+  // there can't resolve `@astrojs/starlight/components` from its own folder.
+  // Alias the bare specifier to the package file in this site's node_modules.
+  vite: {
+    resolve: {
+      // Exact-match (end-anchored) so we don't clobber Starlight's own
+      // `@astrojs/starlight/components/Banner.astro` etc. — only the bare
+      // `@astrojs/starlight/components` specifier used by external docs MDX.
+      alias: [
+        {
+          find: /^@astrojs\/starlight\/components$/,
+          replacement: fileURLToPath(
+            new URL('./node_modules/@astrojs/starlight/components.ts', import.meta.url)
+          ),
+        },
+      ],
+    },
+  },
   integrations: [
     starlight({
       title: 'agents-in-a-box',
@@ -21,7 +46,7 @@ export default defineConfig({
         },
       ],
       plugins: [starlightImageZoom()],
-      customCss: ['./src/styles/tokens.css', './src/styles/crt.css'],
+      customCss: ['./src/styles/tokens.css', './src/styles/crt.css', './src/styles/reflect-viz.css'],
       editLink: {
         baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
       },
@@ -54,12 +79,34 @@ export default defineConfig({
             { label: 'Overview', slug: 'tui/overview' },
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
+            { label: 'Starting a new session', slug: 'tui/start-session' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
-            { label: 'CLI reference', slug: 'tui/cli' },
+            { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
+            { label: 'Token optimisation (Headroom · RTK)', slug: 'tui/token-optimization' },
+            { label: 'Daemons overlay', slug: 'tui/daemons' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
             { label: 'Architecture', slug: 'tui/architecture' },
             { label: 'FAQ', slug: 'tui/faq' },
+          ],
+        },
+        {
+          label: 'CLI',
+          items: [
+            { label: 'Full CLI reference', slug: 'tui/cli' },
+          ],
+        },
+        {
+          label: 'Skill manager',
+          items: [
+            { label: 'Guide', slug: 'skill-manager/guide' },
+            { label: 'Discovery & import', slug: 'skill-manager/discovery' },
+            { label: 'Catalog browse', slug: 'skill-manager/browse' },
+            { label: 'Sync', slug: 'skill-manager/sync' },
+            { label: 'Drift check', slug: 'skill-manager/check' },
+            { label: 'Usage tracking', slug: 'skill-manager/usage' },
+            { label: 'Promote', slug: 'skill-manager/promote' },
+            { label: 'Sandbox testing', slug: 'skill-manager/sandbox-testing' },
           ],
         },
         {
@@ -102,10 +149,19 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Reflect Memory',
+          items: [
+            { label: 'Problem & fit', slug: 'knowledge/reflect-memory/problem-and-fit' },
+            { label: 'The construct', slug: 'knowledge/reflect-memory/construct' },
+            { label: 'Recall reference (57 ports)', slug: 'knowledge/reflect-memory/recall' },
+            { label: 'Why build, not adopt', slug: 'knowledge/reflect-memory/comparison' },
+          ],
+        },
+        {
           label: 'Knowledge',
           items: [
             { label: 'How reflection works', slug: 'knowledge/overview' },
-            { label: 'Hooks & platform (Claude + Codex)', slug: 'knowledge/hooks-and-platform' },
+            { label: 'Hooks & platform (Claude · Codex · Copilot)', slug: 'knowledge/hooks-and-platform' },
             { label: 'reflect CLI', slug: 'knowledge/reflect-cli' },
           ],
         },
@@ -127,6 +183,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Architecture deep-dive', slug: 'reference/architecture' },
+            { label: 'Repositories', slug: 'reference/repositories' },
             { label: 'Glossary', slug: 'reference/glossary' },
           ],
         },

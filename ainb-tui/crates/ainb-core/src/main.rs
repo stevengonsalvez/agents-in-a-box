@@ -34,18 +34,25 @@ mod app;
 mod audit;
 mod claude;
 mod cli;
+mod clipboard;
 mod components;
 mod config;
 mod credentials;
 mod docker;
+mod docs;
 mod editors;
 mod fleet;
 mod git;
+mod headroom;
 mod interactive;
+mod mcp_pool;
 mod models;
+mod otel;
 mod perf;
 mod plugins;
 mod providers;
+mod rtk;
+mod setup;
 mod tmux;
 mod usage_cache;
 mod widgets;
@@ -72,7 +79,10 @@ fn cleanup_terminal() {
 /// Unified terminal cleanup that works with a terminal instance
 fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -84,8 +94,29 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     Ok(())
 }
 
+/// argv[1] values that route to the `ainb-cli` crate before tokio
+/// spins up. These commands are pure CLI (no Docker, no tmux, no
+/// alt-screen) so they short-circuit the TUI bootstrap entirely.
+/// Keep in sync with the safety-tag's CLI_COMMANDS list — adding a
+/// new top-level command means adding it here AND wiring an arm in
+/// ainb-cli's Command enum.
+const SKILL_MANAGER_CLI_COMMANDS: &[&str] = &["source", "search", "skill", "doctor"];
+
+fn is_skill_manager_cli_invocation() -> bool {
+    std::env::args()
+        .nth(1)
+        .is_some_and(|arg| SKILL_MANAGER_CLI_COMMANDS.contains(&arg.as_str()))
+}
+
+fn main() -> Result<()> {
+    if is_skill_manager_cli_invocation() {
+        return ainb_cli::run();
+    }
+    tokio_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn tokio_main() -> Result<()> {
     crate::perf::init();
     setup_logging();
     setup_panic_handler();
@@ -111,6 +142,12 @@ async fn main() -> Result<()> {
                 clap::Arg::new("path")
                     .help("Repository path (default: current directory)")
                     .default_value("."),
+            )
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb diff-review                 Review uncommitted changes in the current repo\n  \
+                 ainb diff-review ~/code/proj     Review a specific repo\n  \
+                 ainb diff-review --format json   Emit the structured diff as JSON (headless)",
             ),
     );
     app = registry.build_clap(app);
@@ -227,17 +264,27 @@ async fn main() -> Result<()> {
                 rt.shutdown();
             }
 
+            // Best-effort: stop the shared Headroom proxy so it does not
+            // orphan after the TUI exits.
+            headroom::stop();
+
             tui_result
         }
 
         // diff-review: interactive Code Review surface for a repo path (owns the
         // alternate screen, so it is handled inline rather than via the registry).
         Some(("diff-review", sub)) => {
-            entered_tui = true;
             let path = sub
                 .get_one::<String>("path")
                 .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
-            cli::diff_review::run(path)
+            // `--format text` (default) opens the interactive surface; any
+            // machine format emits the diff as JSON headless.
+            if matches!(format, cli::OutputFormat::Text) {
+                entered_tui = true;
+                cli::diff_review::run(path)
+            } else {
+                cli::diff_review::run_headless(path)
+            }
         }
 
         // Every other subcommand routes through the registry.
@@ -367,30 +414,69 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
+        // If the interactive embed ended (detach / session gone / EOF), auto-
+        // release so the pane reverts to the read-only preview, not a dead
+        // screen. Releasing changes the layout, so it is a repaint trigger.
+        if app.state.poll_embed_exit() {
+            needs_redraw = true;
+        }
+
+        // Live embed output is the third repaint source alongside input and
+        // plugin frames: the PTY reader thread marks the embed dirty as bytes
+        // stream in, with no host input involved. Without this the dirty-gate
+        // would hold the live pane at the 250ms app-tick floor.
+        if app.state.embed_take_dirty() {
+            needs_redraw = true;
+        }
+
         if needs_redraw {
             let draw_start = Instant::now();
-            terminal.draw(|frame| {
+            match terminal.draw(|frame| {
                 layout.render(frame, &mut app.state);
-            })?;
-            crate::perf::record_draw(draw_start.elapsed());
-            // This paint is the first one to reflect any key read in the
-            // previous iteration, so it marks the end of the key-to-render
-            // interval.
-            if let Some(key_at) = pending_key_at.take() {
-                crate::perf::record_key_to_render(key_at.elapsed());
+            }) {
+                Ok(_) => {
+                    crate::perf::record_draw(draw_start.elapsed());
+                    // This paint is the first one to reflect any key read in the
+                    // previous iteration, so it marks the end of the key-to-render
+                    // interval.
+                    if let Some(key_at) = pending_key_at.take() {
+                        crate::perf::record_key_to_render(key_at.elapsed());
+                    }
+                    needs_redraw = false;
+                }
+                // Transient frame-write failure (e.g. EINTR over a flaky SSH
+                // link) — keep the TUI alive and repaint next iteration instead
+                // of tearing the whole session down. Only genuinely fatal I/O
+                // errors propagate.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    needs_redraw = true;
+                }
+                Err(e) => return Err(e.into()),
             }
-            needs_redraw = false;
         }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
-        if crossterm::event::poll(timeout)? {
+        // Tolerate transient terminal-read failures: EINTR (e.g. SIGWINCH on
+        // resize, common over SSH) must not crash the session. Only fatal I/O
+        // errors propagate.
+        let has_event = match crossterm::event::poll(timeout) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
+            Err(e) => return Err(e.into()),
+        };
+        if has_event {
             // Any input (key/mouse/paste/resize) warrants a repaint on the next
             // loop iteration (perf: bead `wai` dirty-gate).
             needs_redraw = true;
-            match event::read()? {
+            let read_event = match event::read() {
+                Ok(ev) => ev,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            match read_event {
                 Event::Key(key_event) => {
                     // Windows fires Press + Release for every key; macOS/Linux fire only Press.
                     // Drop Release so Enter doesn't immediately re-trigger and close popups.
@@ -414,6 +500,47 @@ async fn run_tui_loop(
                     }
 
                     use crossterm::event::KeyCode;
+
+                    // Interactive embed escape hatch: Ctrl+Q releases focus and
+                    // kills the ephemeral tmux client. Keyed off the RESOURCE
+                    // (embed exists), never the mode flag, so the hatch works
+                    // even from a leaked state where the embed is alive but
+                    // focus drifted off the preview pane.
+                    {
+                        use crossterm::event::KeyModifiers;
+                        if app.state.embed.is_some()
+                            && key_event.code == KeyCode::Char('q')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            app.state.release_interactive_pane();
+                            continue;
+                        }
+                    }
+
+                    // Interactive embed has highest input precedence: while a
+                    // session is focused in-place, every key is forwarded to the
+                    // embedded tmux client (Ctrl+Q was already intercepted
+                    // above). This runs BEFORE the slash palette so typing ':'
+                    // inside the embed reaches the PTY instead of opening the
+                    // palette.
+                    if app.state.is_interactive_pane() {
+                        // write_input only errors when the PTY writer thread is
+                        // gone — release immediately instead of leaving a
+                        // focused pane that silently eats input.
+                        let write_failed = app
+                            .state
+                            .embed
+                            .as_ref()
+                            .zip(crate::tmux::encode_key_event(&key_event))
+                            .is_some_and(|(client, bytes)| client.write_input(&bytes).is_err());
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                        continue;
+                    }
 
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
@@ -538,6 +665,33 @@ async fn run_tui_loop(
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
                             }
+                            AppEvent::EnterInteractivePane => {
+                                // Size the embed to the EXACT interactive
+                                // layout (the user's current sidebar + chrome)
+                                // so tmux reflows once at attach instead of
+                                // attach-size → layout-size back-to-back. The
+                                // render path still resizes each frame for
+                                // terminal resizes.
+                                let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                                    width: 80,
+                                    height: 24,
+                                });
+                                let sidebar =
+                                    app.state.sessions_pane_state.effective_width(sz.width);
+                                let (rows, cols) =
+                                    crate::components::layout::interactive_embed_size(
+                                        sz.width, sz.height, sidebar,
+                                    );
+                                // Failure (no tmux session on the row / attach
+                                // error) surfaces as a notification from
+                                // enter_interactive_pane itself, which knows
+                                // which case it hit.
+                                if !app.state.enter_interactive_pane(rows, cols) {
+                                    tracing::debug!(
+                                        "EnterInteractivePane: no tmux session on selection / attach failed"
+                                    );
+                                }
+                            }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
                             | AppEvent::ConfirmationConfirm => {
@@ -572,6 +726,34 @@ async fn run_tui_loop(
                 Event::Mouse(mouse_event) => {
                     use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
+
+                    // Mode boundary: while the interactive embed owns input,
+                    // host mouse handlers must NEVER run — a click/scroll
+                    // changing focus or selection under a live embed splits
+                    // the mode invariants. Events inside the embed's interior
+                    // are translated + forwarded to the PTY as SGR sequences
+                    // (ainb-created sessions run with tmux `mouse on`, so the
+                    // wheel scrolls and drag selects inside tmux; sessions
+                    // without it ignore the sequences). Everything else is
+                    // swallowed.
+                    if app.state.is_interactive_pane() {
+                        let write_failed = app
+                            .state
+                            .embed_pane_area
+                            .zip(app.state.embed.as_ref())
+                            .and_then(|(inner, client)| {
+                                crate::tmux::encode_mouse_event(&mouse_event, inner)
+                                    .map(|bytes| client.write_input(&bytes).is_err())
+                            })
+                            .unwrap_or(false);
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                        continue;
+                    }
 
                     // A focused plugin screen owns the pointer (mirrors the
                     // key-forwarding contract). Forward + consume before the
@@ -757,7 +939,25 @@ async fn run_tui_loop(
                 Event::FocusGained => {}
                 Event::FocusLost => {}
                 Event::Paste(text) => {
-                    if let Some(app_event) = EventHandler::handle_paste_event(text, &app.state) {
+                    if app.state.is_interactive_pane() {
+                        // Forward as a bracketed paste so the inner program
+                        // doesn't submit multi-line content line-by-line.
+                        let write_failed = app.state.embed.as_ref().is_some_and(|client| {
+                            let mut bytes = Vec::with_capacity(text.len() + 12);
+                            bytes.extend_from_slice(b"\x1b[200~");
+                            bytes.extend_from_slice(text.as_bytes());
+                            bytes.extend_from_slice(b"\x1b[201~");
+                            client.write_input(&bytes).is_err()
+                        });
+                        if write_failed {
+                            app.state.release_interactive_pane();
+                            app.state.add_error_notification(
+                                "Live session input channel closed — released".to_string(),
+                            );
+                        }
+                    } else if let Some(app_event) =
+                        EventHandler::handle_paste_event(text, &app.state)
+                    {
                         EventHandler::process_event(app_event, &mut app.state);
                     }
                 }
@@ -1598,6 +1798,7 @@ fn setup_logging() {
                 | "presets"
                 | "usage"
                 | "claudecode"
+                | "codex"
                 | "statusline"
                 | "completion"
                 | "--help"
@@ -1707,6 +1908,12 @@ fn setup_panic_handler() {
     use tracing::error;
 
     std::panic::set_hook(Box::new(|panic_info| {
+        // Kill any live embedded tmux-attach client before restoring the
+        // terminal, so a panic while an interactive pane is focused doesn't
+        // leak the ephemeral client. Killing the client never kills the
+        // tmux session — tmux owns that.
+        crate::tmux::pty_wrapper::kill_all_embed_children();
+
         // Ensure terminal is restored before logging the panic
         cleanup_terminal();
 

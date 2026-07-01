@@ -9,8 +9,9 @@
 
 use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
-    RenderParams, Result, SdkError, WireBuffer, topics,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext,
+    KeyCode, MouseButton, MouseEvent, MouseKind, Plugin, RenderParams, Result, SdkError,
+    WireBuffer, topics,
 };
 use ainb_plugin_types_sessions::{
     RefreshRequest, ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
@@ -21,9 +22,12 @@ use ratatui::layout::Rect as RRect;
 use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::cli::{UsageCommands, execute_for_plugin};
+use crate::data::savings::{SavingsData, fetch_savings};
 use crate::data::usage::UsageData;
 use crate::output_format::OutputFormat;
-use crate::ui::{UsageTab, UsageViewState, render as render_ui};
+use crate::ui::{
+    TAB_BAR_H, TAB_BAR_TOP, UsageTab, UsageViewState, render as render_ui, tab_at_col,
+};
 use crate::wire::wire_to_local;
 
 /// Static manifest TOML loaded at compile time. The Server uses this on
@@ -114,6 +118,10 @@ pub struct BurndownPlugin {
     /// wall-clock compute was fast enough that the only visible
     /// change is a few panel numbers.
     pivot_seq: u64,
+    /// Latest token-savings snapshot. Populated asynchronously after
+    /// each `sessions.usage_data` finalise — the Savings tab renders
+    /// whatever is here (or a "fetching" placeholder while `None`).
+    savings_data: Option<SavingsData>,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
@@ -362,6 +370,16 @@ impl Plugin for BurndownPlugin {
         Ok(())
     }
 
+    async fn handle_mouse(&mut self, _host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        // Same redraw discipline as `handle_key`: only bump the generation
+        // (→ re-render) when the event actually changed something.
+        if self.dispatch_mouse_pure(params.mouse) {
+            self.ui.copy_flash = None;
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
         let (w, h) = match (params.viewport.width, params.viewport.height) {
             (0, _) | (_, 0) => FALLBACK_VIEWPORT,
@@ -391,6 +409,7 @@ impl Plugin for BurndownPlugin {
             ui.data = self.data.clone();
             ui.scan_progress = self.scan_progress.clone();
             ui.cached_filtered = cached_filtered;
+            ui.savings_data = self.savings_data.clone();
             // True iff `cached_filtered` ran an actual recompute this
             // frame (cache miss). The chip strip uses this to flash a
             // brief `↻ updated` badge so the user sees confirmation
@@ -531,15 +550,31 @@ impl BurndownPlugin {
     /// (follow-on chunk with no in-flight publish); calls into the
     /// pure [`Self::apply_chunk_pure`] for the actual state transition
     /// so unit tests can hit every branch without a `HostClient`.
+    ///
+    /// On `Finalised`, kicks off an async savings fetch so the Savings
+    /// tab has fresh data shortly after each usage snapshot lands.
     async fn apply_chunk(&mut self, event: UsageDataEvent, host: &HostClient) {
         let chunk_index = event.chunk_index;
         let outcome = self.apply_chunk_pure(event);
-        if matches!(outcome, ChunkOutcome::DroppedFollowOn) {
-            let _ = host
-                .log_info(format!(
-                    "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
-                ))
-                .await;
+        match outcome {
+            ChunkOutcome::DroppedFollowOn => {
+                let _ = host
+                    .log_info(format!(
+                        "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
+                    ))
+                    .await;
+            }
+            ChunkOutcome::Finalised => {
+                // Refresh the savings snapshot from all three sources.
+                // The output_tokens total lives on grand_total after
+                // the wire→local conversion has completed; safe to read
+                // here because apply_chunk_pure already moved the
+                // assembled data into self.data.
+                let output_tokens =
+                    self.data.as_ref().map(|d| d.grand_total.output_tokens).unwrap_or(0);
+                self.savings_data = Some(fetch_savings(output_tokens).await);
+            }
+            ChunkOutcome::Buffered => {}
         }
     }
 
@@ -1016,6 +1051,13 @@ impl BurndownPlugin {
                 self.ui.zoom_reset_cols()
             }
 
+            // ── Outer tab switch (Burndown ↔ … ↔ Savings). While zoomed,
+            // `[`/`]` focus table columns (handled above); when NOT zoomed
+            // they cycle the outer UsageTab so every tab — including the
+            // Savings observability card — is keyboard-reachable.
+            KeyCode::Char { ch: '[' } => self.ui.prev_tab(),
+            KeyCode::Char { ch: ']' } => self.ui.next_tab(),
+
             // ── Zoom-table row navigation (zoomed only). Arrows are safe
             // even while searching; `j` is guarded like the resize keys
             // so it can be typed into the search box.
@@ -1080,6 +1122,61 @@ impl BurndownPlugin {
         }
         true
     }
+
+    /// Pure mouse dispatch (no host I/O) so it's unit-testable like
+    /// [`Self::dispatch_key_pure`]. Returns true iff it changed visible state.
+    ///
+    /// - **Wheel** scrolls the focused list — the zoomed table row when zoomed
+    ///   (self-clamping), else the dashboard list clamped to the session count
+    ///   so the offset can never run past the data.
+    /// - **Left click on a tab** in the tab bar switches to that tab, so every
+    ///   tab — including the Savings card — is reachable by mouse.
+    fn dispatch_mouse_pure(&mut self, m: MouseEvent) -> bool {
+        match m.kind {
+            MouseKind::ScrollUp => {
+                // Return the REAL delta so a boundary tick (already at the top)
+                // doesn't force a needless WireBuffer re-serialize — same
+                // redraw discipline as `handle_key`.
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
+                if self.ui.is_zoomed() {
+                    self.ui.zoom_row_up();
+                } else {
+                    self.ui.scroll_up();
+                }
+                (self.ui.scroll_offset, self.ui.focus_row) != before
+            }
+            MouseKind::ScrollDown => {
+                let before = (self.ui.scroll_offset, self.ui.focus_row);
+                if self.ui.is_zoomed() {
+                    self.ui.zoom_row_down();
+                } else {
+                    // `row_count()` reads `ui.data`, which the plugin only syncs
+                    // at render time — refresh it first (same sync the Enter
+                    // handler does) so the clamp matches the live snapshot. It
+                    // is tab-aware (Daily=days, Projects=projects, …), so short
+                    // lists can't over-scroll the way a raw session count would.
+                    self.ui.data = self.data.clone();
+                    let max_rows = self.ui.row_count();
+                    self.ui.scroll_down(max_rows);
+                }
+                (self.ui.scroll_offset, self.ui.focus_row) != before
+            }
+            MouseKind::Down {
+                button: MouseButton::Left,
+            } => {
+                if (TAB_BAR_TOP..TAB_BAR_TOP + TAB_BAR_H).contains(&m.row) {
+                    if let Some(tab) = tab_at_col(m.col) {
+                        if tab != self.ui.active_tab {
+                            self.ui.active_tab = tab;
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Copy `text` to the system clipboard via `arboard`.
@@ -1142,22 +1239,20 @@ mod handle_key_dispatch_tests {
 
     #[test]
     fn arrow_keys_advance_provider_filter() {
-        // `next_provider` / `prev_provider` walk a 4-state internal
-        // `UsageProvider` enum and derive `provider_filter` from it.
-        // Asserting a round-trip is brittle — Gemini/Copilot both map
-        // back to `All`, so Left after one Right doesn't return to
-        // the starting filter. Just confirm each arrow claims the
-        // key and mutates state at least once.
+        // `◀/▶` step the single `provider_filter` ring directly (prev is
+        // the exact inverse of next), so `▶` then `◀` round-trips back to
+        // the starting filter — and both directions always mutate.
         let mut p = BurndownPlugin::default();
         let starting = p.ui.provider_filter;
         assert!(p.dispatch_key_pure(&KeyCode::Right));
-        let after_right = p.ui.provider_filter;
-        let mut p = BurndownPlugin::default();
+        assert_ne!(
+            p.ui.provider_filter, starting,
+            "▶ must mutate provider_filter"
+        );
         assert!(p.dispatch_key_pure(&KeyCode::Left));
-        let after_left = p.ui.provider_filter;
-        assert!(
-            after_right != starting || after_left != starting,
-            "at least one arrow direction must mutate provider_filter from default {starting:?}"
+        assert_eq!(
+            p.ui.provider_filter, starting,
+            "◀ after ▶ returns to the starting filter (inverse ring)"
         );
     }
 
@@ -1168,6 +1263,125 @@ mod handle_key_dispatch_tests {
         assert!(p.dispatch_key_pure(&KeyCode::Tab));
         let after = p.ui.focused_panel;
         assert_ne!(before, after, "Tab must change focused panel");
+    }
+
+    #[test]
+    fn bracket_keys_cycle_outer_tabs_and_reach_savings() {
+        use crate::ui::UsageTab;
+        // Regression: `[`/`]` were zoom-only, so the outer tabs (incl. the
+        // Savings observability card) were keyboard-unreachable — active_tab
+        // was stuck on Burndown. They now cycle the outer tab when not zoomed.
+        let mut p = BurndownPlugin::default();
+        assert_eq!(p.ui.active_tab, UsageTab::Burndown, "starts on Burndown");
+
+        // `]` walks forward: Burndown → Daily → Weekly → Projects → Optimize → Savings.
+        for expect in [
+            UsageTab::Daily,
+            UsageTab::Weekly,
+            UsageTab::Projects,
+            UsageTab::Optimize,
+            UsageTab::Savings,
+        ] {
+            assert!(
+                p.dispatch_key_pure(&KeyCode::Char { ch: ']' }),
+                "] must be consumed"
+            );
+            assert_eq!(p.ui.active_tab, expect, "] advances the outer tab");
+        }
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Savings,
+            "Savings is now reachable"
+        );
+
+        // `[` walks back off Savings.
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Char { ch: '[' }),
+            "[ must be consumed"
+        );
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Optimize,
+            "[ retreats the outer tab"
+        );
+    }
+
+    #[test]
+    fn mouse_left_click_on_savings_tab_switches_to_it() {
+        use crate::ui::{TAB_BAR_TOP, UsageTab, tab_at_col};
+        let mut p = BurndownPlugin::default();
+        assert_eq!(p.ui.active_tab, UsageTab::Burndown);
+        // A column inside the Savings title's hit zone.
+        let col = (0u16..240)
+            .find(|c| tab_at_col(*c) == Some(UsageTab::Savings))
+            .expect("Savings hit zone exists");
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col,
+            row: TAB_BAR_TOP,
+            mods: 0,
+        };
+        assert!(
+            p.dispatch_mouse_pure(ev),
+            "clicking the Savings tab must switch"
+        );
+        assert_eq!(
+            p.ui.active_tab,
+            UsageTab::Savings,
+            "clicked tab is now active"
+        );
+    }
+
+    #[test]
+    fn mouse_click_off_the_tab_bar_is_a_noop() {
+        use crate::ui::TAB_BAR_TOP;
+        let mut p = BurndownPlugin::default();
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 4,
+            row: TAB_BAR_TOP + 40, // deep in the content area
+            mods: 0,
+        };
+        assert!(
+            !p.dispatch_mouse_pure(ev),
+            "a click outside the tab bar changes nothing"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_only_redraws_on_real_movement() {
+        let up = MouseEvent {
+            kind: MouseKind::ScrollUp,
+            col: 0,
+            row: 0,
+            mods: 0,
+        };
+        let down = MouseEvent {
+            kind: MouseKind::ScrollDown,
+            col: 0,
+            row: 0,
+            mods: 0,
+        };
+        // Fresh plugin: nothing to scroll → wheel is a no-op, so it must NOT
+        // request a redraw (boundary tick discipline, mirroring handle_key).
+        let mut p = BurndownPlugin::default();
+        assert!(!p.dispatch_mouse_pure(up), "wheel up at the top is a no-op");
+        assert!(
+            !p.dispatch_mouse_pure(down),
+            "wheel down with no rows is a no-op"
+        );
+
+        // Zoomed table with rows: wheel-down advances the focused row → real
+        // change → redraw requested.
+        let mut z = zoomed_plugin();
+        assert!(
+            z.dispatch_mouse_pure(down),
+            "wheel down in a zoomed table scrolls and redraws"
+        );
     }
 
     #[test]
@@ -1451,12 +1665,14 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn resize_keys_unbound_on_dashboard() {
-        // Not zoomed: the column keys must fall through (return false)
-        // so they keep their no-op behavior on the dashboard.
+    fn resize_col_keys_unbound_on_dashboard() {
+        // Not zoomed: the column resize keys `< > =` must fall through (return
+        // false) so they keep their no-op behavior on the dashboard. (`[`/`]`
+        // ARE bound off-zoom now — they switch the outer tab; see
+        // bracket_keys_cycle_outer_tabs_and_reach_savings.)
         let mut p = BurndownPlugin::default();
         assert!(!p.ui.is_zoomed());
-        for k in ['[', ']', '<', '>', '='] {
+        for k in ['<', '>', '='] {
             assert!(
                 !p.dispatch_key_pure(&ch(k)),
                 "`{k}` must be unhandled on the dashboard"
@@ -1647,6 +1863,7 @@ mod chunk_accumulator_tests {
             SessionUsage {
                 provider: Provider::Claude,
                 project: "p".into(),
+                project_path: "/tmp/p".into(),
                 session_id: id.into(),
                 first_timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::from_timestamp(1_700_000_001, 0).unwrap(),

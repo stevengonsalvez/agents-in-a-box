@@ -1,650 +1,3125 @@
 ---
 title: "ainb CLI Reference"
+description: "Full multi-hierarchy reference for every ainb subcommand — generated from the binary's --help."
 ---
 
-`ainb` is both an interactive terminal UI and a scriptable CLI. Every session operation the TUI can perform is also exposed as a subcommand, so agents and automation can drive it end-to-end without opening the UI.
+`ainb` is both an interactive terminal UI and a scriptable, headless CLI. Every
+operation the TUI performs is also exposed as a subcommand with `--format json`
+output, so humans drive it from the dashboard and agents drive it from shell
+scripts. Run `ainb` with no arguments to launch the TUI; use any subcommand
+below for non-interactive work.
 
-Run `ainb` with no arguments to launch the TUI, or use any subcommand below for non-interactive work.
-
-> **Version documented:** `ainb 1.2.0`
-> **Source of truth:** output of `ainb <cmd> --help`. If this doc drifts, trust `--help`.
-
----
-
-## Table of Contents
-
-- [Global flags](#global-flags)
-- [Shell completions](#shell-completions)
-- [Exit codes](#exit-codes)
-- [File layout](#file-layout)
-- [Environment variables](#environment-variables)
-- [Command reference](#command-reference)
-  - [`tui`](#ainb-tui) — launch the TUI (default)
-  - [`run`](#ainb-run) — spawn a new AI coding session
-  - [`list`](#ainb-list) — list sessions
-  - [`status`](#ainb-status) — inspect a session
-  - [`logs`](#ainb-logs) — stream or tail session output
-  - [`attach`](#ainb-attach) — drop into a session's tmux
-  - [`kill`](#ainb-kill) — terminate a session
-  - [`auth`](#ainb-auth) — set up authentication
-  - [`recover`](#ainb-recover) — recover orphaned sessions
-  - [`config`](#ainb-config) — manage configuration
-  - [`git`](#ainb-git) — worktree operations
-  - [`favorites`](#ainb-favorites) — saved repositories
-  - [`init`](#ainb-init) — first-time setup & factory reset
-  - [`doctor`](#ainb-doctor) — classified dependency check
-  - [`reflect`](#ainb-reflect) — reflect toolchain bootstrap installer
-  - [`presets`](#ainb-presets) — session presets
-  - [`claudecode`](#ainb-claudecode) — Claude Code provider-specific commands (statusline)
-  - [`completion`](#ainb-completion) — shell completions
-  - [`plugin`](#ainb-plugin) — manage ainb plugins
-  - [`fleet`](#ainb-fleet) — orchestrate the claude session fleet
-  - [`usage`](#ainb-usage) — local usage analytics and export
-- [Scripting recipes](#scripting-recipes)
-
----
+> **Generated — do not edit by hand.** This page is produced from the live
+> binary by [`ainb-tui/scripts/gen-cli-reference.sh`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/ainb-tui/scripts/gen-cli-reference.sh),
+> which walks `ainb <cmd> --help` for every command. CI fails if it drifts, so
+> the output of `ainb --help` stays the source of truth. To update: run the
+> script and commit the result.
 
 ## Global flags
 
-Every command accepts:
+| Flag | Description |
+|------|-------------|
+| `--format <text\|json\|csv\|markdown>` | Output format for any command (default `text`). `json` is the machine-readable form for scripting/agents. |
+| `-h, --help` | Print help for the command (recursive — works at every level). |
+| `-V, --version` | Print the build identity (commit + date), or `-V` for the bare semver. |
 
-| Flag | Values | Default | Purpose |
-|------|--------|---------|---------|
-| `--format` | `text`, `json`, `csv` | `text` | Switch output format. `csv` is mainly for `ainb usage export`. |
-| `-h`, `--help` | — | — | Print help for the command or subcommand. |
-| `-V`, `--version` | — | — | Print `ainb` version (top level only). |
+## Reading this reference
 
-`ainb` follows standard clap conventions: invalid enum values (e.g. `--tool foobar`) are rejected at parse time with a `[possible values: …]` hint and exit status 2.
+Each command shows its description followed by the verbatim `ainb <cmd> --help`
+output — including its arguments, flags, and an `EXAMPLES:` block. Groups
+(`config`, `git`, `usage`, `fleet`, `hangar`, …) nest their subcommands as
+sub-sections; recursive help (`ainb <group> <sub> --help`) works for every
+node. The page's right-hand "On this page" panel is the full command tree.
 
----
+## Command reference
 
-## Shell completions
+## `ainb tui`
 
-```bash
-# Generate completions for your shell and source them
-ainb completion zsh > ~/.zsh/completions/_ainb
-ainb completion bash > /usr/local/etc/bash_completion.d/ainb
-ainb completion fish > ~/.config/fish/completions/ainb.fish
+Launch the TUI (default if no command given)
+
+```console
+$ ainb tui --help
+Launch the TUI (default if no command given)
+
+Usage: ainb tui [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
 ```
 
-Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+## `ainb diff-review`
 
----
+Review a repository's uncommitted changes in the Code Review surface
+
+```console
+$ ainb diff-review --help
+Review a repository's uncommitted changes in the Code Review surface
+
+Usage: ainb diff-review [OPTIONS] [path]
+
+Arguments:
+  [path]  Repository path (default: current directory) [default: .]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb diff-review                 Review uncommitted changes in the current repo
+  ainb diff-review ~/code/proj     Review a specific repo
+  ainb diff-review --format json   Emit the structured diff as JSON (headless)
+```
+
+## `ainb run`
+
+Spawn a new AI coding session
+
+```console
+$ ainb run --help
+Spawn a new AI coding session
+
+Usage: ainb run [OPTIONS]
+
+Options:
+      --format <format>                Output format [default: text] [possible values: text, json, csv, markdown]
+      --remote-repo <REMOTE_REPO>      Remote repository (e.g., username/repo or full URL)
+      --repo <REPO>                    Local repository path
+      --create-branch <CREATE_BRANCH>  Create a new branch with this name
+      --worktree                       Use git worktree for isolation
+      --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot]
+      --model <MODEL>                  Model to use (sonnet, opus, haiku) [default: sonnet]
+  -p, --prompt <PROMPT>                Initial prompt to send
+  -a, --attach                         Attach to session after creation
+      --dangerously-skip-permissions   Skip permission prompts (dangerous!)
+      --name <NAME>                    Custom session name
+  -i, --interactive                    Run in interactive mode (spawn tmux and attach)
+  -h, --help                           Print help
+
+EXAMPLES:
+  ainb run --repo .                                 Use current directory
+  ainb run --repo . --worktree                      Isolate in a new worktree
+  ainb run --repo . --create-branch feat/new        Create a branch + worktree
+  ainb run --remote-repo owner/repo                 Clone GitHub repo first
+  ainb run --tool codex --repo .                    Use Codex instead of Claude
+  ainb run --repo . -p "fix the failing tests"    Send an initial prompt
+  ainb run --repo . --attach                        Drop into tmux after creating
+```
+
+## `ainb list`
+
+List all sessions (running + idle)
+
+```console
+$ ainb list --help
+List all sessions (running + idle)
+
+Usage: ainb list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --running                Show only running sessions
+      --workspace <WORKSPACE>  Show only sessions for a specific workspace
+  -h, --help                   Print help
+
+EXAMPLES:
+  ainb list                        List all sessions
+  ainb list --running              Only running sessions
+  ainb list --workspace my-proj    Sessions for one workspace
+  ainb list --format json          Machine-readable output
+```
+
+## `ainb logs`
+
+View session output/logs
+
+```console
+$ ainb logs --help
+View session output/logs
+
+Usage: ainb logs [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID or name
+
+Options:
+  -f, --follow           Follow log output (like tail -f)
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -l, --lines <LINES>    Number of lines to show [default: 100]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb logs my-project             Last 100 lines for a session
+  ainb logs my-project -f          Follow live (like tail -f)
+  ainb logs my-project -l 500      Last 500 lines
+```
+
+## `ainb attach`
+
+Attach to a session (drops into tmux)
+
+```console
+$ ainb attach --help
+Attach to a session (drops into tmux)
+
+Usage: ainb attach [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID or name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb attach my-project           Drop into the session's tmux
+```
+
+## `ainb status`
+
+Show a session's status/health
+
+```console
+$ ainb status --help
+Show a session's status/health
+
+Usage: ainb status [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID or name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb status my-project           Show status/health
+  ainb status my-project --format json
+```
+
+## `ainb kill`
+
+Terminate a session
+
+```console
+$ ainb kill --help
+Terminate a session
+
+Usage: ainb kill [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID or name
+
+Options:
+  -f, --force            Force kill without confirmation
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb kill my-project             Kill (with confirmation)
+  ainb kill my-project --force     Kill without prompting
+```
+
+## `ainb auth`
+
+Set up authentication
+
+```console
+$ ainb auth --help
+Set up authentication
+
+Usage: ainb auth [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb auth                        Interactive authentication setup
+```
+
+## `ainb recover`
+
+Recover orphaned or crashed sessions
+
+```console
+$ ainb recover --help
+Recover orphaned or crashed sessions
+
+Usage: ainb recover [OPTIONS] <COMMAND>
+
+Commands:
+  list     List orphaned sessions and broken worktree symlinks
+  resume   Resume an orphaned session by re-registering it in the session store
+  cleanup  Clean up orphaned sessions and broken worktrees
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb recover list                Find orphaned sessions + broken worktrees
+  ainb recover resume <id>         Re-register an orphaned session
+  ainb recover cleanup             Remove orphans + broken worktrees
+```
+
+### `ainb recover list`
+
+List orphaned sessions and broken worktree symlinks
+
+```console
+$ ainb recover list --help
+List orphaned sessions and broken worktree symlinks
+
+Usage: ainb recover list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb recover resume`
+
+Resume an orphaned session by re-registering it in the session store
+
+```console
+$ ainb recover resume --help
+Resume an orphaned session by re-registering it in the session store
+
+Usage: ainb recover resume [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID, tmux name, or workspace name prefix
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb recover cleanup`
+
+Clean up orphaned sessions and broken worktrees
+
+```console
+$ ainb recover cleanup --help
+Clean up orphaned sessions and broken worktrees
+
+Usage: ainb recover cleanup [OPTIONS] [SESSION]
+
+Arguments:
+  [SESSION]  Specific session to clean up (all if omitted)
+
+Options:
+  -f, --force            Skip confirmation prompt
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb config`
+
+Manage configuration
+
+```console
+$ ainb config --help
+Manage configuration
+
+Usage: ainb config [OPTIONS] <COMMAND>
+
+Commands:
+  show   Display current configuration (merged from all sources)
+  get    Get a specific config value using dot-notation (e.g., `authentication.default_model`)
+  set    Set a config value in user-level config
+  reset  Reset user configuration to defaults
+  path   Show config file locations
+  edit   Open user config in $EDITOR
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb config show                                Merged config from all sources
+  ainb config get authentication.default_model    Read one value (dot notation)
+  ainb config set ui_preferences.show_git_status true
+  ainb config path                                Where config files live
+  ainb config edit                                Open user config in $EDITOR
+  ainb config reset                               Restore defaults
+```
+
+### `ainb config show`
+
+Display current configuration (merged from all sources)
+
+```console
+$ ainb config show --help
+Display current configuration (merged from all sources)
+
+Usage: ainb config show [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb config get`
+
+Get a specific config value using dot-notation (e.g., `authentication.default_model`)
+
+```console
+$ ainb config get --help
+Get a specific config value using dot-notation (e.g., `authentication.default_model`)
+
+Usage: ainb config get [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Config key in dot-notation
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb config set`
+
+Set a config value in user-level config
+
+```console
+$ ainb config set --help
+Set a config value in user-level config
+
+Usage: ainb config set [OPTIONS] <KEY> <VALUE>
+
+Arguments:
+  <KEY>    Config key in dot-notation
+  <VALUE>  Value to set
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb config reset`
+
+Reset user configuration to defaults
+
+```console
+$ ainb config reset --help
+Reset user configuration to defaults
+
+Usage: ainb config reset [OPTIONS]
+
+Options:
+  -f, --force            Skip confirmation prompt
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb config path`
+
+Show config file locations
+
+```console
+$ ainb config path --help
+Show config file locations
+
+Usage: ainb config path [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb config edit`
+
+Open user config in $EDITOR
+
+```console
+$ ainb config edit --help
+Open user config in $EDITOR
+
+Usage: ainb config edit [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb git`
+
+Manage git worktrees + inspect session changes
+
+```console
+$ ainb git --help
+Manage git worktrees + inspect session changes
+
+Usage: ainb git [OPTIONS] <COMMAND>
+
+Commands:
+  worktrees  List all managed worktrees and their session association
+  cleanup    Remove orphaned worktrees (not referenced by any session)
+  status     Show git status for a specific session's worktree
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb git worktrees               List managed worktrees + session links
+  ainb git status my-project       Git status for a session's worktree
+  ainb git cleanup                 Remove orphaned worktrees
+```
+
+### `ainb git worktrees`
+
+List all managed worktrees and their session association
+
+```console
+$ ainb git worktrees --help
+List all managed worktrees and their session association
+
+Usage: ainb git worktrees [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb git cleanup`
+
+Remove orphaned worktrees (not referenced by any session)
+
+```console
+$ ainb git cleanup --help
+Remove orphaned worktrees (not referenced by any session)
+
+Usage: ainb git cleanup [OPTIONS]
+
+Options:
+  -f, --force            Skip confirmation prompt
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --dry-run          Preview what would be removed without making changes
+  -h, --help             Print help
+```
+
+### `ainb git status`
+
+Show git status for a specific session's worktree
+
+```console
+$ ainb git status --help
+Show git status for a specific session's worktree
+
+Usage: ainb git status [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session ID (full/partial UUID) or workspace name prefix
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb favorites`
+
+Manage favorite repositories
+
+```console
+$ ainb favorites --help
+Manage favorite repositories
+
+Usage: ainb favorites [OPTIONS] <COMMAND>
+
+Commands:
+  list    List all favorites sorted by usage (most used first)
+  add     Add a new favorite repository
+  remove  Remove a favorite by alias
+  use     Record usage of a favorite (bumps use_count and last_used)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb favorites list                       Favorites ranked by usage
+  ainb favorites add --alias <alias> <src>  Add a favorite (alias + path/URL)
+  ainb favorites use <alias>                Record a use (bumps ranking)
+  ainb favorites remove <alias>             Delete a favorite
+```
+
+### `ainb favorites list`
+
+List all favorites sorted by usage (most used first)
+
+```console
+$ ainb favorites list --help
+List all favorites sorted by usage (most used first)
+
+Usage: ainb favorites list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb favorites add`
+
+Add a new favorite repository
+
+```console
+$ ainb favorites add --help
+Add a new favorite repository
+
+Usage: ainb favorites add [OPTIONS] --alias <ALIAS> <SOURCE>
+
+Arguments:
+  <SOURCE>  Repository source: owner/repo, https URL, ssh URL, or local path
+
+Options:
+      --alias <ALIAS>              Friendly alias for this favorite (used to look it up later)
+      --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
+      --description <DESCRIPTION>  Optional human-readable description
+      --tags <TAGS>                Comma-separated list of tags
+  -h, --help                       Print help
+```
+
+### `ainb favorites remove`
+
+Remove a favorite by alias
+
+```console
+$ ainb favorites remove --help
+Remove a favorite by alias
+
+Usage: ainb favorites remove [OPTIONS] <ALIAS>
+
+Arguments:
+  <ALIAS>  Alias of the favorite to remove
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb favorites use`
+
+Record usage of a favorite (bumps use_count and last_used)
+
+```console
+$ ainb favorites use --help
+Record usage of a favorite (bumps use_count and last_used)
+
+Usage: ainb favorites use [OPTIONS] <ALIAS>
+
+Arguments:
+  <ALIAS>  Alias of the favorite to record usage for
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb init`
+
+First-time setup and prerequisite checking
+
+```console
+$ ainb init --help
+First-time setup and prerequisite checking
+
+Usage: ainb init [OPTIONS]
+
+Options:
+      --check            Only check prerequisites, don't modify any files
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --status           Show current onboarding completion status
+      --reset            Factory reset: remove ~/.agents-in-a-box entirely
+  -f, --force            Skip interactive confirmation (required for non-interactive --reset)
+  -y, --yes              Auto-install missing dependencies ainb can install safely (npm/uv/cargo/ ainb/claude-plugin). brew/curl still need explicit per-item consent
+      --script           Generate an idempotent install script for what's missing (writes ~/.agents-in-a-box/installer/install-<agent>.sh) instead of installing
+      --agent <AGENT>    Target agent for --script: claude | codex | copilot (default: claude)
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb init                        First-time setup (interactive)
+  ainb init --check                Only check prerequisites, change nothing
+  ainb init --status               Show onboarding completion status
+  ainb init --reset --force        Factory reset ~/.agents-in-a-box (non-interactive)
+```
+
+## `ainb doctor`
+
+Health-check the manifest, lockfile, deployed files, and configured sources. Exits non-zero when any problem is found
+
+```console
+$ ainb doctor --help
+Health-check the manifest, lockfile, deployed files, and configured sources. Exits non-zero when any problem is found
+
+Usage: ainb doctor [OPTIONS]
+
+Options:
+      --offline  Skip the source-reachability check (avoid hitting the network / re-running fetchers)
+  -h, --help     Print help
+
+EXAMPLES:
+  ainb doctor                      Health-check skill manifest/lockfile/deployed files
+  ainb doctor --offline            Skip source-reachability network checks
+```
+
+## `ainb reflect`
+
+Reflect plugin lifecycle: bootstrap installer + dependency check
+
+```console
+$ ainb reflect --help
+Reflect plugin lifecycle: bootstrap installer + dependency check
+
+Usage: ainb reflect [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  One-step install: auto-install reflect-kb[graph]; print missing system tools
+  check      Classified dependency check (reflect-focused; same engine as `ainb doctor`)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb reflect bootstrap           One-step install of reflect-kb[graph]
+  ainb reflect bootstrap --yes     Non-interactive install
+  ainb reflect check               Classified dependency report
+```
+
+### `ainb reflect bootstrap`
+
+One-step install: auto-install reflect-kb[graph]; print missing system tools
+
+```console
+$ ainb reflect bootstrap --help
+One-step install: auto-install reflect-kb[graph]; print missing system tools
+
+Usage: ainb reflect bootstrap [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              Install the reflect-owned layer without prompting
+      --print-only       Detect + print every command; install nothing
+  -h, --help             Print help
+```
+
+### `ainb reflect check`
+
+Classified dependency check (reflect-focused; same engine as `ainb doctor`)
+
+```console
+$ ainb reflect check --help
+Classified dependency check (reflect-focused; same engine as `ainb doctor`)
+
+Usage: ainb reflect check [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb presets`
+
+Manage session presets
+
+```console
+$ ainb presets --help
+Manage session presets
+
+Usage: ainb presets [OPTIONS] <COMMAND>
+
+Commands:
+  list    List all available presets (built-in + custom)
+  show    Show full details for a specific preset
+  create  Create a new custom preset
+  delete  Delete a custom preset
+  apply   Apply a preset to the current repository (writes .agents-box/preset.toml)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb presets list                Built-in + custom presets
+  ainb presets show <name>         Full preset details
+  ainb presets apply <name>        Write .agents-box/preset.toml in this repo
+```
+
+### `ainb presets list`
+
+List all available presets (built-in + custom)
+
+```console
+$ ainb presets list --help
+List all available presets (built-in + custom)
+
+Usage: ainb presets list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb presets show`
+
+Show full details for a specific preset
+
+```console
+$ ainb presets show --help
+Show full details for a specific preset
+
+Usage: ainb presets show [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Preset name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb presets create`
+
+Create a new custom preset
+
+```console
+$ ainb presets create --help
+Create a new custom preset
+
+Usage: ainb presets create [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Preset name (must be unique and not collide with built-ins)
+
+Options:
+      --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
+      --provider <PROVIDER>        Agent provider (e.g., claude, codex, gemini)
+      --model <MODEL>              Model identifier (e.g., sonnet, opus, haiku)
+      --description <DESCRIPTION>  Human-readable description
+  -h, --help                       Print help
+```
+
+### `ainb presets delete`
+
+Delete a custom preset
+
+```console
+$ ainb presets delete --help
+Delete a custom preset
+
+Usage: ainb presets delete [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Preset name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb presets apply`
+
+Apply a preset to the current repository (writes .agents-box/preset.toml)
+
+```console
+$ ainb presets apply --help
+Apply a preset to the current repository (writes .agents-box/preset.toml)
+
+Usage: ainb presets apply [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Preset name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb usage`
+
+Usage analytics, reports, export, and optimization
+
+```console
+$ ainb usage --help
+Usage analytics, reports, export, and optimization
+
+Usage: ainb usage [OPTIONS] <COMMAND>
+
+Commands:
+  report       Print a compact burndown report
+  status       Print current usage status
+  today        Print today's usage
+  month        Print current month's usage
+  export       Export usage data as CSV or JSON
+  plan         Manage usage plan
+  currency     Set or reset display currency
+  model-alias  Manage model aliases
+  optimize     Show read-only optimization findings
+  savings      Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+  compare      Compare models
+  yield        Estimate usage yield from session signals
+  cache        Inspect or wipe the persistent usage cache
+  models       Per-model rollup or per-model × per-activity-category matrix
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb usage today                 Today's usage  (needs the burndown plugin)
+  ainb usage month                 Current month
+  ainb usage report                Compact burndown report
+  ainb usage export --format csv   Export usage data
+  ainb usage models                Per-model rollup
+```
+
+### `ainb usage report`
+
+Print a compact burndown report
+
+```console
+$ ainb usage report --help
+Print a compact burndown report
+
+Usage: ainb usage report [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage status`
+
+Print current usage status
+
+```console
+$ ainb usage status --help
+Print current usage status
+
+Usage: ainb usage status [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage today`
+
+Print today's usage
+
+```console
+$ ainb usage today --help
+Print today's usage
+
+Usage: ainb usage today [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage month`
+
+Print current month's usage
+
+```console
+$ ainb usage month --help
+Print current month's usage
+
+Usage: ainb usage month [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage export`
+
+Export usage data as CSV or JSON
+
+```console
+$ ainb usage export --help
+Export usage data as CSV or JSON
+
+Usage: ainb usage export [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -o, --output <OUTPUT>      Output file or directory
+  -h, --help                 Print help
+```
+
+### `ainb usage plan`
+
+Manage usage plan
+
+```console
+$ ainb usage plan --help
+Manage usage plan
+
+Usage: ainb usage plan [OPTIONS] <COMMAND>
+
+Commands:
+  show    Show configured plan
+  set     Set a known or custom plan
+  reset   Remove plan
+  detect  Attempt to detect plan from Claude CLI
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb usage plan show`
+
+Show configured plan
+
+```console
+$ ainb usage plan show --help
+Show configured plan
+
+Usage: ainb usage plan show [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+#### `ainb usage plan set`
+
+Set a known or custom plan
+
+```console
+$ ainb usage plan set --help
+Set a known or custom plan
+
+Usage: ainb usage plan set [OPTIONS] <PLAN>
+
+Arguments:
+  <PLAN>  [possible values: claude-pro, claude-max, claude-max5x, cursor-pro, custom, none]
+
+Options:
+      --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
+      --monthly-usd <MONTHLY_USD>
+      --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor]
+      --reset-day <RESET_DAY>      [default: 1]
+  -h, --help                       Print help
+```
+
+#### `ainb usage plan reset`
+
+Remove plan
+
+```console
+$ ainb usage plan reset --help
+Remove plan
+
+Usage: ainb usage plan reset [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb usage plan detect`
+
+Attempt to detect plan from Claude CLI
+
+```console
+$ ainb usage plan detect --help
+Attempt to detect plan from Claude CLI
+
+Usage: ainb usage plan detect [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb usage currency`
+
+Set or reset display currency
+
+```console
+$ ainb usage currency --help
+Set or reset display currency
+
+Usage: ainb usage currency [OPTIONS] [CODE]
+
+Arguments:
+  [CODE]  Currency code, for example USD, GBP, EUR
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --symbol <SYMBOL>  Display symbol
+      --reset            Reset to USD
+  -h, --help             Print help
+```
+
+### `ainb usage model-alias`
+
+Manage model aliases
+
+```console
+$ ainb usage model-alias --help
+Manage model aliases
+
+Usage: ainb usage model-alias [OPTIONS] [FROM] [TO]
+
+Arguments:
+  [FROM]  Source model name
+  [TO]    Alias target model name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --list             List aliases
+      --remove <REMOVE>  Remove alias by source model name
+  -h, --help             Print help
+```
+
+### `ainb usage optimize`
+
+Show read-only optimization findings
+
+```console
+$ ainb usage optimize --help
+Show read-only optimization findings
+
+Usage: ainb usage optimize [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage savings`
+
+Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+
+```console
+$ ainb usage savings --help
+Token-savings rollup (Headroom proxy + RTK + caveman estimate)
+
+Usage: ainb usage savings [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage compare`
+
+Compare models
+
+```console
+$ ainb usage compare --help
+Compare models
+
+Usage: ainb usage compare [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage yield`
+
+Estimate usage yield from session signals
+
+```console
+$ ainb usage yield --help
+Estimate usage yield from session signals
+
+Usage: ainb usage yield [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+  -h, --help                 Print help
+```
+
+### `ainb usage cache`
+
+Inspect or wipe the persistent usage cache
+
+```console
+$ ainb usage cache --help
+Inspect or wipe the persistent usage cache
+
+Usage: ainb usage cache [OPTIONS] <COMMAND>
+
+Commands:
+  info   Show cache DB path, on-disk size, file count, oldest entry timestamp
+  clear  Drop all cached file rows (schema_version row preserved)
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb usage cache info`
+
+Show cache DB path, on-disk size, file count, oldest entry timestamp
+
+```console
+$ ainb usage cache info --help
+Show cache DB path, on-disk size, file count, oldest entry timestamp
+
+Usage: ainb usage cache info [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb usage cache clear`
+
+Drop all cached file rows (schema_version row preserved)
+
+```console
+$ ainb usage cache clear --help
+Drop all cached file rows (schema_version row preserved)
+
+Usage: ainb usage cache clear [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb usage models`
+
+Per-model rollup or per-model × per-activity-category matrix
+
+```console
+$ ainb usage models --help
+Per-model rollup or per-model × per-activity-category matrix
+
+Usage: ainb usage models [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <PERIOD>      Period: today, week, 30days, month, all [default: week] [possible values: today, week, 30days, month, all]
+      --from <FROM>          Start date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --to for an explicit range)
+      --to <TO>              End date YYYY-MM-DD (mutually exclusive with --month, --quarter, --last-n-days, --ytd; pairs with --from for an explicit range)
+      --month <MONTH>        Pin to a specific calendar month, e.g. `2026-04`. Mutually exclusive with --quarter, --last-n-days, --ytd, --from, --to
+      --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
+      --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
+      --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
+      --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
+      --no-cache             Bypass the persistent usage cache and force a full re-parse
+      --hard                 Hard refresh: wipe the parse cache and stable rollup, then rebuild everything from source before reporting. CPU-heavy on large histories; the flag itself is the explicit opt-in (no interactive prompt, safe for pipes/scripts)
+      --project <PROJECT>    Drill into a single project (exact match). Repeatable
+      --model <MODEL>        Drill into a single model (exact match). Repeatable
+      --activity <ACTIVITY>  Drill into one activity category (Coding, Conversation, Git, etc. — see ActivityCategory::label). Repeatable
+      --session <SESSION>    Drill into a single session id. Repeatable
+      --branch <BRANCH>      Drill into a single git branch (exact match against `gitBranch` on Claude turns). Repeatable. Codex turns have no recorded branch and are excluded by any non-empty `--branch` filter
+      --top <TOP>            Cap the long By-Project / By-Activity / By-Model tables at N rows (default 8 mirrors the historical hard-coded slice). Applies to report, today, month, and export subcommands across every format. 0 means "no cap" — emit every row [default: 8]
+      --by-task              Emit a per-model × per-activity-category matrix instead of the flat per-model rollup. Rows = model, columns = activity category, cell = (calls, tokens, cost)
+  -h, --help                 Print help
+```
+
+## `ainb claudecode`
+
+Claude Code-specific commands (statusline, etc.). Provider-namespaced — other providers grow their own.
+
+```console
+$ ainb claudecode --help
+Claude Code-specific commands (statusline, etc.). Provider-namespaced — other providers grow their own.
+
+Usage: ainb claudecode [OPTIONS] <COMMAND>
+
+Commands:
+  statusline  Claude Code statusline hook: read JSON on stdin, cache rate-limit windows for the TUI, and emit a powerline status string on stdout.
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb claudecode statusline               Statusline hook (reads Claude JSON on stdin)
+  ainb claudecode statusline --cache-only  Cache rate-limit windows, emit nothing
+  # wire into ~/.claude/settings.json statusLine.command
+```
+
+### `ainb claudecode statusline`
+
+Claude Code statusline hook: read JSON on stdin, cache rate-limit windows for the TUI, and emit a powerline status string on stdout.
+
+```console
+$ ainb claudecode statusline --help
+Claude Code statusline hook: read JSON on stdin, cache rate-limit windows for the TUI, and emit a powerline status string on stdout.
+
+Usage: ainb claudecode statusline [OPTIONS]
+
+Options:
+      --cache-only       Side-channel mode: write the cache only and emit nothing on stdout.
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --install          Wire the statusline into ~/.claude/settings.json (idempotent) instead of running the hook.
+  -h, --help             Print help
+```
+
+## `ainb codex`
+
+Codex-specific commands (statusline, etc.). Provider-namespaced — the Codex analog of `claudecode`.
+
+```console
+$ ainb codex --help
+Codex-specific commands (statusline, etc.). Provider-namespaced — the Codex analog of `claudecode`.
+
+Usage: ainb codex [OPTIONS] <COMMAND>
+
+Commands:
+  statusline  Pull Codex OAuth quota (5h + weekly) from chatgpt.com and cache it for the ainb TUI top bar. Throttled; hide-on-fail when Codex is not logged in.
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb codex statusline          Pull + cache Codex OAuth quota for the TUI top bar
+  ainb codex statusline --force  Bypass the throttle and pull now
+```
+
+### `ainb codex statusline`
+
+Pull Codex OAuth quota (5h + weekly) from chatgpt.com and cache it for the ainb TUI top bar. Throttled; hide-on-fail when Codex is not logged in.
+
+```console
+$ ainb codex statusline --help
+Pull Codex OAuth quota (5h + weekly) from chatgpt.com and cache it for the ainb TUI top bar. Throttled; hide-on-fail when Codex is not logged in.
+
+Usage: ainb codex statusline [OPTIONS]
+
+Options:
+      --force            Bypass the throttle and pull now.
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb tmux`
+
+Manage the rich tmux.conf shipped with ainb-tui (Catppuccin Mocha + TPM + resurrect/continuum/yank + discoverable detach hints).
+
+```console
+$ ainb tmux --help
+Manage the rich tmux.conf shipped with ainb-tui (Catppuccin Mocha + TPM + resurrect/continuum/yank + discoverable detach hints).
+
+Usage: ainb tmux [OPTIONS] <COMMAND>
+
+Commands:
+  install  Install or upgrade the bundled rich tmux.conf to ~/.tmux.conf (backs up any existing file, shows a diff preview, then reloads live sessions).
+  status   Report whether ~/.tmux.conf is missing, up to date, or stale relative to the bundled rich conf.
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb tmux status                 Is ~/.tmux.conf current vs the bundled conf?
+  ainb tmux install                Install/upgrade bundled tmux.conf (backs up existing)
+```
+
+### `ainb tmux install`
+
+Install or upgrade the bundled rich tmux.conf to ~/.tmux.conf (backs up any existing file, shows a diff preview, then reloads live sessions).
+
+```console
+$ ainb tmux install --help
+Install or upgrade the bundled rich tmux.conf to ~/.tmux.conf (backs up any existing file, shows a diff preview, then reloads live sessions).
+
+Usage: ainb tmux install [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              Skip the confirmation prompt (non-interactive use)
+      --no-plugins       Skip TPM clone + plugin install. Useful in restricted environments or for users who don't want plugins
+      --no-reload        Skip `tmux source-file` reload of live sessions
+  -h, --help             Print help
+```
+
+### `ainb tmux status`
+
+Report whether ~/.tmux.conf is missing, up to date, or stale relative to the bundled rich conf.
+
+```console
+$ ainb tmux status --help
+Report whether ~/.tmux.conf is missing, up to date, or stale relative to the bundled rich conf.
+
+Usage: ainb tmux status [OPTIONS]
+
+Options:
+      --diff             Show a diff preview if the on-disk conf is stale
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb otel`
+
+Set up OpenTelemetry export to Grafana Cloud (Grafana Alloy pipeline)
+
+```console
+$ ainb otel --help
+Set up OpenTelemetry export to Grafana Cloud (Grafana Alloy pipeline)
+
+Usage: ainb otel [OPTIONS] <COMMAND>
+
+Commands:
+  setup   Set up OpenTelemetry export to Grafana Cloud (assets, creds, Alloy)
+  status  Show local OTEL pipeline state (env file, Alloy install, tmux session)
+  start   (Re)start Grafana Alloy in its tmux session
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb otel setup     Configure OTEL export to Grafana Cloud (assets, creds, Alloy)
+  ainb otel status    Show the local OTEL pipeline state
+  ainb otel start     (Re)start Grafana Alloy in its tmux session
+```
+
+### `ainb otel setup`
+
+Set up OpenTelemetry export to Grafana Cloud (assets, creds, Alloy)
+
+```console
+$ ainb otel setup --help
+Set up OpenTelemetry export to Grafana Cloud (assets, creds, Alloy)
+
+Usage: ainb otel setup [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --host-name <HOST_NAME>  host.name resource attribute (defaults to the short hostname)
+      --no-start               Don't start Alloy after writing config
+      --no-install             Don't offer to `brew install` Alloy if it's missing
+      --provider <PROVIDER>    Telemetry provider (only grafana-cloud today) [default: grafana-cloud]
+  -h, --help                   Print help
+```
+
+### `ainb otel status`
+
+Show local OTEL pipeline state (env file, Alloy install, tmux session)
+
+```console
+$ ainb otel status --help
+Show local OTEL pipeline state (env file, Alloy install, tmux session)
+
+Usage: ainb otel status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb otel start`
+
+(Re)start Grafana Alloy in its tmux session
+
+```console
+$ ainb otel start --help
+(Re)start Grafana Alloy in its tmux session
+
+Usage: ainb otel start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb completion`
+
+Generate shell completions (bash, zsh, fish, powershell, elvish)
+
+```console
+$ ainb completion --help
+Generate shell completions (bash, zsh, fish, powershell, elvish)
+
+Usage: ainb completion [OPTIONS] <shell>
+
+Arguments:
+  <shell>  Shell to generate completions for [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb completion zsh > ~/.zsh/completions/_ainb
+  ainb completion bash > /usr/local/etc/bash_completion.d/ainb
+  ainb completion fish > ~/.config/fish/completions/ainb.fish
+```
+
+## `ainb abtop`
+
+Snapshot running AI agents (top-for-agents) via `abtop --once`
+
+```console
+$ ainb abtop --help
+Snapshot running AI agents (top-for-agents) via `abtop --once`
+
+Usage: ainb abtop [OPTIONS] [args]...
+
+Arguments:
+  [args]...  Extra flags forwarded verbatim to `abtop --once` (e.g. --theme <name>)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb abtop                       Snapshot running AI agents
+  ainb abtop --theme dracula       Forward flags to `abtop --once`
+```
+
+## `ainb witr`
+
+Trace a running process's causality chain (via the witr plugin)
+
+```console
+$ ainb witr --help
+Trace a running process's causality chain (via the witr plugin)
+
+Usage: ainb witr [OPTIONS] [args]...
+
+Arguments:
+  [args]...  witr target + flags, forwarded verbatim: <name> | --pid <pid> | --port <p> | --file <path> | --container <id>  [--tree|--warnings|--short]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb witr node                   Trace a process by name
+  ainb witr --pid 1234             Trace a process by PID
+  ainb witr --port 3000            Trace whatever listens on a port
+  ainb witr node --tree            Show the ancestry chain as a tree
+  ainb witr node --format json     Machine-readable snapshot
+```
+
+## `ainb learnings`
+
+Search your learnings knowledge base (via the learnings plugin)
+
+```console
+$ ainb learnings --help
+Search your learnings knowledge base (via the learnings plugin)
+
+Usage: ainb learnings [OPTIONS] [args]...
+
+Arguments:
+  [args]...  subcommand + flags, forwarded verbatim: search <query...> [--bm25] [-k N]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb learnings search "redis connection pooling"   Semantic search
+  ainb learnings search rust async --bm25            Fast BM25 (no LLM rerank)
+  ainb learnings search clap -k 5                    Top 5 hits
+  ainb learnings search clap --format json           Machine-readable hits
+```
+
+## `ainb plugin`
+
+Manage ainb plugins
+
+```console
+$ ainb plugin --help
+Manage ainb plugins
+
+Usage: ainb plugin [OPTIONS] <COMMAND>
+
+Commands:
+  install      Install a plugin from a marketplace (NOT YET IMPLEMENTED)
+  update       Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)
+  remove       Remove an installed plugin (NOT YET IMPLEMENTED)
+  list         List installed plugins
+  search       Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)
+  marketplace  Manage marketplace registries (NOT YET IMPLEMENTED)
+  lint         Validate a plugin manifest + binary (ABI 2.0 sanity checks)
+  watch        Live-tail lifecycle + snapshot events for a registered plugin
+  tail         Stream the host's tracing layer filtered to a single plugin id
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb plugin list                 Installed plugins
+  ainb plugin lint ./my-plugin     Validate a manifest + binary
+  ainb plugin watch burndown       Live-tail a plugin's events
+  ainb plugin tail burndown --level info
+```
+
+### `ainb plugin install`
+
+Install a plugin from a marketplace (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin install --help
+Install a plugin from a marketplace (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin install [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>  plugin id, e.g. burndown or ainb-plugins/burndown@0.1.0
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              skip the capability approval prompt
+  -h, --help             Print help
+```
+
+### `ainb plugin update`
+
+Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin update --help
+Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin update [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              skip prompts when new capabilities are requested
+  -h, --help             Print help
+```
+
+### `ainb plugin remove`
+
+Remove an installed plugin (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin remove --help
+Remove an installed plugin (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin remove [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              skip the data-directory deletion prompt
+  -h, --help             Print help
+```
+
+### `ainb plugin list`
+
+List installed plugins
+
+```console
+$ ainb plugin list --help
+List installed plugins
+
+Usage: ainb plugin list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb plugin search`
+
+Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin search --help
+Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin search [OPTIONS] <query>
+
+Arguments:
+  <query>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb plugin marketplace`
+
+Manage marketplace registries (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin marketplace --help
+Manage marketplace registries (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin marketplace [OPTIONS] <COMMAND>
+
+Commands:
+  add     Register a marketplace by URL or local path (NOT YET IMPLEMENTED)
+  remove  Unregister a marketplace by name (NOT YET IMPLEMENTED)
+  list    List registered marketplaces (NOT YET IMPLEMENTED)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb plugin marketplace add`
+
+Register a marketplace by URL or local path (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin marketplace add --help
+Register a marketplace by URL or local path (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin marketplace add [OPTIONS] <url>
+
+Arguments:
+  <url>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb plugin marketplace remove`
+
+Unregister a marketplace by name (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin marketplace remove --help
+Unregister a marketplace by name (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin marketplace remove [OPTIONS] <name>
+
+Arguments:
+  <name>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb plugin marketplace list`
+
+List registered marketplaces (NOT YET IMPLEMENTED)
+
+```console
+$ ainb plugin marketplace list --help
+List registered marketplaces (NOT YET IMPLEMENTED)
+
+Usage: ainb plugin marketplace list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb plugin lint`
+
+Validate a plugin manifest + binary (ABI 2.0 sanity checks)
+
+```console
+$ ainb plugin lint --help
+Validate a plugin manifest + binary (ABI 2.0 sanity checks)
+
+Usage: ainb plugin lint [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>  plugin id, staging dir, or manifest.toml path
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb plugin watch`
+
+Live-tail lifecycle + snapshot events for a registered plugin
+
+```console
+$ ainb plugin watch --help
+Live-tail lifecycle + snapshot events for a registered plugin
+
+Usage: ainb plugin watch [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>  plugin id (matches `ainb plugin list`)
+
+Options:
+      --duration <duration>  seconds to watch before exiting (default 30)
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help                 Print help
+```
+
+### `ainb plugin tail`
+
+Stream the host's tracing layer filtered to a single plugin id
+
+```console
+$ ainb plugin tail --help
+Stream the host's tracing layer filtered to a single plugin id
+
+Usage: ainb plugin tail [OPTIONS] <plugin>
+
+Arguments:
+  <plugin>  plugin id (matches `ainb plugin list`)
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --level <level>        min log level: trace|debug|info|warn|error (default debug)
+      --since <since>        RFC-3339 timestamp; suppresses events older than this
+      --duration <duration>  seconds to tail before exiting (default 30)
+  -h, --help                 Print help
+```
+
+## `ainb fleet`
+
+Fleet orchestration: standup / broadcast / sequence / needs / daemon
+
+```console
+$ ainb fleet --help
+Fleet orchestration: standup / broadcast / sequence / needs / daemon
+
+Usage: ainb fleet [OPTIONS] <COMMAND>
+
+Commands:
+  standup       Live fleet status: every claude session across ainb + peers + bg jobs
+  broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
+  sequence      Ordered prompts with ack between steps
+  needs         Center control panel — sessions blocked on input / errors / idle / waiting
+  daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+  enrich-cache  Content-addressed enrich cache (the producer's write path)
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb fleet standup               Live status of all sessions
+  ainb fleet needs                 Sessions blocked on input / errors
+  ainb fleet broadcast "git pull" --all     Send a prompt to every session
+  ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
+```
+
+### `ainb fleet standup`
+
+Live fleet status: every claude session across ainb + peers + bg jobs
+
+```console
+$ ainb fleet standup --help
+Live fleet status: every claude session across ainb + peers + bg jobs
+
+Usage: ainb fleet standup [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --text             Force text output even with --format json
+      --no-enrich        Skip AI enrichment — 0-token output (env AINB_FLEET_ENRICH=0)
+  -h, --help             Print help
+```
+
+### `ainb fleet broadcast`
+
+Send one prompt to selected sessions (peers-first, tmux fallback)
+
+```console
+$ ainb fleet broadcast --help
+Send one prompt to selected sessions (peers-first, tmux fallback)
+
+Usage: ainb fleet broadcast [OPTIONS] <prompt>
+
+Arguments:
+  <prompt>
+
+Options:
+      --all              Fan out to every running session
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --filter <filter>  Regex against tmux/workspace name
+      --cwd <cwd>        Substring against cwd
+  -h, --help             Print help
+```
+
+### `ainb fleet sequence`
+
+Ordered prompts with ack between steps
+
+```console
+$ ainb fleet sequence --help
+Ordered prompts with ack between steps
+
+Usage: ainb fleet sequence [OPTIONS] <steps>...
+
+Arguments:
+  <steps>...
+
+Options:
+      --all
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --timeout <timeout>  Per-step timeout (seconds) [default: 300]
+  -h, --help               Print help
+```
+
+### `ainb fleet needs`
+
+Center control panel — sessions blocked on input / errors / idle / waiting
+
+```console
+$ ainb fleet needs --help
+Center control panel — sessions blocked on input / errors / idle / waiting
+
+Usage: ainb fleet needs [OPTIONS]
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --idle-min <idle-min>  Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)
+      --no-enrich            Skip AI enrichment — 0-token HUD (env AINB_FLEET_ENRICH=0)
+  -h, --help                 Print help
+```
+
+### `ainb fleet daemon`
+
+Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+
+```console
+$ ainb fleet daemon --help
+Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+
+Usage: ainb fleet daemon [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -v, --verbose
+  -h, --help             Print help
+```
+
+### `ainb fleet enrich-cache`
+
+Content-addressed enrich cache (the producer's write path)
+
+```console
+$ ainb fleet enrich-cache --help
+Content-addressed enrich cache (the producer's write path)
+
+Usage: ainb fleet enrich-cache [OPTIONS] <COMMAND>
+
+Commands:
+  put   Store a drafted suggestion under a card's enrich_key
+  get   Read a cached suggestion by enrich_key (exit non-zero on miss)
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet enrich-cache put`
+
+Store a drafted suggestion under a card's enrich_key
+
+```console
+$ ainb fleet enrich-cache put --help
+Store a drafted suggestion under a card's enrich_key
+
+Usage: ainb fleet enrich-cache put [OPTIONS] --key <key> --suggestion <suggestion>
+
+Options:
+      --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <key>
+      --suggestion <suggestion>
+  -h, --help                     Print help
+```
+
+#### `ainb fleet enrich-cache get`
+
+Read a cached suggestion by enrich_key (exit non-zero on miss)
+
+```console
+$ ainb fleet enrich-cache get --help
+Read a cached suggestion by enrich_key (exit non-zero on miss)
+
+Usage: ainb fleet enrich-cache get [OPTIONS] --key <key>
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <key>
+  -h, --help             Print help
+```
+
+## `ainb headroom`
+
+Manage the ainb-managed Headroom compression proxy
+
+```console
+$ ainb headroom --help
+Manage the ainb-managed Headroom compression proxy
+
+Usage: ainb headroom [OPTIONS] <COMMAND>
+
+Commands:
+  status  Query the Headroom proxy (running, port, pid, tokens saved)
+  stop    Stop the ainb-managed Headroom proxy
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb headroom status    Is the proxy running? port / pid / tokens saved
+  ainb headroom stop      Stop the ainb-managed Headroom proxy
+```
+
+### `ainb headroom status`
+
+Query the Headroom proxy (running, port, pid, tokens saved)
+
+```console
+$ ainb headroom status --help
+Query the Headroom proxy (running, port, pid, tokens saved)
+
+Usage: ainb headroom status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb headroom stop`
+
+Stop the ainb-managed Headroom proxy
+
+```console
+$ ainb headroom stop --help
+Stop the ainb-managed Headroom proxy
+
+Usage: ainb headroom stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb mcp`
+
+Shared MCP server pool: daemon / proxy / status / stop / import / install
+
+```console
+$ ainb mcp --help
+Shared MCP server pool: daemon / proxy / status / stop / import / install
+
+Usage: ainb mcp [OPTIONS] <COMMAND>
+
+Commands:
+  daemon   Run the shared MCP pool daemon (foreground)
+  proxy    Stdio shim: bridge this process's stdio onto a pool socket
+  status   Query the pool daemon (JSON)
+  stop     Stop the pool daemon (or one server with `stop <server>`)
+  import   Import stdio servers from .mcp.json / Claude user scope into ainb config
+  install  Point other agent CLIs' MCP configs at the pool shim
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb mcp status                  Query the pool daemon (JSON)
+  ainb mcp import                  Import .mcp.json servers into ainb config
+  ainb mcp import --user           Also import Claude user-scope servers
+  ainb mcp install --codex --copilot   Point other agent CLIs at the pool shim
+  ainb mcp stop                    Stop the pool daemon
+  ainb mcp stop <server>           Stop one pooled server
+```
+
+### `ainb mcp daemon`
+
+Run the shared MCP pool daemon (foreground).
+
+```console
+$ ainb mcp daemon --help
+Run the shared MCP pool daemon (foreground).
+
+You rarely run this directly — `ainb run` and the TUI overlay's import auto-start it detached. There is exactly ONE daemon per user, keyed by the control socket at ~/.agents-in-a-box/mcp/sockets/control.sock: every `ainb` instance (and Codex/Copilot sessions wired via `ainb mcp install`) shares it, so N sessions share ONE child process per server. A second start is a no-op — it detects the live socket (or loses the bind race) and exits.
+
+Lifecycle: servers spawn lazily on first attach; a server's child is reaped [mcp_pool].idle_grace_secs after its last client detaches (default 300); and the whole daemon exits after [mcp_pool].daemon_idle_grace_secs with no clients anywhere (default 900, 0 = never) so an unused or orphaned pool can't linger.
+
+Usage: ainb mcp daemon [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --idle-grace <idle-grace>
+          Override [mcp_pool].idle_grace_secs (seconds)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ainb mcp proxy`
+
+Stdio shim: bridge this process's stdio onto a pool socket
+
+```console
+$ ainb mcp proxy --help
+Stdio shim: bridge this process's stdio onto a pool socket
+
+Usage: ainb mcp proxy [OPTIONS] <socket>
+
+Arguments:
+  <socket>  Unix socket path
+
+Options:
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --session <session>  Session label to announce to the pool (shown in `ainb mcp status`)
+  -h, --help               Print help
+```
+
+### `ainb mcp status`
+
+Query the pool daemon (JSON)
+
+```console
+$ ainb mcp status --help
+Query the pool daemon (JSON)
+
+Usage: ainb mcp status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb mcp stop`
+
+Stop the pool daemon (or one server with `stop <server>`)
+
+```console
+$ ainb mcp stop --help
+Stop the pool daemon (or one server with `stop <server>`)
+
+Usage: ainb mcp stop [OPTIONS] [server]
+
+Arguments:
+  [server]  Stop just this server (next attach respawns it); omit to stop the whole daemon
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb mcp import`
+
+Import stdio servers from .mcp.json / Claude user scope into ainb config
+
+```console
+$ ainb mcp import --help
+Import stdio servers from .mcp.json / Claude user scope into ainb config
+
+Usage: ainb mcp import [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --user             Write to user config instead of project .ainb/config.toml
+  -h, --help             Print help
+```
+
+### `ainb mcp install`
+
+Point other agent CLIs' MCP configs at the pool shim
+
+```console
+$ ainb mcp install --help
+Point other agent CLIs' MCP configs at the pool shim
+
+Usage: ainb mcp install [OPTIONS]
+
+Options:
+      --codex            Wire ~/.codex/config.toml
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --copilot          Wire ~/.copilot/mcp-config.json
+  -h, --help             Print help
+```
+
+## `ainb hangar`
+
+Hangar managed-agents control plane (issue / task / beads / daemon)
+
+```console
+$ ainb hangar --help
+Hangar managed-agents control plane (issue / task / beads / daemon)
+
+Usage: ainb hangar [OPTIONS] <COMMAND>
+
+Commands:
+  issue      Manage Hangar issues
+  task       Inspect and control Hangar tasks
+  beads      Sync Hangar issues with the beads (`bd`) tracker
+  daemon     Inspect the Hangar control-plane daemon
+  auth       Manage Hangar auth tokens (PATs + daemon tokens)
+  config     Configure Hangar (env allowlist, …)
+  skills     Import + list workspace-scoped skills
+  templates  List, inspect, and apply curated agent templates
+  autopilot  Create and control cron-scheduled autopilots
+  logs       Read the daemon's structured logs
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb hangar daemon status        Is the control-plane daemon reachable?
+  ainb hangar issue list           List Hangar issues
+  ainb hangar task list            Inspect pending tasks
+  ainb hangar logs tail --follow   Tail daemon logs
+```
+
+### `ainb hangar issue`
+
+Manage Hangar issues
+
+```console
+$ ainb hangar issue --help
+Manage Hangar issues
+
+Usage: ainb hangar issue [OPTIONS] <COMMAND>
+
+Commands:
+  create  Create a new issue (bootstraps a default workspace on first use)
+  list    List issues in the default workspace
+  show    Show one issue by id
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue create`
+
+Create a new issue (bootstraps a default workspace on first use)
+
+```console
+$ ainb hangar issue create --help
+Create a new issue (bootstraps a default workspace on first use)
+
+Usage: ainb hangar issue create [OPTIONS] --title <TITLE>
+
+Options:
+      --format <format>
+          Output format
+
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --title <TITLE>
+          Issue title
+
+      --description <DESCRIPTION>
+          Free-form description
+
+      --state <STATE>
+          Initial lifecycle state
+
+          [default: open]
+
+      --assign <ASSIGN>
+          Assign the issue to an agent (`agent.id`) and enqueue a task for it.
+
+          When set, the issue's assignee is the agent and a `queued` task is enqueued for the agent's runtime, so the daemon's claim loop picks it up, materialises the agent's attached skills (P6.4), and dispatches the provider. The created task id is printed alongside the issue id.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar issue list`
+
+List issues in the default workspace
+
+```console
+$ ainb hangar issue list --help
+List issues in the default workspace
+
+Usage: ainb hangar issue list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --state <STATE>    Restrict to issues in this lifecycle state [default: open]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue show`
+
+Show one issue by id
+
+```console
+$ ainb hangar issue show --help
+Show one issue by id
+
+Usage: ainb hangar issue show [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar task`
+
+Inspect and control Hangar tasks
+
+```console
+$ ainb hangar task --help
+Inspect and control Hangar tasks
+
+Usage: ainb hangar task [OPTIONS] <COMMAND>
+
+Commands:
+  list    List pending (queued / dispatched) tasks
+  cancel  Cancel a task (`{queued|dispatched|running} -> cancelled`)
+  retry   Spawn a retry child for a retryable failed task
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar task list`
+
+List pending (queued / dispatched) tasks
+
+```console
+$ ainb hangar task list --help
+List pending (queued / dispatched) tasks
+
+Usage: ainb hangar task list [OPTIONS]
+
+Options:
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --runtime <RUNTIME>  Restrict to a single runtime id. When omitted, every runtime in the default workspace is scanned
+  -h, --help               Print help
+```
+
+#### `ainb hangar task cancel`
+
+Cancel a task (`{queued|dispatched|running} -> cancelled`)
+
+```console
+$ ainb hangar task cancel --help
+Cancel a task (`{queued|dispatched|running} -> cancelled`)
+
+Usage: ainb hangar task cancel [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Task id (ULID)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar task retry`
+
+Spawn a retry child for a retryable failed task
+
+```console
+$ ainb hangar task retry --help
+Spawn a retry child for a retryable failed task
+
+Usage: ainb hangar task retry [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Task id (ULID)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar beads`
+
+Sync Hangar issues with the beads (`bd`) tracker
+
+```console
+$ ainb hangar beads --help
+Sync Hangar issues with the beads (`bd`) tracker
+
+Usage: ainb hangar beads [OPTIONS] <COMMAND>
+
+Commands:
+  reconcile  Walk the mapping table and repair Hangar <-> bd drift
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar beads reconcile`
+
+Walk the mapping table and repair Hangar <-> bd drift
+
+```console
+$ ainb hangar beads reconcile --help
+Walk the mapping table and repair Hangar <-> bd drift
+
+Usage: ainb hangar beads reconcile [OPTIONS]
+
+Options:
+      --dry-run          Diff only — report drift without writing either side
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --label <LABEL>    Restrict to bd issues carrying this label (repeatable)
+      --json             Emit the reconcile report as JSON instead of a summary line
+  -h, --help             Print help
+```
+
+### `ainb hangar daemon`
+
+Inspect the Hangar control-plane daemon
+
+```console
+$ ainb hangar daemon --help
+Inspect the Hangar control-plane daemon
+
+Usage: ainb hangar daemon [OPTIONS] <COMMAND>
+
+Commands:
+  status  Report whether the Hangar database is reachable and migrated
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon status`
+
+Report whether the Hangar database is reachable and migrated
+
+```console
+$ ainb hangar daemon status --help
+Report whether the Hangar database is reachable and migrated
+
+Usage: ainb hangar daemon status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar auth`
+
+Manage Hangar auth tokens (PATs + daemon tokens)
+
+```console
+$ ainb hangar auth --help
+Manage Hangar auth tokens (PATs + daemon tokens)
+
+Usage: ainb hangar auth [OPTIONS] <COMMAND>
+
+Commands:
+  token  Manage personal access tokens
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar auth token`
+
+Manage personal access tokens
+
+```console
+$ ainb hangar auth token --help
+Manage personal access tokens
+
+Usage: ainb hangar auth token [OPTIONS] <COMMAND>
+
+Commands:
+  create  Mint a new PAT. Prints the plaintext **once** — it is never recoverable
+  list    List this user's PATs (id, scope, timestamps — never the plaintext)
+  revoke  Revoke a PAT by id
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar config`
+
+Configure Hangar (env allowlist, …)
+
+```console
+$ ainb hangar config --help
+Configure Hangar (env allowlist, …)
+
+Usage: ainb hangar config [OPTIONS] <COMMAND>
+
+Commands:
+  env.allow  Manage the provider-subprocess env allowlist
+  warnings   Manage danger-full-access warning acknowledgements
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar config env.allow`
+
+Manage the provider-subprocess env allowlist
+
+```console
+$ ainb hangar config env.allow --help
+Manage the provider-subprocess env allowlist
+
+Usage: ainb hangar config env.allow [OPTIONS] <COMMAND>
+
+Commands:
+  list    Show the merged effective allowlist (`[deny-locked]` marks deny entries)
+  add     Add an env-var name (or `*`-suffix glob) to the allowlist
+  remove  Remove an env-var name from the allowlist
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar config warnings`
+
+Manage danger-full-access warning acknowledgements
+
+```console
+$ ainb hangar config warnings --help
+Manage danger-full-access warning acknowledgements
+
+Usage: ainb hangar config warnings [OPTIONS] <COMMAND>
+
+Commands:
+  reset  Clear recorded warning acks so they show again
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar skills`
+
+Import + list workspace-scoped skills
+
+```console
+$ ainb hangar skills --help
+Import + list workspace-scoped skills
+
+Usage: ainb hangar skills [OPTIONS] <COMMAND>
+
+Commands:
+  sync  Import skills from a toolkit directory into a workspace (idempotent)
+  list  List the skills imported into a workspace
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar skills sync`
+
+Import skills from a toolkit directory into a workspace (idempotent)
+
+```console
+$ ainb hangar skills sync --help
+Import skills from a toolkit directory into a workspace (idempotent)
+
+Usage: ainb hangar skills sync [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to import into. Defaults to the bootstrapped `default` workspace
+      --source <SOURCE>        Source directory holding `<name>/SKILL.md` skill dirs. Defaults to `$AINB_TOOLKIT_SKILLS_DIR`, else a walk up to `ainb-toolkit/skills`
+      --dry-run                Print the skills that would be imported without writing anything
+  -h, --help                   Print help
+```
+
+#### `ainb hangar skills list`
+
+List the skills imported into a workspace
+
+```console
+$ ainb hangar skills list --help
+List the skills imported into a workspace
+
+Usage: ainb hangar skills list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar templates`
+
+List, inspect, and apply curated agent templates
+
+```console
+$ ainb hangar templates --help
+List, inspect, and apply curated agent templates
+
+Usage: ainb hangar templates [OPTIONS] <COMMAND>
+
+Commands:
+  list  List every embedded curated template
+  show  Show one template in full (instructions + skill list)
+  use   Create an agent from a template, attaching its bundled skills
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar templates list`
+
+List every embedded curated template
+
+```console
+$ ainb hangar templates list --help
+List every embedded curated template
+
+Usage: ainb hangar templates list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar templates show`
+
+Show one template in full (instructions + skill list)
+
+```console
+$ ainb hangar templates show --help
+Show one template in full (instructions + skill list)
+
+Usage: ainb hangar templates show [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Template name (e.g. `code-reviewer`)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar templates use`
+
+Create an agent from a template, attaching its bundled skills
+
+```console
+$ ainb hangar templates use --help
+Create an agent from a template, attaching its bundled skills
+
+Usage: ainb hangar templates use [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Template name to apply (e.g. `code-reviewer`)
+
+Options:
+      --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>    Workspace slug to create the agent in. Defaults to the bootstrapped `default` workspace
+      --agent-name <AGENT_NAME>  Name the created agent something other than the template name
+  -h, --help                     Print help
+```
+
+### `ainb hangar autopilot`
+
+Create and control cron-scheduled autopilots
+
+```console
+$ ainb hangar autopilot --help
+Create and control cron-scheduled autopilots
+
+Usage: ainb hangar autopilot [OPTIONS] <COMMAND>
+
+Commands:
+  create   Create a cron-scheduled autopilot (rejects an invalid cron expression)
+  list     List the workspace's autopilots (cron, next tick, last run, enabled)
+  disable  Disable an autopilot so the scheduler stops firing it
+  enable   Re-enable an autopilot, recomputing its next tick from now
+  run      Fire one tick immediately (manual run), bypassing the schedule
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar autopilot create`
+
+Create a cron-scheduled autopilot (rejects an invalid cron expression)
+
+```console
+$ ainb hangar autopilot create --help
+Create a cron-scheduled autopilot (rejects an invalid cron expression)
+
+Usage: ainb hangar autopilot create [OPTIONS] --name <NAME> --cron <CRON> --agent <AGENT>
+
+Options:
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --name <NAME>
+          Name, unique within the workspace
+      --cron <CRON>
+          Cron expression (UTC, 5-field) — validated before insert
+      --agent <AGENT>
+          Agent id to dispatch to at each tick (`agent.id`)
+      --instructions <INSTRUCTIONS>
+          Optional instructions handed to the agent on every tick
+      --max-concurrent-runs <MAX_CONCURRENT_RUNS>
+          Maximum simultaneous in-flight runs before a tick is skipped [default: 1]
+      --workspace <WORKSPACE>
+          Workspace slug to create in. Defaults to the bootstrapped `default`
+  -h, --help
+          Print help
+```
+
+#### `ainb hangar autopilot list`
+
+List the workspace's autopilots (cron, next tick, last run, enabled)
+
+```console
+$ ainb hangar autopilot list --help
+List the workspace's autopilots (cron, next tick, last run, enabled)
+
+Usage: ainb hangar autopilot list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot disable`
+
+Disable an autopilot so the scheduler stops firing it
+
+```console
+$ ainb hangar autopilot disable --help
+Disable an autopilot so the scheduler stops firing it
+
+Usage: ainb hangar autopilot disable [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot enable`
+
+Re-enable an autopilot, recomputing its next tick from now
+
+```console
+$ ainb hangar autopilot enable --help
+Re-enable an autopilot, recomputing its next tick from now
+
+Usage: ainb hangar autopilot enable [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot run`
+
+Fire one tick immediately (manual run), bypassing the schedule
+
+```console
+$ ainb hangar autopilot run --help
+Fire one tick immediately (manual run), bypassing the schedule
+
+Usage: ainb hangar autopilot run [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+### `ainb hangar logs`
+
+Read the daemon's structured logs
+
+```console
+$ ainb hangar logs --help
+Read the daemon's structured logs
+
+Usage: ainb hangar logs [OPTIONS] <COMMAND>
+
+Commands:
+  tail  Pretty-print recent log events; `--follow` streams live
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar logs tail`
+
+Pretty-print recent log events; `--follow` streams live
+
+```console
+$ ainb hangar logs tail --help
+Pretty-print recent log events; `--follow` streams live
+
+Usage: ainb hangar logs tail [OPTIONS]
+
+Options:
+  -f, --follow           Stream new events live as the daemon writes them (poll-append loop)
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --lines <LINES>    Print the last N events and exit (the bounded tail window) [default: 200]
+      --level <LEVEL>    Only show events at or above this level (`trace`/`debug`/`info`/`warn`/`error`)
+      --no-follow        Print + exit even when `--follow` is set (bounded mode for tests/CI)
+  -h, --help             Print help
+```
+
+## `ainb rtk`
+
+RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse hook
+
+```console
+$ ainb rtk --help
+RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse hook
+
+Usage: ainb rtk [OPTIONS] <COMMAND>
+
+Commands:
+  status     Show RTK install state, hook wiring, and total tokens saved
+  install    Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+  uninstall  Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb rtk status      Install state + total tokens saved
+  ainb rtk install     Install rtk + wire the Claude Code PreToolUse hook
+  ainb rtk uninstall   Remove the hook (keeps the rtk binary)
+```
+
+### `ainb rtk status`
+
+Show RTK install state, hook wiring, and total tokens saved
+
+```console
+$ ainb rtk status --help
+Show RTK install state, hook wiring, and total tokens saved
+
+Usage: ainb rtk status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb rtk install`
+
+Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+
+```console
+$ ainb rtk install --help
+Install rtk (brew install rtk) and wire the Claude Code PreToolUse hook (rtk init -g)
+
+Usage: ainb rtk install [OPTIONS]
+
+Options:
+      --codex            Also wire Codex AGENTS.md prompt injection (rtk init -g --codex). Best-effort; weaker than the Claude Code hook path.
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb rtk uninstall`
+
+Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+
+```console
+$ ainb rtk uninstall --help
+Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
+
+Usage: ainb rtk uninstall [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## Skill manager
+
+The skill-manager commands (`skill`, `source`, `search`, `migrate`) are
+intercepted before clap and routed to the unit manager; they are documented in
+their own section under [Skill manager](../skill-manager/guide) and surfaced in
+`ainb --help` under "SKILL MANAGER". Run `ainb skill --help` for the full verb
+list.
+
+## Hidden / daemon commands
+
+A few commands are hidden from `ainb --help` because they are internal
+daemon/hook entrypoints rather than everyday verbs. Run `<cmd> --help` for each:
+
+- `ainb notifyd <run|stop|install|uninstall|status|list>` — the ainb-hooks
+  notification daemon. `ainb notifyd list [--format json]` reads persisted
+  notifications headlessly; the TUI Inbox is the interactive view.
+- `ainb statusline` — legacy Claude Code statusline alias (prefer
+  `ainb claudecode statusline`).
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0`  | Success |
-| `1`  | Runtime error — missing session, failed tmux op, config parse error, etc. Error message on stderr. |
-| `2`  | Usage error — unknown flag, invalid enum value, missing required argument. Handled by clap. |
-
----
-
-## File layout
-
-`ainb` stores state under `~/.agents-in-a-box/` and reads/writes a handful of Claude-specific files under `~/.claude/`:
-
-```
-~/.agents-in-a-box/
-├── sessions.json                    # Session registry (read by list/status/kill/recover)
-├── config/config.toml               # User-level config (written by `config set` / `config edit`)
-├── worktrees/
-│   ├── by-session/<session-id>      # Symlink → real worktree path
-│   └── <branch-name>/               # Actual worktree directories
-├── repo-cache/                      # Cloned remote repos (populated by `run --remote-repo`)
-├── favorites.json                   # Favorite repositories (managed by `favorites`)
-└── presets/<name>.toml              # Custom presets (managed by `presets`)
-
-./.agents-box/
-├── config.toml                      # Project-level config override (takes precedence)
-└── preset.toml                      # Active preset (written by `presets apply`)
-
-~/.claude/
-├── claude.json                      # Claude CLI state (updated by `run`)
-└── agents/<session-id>.json         # Agent session metadata (scanned by `recover`)
-```
-
-Configuration precedence (highest first):
-1. `./.agents-box/config.toml` (project)
-2. `~/.agents-in-a-box/config/config.toml` (user)
-3. `/etc/agents-in-a-box/config.toml` (system)
-
----
-
-## Environment variables
-
-| Variable | Effect |
-|----------|--------|
-| `EDITOR` | Used by `ainb config edit` to open the user config. Falls back to `vi`. |
-| `HOME` | All paths under `~/.agents-in-a-box/` and `~/.claude/` resolve through `$HOME`. Override to run `ainb` against an isolated sandbox (see `scripts/cli-smoke-test.sh`). |
-| `TMUX_TMPDIR` | Redirects the tmux socket directory. Useful for isolation testing so sessions don't appear in the user's default `tmux ls`. |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` / `GITHUB_COPILOT_TOKEN` | Honored by the respective AI providers when `--tool` selects them. |
-
----
-
-## Command reference
-
-### `ainb tui`
-
-Launch the TUI. This is the default when `ainb` is invoked with no subcommand.
-
-```bash
-ainb            # equivalent to `ainb tui`
-ainb tui
-```
-
-No flags beyond the global `--format` / `--help`.
-
----
-
-### `ainb run`
-
-Spawn a new AI coding session in an isolated worktree + tmux pane.
-
-```bash
-ainb run [OPTIONS]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--repo <PATH>` | Local repository path to use. |
-| `--remote-repo <OWNER/REPO \| URL>` | Clone this repo into `~/.agents-in-a-box/repo-cache/` first. |
-| `--create-branch <NAME>` | Create a new branch with this name in the worktree. |
-| `--worktree` | Use a git worktree for isolation (recommended). |
-| `--tool <TOOL>` | AI tool. One of `claude` (default), `codex`, `gemini`, `copilot`. Invalid values rejected at parse. |
-| `--model <MODEL>` | Model identifier. Default `sonnet`. Common values: `sonnet`, `opus`, `haiku`. |
-| `-p, --prompt <TEXT>` | Initial prompt sent to the agent after startup. |
-| `-a, --attach` | Drop into the tmux session after creation. |
-| `-i, --interactive` | Run in interactive mode (spawn tmux and attach). |
-| `--dangerously-skip-permissions` | Pass the provider's "skip permission prompts" flag. **Dangerous** — the agent will not confirm destructive operations. |
-| `--name <NAME>` | Custom session/workspace name (otherwise auto-generated from the repo + branch). |
-
-**Examples**
-
-```bash
-ainb run --repo .                                  # Use current directory
-ainb run --repo . --worktree                       # Isolate in a new worktree
-ainb run --repo . --create-branch feat/new         # Create a branch + worktree
-ainb run --remote-repo owner/repo                  # Clone from GitHub first
-ainb run --tool codex --repo .                     # Use Codex instead of Claude
-ainb run --repo . -p "fix the failing tests"       # Seed an initial prompt
-ainb run --repo . --attach                         # Drop into tmux after creating
-```
-
-The provider binary (`claude`, `codex`, `gemini`, `copilot`) must be on `$PATH`. If it isn't, `run` exits with `1` and a clear message (`codex: not found on PATH`).
-
----
-
-### `ainb list`
-
-List sessions from the registry.
-
-```bash
-ainb list [OPTIONS]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--running` | Only sessions whose tmux is currently alive. |
-| `--workspace <NAME>` | Filter by workspace name. |
-| `--format json` | Emit the registry as JSON for piping to `jq`. |
-
-**Example**
-
-```bash
-ainb list --format json | jq '.[] | {name: .workspace_name, tool: .agent_type, branch}'
-```
-
-### `ainb usage`
-
-Read-only local usage analytics for Claude Code and Codex session histories. AINB reads `~/.claude/projects/**/*.jsonl` plus `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` or `$CODEX_HOME/sessions/...`. It does not modify session files. Cost values are estimates from built-in model pricing; unknown models still report tokens and calls.
-
-```bash
-ainb usage report --period week
-ainb usage report --from 2026-04-01 --to 2026-04-10 --format json
-ainb usage report --provider codex --include agents-in-a-box
-ainb usage report --exclude scratch --format json
-ainb usage status --format json
-ainb usage today --format json
-ainb usage month --format json
-ainb usage export --format csv --output /tmp/ainb-usage.csv
-ainb usage export --format csv --output /tmp/ainb-usage-export
-ainb usage optimize --period 30days
-ainb usage compare --period all --format json
-ainb usage yield --period week
-```
-
-Usage filters:
-
-| Flag | Values | Purpose |
-|------|--------|---------|
-| `--period` | `today`, `week`, `30days`, `month`, `all` | Select time window. |
-| `--from`, `--to` | `YYYY-MM-DD` | Custom inclusive range. One bound may be omitted. |
-| `--provider` | `all`, `claude`, `codex` | Provider filter. |
-| `--include`, `--project` | repeatable text | Include projects whose name/path contains text. |
-| `--exclude` | repeatable text | Exclude projects whose name/path contains text. Exclusion wins. |
-
-Usage settings:
-
-```bash
-ainb usage plan show --format json
-ainb usage plan set claude-pro --provider claude --reset-day 12
-ainb usage plan set custom --monthly-usd 75 --provider all
-ainb usage plan reset
-ainb usage currency GBP --symbol GBP
-ainb usage currency --reset
-ainb usage model-alias --list
-ainb usage model-alias cursor-auto claude-sonnet-4-5
-ainb usage model-alias --remove cursor-auto
-```
-
-TUI: press `i` to open Stats, `Tab` to reach `Burndown` and `Optimize`, `1`-`5` for periods, `p` for All/Claude/Codex, `/` include filter, `x` exclude filter, `d` custom range, `c` clear filters, and `r` reload.
-
----
-
-### `ainb status`
-
-Inspect a single session.
-
-```bash
-ainb status <SESSION>
-```
-
-`<SESSION>` can be a full/partial session UUID, tmux name, or workspace-name prefix. Prints session state, tmux status, worktree path, branch, and provider.
-
----
-
-### `ainb logs`
-
-View or follow a session's log output.
-
-```bash
-ainb logs [OPTIONS] <SESSION>
-```
-
-| Flag | Description |
-|------|-------------|
-| `-l, --lines <N>` | Number of lines to show. Default `100`. |
-| `-f, --follow` | Follow new output (like `tail -f`). |
-
-**Example**
-
-```bash
-ainb logs my-project -f              # Follow live
-ainb logs my-project --lines 500     # Print the last 500 lines and exit
-```
-
----
-
-### `ainb attach`
-
-Attach to a session's tmux pane interactively.
-
-```bash
-ainb attach <SESSION>
-```
-
-This replaces the current process with `tmux attach`, so it only makes sense from an interactive terminal (not a script).
-
----
-
-### `ainb kill`
-
-Terminate a session: kills the tmux, removes the worktree symlink, updates the registry.
-
-```bash
-ainb kill [OPTIONS] <SESSION>
-```
-
-| Flag | Description |
-|------|-------------|
-| `-f, --force` | Skip the confirmation prompt. Required for non-interactive use. |
-
----
-
-### `ainb auth`
-
-Interactive authentication setup — select provider (Claude, API key, etc.) and store credentials. Equivalent of the TUI's "Setup" panel.
-
-```bash
-ainb auth
-```
-
-Credentials for supported providers are stored via the OS keyring (macOS Keychain / libsecret / Windows Credential Manager) rather than a plaintext config file.
-
----
-
-### `ainb recover`
-
-Recover sessions whose state drifted — e.g. `sessions.json` entry without a live tmux, or agent-side metadata in `~/.claude/agents/` without a registry entry.
-
-```bash
-ainb recover <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | List orphaned sessions and broken worktree symlinks. Read-only. |
-| `resume <SESSION>` | Re-register an orphaned session in `sessions.json`. Accepts a partial UUID, tmux name, or workspace prefix. |
-| `cleanup [SESSION] [--force]` | Remove orphaned session entries and broken symlinks. Omit `<SESSION>` to clean all orphans. `--force` skips confirmation. |
-
-**Examples**
-
-```bash
-ainb recover list                       # Read-only sanity check
-ainb recover list --format json         # Feed into automation
-ainb recover cleanup --force            # Clean every orphan without prompting
-ainb recover resume 7a2b                # Resume by UUID prefix
-```
-
----
-
-### `ainb config`
-
-Read and modify configuration.
-
-```bash
-ainb config <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `show` | Display the merged config (project + user + system). |
-| `get <KEY>` | Get a value by dot-notation key (e.g. `authentication.default_model`). |
-| `set <KEY> <VALUE>` | Set a value in the **user-level** config. Creates the file if missing. |
-| `reset [--force]` | Reset user config to defaults. Prompts unless `--force`. |
-| `path` | Show the resolved path of each config layer and whether it exists. |
-| `edit` | Open the user config in `$EDITOR`. |
-
-**Examples**
-
-```bash
-ainb config path                                     # Where's my config?
-ainb config show --format json | jq .                # Dump merged config
-ainb config get authentication.default_model        # → sonnet
-ainb config set authentication.default_model opus   # Persist a change
-ainb config reset --force                            # Nuke user overrides
-```
-
-The dot-notation supports any TOML path the schema exposes; invalid keys exit with `1` and a list of valid top-level sections.
-
----
-
-### `ainb git`
-
-Worktree inspection and cleanup.
-
-```bash
-ainb git <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `worktrees` | List all managed worktrees and which session owns each. |
-| `cleanup [--dry-run] [--force]` | Remove worktrees not referenced by any session. `--dry-run` previews. |
-| `status <SESSION>` | Show `git status` for a session's worktree. |
-
-**Example**
-
-```bash
-ainb git worktrees --format json | jq '.[] | select(.session_id == null)'  # Orphaned worktrees
-ainb git cleanup --dry-run                                                 # Preview cleanup
-```
-
----
-
-### `ainb favorites`
-
-Bookmark frequently-used repositories so `ainb run` can pick them up by alias.
-
-```bash
-ainb favorites <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | All favorites sorted by use count (most-used first). |
-| `add --alias <A> [--description <D>] [--tags <A,B>] <SOURCE>` | Add a favorite. `<SOURCE>` is `owner/repo`, an HTTPS/SSH URL, or a local path. |
-| `remove <ALIAS>` | Remove a favorite by alias. |
-| `use <ALIAS>` | Bump `use_count` and `last_used` for ranking. |
-
-**Example**
-
-```bash
-ainb favorites add --alias myapp --tags "work,rust" git@github.com:me/myapp.git
-ainb favorites list --format json | jq '.[0].alias'
-```
-
-Favorites live in `~/.agents-in-a-box/favorites.json`.
-
----
-
-### `ainb init`
-
-First-time setup, prerequisite check, and factory reset.
-
-```bash
-ainb init [OPTIONS]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--check` | Only verify prerequisites (`tmux`, `git`, `claude`, `docker`). Read-only. |
-| `--status` | Report onboarding completion state. |
-| `--reset` | **Destructive** — remove `~/.agents-in-a-box/` entirely. Requires `--force` for non-interactive use. |
-| `-f, --force` | Skip interactive confirmation (required for non-interactive `--reset`). |
-
-**Example**
-
-```bash
-ainb init --check                   # CI-friendly prereq check
-ainb init --status --format json    # What's configured?
-ainb init --reset --force           # Factory reset (dangerous)
-```
-
----
-
-### `ainb doctor`
-
-Classified dependency check for the reflect / statusline toolchain. Reports every dependency grouped by what needs it (core / reflect / statusline / beads / usage), with version/variant detection (bash >= 4, `timeout` or `gtimeout`, `reflect-kb` via the `reflect` binary or a system import) and the exact install command for anything missing.
-
-```bash
-ainb doctor                 # text report, grouped by consumer
-ainb doctor --format json   # machine-readable for scripts / CI
-```
-
-Read-only; installs nothing. Use `ainb reflect bootstrap` to act on what it reports.
-
----
-
-### `ainb reflect`
-
-Reflect plugin lifecycle. Today: `bootstrap`, the one-step installer for the reflect toolchain.
-
-```bash
-ainb reflect bootstrap          # install reflect-kb[graph]; print missing system tools
-ainb reflect bootstrap --yes    # don't prompt before installing the reflect-owned layer
-ainb reflect bootstrap --print-only   # detect + print every command, install nothing
-ainb reflect check              # dependency check (reflect-focused; same engine as `ainb doctor`)
-```
-
-`bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]` — the `reflect` CLI plus qmd + nano-graphrag — via `uv`) after one confirm, and only *prints* the `brew`/`apt` commands for system tools (bash >= 4, coreutils, jq) so it never touches your OS or PATH. If `uv` is missing it prints the uv installer line and stops. Verify the result with `ainb doctor`.
-
----
-
-### `ainb presets`
-
-Session presets bundle a provider + model + defaults that `ainb run` can apply in one step.
-
-```bash
-ainb presets <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | Built-in + custom presets. |
-| `show <NAME>` | Full details for one preset. |
-| `create <NAME> [--provider <P>] [--model <M>] [--description <D>]` | Create a custom preset. Name must not collide with a built-in. |
-| `delete <NAME>` | Delete a custom preset. Built-ins cannot be deleted. |
-| `apply <NAME>` | Write `./.agents-box/preset.toml` pointing to this preset. Subsequent `ainb run` invocations in this repo pick up the defaults. |
-
-**Built-in presets** (ship with ainb):
-
-| Name | Provider / Model | Use case |
-|------|-----------------|----------|
-| `rust-backend` | claude / sonnet | Rust backend development with testing + clippy |
-| `typescript-frontend` | claude / sonnet | TypeScript frontend with React + testing |
-| `fast-iteration` | claude / haiku | Maximum speed — skips permission prompts |
-
-**Example**
-
-```bash
-ainb presets list
-ainb presets show rust-backend
-ainb presets create my-opus --provider claude --model opus --description "Heavy refactors"
-ainb presets apply rust-backend     # Next `ainb run` in this repo uses sonnet + rust conventions
-```
-
----
-
-### `ainb completion`
-
-Emit shell completion script to stdout.
-
-```bash
-ainb completion <SHELL>
-```
-
-Supported: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
-
----
-
-### `ainb claudecode`
-
-Provider-namespaced commands for Claude Code. Other providers grow their own namespace; today only the statusline hook lives here.
-
-```bash
-ainb claudecode <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `statusline` | Claude Code statusline hook: reads session JSON on stdin, caches rate-limit windows for the TUI, and emits a powerline status string on stdout. |
-
-**`statusline` flags**
-
-| Flag | Description |
-|------|-------------|
-| `--cache-only` | Side-channel mode: write the rate-limit cache only and emit nothing on stdout. |
-
-Wire it into Claude Code's `settings.json` as the `statusLine` command so the TUI can surface live rate-limit windows.
-
----
-
-### `ainb plugin`
-
-Manage ainb plugins — install from marketplaces, update, remove, and inspect runtime events.
-
-```bash
-ainb plugin <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `install <PLUGIN> [-y]` | Install a plugin from a marketplace. `<PLUGIN>` is a plugin id, e.g. `burndown` or `ainb-plugins/burndown@0.1.0`. `-y, --yes` skips the capability-approval prompt. |
-| `update <PLUGIN> [-y]` | Update an installed plugin to the latest matching version. `-y, --yes` skips prompts when new capabilities are requested. |
-| `remove <PLUGIN> [-y]` | Remove an installed plugin. `-y, --yes` skips the data-directory deletion prompt. |
-| `list` | List installed plugins. |
-| `search <QUERY>` | Search registered marketplaces by plugin name. |
-| `marketplace <SUBCOMMAND>` | Manage marketplace registries: `add <URL\|PATH>`, `remove <NAME>`, `list`. |
-| `lint <PLUGIN>` | Validate a plugin manifest + binary (ABI 2.0 sanity checks). Accepts a plugin id, staging dir, or `manifest.toml` path. |
-| `watch <PLUGIN> [--duration <SECS>]` | Live-tail lifecycle + snapshot events for a registered plugin. `--duration` defaults to 30s. |
-| `tail <PLUGIN> [--level <LVL>] [--since <TS>] [--duration <SECS>]` | Stream the host's tracing layer filtered to one plugin id. `--level` is `trace\|debug\|info\|warn\|error` (default `debug`); `--since` is an RFC-3339 timestamp; `--duration` defaults to 30s. |
-
-**Examples**
-
-```bash
-ainb plugin marketplace add https://github.com/stevengonsalvez/ainb-plugins
-ainb plugin search burndown
-ainb plugin install burndown -y
-ainb plugin list --format json
-ainb plugin watch burndown --duration 60
-```
-
-In-tree v2 reference plugins: `burndown` (analytics), `notifyd` (notifications), `session-reader` (data backend).
-
----
-
-### `ainb fleet`
-
-Orchestrate every claude session running on the host — merged across ainb's registry, the claude-peers broker, and background jobs.
-
-```bash
-ainb fleet <SUBCOMMAND>
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `standup [--text]` | Live fleet status: every claude session across ainb + peers + background jobs. `--text` forces text output even with `--format json`. |
-| `broadcast <PROMPT> (--all \| --filter <REGEX> \| --cwd <SUBSTR>)` | Send one prompt to selected sessions (peers-first, tmux fallback). Requires an explicit targeting flag — no implicit fan-out. `--filter` matches a regex against tmux/workspace name; `--cwd` matches a substring of the session cwd. |
-| `sequence <STEPS>... [--all] [--timeout <SECS>]` | Send ordered prompts with an ack between each step. `--timeout` is the per-step timeout in seconds (default `300`). |
-| `needs [--idle-min <MIN>]` | Center control panel — list sessions blocked on input / errors / idle / waiting. `--idle-min` is minutes of assistant silence before flagging IDLE (default 5, env `AINB_FLEET_IDLE_MIN`). |
-| `daemon [-v]` | Watcher: registers as the `ainb-fleet-cp` peer and auto-continues sessions hitting API errors. `-v, --verbose` for detailed logging. |
-
-**Examples**
-
-```bash
-ainb fleet standup --format json | jq '.[] | .workspace_name'
-ainb fleet needs --idle-min 10
-ainb fleet broadcast "git pull" --filter '^feat-'
-ainb fleet sequence "run tests" "commit" --all --timeout 600
-ainb fleet daemon -v
-```
-
-Backed by the in-tree `plugins/ainb-fleet/` plugin.
-
----
+| `0` | Success. |
+| `1` | Runtime error (the command ran but failed). |
+| `2` | Usage error (bad flags/args), or a required plugin/tool is not installed. |
 
 ## Scripting recipes
 
-**Agent-friendly: list running sessions as JSON, exit non-zero if none**
-
 ```bash
-count=$(ainb list --running --format json | jq length)
-[ "$count" -gt 0 ] || { echo "no running sessions"; exit 1; }
+# List running sessions as JSON and pull workspace names
+ainb list --running --format json | jq -r '.[].workspace'
+
+# Spawn a session in an isolated worktree with an initial prompt
+ainb run --repo . --worktree -p "fix the failing tests"
+
+# Machine-readable diff of the working tree (no TUI)
+ainb diff-review --format json | jq '.total_insertions, .total_deletions'
+
+# Find orphaned sessions and clean them up
+ainb recover list --format json && ainb recover cleanup
+
+# Search the knowledge base headlessly
+ainb learnings search "redis connection pooling" --format json
 ```
-
-**Create a session, wait for it to register, seed a prompt, kill when done**
-
-```bash
-ainb run --repo . --worktree --name review-pr --tool claude --model sonnet \
-         -p "Review the diff on the current branch"
-until ainb status review-pr --format json | jq -e '.is_running' >/dev/null; do sleep 1; done
-# ... do work ...
-ainb kill review-pr --force
-```
-
-**Isolated sandbox for testing (zero impact on real user data)**
-
-```bash
-export HOME=$(mktemp -d)
-export TMUX_TMPDIR=$HOME/tmux
-mkdir -p "$TMUX_TMPDIR"
-ainb init --check                 # Verifies prereqs against the sandbox
-ainb config set authentication.default_model opus
-ainb list                         # Empty — sandbox is pristine
-```
-
-See `scripts/cli-smoke-test.sh` in this repo for a full isolation harness.
-
-**Cleanup everything orphaned**
-
-```bash
-ainb recover cleanup --force
-ainb git cleanup --force
-```
-
----
-
-*For TUI-specific keybindings see the README. For architecture and module layout see `CLAUDE.md`.*

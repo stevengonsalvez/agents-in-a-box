@@ -123,7 +123,7 @@ fn rate_window_from_value(value: &serde_json::Value) -> Option<RateWindow> {
 /// dropped the integer form, so the reset instant never reached the cache
 /// and the TUI's per-window "↻ <reset>" affordance had nothing to render.
 /// Accept both forms here.
-fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
     if let Some(s) = value.as_str() {
         // Already a timestamp string — trust it as-is.
         return Some(s.to_string());
@@ -137,7 +137,7 @@ fn parse_resets_at(value: &serde_json::Value) -> Option<String> {
     chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339())
 }
 
-fn round_pct(p: f64) -> u8 {
+pub(crate) fn round_pct(p: f64) -> u8 {
     p.clamp(0.0, 100.0).round() as u8
 }
 
@@ -177,7 +177,7 @@ pub fn read_cache(path: &std::path::Path) -> Option<LiveCache> {
 /// Render the powerline-styled status string. Hand-rolled ANSI escapes
 /// keep this dependency-free. The format is intentionally plain (no
 /// nerd-font glyphs) so it works in any terminal.
-pub fn render_powerline(cache: &LiveCache) -> String {
+pub fn render_powerline(cache: &LiveCache, session_dir: Option<&std::path::Path>) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(model) = &cache.model {
@@ -212,7 +212,135 @@ pub fn render_powerline(cache: &LiveCache) -> String {
         parts.push(ansi_fg(GOLD, &format!("${cost:.2}")));
     }
 
+    if let Some(hr) = headroom_segment() {
+        parts.push(hr);
+    }
+
+    if let Some(rtk) = rtk_segment(session_dir) {
+        parts.push(rtk);
+    }
+
     parts.join(&format!(" {} ", ansi_fg(MUTED, "·")))
+}
+
+/// A compact `HR` segment when this session's CLI is routed through the local
+/// Headroom proxy.
+///
+/// Detection reads the base-URL env var the statusline process actually
+/// inherited (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex). A
+/// `#951`-bypassed child that never received the var shows nothing — so the
+/// badge reflects ACTUAL routing, not the stored toggle. A fast localhost TCP
+/// probe distinguishes a live proxy (green `HR`) from a configured-but-down one
+/// (amber `HR`).
+fn headroom_segment() -> Option<String> {
+    let port = crate::headroom::proxy_port();
+    let needle_ip = format!("127.0.0.1:{port}");
+    let needle_localhost = format!("localhost:{port}");
+
+    let routed = ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"].iter().any(|var| {
+        std::env::var(var)
+            .map(|v| v.contains(&needle_ip) || v.contains(&needle_localhost))
+            .unwrap_or(false)
+    });
+    if !routed {
+        return None;
+    }
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let live =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(40)).is_ok();
+    let color = if live { GREEN } else { AMBER };
+    Some(ansi_fg(color, "HR"))
+}
+
+/// RTK (Rust Token Killer) statusline pill. Like the `HR` segment, it
+/// reflects the ACTUAL wiring state rather than the stored per-session
+/// toggle: the pill shows only when the RTK `PreToolUse` hook is really
+/// wired for this session. This statusline command is only ever invoked by
+/// Claude Code, so no agent-type gate is needed.
+///
+/// `session_dir` is the session's directory from the Claude Code payload
+/// (`workspace.project_dir`); see [`rtk_hook_wired_for_session`].
+fn rtk_segment(session_dir: Option<&std::path::Path>) -> Option<String> {
+    rtk_pill(rtk_hook_wired_for_session(session_dir))
+}
+
+/// True when an RTK `PreToolUse` hook is wired for THIS session.
+///
+/// ainb wires it project-locally into `<worktree>/.claude/settings.json`
+/// (see `wire_rtk_project_hook`); `rtk init -g` wires it globally into
+/// `~/.claude/settings.json`. Check both.
+///
+/// The session dir comes from the Claude Code payload rather than the
+/// process cwd — the statusline docs explicitly say the command's working
+/// directory is not guaranteed, so we resolve `<session_dir>/.claude/
+/// settings.json` from `workspace.project_dir`, falling back to the process
+/// cwd only when the payload omits it.
+///
+/// Cheap file reads only — deliberately NOT `rtk::is_wired()`, which spawns
+/// `rtk init --show` on every render AND only sees the global hook, so it
+/// missed the common project-wired session entirely.
+fn rtk_hook_wired_for_session(session_dir: Option<&std::path::Path>) -> bool {
+    let project_settings = match session_dir {
+        Some(dir) => dir.join(".claude").join("settings.json"),
+        None => std::path::PathBuf::from(".claude/settings.json"),
+    };
+    if rtk_hook_in_settings(&project_settings) {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir() {
+        if rtk_hook_in_settings(&home.join(".claude").join("settings.json")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract the session directory from a Claude Code statusline payload.
+/// Prefers `workspace.project_dir` (where Claude Code — and thus the
+/// session's RTK hook — was launched), then `workspace.current_dir`, then
+/// the top-level `cwd`.
+fn payload_session_dir(value: &serde_json::Value) -> Option<std::path::PathBuf> {
+    value
+        .pointer("/workspace/project_dir")
+        .or_else(|| value.pointer("/workspace/current_dir"))
+        .or_else(|| value.pointer("/cwd"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Whether the `settings.json` at `path` carries an RTK `PreToolUse` hook.
+/// Matches the command substring `rtk hook claude` — the same match
+/// `wire_rtk_project_hook` uses for its idempotency check. Any read/parse
+/// failure (missing file, bad JSON) is treated as "not wired".
+fn rtk_hook_in_settings(path: &std::path::Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value
+        .pointer("/hooks/PreToolUse")
+        .and_then(|v| v.as_array())
+        .is_some_and(|matchers| {
+            matchers.iter().any(|matcher| {
+                matcher.get("hooks").and_then(|h| h.as_array()).is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c.contains("rtk hook claude"))
+                    })
+                })
+            })
+        })
+}
+
+/// Pure formatter for the RTK pill — split from `rtk_segment` so it is
+/// unit-testable without touching the filesystem.
+fn rtk_pill(wired: bool) -> Option<String> {
+    wired.then(|| ansi_fg(GREEN, "RTK"))
 }
 
 // Hand-rolled ANSI 24-bit escape sequences. Avoid pulling in a colored
@@ -315,7 +443,13 @@ pub fn run_with(
     if cache_only {
         Ok(None)
     } else {
-        Ok(Some(render_powerline(&cache)))
+        // Resolve the session dir from the payload for project-local RTK hook
+        // detection (statusline cwd is not guaranteed; see rtk_segment).
+        let session_dir = serde_json::from_slice::<serde_json::Value>(buf)
+            .ok()
+            .as_ref()
+            .and_then(payload_session_dir);
+        Ok(Some(render_powerline(&cache, session_dir.as_deref())))
     }
 }
 
@@ -509,7 +643,7 @@ mod tests {
             context_pct: Some(45),
             model: Some("Opus".to_string()),
         };
-        let line = render_powerline(&cache);
+        let line = render_powerline(&cache, None);
         assert!(line.contains("Opus"));
         assert!(line.contains("ctx"));
         assert!(line.contains("45"));
@@ -531,7 +665,125 @@ mod tests {
             model: None,
         };
         // Just don't panic; result may be empty string.
-        let _ = render_powerline(&cache);
+        let _ = render_powerline(&cache, None);
+    }
+
+    #[test]
+    fn headroom_segment_reflects_base_url_routing() {
+        // Shared lock: this test mutates ANTHROPIC_BASE_URL + AINB_HEADROOM_PORT,
+        // which other tests read in parallel (cargo runs tests in-process).
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let key = "ANTHROPIC_BASE_URL";
+        let old = std::env::var_os(key);
+        let port_old = std::env::var_os("AINB_HEADROOM_PORT");
+        std::env::remove_var("AINB_HEADROOM_PORT"); // force default 8787
+
+        // Not routed → no segment.
+        std::env::remove_var(key);
+        assert!(headroom_segment().is_none());
+
+        // Pointed at the real Anthropic endpoint → no segment.
+        std::env::set_var(key, "https://api.anthropic.com");
+        assert!(headroom_segment().is_none());
+
+        // Pointed at the local proxy → segment present (proxy is down in tests,
+        // so it renders, just amber — we only assert the "HR" label is there).
+        std::env::set_var(key, "http://127.0.0.1:8787");
+        assert!(headroom_segment().as_deref().unwrap_or("").contains("HR"));
+
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        if let Some(v) = port_old {
+            std::env::set_var("AINB_HEADROOM_PORT", v);
+        }
+    }
+
+    #[test]
+    fn rtk_pill_shows_only_when_wired() {
+        // Wired → "RTK" label present; not wired → no segment. Pure formatter,
+        // so no `rtk` binary required (mirrors the HR pill's label assertion).
+        assert!(rtk_pill(true).as_deref().unwrap_or("").contains("RTK"));
+        assert!(rtk_pill(false).is_none());
+    }
+
+    #[test]
+    fn rtk_hook_in_settings_detects_project_local_hook() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Missing file → not wired.
+        assert!(!rtk_hook_in_settings(&path));
+
+        // Malformed JSON → not wired (never panics).
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(!rtk_hook_in_settings(&path));
+
+        // PreToolUse hook with an unrelated command → not wired.
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"echo hi","type":"command"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(!rtk_hook_in_settings(&path));
+
+        // The exact shape ainb's wire_rtk_project_hook writes → wired.
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"command":"/opt/homebrew/bin/rtk hook claude","type":"command"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(rtk_hook_in_settings(&path));
+    }
+
+    #[test]
+    fn payload_session_dir_prefers_project_dir() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"cwd":"/c","workspace":{"current_dir":"/cur","project_dir":"/proj"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            payload_session_dir(&v),
+            Some(std::path::PathBuf::from("/proj"))
+        );
+
+        // Falls back to current_dir, then cwd.
+        let v2: serde_json::Value =
+            serde_json::from_str(r#"{"cwd":"/c","workspace":{"current_dir":"/cur"}}"#).unwrap();
+        assert_eq!(
+            payload_session_dir(&v2),
+            Some(std::path::PathBuf::from("/cur"))
+        );
+        let v3: serde_json::Value = serde_json::from_str(r#"{"cwd":"/c"}"#).unwrap();
+        assert_eq!(
+            payload_session_dir(&v3),
+            Some(std::path::PathBuf::from("/c"))
+        );
+
+        // Absent / empty → None (callers fall back to process cwd).
+        let v4: serde_json::Value = serde_json::from_str(r#"{"workspace":{}}"#).unwrap();
+        assert_eq!(payload_session_dir(&v4), None);
+    }
+
+    #[test]
+    fn rtk_wired_resolves_hook_under_session_dir() {
+        // Mirrors the real flow: hook lives in <session_dir>/.claude/settings.json
+        // (where ainb's wire_rtk_project_hook writes it), and we resolve it from
+        // the payload-provided session dir, not the process cwd.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+
+        // NB: the negative case (no hook) is covered hermetically by
+        // rtk_hook_in_settings_detects_project_local_hook — we don't assert it
+        // here because rtk_hook_wired_for_session also reads the real global
+        // ~/.claude/settings.json, which may legitimately carry an rtk hook.
+        std::fs::write(
+            dir.path().join(".claude").join("settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"command":"/opt/homebrew/bin/rtk hook claude","type":"command"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(rtk_hook_wired_for_session(Some(dir.path())));
     }
 
     /// `--cache-only`: cache is written, stdout payload is `None`

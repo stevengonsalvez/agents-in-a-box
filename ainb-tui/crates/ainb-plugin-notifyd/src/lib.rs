@@ -26,11 +26,14 @@
 pub mod cli;
 pub mod envelope;
 pub mod fallback;
+pub mod ingest;
 pub mod install;
 pub mod osnotify;
 pub mod paths;
 pub mod pid;
+pub mod procs;
 pub mod store;
+pub mod transition;
 
 mod listener;
 
@@ -45,4 +48,5 @@ pub use listener::{RunConfig, run_daemon};
 pub use osnotify::{AlertKind, classify_attention};
 pub use paths::Paths;
 pub use pid::PidFile;
-pub use store::{NotificationRecord, RetentionPolicy, Store, StoreError};
+pub use procs::{ClassifiedDaemon, DaemonClass, NotifydProc, scan as scan_daemons};
+pub use store::{EventRow, NotificationRecord, RetentionPolicy, StateRow, Store, StoreError};

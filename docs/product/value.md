@@ -38,7 +38,7 @@ Every TUI operation is also a CLI subcommand. `--format json` on every command. 
 
 ### A portable toolkit that follows you across tools
 
-86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, 11 targets.
+86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, 11 targets. The toolkit lives in the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb's skill manager syncs from it as a pinned external source.
 
 ### A plugin system you can actually use
 
@@ -54,7 +54,7 @@ Add a TUI screen, a CLI subcommand, a statusline segment without forking the hos
 
 - **One install command.** `brew install ainb` (macOS, Linux). One-liner `install.sh` for everything else.
 - **No subscription.** MIT-licensed. No accounts, no metering.
-- **No vendor lock-in.** Toolkit deploys to 11 AI tools; the TUI orchestrates four providers. You can swap out any layer.
+- **No vendor lock-in.** ainb-toolkit deploys to 11 AI tools; the TUI orchestrates four providers. You can swap out any layer.
 - **No cloud dependency.** Everything runs locally. The only network traffic is what your AI provider (Claude, Codex, etc.) makes on your behalf.
 
 ---
@@ -63,7 +63,7 @@ Add a TUI screen, a CLI subcommand, a statusline segment without forking the hos
 
 If you're running ≥2 parallel AI coding sessions a week and tracking your own token spend, agents-in-a-box pays for itself in the first week — purely on saved worktree-management toil. The burndown dashboard alone replaces a dashboard you'd otherwise build yourself (or live without).
 
-If you're authoring AI skills or agents and supporting them across multiple tools (Claude Code + Codex + Copilot), the toolkit's deploy-everywhere bootstrap replaces nine custom packaging scripts.
+If you're authoring AI skills or agents and supporting them across multiple tools (Claude Code + Codex + Copilot), the ainb-toolkit's deploy-everywhere bootstrap replaces nine custom packaging scripts.
 
 If you're building a TUI extension or a custom analytics dashboard for your team's AI usage, the v2 plugin system lets you ship that as a 500-line binary instead of a fork.
 

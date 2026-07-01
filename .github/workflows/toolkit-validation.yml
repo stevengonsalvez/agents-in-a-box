@@ -1,185 +1,149 @@
-name: Toolkit Validation
+name: Skill Manager & Catalog CI
+
+# The curated skills/installer/catalog moved out of this monorepo into the
+# standalone stevengonsalvez/ainb-toolkit repo. This workflow validates the
+# ainb skill-manager (which consumes ainb-toolkit as a pinned external source)
+# and cross-checks the embedded agent templates against a fetched ainb-toolkit
+# checkout. The old toolkit/ structure-validation jobs were retired with the
+# folder.
 
 on:
   push:
     paths:
-      - 'toolkit/**'
+      - 'ainb-tui/**'
+      - '.github/workflows/toolkit-validation.yml'
   pull_request:
     paths:
-      - 'toolkit/**'
+      - 'ainb-tui/**'
+      - '.github/workflows/toolkit-validation.yml'
 
+# The pinned ainb-toolkit ref this build of ainb consumes. Keep in lockstep
+# with release.yml's AINB_TOOLKIT_REF.
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  AINB_TOOLKIT_REF: v1.6.0
 
 jobs:
-  validate-packages:
-    name: Validate Packages Structure
+  validate-template-skill-refs:
+    name: Validate template skill refs against ainb-toolkit
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo state
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: '20'
+          workspaces: ainb-tui
 
-      - name: Install dependencies
+      - name: Clone pinned ainb-toolkit
         run: |
-          cd toolkit
-          npm install
+          git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
+            https://github.com/stevengonsalvez/ainb-toolkit.git \
+            "${{ github.workspace }}/ainb-toolkit"
 
-      - name: Validate package structure
+      - name: Enforce every embedded template skill resolves in ainb-toolkit
+        env:
+          # The runtime mirror test enforces existence (instead of skipping)
+          # when this points at a real ainb-toolkit skills/ dir.
+          AINB_TOOLKIT_SKILLS_DIR: ${{ github.workspace }}/ainb-toolkit/skills
         run: |
-          cd toolkit
+          cd ainb-tui
+          cargo test -p ainb-hangar-core --test template_registry_tests -- --nocapture
 
-          echo "=== Checking packages/ structure ==="
+      - name: Generate catalog index from the pinned ainb-toolkit (sanity)
+        run: |
+          cd ainb-tui
+          cargo run -p xtask -- gen-catalog-index \
+            --toolkit-root "${{ github.workspace }}/ainb-toolkit" \
+            --release-tag "${AINB_TOOLKIT_REF}" \
+            --out "${RUNNER_TEMP}/catalog-index.json"
+          # Owned URIs must pin the cloned ainb-toolkit ref.
+          grep -q "gh:stevengonsalvez/ainb-toolkit@${AINB_TOOLKIT_REF}/skills/" \
+            "${RUNNER_TEMP}/catalog-index.json" \
+            || (echo "ERROR: owned install_uris do not pin ainb-toolkit@${AINB_TOOLKIT_REF}"; exit 1)
+          echo "✓ catalog-index owned URIs pin ainb-toolkit@${AINB_TOOLKIT_REF}"
 
-          # Required directories
-          for dir in agents skills workflows utilities; do
-            if [ ! -d "packages/$dir" ]; then
-              echo "ERROR: Missing required directory: packages/$dir"
-              exit 1
-            fi
-            echo "✓ packages/$dir exists"
-          done
-
-          # Count files
-          AGENT_COUNT=$(find packages/agents -name "*.md" | wc -l)
-          SKILL_COUNT=$(find packages/skills -mindepth 2 -name "SKILL.md" | wc -l)
-
-          echo ""
-          echo "File counts:"
-          echo "  Agents:    $AGENT_COUNT"
-          echo "  Skills:    $SKILL_COUNT"
-
-          # Minimum thresholds. Commands have been consolidated into skills,
-          # so we no longer count a separate commands/ tree.
-          [ "$AGENT_COUNT" -lt 30 ] && echo "WARNING: Agent count seems low" && exit 1
-          [ "$SKILL_COUNT" -lt 60 ] && echo "WARNING: Skill count seems low" && exit 1
-
-          echo "✓ Package structure validated"
-
-  test-installations:
-    name: Test Tool Installations
+  test-ainb-installations:
+    name: Test ainb installations (replaces bootstrap.js parity tests)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        tool: [claude-code-4.5, codex, gemini]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo state
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: '20'
+          workspaces: ainb-tui
 
-      - name: Install dependencies
+      - name: Install tmux (required by TUI tripwires)
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Run skill-manager unit + integration test suite
         run: |
-          cd toolkit
-          npm install
+          cd ainb-tui
+          cargo test --workspace --no-fail-fast \
+            -p ainb-skill-core \
+            -p ainb-fetch \
+            -p ainb-adapters-source \
+            -p ainb-adapters-tool \
+            -p ainb-diff \
+            -p ainb-cli \
+            -p ainb-usage
 
-      - name: Test ${{ matrix.tool }} installation
+      - name: Run live-binary tripwires (Layer 4)
         run: |
-          cd toolkit
-          FAKE_HOME="/tmp/test-${{ matrix.tool }}"
-          mkdir -p "$FAKE_HOME"
+          cd ainb-tui
+          # Release-build the binary so tripwires get a fast spawn time.
+          cargo build --release -p ainb
 
-          echo "Installing ${{ matrix.tool }}..."
-          node bootstrap.js --tool=${{ matrix.tool }} --homeDir="$FAKE_HOME"
+          # CLI tripwires run without tmux; TUI tripwires self-skip when
+          # tmux is missing (sudo-installed step above ensures it's
+          # present on this runner). Both groups must be green.
+          #
+          # Naming convention: `tripwire_<area>_<feature>_*` where area is
+          # one of {cli, core, plugin}. `tripwire_helpers.rs` is the shared
+          # module (not a test) and is excluded by the prefix scheme.
+          cargo test -p ainb --release \
+              --test 'tripwire_cli_*' \
+              --test 'tripwire_core_skill_manager_*' \
+              --test 'tripwire_core_home_tile_lists_skill_manager'
 
-          # Verify installation
-          TARGET_DIR="$FAKE_HOME/.${{ matrix.tool == 'claude-code-4.5' && 'claude' || matrix.tool }}"
-
-          if [ ! -d "$TARGET_DIR" ]; then
-            echo "ERROR: Installation directory not created at $TARGET_DIR"
-            exit 1
-          fi
-
-          # Count installed files
-          FILE_COUNT=$(find "$TARGET_DIR" -type f | wc -l)
-          echo "Installed $FILE_COUNT files to $TARGET_DIR"
-
-          # Minimum file count check
-          [ "$FILE_COUNT" -lt 100 ] && echo "ERROR: Too few files installed" && exit 1
-
-          # skills/ is required for every supported tool. Commands have
-          # been consolidated into skills, so no separate commands/ check.
-          [ ! -d "$TARGET_DIR/skills" ] && echo "ERROR: skills/ missing" && exit 1
-
-          # agents/ is only required by claude-code-4.5. Codex, Gemini, and
-          # Copilot represent agents via a top-level AGENTS.md instead.
-          if [ "${{ matrix.tool }}" = "claude-code-4.5" ]; then
-            [ ! -d "$TARGET_DIR/agents" ] && echo "ERROR: agents/ missing" && exit 1
-          fi
-
-          echo "✓ ${{ matrix.tool }} installation validated"
-
-  check-template-substitution:
-    name: Check Template Substitution
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
+      - name: Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME
         run: |
-          cd toolkit
-          npm install
+          cd ainb-tui
+          BIN="$PWD/target/release/ainb"
 
-      - name: Test template substitution
-        run: |
-          cd toolkit
-          FAKE_HOME="/tmp/test-templates"
-          mkdir -p "$FAKE_HOME"
+          # Pretend HOME is a clean tempdir so the real-home tier
+          # writes into it instead of the runner's actual home.
+          export HOME="$RUNNER_TEMP/fake-home"
+          export AINB_HOME="$RUNNER_TEMP/ainb-home"
+          export AINB_USE_REAL_HOMES=1
+          mkdir -p "$HOME" "$AINB_HOME"
 
-          # Install claude-code-4.5 into a fake $HOME so we can grep the result.
-          node bootstrap.js --tool=claude-code-4.5 --homeDir="$FAKE_HOME"
+          # Build a local fixture source.
+          mkdir -p "$RUNNER_TEMP/fixture/skills/commit"
+          cat > "$RUNNER_TEMP/fixture/skills/commit/SKILL.md" <<'SKILL'
+          ---
+          name: commit
+          description: commit-message skill (CI fixture)
+          ---
+          body
+          SKILL
 
-          # Check that {{TOOL_DIR}} and {{HOME_TOOL_DIR}} are replaced
-          UNSUBSTITUTED=$(grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" 2>/dev/null | wc -l)
+          "$BIN" source add "local:$RUNNER_TEMP/fixture" --name fixture
+          "$BIN" skill install "local:$RUNNER_TEMP/fixture@main/skills/commit" \
+              --targets claude --yes
 
-          if [ "$UNSUBSTITUTED" -gt 0 ]; then
-            echo "ERROR: Found $UNSUBSTITUTED unsubstituted template variables"
-            grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" | head -10
-            exit 1
-          fi
+          # Verify the file landed in the real-home path.
+          test -f "$HOME/.claude/skills/commit/SKILL.md" \
+              || (echo "ERROR: missing deployed file"; exit 1)
+          echo "✓ ainb skill install reaches HOME/.claude when AINB_USE_REAL_HOMES=1"
 
-          echo "✓ All template variables substituted correctly"
-
-  check-claude-code-thin-layer:
-    name: Verify claude-code-4.5 is thin layer
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check claude-code-4.5 structure
-        run: |
-          cd toolkit/claude-code-4.5
-
-          echo "=== Checking claude-code-4.5 is a thin layer ==="
-
-          # Should only have these files
-          ALLOWED_FILES="CLAUDE.md settings.json settings.local.json .gitignore"
-          ALLOWED_DIRS="session logs"
-
-          # Check for unexpected directories (agents, commands, etc should NOT exist)
-          for dir in agents commands hooks skills templates utils orchestration output-styles reflections; do
-            if [ -d "$dir" ]; then
-              echo "ERROR: claude-code-4.5/$dir should not exist (content is in packages/)"
-              exit 1
-            fi
-          done
-
-          # Verify required files exist
-          [ ! -f "CLAUDE.md" ] && echo "ERROR: CLAUDE.md missing" && exit 1
-          [ ! -f "settings.json" ] && echo "ERROR: settings.json missing" && exit 1
-
-          echo "✓ claude-code-4.5 is correctly structured as a thin layer"
+          # Doctor against the just-installed state.
+          "$BIN" doctor --offline

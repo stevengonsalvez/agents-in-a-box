@@ -35,6 +35,7 @@ const docs = (path: string) => `${BASE}/${path.replace(/^\//, '')}`;
       <a class="nav__brand" href={`${BASE}/`}>ainb<span class="ainb-cursor" aria-hidden="true"></span></a>
       <nav class="nav__links">
         <a href={docs('product/what-is-ainb')}>Docs</a>
+        <a href={docs('tui/cli')}>CLI</a>
         <a href={docs('plugins/overview')}>Plugins</a>
         <a href={docs('toolkit/overview')}>Toolkit</a>
         <a href={REPO}>GitHub →</a>
@@ -254,11 +255,13 @@ cli_namespaces = ["usage"]</code></pre>
           <a href={docs('tui/cli')}>CLI reference</a>
           <a href={docs('plugins/overview')}>Plugins</a>
           <a href={docs('toolkit/overview')}>Toolkit</a>
+          <a href={docs('reference/repositories')}>Repositories</a>
           <a href={docs('knowledge/overview')}>Knowledge</a>
         </div>
         <div>
           <h4>Project</h4>
           <a href={REPO}>GitHub</a>
+          <a href="https://github.com/stevengonsalvez/ainb-toolkit">ainb-toolkit</a>
           <a href={`${REPO}/releases`}>Releases</a>
           <a href={`${REPO}/issues`}>Issues</a>
           <a href={`${REPO}/blob/main/LICENSE`}>License — MIT</a>

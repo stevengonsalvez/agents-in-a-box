@@ -2,13 +2,9 @@
 // Guides users through dependency checks, git configuration, and authentication
 
 pub mod component;
-pub mod dependency_checker;
 pub mod state;
 
 pub use component::OnboardingComponent;
-pub use dependency_checker::{
-    Dependency, DependencyCategory, DependencyCheckResult, DependencyChecker, DependencyStatus,
-};
 pub use state::{
     OnboardingFocus, OnboardingState, OnboardingStep, QuestionnaireKind, ValidatedPath,
 };

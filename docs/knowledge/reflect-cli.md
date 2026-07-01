@@ -2,7 +2,7 @@
 title: "`reflect` CLI reference"
 ---
 
-The `reflect` command is the command-line interface to the agents-in-a-box knowledge base. It is shipped by the Python package **`reflect-kb`** (source: [`reflect-kb/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/reflect-kb)) and provides the **capture → index → recall** loop: `reflect add` captures a learning, `reflect reindex` rebuilds the GraphRAG + vector index, and `reflect search` recalls the most relevant prior learnings.
+The `reflect` command is the command-line interface to the agents-in-a-box knowledge base. It is shipped by the Python package **`reflect-kb`** (source: [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory), flattened at the repo root) and provides the **capture → index → recall** loop: `reflect add` captures a learning, `reflect reindex` rebuilds the GraphRAG + vector index, and `reflect search` recalls the most relevant prior learnings.
 
 ## Two version streams
 
@@ -10,8 +10,8 @@ There are **two** independent versions and they are easy to confuse:
 
 | Component | Package / manifest | Version | Source of truth |
 |---|---|---|---|
-| `reflect` **CLI** | Python package `reflect-kb` | `0.1.1` | [`reflect-kb/pyproject.toml`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/reflect-kb/pyproject.toml) |
-| `reflect` **plugin** (Claude Code wiring) | [`plugins/reflect/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/plugins/reflect) | `3.6.0` | [`plugins/reflect/.claude-plugin/plugin.json`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/.claude-plugin/plugin.json) |
+| `reflect` **CLI** | Python package `reflect-kb` | `0.1.1` | [`pyproject.toml`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/pyproject.toml) (ainb-reflect-memory root) |
+| `reflect` **plugin** (Claude Code wiring) | [`plugin/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin) | `3.6.0` | [`plugin/.claude-plugin/plugin.json`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/.claude-plugin/plugin.json) |
 
 `reflect --version` reports the CLI version (`0.1.x`). The plugin version describes the harness wiring (hooks, skills, adapters) and is documented separately in the plugin architecture docs.
 
@@ -20,7 +20,7 @@ There are **two** independent versions and they are easy to confuse:
 Recommended — `uv tool install` with the `[graph]` extra (pulls the full GraphRAG + vector stack):
 
 ```bash
-uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
+uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'
 ```
 
 Verify the install:
@@ -29,7 +29,7 @@ Verify the install:
 reflect --version   # prints 0.1.x
 ```
 
-> The `[graph]` extra will not resolve cleanly with plain `pip` on Python >= 3.11 because `nano-graphrag` pulls `graspologic -> hyppo -> numba -> llvmlite` (Python < 3.10 only). Use the `uv`/`pipx` `--no-deps` flow documented in [`reflect-kb/README.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/reflect-kb/README.md).
+> The `[graph]` extra will not resolve cleanly with plain `pip` on Python >= 3.11 because `nano-graphrag` pulls `graspologic -> hyppo -> numba -> llvmlite` (Python < 3.10 only). Use the `uv`/`pipx` `--no-deps` flow documented in the [ainb-reflect-memory README](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/README.md).
 
 ## Subcommands
 
@@ -43,11 +43,11 @@ reflect --version   # prints 0.1.x
 | `reflect critical-patterns` | Surface high-confidence, widely-applicable patterns. Filter with `--language/-l`, `--domain/-d`. |
 | `reflect generate-sidecars` | Backfill missing `.entities.yaml` sidecars heuristically (no LLM). `--force` regenerates all. |
 | `reflect metrics stats` | Aggregate the recall-metrics JSONL log (total events, hit rate, p50/p95 latency, top tags). Supports `--format json` and `--window-days`. |
-| `reflect cost` | Report background-drain spend from `~/.reflect/drain-cost.jsonl` (plugin 4.0.0+). Groups by `--by day\|transcript\|model\|outcome`, shows the cached-vs-uncached token split with outlier flagging and a per-model `$` estimate. Flags: `--since 30d`, `--top N`, `--json`, `--state-dir`. Backed by `plugins/reflect/scripts/reflect_cost.py`. |
+| `reflect cost` | Report background-drain spend from `~/.reflect/drain-cost.jsonl` (plugin 4.0.0+). Groups by `--by day\|transcript\|model\|outcome`, shows the cached-vs-uncached token split with outlier flagging and a per-model `$` estimate. Flags: `--since 30d`, `--top N`, `--json`, `--state-dir`. Backed by `plugin/scripts/reflect_cost.py` (in ainb-reflect-memory). |
 | `reflect errors count\|ack\|append` | Triage the error sink at `~/.reflect/errors.json`. `count` prints un-acked errors (drives the statusline ⚠ badge); `ack [ids…]` acknowledges them; `append --severity --source --kind --message --context` records one. Exposed on the installed binary so callers (statusline, drain hook, `/reflect:errors-ack`) avoid bare `python3 -m reflect_kb`, which needs reflect_kb importable by *system* python3 (it lives in the uv tool venv). The `python -m reflect_kb.errors` entrypoint still works for back-compat. |
 | `reflect timeline --explain <ROW>` | Drill down on a statusline dashboard row (`REC`, `MEM`, `ING`, `DRN`, `TOK`, `ERR`, `COM`, `AGT`, or `all`). Shells out to the reflect plugin's helper. |
 
-The Python `console_scripts` entry point is `reflect = reflect_kb.cli.main:main` ([`pyproject.toml`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/reflect-kb/pyproject.toml)).
+The Python `console_scripts` entry point is `reflect = reflect_kb.cli.main:main` ([`pyproject.toml`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/pyproject.toml)).
 
 ## Quick start
 
@@ -69,7 +69,7 @@ The CLI is the data layer; it knows nothing about Claude Code. Knowledge content
 
 The `reflect` plugin (version `3.6.0`) wires the CLI into the agent harness. It ships:
 
-**Six colon-namespaced skills** ([`plugins/reflect/skills/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/plugins/reflect/skills)):
+**Six colon-namespaced skills** ([`plugin/skills/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin/skills)):
 
 | Skill | Purpose |
 |---|---|
@@ -80,9 +80,9 @@ The `reflect` plugin (version `3.6.0`) wires the CLI into the agent harness. It 
 | `reflect:reflect-status` | Read-only views into reflect system state; can approve/reject pending items. |
 | `reflect:errors-ack` | Acknowledge captured error signals. |
 
-**Cross-harness adapters** ([`plugins/reflect/adapters/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/plugins/reflect/adapters)): a shared `base.py` plus per-harness adapters under `claude/`, `codex/`, and `copilot/`.
+**Cross-harness adapters** ([`plugin/adapters/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin/adapters)): a shared `base.py` plus per-harness adapters under `claude/`, `codex/`, and `copilot/`.
 
-**Five lifecycle hooks** (declared in [`plugin.json`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/.claude-plugin/plugin.json)):
+**Five lifecycle hooks** (declared in [`plugin.json`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/.claude-plugin/plugin.json)):
 
 | Hook | Action |
 |---|---|
@@ -106,10 +106,10 @@ The producer hooks (`Stop`, `PreCompact`) only enqueue; reflection itself runs l
 | `REFLECT_DISABLED` | unset | Set `1` for a hard kill switch (drain is a no-op). |
 | `REFLECT_DRAIN_SKIP_REINDEX` | unset | Set `1` to skip the post-drain reindex (tests). |
 
-Inspect drain spend with `reflect cost`. See the plugin [`CHANGELOG.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/CHANGELOG.md) for the 4.0.0 cost rearchitecture.
+Inspect drain spend with `reflect cost`. See the plugin [`CHANGELOG.md`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/CHANGELOG.md) for the 4.0.0 cost rearchitecture.
 
 ## See also
 
 - [Knowledge base overview](./overview.md)
-- [`reflect-kb/README.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/reflect-kb/README.md)
+- [ainb-reflect-memory README](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/README.md)
 - [Docs hub](../README.md)

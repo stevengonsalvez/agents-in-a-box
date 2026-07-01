@@ -19,20 +19,22 @@
 //! # Skill-reference invariant
 //!
 //! Every skill name a template references **must** correspond to a real
-//! `toolkit/packages/skills/<name>/SKILL.md`. This is enforced two ways:
-//! - at compile time by this crate's `build.rs`, which fails the build if any
-//!   referenced skill directory is missing (so drift is caught before a binary
-//!   is ever produced), and
-//! - at run time by the `test_template_skill_refs_resolve_to_toolkit_dir`
-//!   integration test (the mirror, so a stale build cache cannot hide a
-//!   regression).
+//! `skills/<name>/SKILL.md` in the standalone `ainb-toolkit` repo. This is
+//! validated two ways:
+//! - at compile time by this crate's `build.rs`, which validates each template
+//!   is well-formed (non-empty `skills` array, no malformed names) so the
+//!   embedded registry is self-consistent before a binary is produced, and
+//! - against a fetched `ainb-toolkit` checkout by the
+//!   `test_template_skill_refs_resolve_to_toolkit_dir` integration test +
+//!   the release CI (both keyed off `AINB_TOOLKIT_SKILLS_DIR`), which confirm
+//!   every referenced skill name resolves to a real `SKILL.md`.
 
 use std::sync::OnceLock;
 
 /// One curated agent template.
 ///
 /// Mirrors the embedded JSON shape one-to-one. `skills` is a list of skill
-/// *names* (kebab-case, matching `toolkit/packages/skills/<name>/`), resolved to
+/// *names* (kebab-case, matching ainb-toolkit `skills/<name>/`), resolved to
 /// concrete `skill` rows at `templates use` time — the template itself carries
 /// no skill bodies, only references.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,7 +48,8 @@ pub struct AgentTemplate {
     /// The agent's system prompt / instructions, embedded verbatim.
     pub instructions: String,
     /// Skill names this template bundles. Each must resolve to a real
-    /// `toolkit/packages/skills/<name>/SKILL.md` (enforced by `build.rs`).
+    /// ainb-toolkit `skills/<name>/SKILL.md` (validated against a fetched
+    /// checkout in CI / tests via `AINB_TOOLKIT_SKILLS_DIR`).
     pub skills: Vec<String>,
 }
 

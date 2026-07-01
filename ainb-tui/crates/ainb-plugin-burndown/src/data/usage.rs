@@ -85,6 +85,50 @@ impl UsageProviderFilter {
             Self::Gemini => provider == "gemini",
         }
     }
+
+    /// Display order for the single provider selector (the burndown's
+    /// `◀/▶` / `p` control). The ring `next`/`prev` walk this order.
+    pub(crate) fn all() -> &'static [UsageProviderFilter] {
+        &[
+            Self::All,
+            Self::Claude,
+            Self::Codex,
+            Self::Cursor,
+            Self::Copilot,
+            Self::Gemini,
+        ]
+    }
+
+    /// Step forward through [`Self::all`] (wraps). Drives both `▶` and `p`.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::All => Self::Claude,
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Cursor,
+            Self::Cursor => Self::Copilot,
+            Self::Copilot => Self::Gemini,
+            Self::Gemini => Self::All,
+        }
+    }
+
+    /// Step backward through [`Self::all`] (wraps). Drives `◀`.
+    pub(crate) fn prev(self) -> Self {
+        match self {
+            Self::All => Self::Gemini,
+            Self::Claude => Self::All,
+            Self::Codex => Self::Claude,
+            Self::Cursor => Self::Codex,
+            Self::Copilot => Self::Cursor,
+            Self::Gemini => Self::Copilot,
+        }
+    }
+
+    /// Whether a parser currently feeds this provider. `Cursor` and
+    /// `Gemini` are stubs today; everything else (incl. `All`) has data.
+    /// Gates the "not yet available" empty-state message.
+    pub(crate) fn has_data(self) -> bool {
+        matches!(self, Self::All | Self::Claude | Self::Codex | Self::Copilot)
+    }
 }
 
 /// Deterministic activity categories. Phase 2 fills these from turn classification.
@@ -576,6 +620,14 @@ pub struct ProjectUsage {
 pub struct SessionUsage {
     pub provider: String,
     pub project: String,
+    /// Raw working directory the session ran in (`ProviderCall.project_path`).
+    /// `project` is the sanitised folder/repo *name*; `project_path` is the
+    /// unmodified cwd, the cross-system join key against the fleet
+    /// `Session.cwd`. Kept distinct so consumers (e.g. `ainb fleet cost`)
+    /// can join on the path directly instead of round-tripping through the
+    /// repo-slug-keyed `ProjectUsage.name`.
+    #[serde(default)]
+    pub project_path: String,
     pub session_id: String,
     pub first_timestamp: DateTime<Utc>,
     pub last_timestamp: DateTime<Utc>,
@@ -1712,6 +1764,7 @@ fn aggregate_calls_with_analysis(
         let session = session_map.entry(session_key).or_insert_with(|| SessionUsageAccumulator {
             provider: call.provider.clone(),
             project: call.project.clone(),
+            project_path: call.project_path.clone(),
             session_id: call.session_id.clone(),
             first_timestamp: call.timestamp,
             last_timestamp: call.timestamp,
@@ -2849,6 +2902,7 @@ pub fn analyze_yield(data: &UsageData) -> YieldResult {
 struct SessionUsageAccumulator {
     provider: String,
     project: String,
+    project_path: String,
     session_id: String,
     first_timestamp: DateTime<Utc>,
     last_timestamp: DateTime<Utc>,
@@ -2861,6 +2915,7 @@ impl SessionUsageAccumulator {
         SessionUsage {
             provider: self.provider,
             project: self.project,
+            project_path: self.project_path,
             session_id: self.session_id,
             first_timestamp: self.first_timestamp,
             last_timestamp: self.last_timestamp,

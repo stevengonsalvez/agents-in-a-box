@@ -90,8 +90,8 @@ pub enum AlertKind {
 /// the ainb-tui per-session marker classify through here so the two
 /// surfaces never drift apart.
 ///
-/// Codex and Claude name the same semantic event differently; both
-/// variants map to the same [`AlertKind`]. A matcher suffix
+/// Host agents name the same semantic events differently; every
+/// supported variant maps to the same [`AlertKind`]. A matcher suffix
 /// (e.g. `Notification:idle_prompt`) is stripped before matching.
 pub fn classify_attention(raw_event: &str) -> Option<AlertKind> {
     let head = raw_event.split(':').next().unwrap_or(raw_event);
@@ -102,9 +102,11 @@ pub fn classify_attention(raw_event: &str) -> Option<AlertKind> {
         | "exec_approval_request"
         | "apply_patch_approval_request" => AlertKind::NeedsPermission,
         // Asked the user something / idle awaiting input.
-        "Notification" | "request_user_input" | "wait_for_user" => AlertKind::WaitingOnUser,
+        "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
+            AlertKind::WaitingOnUser
+        }
         // Turn ended — informational.
-        "Stop" | "agent-turn-complete" | "task_complete" => AlertKind::Finished,
+        "Stop" | "agentStop" | "agent-turn-complete" | "task_complete" => AlertKind::Finished,
         // Telemetry / lifecycle (PreToolUse, PostToolUse, UserPromptSubmit, …).
         _ => return None,
     })
@@ -116,13 +118,14 @@ pub fn render_title(env: &Envelope) -> String {
     let agent = match env.agent.as_str() {
         "claude" => "Claude",
         "codex" => "Codex",
+        "copilot" => "Copilot",
         other => other,
     };
     match head {
-        "Stop" | "agent-turn-complete" | "task_complete" => {
+        "Stop" | "agentStop" | "agent-turn-complete" | "task_complete" => {
             format!("{agent} session finished")
         }
-        "Notification" | "request_user_input" | "wait_for_user" => {
+        "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
             format!("{agent} is waiting for you")
         }
         "PermissionRequest"
@@ -135,17 +138,36 @@ pub fn render_title(env: &Envelope) -> String {
 
 /// Render a short body from an envelope — best-effort, falls back
 /// to the project + cwd when no friendlier text is available.
+///
+/// The chosen text is run through [`sanitize_notification_text`] so a hook
+/// payload carrying a raw newline or other control character can't produce a
+/// malformed `osascript` line (which silently fails to notify) — see that
+/// function for the robustness rationale.
 pub fn render_body(env: &Envelope) -> String {
-    if let Some(msg) = env.payload.get("message").and_then(|v| v.as_str()) {
-        return msg.to_string();
-    }
-    if !env.project.is_empty() {
-        return env.project.clone();
-    }
-    if !env.cwd.is_empty() {
-        return env.cwd.clone();
-    }
-    "(no details)".into()
+    let raw = if let Some(msg) = env.payload.get("message").and_then(|v| v.as_str()) {
+        msg.to_string()
+    } else if !env.project.is_empty() {
+        env.project.clone()
+    } else if !env.cwd.is_empty() {
+        env.cwd.clone()
+    } else {
+        "(no details)".into()
+    };
+    sanitize_notification_text(&raw)
+}
+
+/// Collapse control characters (newlines, carriage returns, tabs, and any other
+/// C0/DEL control byte) to single spaces for single-line notification text.
+///
+/// A notification body/title is a single line. On macOS the body is embedded in
+/// an AppleScript string literal passed to `osascript -e`; a raw `\n` in that
+/// literal yields a multi-line script and the `display notification` call
+/// silently fails (no error surfaces — the user just never sees the alert). On
+/// Linux `notify-send` is similarly happiest with single-line text. This is pure
+/// robustness, not injection defense — quotes are still escaped in
+/// [`quote_applescript`] and args are passed via `Command::arg`, never a shell.
+fn sanitize_notification_text(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 /// Emit a native OS notification if [`is_user_facing`] is true and
@@ -201,15 +223,19 @@ fn emit_native(_title: &str, _body: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn quote_applescript(s: &str) -> String {
-    // AppleScript string literal: wrap in double quotes, escape `"`
-    // and `\`. Keep it minimal — we don't pass user-controlled text
-    // beyond hook payloads, but a hostile payload should still not
-    // crash osascript.
+    // AppleScript string literal: wrap in double quotes, escape `"` and `\`, and
+    // collapse any control char (newline/CR/tab/…) to a space. A raw newline in
+    // the literal would split the `-e` script across lines and make
+    // `display notification` silently fail (LOW-7); escaping quotes/backslash
+    // keeps a hostile payload from breaking out of the literal. Belt-and-braces:
+    // `render_body` already sanitizes, but a `title` reaches here un-sanitized,
+    // so the control-char fold also lives here.
     let escaped: String = s
         .chars()
         .flat_map(|c| match c {
             '"' | '\\' => vec!['\\', c],
-            _ => vec![c],
+            c if c.is_control() => vec![' '],
+            c => vec![c],
         })
         .collect();
     format!("\"{escaped}\"")
@@ -255,6 +281,12 @@ mod tests {
     }
 
     #[test]
+    fn copilot_attention_events_are_user_facing() {
+        assert!(is_user_facing(&env("agentStop", "copilot")));
+        assert!(is_user_facing(&env("notification", "copilot")));
+    }
+
+    #[test]
     fn classify_attention_maps_each_kind() {
         // Permission / approval (Claude + Codex) → NeedsPermission.
         for e in [
@@ -273,13 +305,14 @@ mod tests {
         for e in [
             "Notification",
             "Notification:idle_prompt",
+            "notification",
             "request_user_input",
             "wait_for_user",
         ] {
             assert_eq!(classify_attention(e), Some(AlertKind::WaitingOnUser), "{e}");
         }
         // Turn ended → Finished.
-        for e in ["Stop", "agent-turn-complete", "task_complete"] {
+        for e in ["Stop", "agentStop", "agent-turn-complete", "task_complete"] {
             assert_eq!(classify_attention(e), Some(AlertKind::Finished), "{e}");
         }
         // Telemetry / lifecycle → no marker.
@@ -336,9 +369,31 @@ mod tests {
         assert_eq!(render_body(&e), "x");
     }
 
+    #[test]
+    fn render_body_strips_control_chars_to_single_line() {
+        // LOW-7: a payload message with a raw newline/CR/tab must come back as a
+        // single line so the downstream osascript/notify-send call can't be
+        // broken by embedded control characters.
+        let mut e = env("Stop", "claude");
+        e.payload = json!({"message": "line one\nline two\r\tindented"});
+        let body = render_body(&e);
+        assert!(!body.contains('\n'), "newline survived: {body:?}");
+        assert!(!body.contains('\r'), "carriage return survived: {body:?}");
+        assert!(!body.contains('\t'), "tab survived: {body:?}");
+        assert_eq!(body, "line one line two  indented");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn applescript_quoting_escapes_dangerous_chars() {
         assert_eq!(quote_applescript(r#"a "b" \ c"#), r#""a \"b\" \\ c""#);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_quoting_folds_control_chars_to_space() {
+        // LOW-7: a raw newline in the AppleScript literal would split the -e
+        // script and make `display notification` silently fail. Fold to a space.
+        assert_eq!(quote_applescript("a\nb\tc"), "\"a b c\"");
     }
 }

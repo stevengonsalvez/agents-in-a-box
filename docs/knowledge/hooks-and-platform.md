@@ -3,13 +3,18 @@ title: "Hooks & Platform · how reflect captures and recalls across Claude + Cod
 description: "Visual deep-dive into the reflect plugin's hook architecture, recall flows, capture flows, status line integration, and cross-tool drain — across Claude Code and Codex CLI."
 ---
 
-> **The short version** — Two harnesses (Claude Code, Codex CLI) wire the same hook scripts
-> into different config files (`~/.claude/settings.json` vs `~/.codex/hooks.json`) and share
-> one on-disk knowledge base (`~/.reflect/` queue + `~/.learnings/` documents + GraphRAG
-> index). **SessionStart** fires the baseline recall + the bg-drainer; **UserPromptSubmit**
-> fires the intent-sharp recall with per-session dedupe; **PreCompact**, **Stop**, and
-> **PostToolUse** capture learnings into the shared store. A codex session can enqueue a
-> reflection that a later Claude session drains — and vice versa.
+> **The short version** — Three harnesses (Claude Code, Codex CLI, GitHub Copilot) wire the same
+> hook scripts into different config files (`~/.claude/settings.json` vs `~/.codex/hooks.json` vs
+> `~/.copilot/hooks/reflect.json`) and share one on-disk knowledge base (`~/.reflect/` queue +
+> `~/.learnings/` documents + GraphRAG index). **SessionStart** fires the baseline recall + the
+> bg-drainer; **UserPromptSubmit** fires the intent-sharp recall with per-session dedupe;
+> **PreCompact**, **Stop**, and **PostToolUse** capture learnings into the shared store. A codex
+> session can enqueue a reflection that a later Claude session drains — and vice versa.
+>
+> **No extra LLM/embedding config** on any harness — recall/index use a local model (no key);
+> capture reuses the harness LLM (`claude -p`), so Codex/Copilot need the `claude` CLI on PATH for
+> the drain. Copilot drops `userPromptSubmitted` hook output, so per-prompt recall there is manual
+> `/recall` (SessionStart auto-recall works).
 
 ---
 
@@ -567,8 +572,8 @@ command.
         <!-- Step 2: run adapter -->
         <rect x="186" y="200" width="220" height="52" rx="8" fill="#F4E4C1" stroke="#3D3D3A" stroke-width="1.5"/>
         <text x="296" y="218" font-size="10.5" font-weight="600" fill="#141413" text-anchor="middle">2. Run adapter directly</text>
-        <text x="296" y="234" font-size="9.5" font-family="ui-monospace,monospace" fill="#3D3D3A" text-anchor="middle">python plugins/reflect/</text>
-        <text x="296" y="248" font-size="9.5" font-family="ui-monospace,monospace" fill="#3D3D3A" text-anchor="middle">adapters/codex/codex_adapter.py install</text>
+        <text x="296" y="234" font-size="9.5" font-family="ui-monospace,monospace" fill="#3D3D3A" text-anchor="middle">python plugin/adapters/codex/</text>
+        <text x="296" y="248" font-size="9.5" font-family="ui-monospace,monospace" fill="#3D3D3A" text-anchor="middle">codex_adapter.py install</text>
         <line x1="406" y1="226" x2="424" y2="226" stroke="#3D3D3A" stroke-width="1.5" marker-end="url(#d1)"/>
         <!-- Step 3: adapter copies skills -->
         <rect x="426" y="200" width="188" height="52" rx="8" fill="#9DD4C7" stroke="#3D3D3A" stroke-width="1.5"/>
@@ -624,15 +629,16 @@ command.
       </svg>
 </div>
 
-```bash
-# Claude Code — managed install via plugin runtime
-/plugin marketplace add stevengonsalvez/agents-in-a-box
-/plugin install reflect@agents-in-a-box
+The `reflect` plugin now ships from its own repo, [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) (plugin under `plugin/`), not this monorepo's marketplace — so `/plugin install reflect@agents-in-a-box` no longer resolves. Clone that repo (or use `ainb reflect bootstrap`, which installs from it) and run the adapters from its `plugin/adapters/` directory:
 
-# Codex CLI — adapter does the autowire
-python plugins/reflect/adapters/codex/codex_adapter.py install
+```bash
+# Claude Code — install from the ainb-reflect-memory plugin/ dir via your
+# harness's plugin runtime (see the repo README).
+
+# Codex CLI — adapter does the autowire (paths relative to the new repo's plugin/ dir)
+python plugin/adapters/codex/codex_adapter.py install
 # or skip the bg drain on codex-only machines without claude on PATH:
-python plugins/reflect/adapters/codex/codex_adapter.py install --no-bg-drain
+python plugin/adapters/codex/codex_adapter.py install --no-bg-drain
 ```
 
 ---
@@ -1002,16 +1008,18 @@ around. The queue and the learnings store are the only handoff.
 
 ## Files involved
 
+The plugin-internal files below now live under `plugin/` in the standalone [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) repo (extracted out of this monorepo); paths are relative to that `plugin/` directory. The `~/.reflect/` and `~/.learnings/` entries are runtime state on the user's machine, unchanged by the move.
+
 | File | Role |
 |---|---|
-| `plugins/reflect/skills/recall/hooks/session_start_recall.py` | SessionStart recall (baseline, cwd-based query) |
-| `plugins/reflect/skills/recall/hooks/user_prompt_submit_recall.py` | UserPromptSubmit recall (intent-sharp, with dedupe) |
-| `plugins/reflect/hooks/precompact_reflect.py` | PreCompact enqueue (full reflection deferred) |
-| `plugins/reflect/hooks/stop_reflect.py` | Stop enqueue (short-session fallback) |
-| `plugins/reflect/hooks/posttooluse_minilearning.py` | PostToolUse mini-learning capture |
-| `plugins/reflect/hooks/reflect-drain-bg.sh` | SessionStart bg-drainer (shells out to `claude -p`) |
-| `plugins/reflect/.claude-plugin/plugin.json` | Claude plugin autowire (`/plugin install`) |
-| `plugins/reflect/adapters/codex/codex_adapter.py` | Codex installer (writes `~/.codex/hooks.json`) |
+| `plugin/skills/recall/hooks/session_start_recall.py` | SessionStart recall (baseline, cwd-based query) |
+| `plugin/skills/recall/hooks/user_prompt_submit_recall.py` | UserPromptSubmit recall (intent-sharp, with dedupe) |
+| `plugin/hooks/precompact_reflect.py` | PreCompact enqueue (full reflection deferred) |
+| `plugin/hooks/stop_reflect.py` | Stop enqueue (short-session fallback) |
+| `plugin/hooks/posttooluse_minilearning.py` | PostToolUse mini-learning capture |
+| `plugin/hooks/reflect-drain-bg.sh` | SessionStart bg-drainer (shells out to `claude -p`) |
+| `plugin/.claude-plugin/plugin.json` | Claude plugin autowire (installed from ainb-reflect-memory) |
+| `plugin/adapters/codex/codex_adapter.py` | Codex installer (writes `~/.codex/hooks.json`) |
 | `~/.reflect/pending_reflections.jsonl` | Shared queue (any harness writes, any drains) |
 | `~/.reflect/session-injected/<session_id>.json` | Per-session dedupe state |
 | `~/.reflect/last-event.json` | Status line fragment source |

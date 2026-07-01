@@ -40,9 +40,11 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | Key | Action |
 |-----|--------|
 | `n` | New session (local or remote) |
-| `a` | Attach to session |
+| `a` | [Attach](attach.md) full-screen (TUI suspends; `Ctrl+B` `d` detaches) |
+| `A` | [In-pane attach](attach.md) — the preview pane becomes a live embedded tmux client (`Ctrl+Q` releases) |
+| `B` | Toggle the sessions sidebar |
 | `e` | Restart stopped session |
-| `r` | Re-authenticate credentials |
+| `u` | Re-authenticate credentials |
 | `d` | Delete session |
 | `x` | Cleanup orphaned containers |
 | `f` | Refresh workspaces |

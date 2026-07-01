@@ -190,7 +190,7 @@ pub struct SkillDetail {
 /// an optional source directory override.
 ///
 /// When `source_path` is `None` the daemon resolves the source the same way the
-/// CLI does (`$AINB_TOOLKIT_SKILLS_DIR`, else a walk to `toolkit/packages/skills`).
+/// CLI does (`$AINB_TOOLKIT_SKILLS_DIR`, else a walk to `ainb-toolkit/skills`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillsSyncParams {
     /// The workspace to import into.

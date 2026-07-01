@@ -17,9 +17,7 @@ pub type ScreenId = String;
 /// equality comparisons against `ScreenId` (`String`) without allocation.
 pub mod ids {
     pub const HOME: &str = "home";
-    pub const AGENT_SELECTION: &str = "agent_selection";
     pub const CONFIG: &str = "config";
-    pub const CATALOG: &str = "catalog";
     pub const ANALYTICS: &str = "analytics";
     /// Process-causality screen, owned by the `witr` plugin. Generic
     /// plugin-screen registration — no witr domain logic in the host;
@@ -51,10 +49,19 @@ pub mod ids {
     pub const CHANGELOG: &str = "changelog";
     pub const SESSION_RECOVERY: &str = "session_recovery";
     pub const SKILLS: &str = "skills";
+    pub const SKILL_MANAGER: &str = "skill_manager";
     pub const INBOX: &str = "inbox";
     /// Hangar managed-agents control plane — a plugin-owned screen rendered by
     /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
     pub const HANGAR: &str = "hangar";
+    /// Daemons observability screen — read-only runtime health of the phone
+    /// bridge / notifyd / ATC / fleet daemon. Reached from home with `d`.
+    pub const DAEMONS: &str = "daemons";
+    /// Fleet control panel — the interactive "who-needs-you" looking-glass.
+    /// Reads the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session)
+    /// and lets the human answer interviews + broadcast. Reached from home with
+    /// `f`.
+    pub const FLEET_PANEL: &str = "fleet_panel";
 }
 
 /// Outcome of a screen-handled event.
@@ -106,9 +113,7 @@ mod tests {
     fn screen_ids_are_unique() {
         let all = [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
-            ids::CATALOG,
             ids::ANALYTICS,
             ids::SESSION_LIST,
             ids::LOGS,
@@ -127,6 +132,7 @@ mod tests {
             ids::CHANGELOG,
             ids::SESSION_RECOVERY,
             ids::SKILLS,
+            ids::SKILL_MANAGER,
             ids::INBOX,
         ];
         let mut sorted = all.to_vec();

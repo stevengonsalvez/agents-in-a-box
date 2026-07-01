@@ -172,8 +172,11 @@ impl AbtopPlugin {
         // No usable abtop binary — print the install hint to stdout and
         // exit 1 (acceptance: "Missing-abtop CLI exit 1").
         let Some(path) = self.abtop_path.clone() else {
+            // Full docsite URL on its own line: terminals auto-linkify it, it
+            // stays copyable, and it never truncates.
             let hint = format!(
-                "abtop not found on PATH. Install: {}  (or `cargo install abtop`)\n",
+                "abtop not found on PATH. Install: {}  (or `cargo install abtop`)\n\
+                 What it does + screenshots: https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/\n",
                 platform_install_command(),
             );
             return CliOutput {

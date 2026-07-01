@@ -46,6 +46,17 @@
 
 A terminal-native ecosystem for managing AI coding agents. Built around a Rust TUI that orchestrates Claude Code, Codex, Gemini, and Copilot sessions with git worktree isolation, and a portable toolkit of skills, agents, and workflows that plug into 9 different AI coding tools.
 
+### Related repositories
+
+The portable skills, the `bootstrap.js` installer, and the catalog live in a
+separate, standalone repo — `ainb` consumes it as a pinned external source.
+
+| Repo | What it holds |
+|---|---|
+| **stevengonsalvez/agents-in-a-box** (this repo) | The `ainb` TUI/CLI unit manager (Rust workspace), the v2 plugin system, and the docs. |
+| **[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory)** | `reflect` — the long-term memory engine (GraphRAG + QMD) + its Claude Code plugin, extracted from this monorepo. Engine install: `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`. |
+| **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 91 curated skills, 37 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
+
 <p align="center">
   <img src="docs/assets/screenshots/dashboard-session.png" alt="ainb TUI — live session dashboard with multi-workspace sidebar" width="900">
   <br>
@@ -87,13 +98,29 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 ```bash
 # Install the TUI (macOS / Linux)
 brew tap stevengonsalvez/agents-in-a-box && brew install ainb
+# newer Homebrew gates third-party taps — if it says "untrusted tap", run:
+#   brew trust stevengonsalvez/agents-in-a-box
 
-# Install the toolkit for your AI tool
-cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
-
-# Launch
+# Launch the TUI
 ainb
+
+# Register the toolkit as a source, then install the units you want into your
+# real tool homes. Install is purely ADDITIVE — units land alongside your
+# existing config; your CLAUDE.md, settings, projects/ history and custom
+# agents are never touched.
+ainb source add gh:stevengonsalvez/ainb-toolkit
+AINB_USE_REAL_HOMES=1 ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit
 ```
+
+> **The easy way:** just run `ainb`, press `m` for the Skill Manager, and
+> browse + install units with `[i]`. If you already have skills on disk
+> (`~/.claude/skills/`, etc.), the first open offers one-keystroke adoption —
+> no manual setup. `ainb skill sync` then keeps installed units reconciled with
+> the manifest.
+>
+> To uninstall a unit, run `ainb skill remove <uri>` or press `[r]` on it in the
+> Skill Manager. Removal is **per-file and scoped to that unit** — it deletes
+> only what ainb deployed and can never wipe your config or session history.
 
 ---
 
@@ -109,7 +136,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 20 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
+- **Scriptable CLI** — 30+ commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …) with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
 
 ### Feature Showcase
 
@@ -186,6 +213,11 @@ brew tap stevengonsalvez/agents-in-a-box
 brew install ainb
 ```
 
+> Newer Homebrew versions refuse formulas from untrusted third-party taps. If
+> `brew install`/`brew upgrade` errors with *"Refusing to load formula … from
+> untrusted tap"*, trust the tap once and retry:
+> `brew trust stevengonsalvez/agents-in-a-box`
+
 The tap lives at [`stevengonsalvez/homebrew-agents-in-a-box`](https://github.com/stevengonsalvez/homebrew-agents-in-a-box) and is auto-updated by the release workflow on every tagged release — `brew upgrade ainb` always pulls the latest.
 
 <details>
@@ -224,6 +256,12 @@ sudo xcode-select --install
 ```bash
 brew untap stevengonsalvez/ainb   # only if you tapped this earlier
 brew install stevengonsalvez/agents-in-a-box/ainb
+```
+
+**`Refusing to load formula … from untrusted tap`** — newer Homebrew gates third-party taps behind an explicit trust step. Trust the tap once and retry:
+```bash
+brew trust stevengonsalvez/agents-in-a-box
+brew install ainb   # or brew upgrade ainb
 ```
 </details>
 
@@ -299,7 +337,7 @@ Config lives at `~/.agents-in-a-box/config/config.toml` under a `[plugins]` tabl
 
 A portable AI coding agent toolkit: skills, agents, workflows, and configurations that deploy to 9 different AI coding tools from a single source.
 
-**[Full toolkit documentation →](toolkit/README.md)**
+**[Full toolkit documentation → stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)**
 
 ### Supported AI Tools
 
@@ -404,7 +442,7 @@ A two-tier learning system that captures insights during development and retriev
 | **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
 | **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
 
-The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect-kb/`](reflect-kb/) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in this monorepo and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'`.
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect`](https://github.com/stevengonsalvez/ainb-reflect-memory) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in its own repo, [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory), and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`.
 
 **[How the knowledge system works →](docs/knowledge/overview.md)**
 
@@ -434,36 +472,36 @@ agents-in-a-box/
 │   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
 │
-├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
-│   ├── src/                    #   Package source (installed via `uv tool install`)
-│   ├── tests/                  #   Unit + integration tests
-│   └── pyproject.toml          #   Workspace member
-│
-├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
-│   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+# reflect (the `reflect` CLI + GraphRAG/QMD engine and its Claude Code plugin)
+# now lives in a SEPARATE repo: github.com/stevengonsalvez/ainb-reflect-memory
+# — flattened, with the engine at its repo root and the plugin under plugin/.
+#
+├── plugins/                    # Claude Code plugins (root-level)
 │   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
 │   └── ainb-hooks/             #   ainb lifecycle hooks
 │
-├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
-│   ├── packages/
-│   │   ├── skills/             #   91 reusable skills
-│   │   ├── agents/             #   37 agent definitions
-│   │   │   ├── universal/      #     Cross-stack specialists
-│   │   │   ├── engineering/    #     Backend & infra agents
-│   │   │   ├── orchestrators/  #     Team coordination
-│   │   │   ├── design/         #     UI/UX specialists
-│   │   │   ├── swarm/          #     Multi-agent coordination
-│   │   │   └── meta/           #     Agent creation & reflection
-│   │   ├── workflows/          #   Structured delivery workflows
-│   │   └── utilities/          #   Shared utilities
-│   ├── bootstrap.js            #   Multi-tool deployment engine
-│   └── create-rule.js          #   CLI installer
+# The portable toolkit (91 skills, 37 agents, workflows, utilities,
+# bootstrap.js, external-dependencies.yaml, catalog.yaml) lives in a
+# SEPARATE repo: github.com/stevengonsalvez/ainb-toolkit — flattened at
+# its repo root. `ainb` consumes it as a pinned external source.
+#
+├── ainb-tui/                   # `ainb` binary (Rust) — TUI + skill-manager CLI
+│   ├── crates/
+│   │   ├── ainb-cli/           #   ainb source/skill/doctor subcommands
+│   │   ├── ainb-core/          #   ratatui app + manifest/lockfile/URI types
+│   │   ├── ainb-fetch/         #   git2 / http / local fetchers
+│   │   ├── ainb-adapters-source/  # marketplace / manifest / raw / single
+│   │   ├── ainb-adapters-tool/    # 9 tool adapters (claude/codex/copilot/…)
+│   │   ├── ainb-diff/          #   Diff render + pager driver
+│   │   ├── ainb-skill-core/    #   Manifest/lockfile/URI/paths/error
+│   │   └── ainb-usage/         #   JSONL invocation parser + cache
+│   └── plans/skill-manager/spec.md   # v1 design + acceptance criteria
 │
 ├── docs/                       # Documentation hub (Markdown source of truth)
 │   ├── README.md               #   Docs TOC
 │   ├── product/                #   What ainb is, value, architecture
 │   ├── tui/                    #   ainb CLI reference, FAQ, keyboard shortcuts
-│   ├── toolkit/                #   Skills + agents + bootstrap reference
+│   ├── toolkit/                #   ainb-toolkit reference (skills/agents/bootstrap)
 │   ├── plugins/                #   v2 plugin overview, user guide, authoring, spec
 │   ├── knowledge/              #   reflect/recall (GraphRAG + QMD)
 │   ├── contributing/           #   Build, CI/CD, release
@@ -474,7 +512,7 @@ agents-in-a-box/
 │
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
-    ├── toolkit-validation.yml  #   Toolkit structure & install validation
+    ├── toolkit-validation.yml  #   Skill Manager & Catalog CI (ainb + ainb-toolkit)
     ├── release.yml             #   Cross-platform binary releases
     └── deploy-pages.yml        #   Build & deploy the website to GitHub Pages
 ```
@@ -528,13 +566,62 @@ cargo deny check                        # Security + licenses
 
 ### Installing the toolkit
 
+Install is **additive** — units are deployed alongside whatever is already in
+your tool homes; nothing is wiped. Writes to the real tool dirs are opt-in via
+`AINB_USE_REAL_HOMES=1` (without it, ainb writes to a managed sandbox).
+
 ```bash
-cd toolkit
-npm install
-node create-rule.js --tool=claude-code-4.5    # Deploy to ~/.claude/
-node create-rule.js --tool=gemini             # Deploy to .gemini/
-node create-rule.js --tool=codex              # Deploy to ~/.codex/
+# Register the toolkit as a source (fetches it and reports its unit count).
+ainb source add gh:stevengonsalvez/ainb-toolkit
+
+# Install the units you want into the real tool home dirs.
+AINB_USE_REAL_HOMES=1 ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit
+
+# Scope an install to specific tools (passed to every mutating verb):
+ainb skill install gh:stevengonsalvez/ainb-toolkit/skills/commit --targets claude,codex
+ainb skill sync                               # reconcile installed units with the manifest
+ainb skill update --check                     # report drift across sources
+ainb skill update --all --yes                 # re-fetch + apply
+ainb skill remove gh:stevengonsalvez/ainb-toolkit/skills/commit   # per-file uninstall, never touches config
+ainb doctor                                   # health-check the deployment
 ```
+
+> Prefer the TUI? Press `m` for the Skill Manager to browse + install units
+> with `[i]` and remove them with `[r]` — no manual URIs.
+
+See `ainb-tui/plans/skill-manager/spec.md` for the full §8 CLI
+surface (`source`, `skill`, `doctor`, `usage`).
+
+#### v1.1 — Discovery + adoption + promote
+
+If you already have skills under `~/.<tool>/skills/` (Claude,
+Codex, Gemini, …) or plugins installed via Claude Code's
+`/plugin install`, you don't have to migrate by hand any more.
+v1.1 layers a read-only discovery walker + a one-keystroke
+adoption banner on top of v1. Open SkillManager (`m` on Home)
+with an empty manifest and `ainb` offers to import what's already
+on disk — marketplace plugins, orphan skills, the lot —
+including a conflict matrix when the same name shows up in two
+places.
+
+A new `ainb skill promote <unit> --to gh:user/repo` command turns
+a hand-edited orphan into a git-backed source in one shot:
+clones the target repo, copies the unit, commits + pushes, and
+rewrites the manifest URI from `local:` to `gh:`.
+
+- [Discovery flow reference →](docs/skill-manager/discovery.md) —
+  walker classes, reconciler conflict matrix, banner UX
+- [`ainb skill promote` reference →](docs/skill-manager/promote.md) —
+  command surface, locked design, failure modes
+- [`ainb skill usage` reference →](docs/skill-manager/usage.md) —
+  per-unit invocation counts + last-used in the Detail pane (v1.2)
+- [`ainb skill sync` reference →](docs/skill-manager/sync.md) —
+  bidirectional home ↔ repo reconciliation with `[s]` keybind (v1.2)
+- [`ainb skill check` reference →](docs/skill-manager/check.md) —
+  drift detection + Units-panel status column (v1.2)
+
+Full spec at `.agents/goals/ainb-skill-manager-v1.1-discovery-spec.md`
+and `.agents/goals/ainb-skill-manager-v1.2-rollup-plan.md`.
 
 ### Contributing
 
@@ -553,7 +640,7 @@ node create-rule.js --tool=codex              # Deploy to ~/.codex/
 - [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-agents-in-a-box)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
 - [Knowledge System Architecture](docs/knowledge/overview.md)
-- [Toolkit Documentation](toolkit/README.md)
+- [Toolkit Repository (ainb-toolkit)](https://github.com/stevengonsalvez/ainb-toolkit)
 
 ---
 

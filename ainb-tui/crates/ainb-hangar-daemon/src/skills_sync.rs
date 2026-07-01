@@ -1,6 +1,6 @@
-//! P6.2 — the toolkit-directory skill importer behind `ainb hangar skills sync`.
+//! P6.2 — the curated-skills directory importer behind `ainb hangar skills sync`.
 //!
-//! Walks a `toolkit/packages/skills/`-shaped tree where each skill lives at
+//! Walks an `ainb-toolkit` `skills/`-shaped tree where each skill lives at
 //! `<root>/<name>/SKILL.md` (with optional supporting files nested beneath the
 //! skill dir), parses the YAML frontmatter for the skill's `name`/`description`,
 //! and upserts each skill workspace-scoped into the store via
@@ -38,22 +38,26 @@ use sqlx::SqlitePool;
 /// The basename every skill directory must contain to be imported.
 const SKILL_MD: &str = "SKILL.md";
 
-/// Env var that, when set, overrides the toolkit-skills source directory.
+/// Env var that, when set, overrides the curated-skills source directory.
+/// Point it at a fetched `ainb-toolkit` checkout's flattened `skills/` dir.
 pub const SOURCE_ENV: &str = "AINB_TOOLKIT_SKILLS_DIR";
 
-/// The repo-relative suffix the source walk looks for under each ancestor of
-/// the current working directory.
-const TOOLKIT_SUFFIX: &str = "toolkit/packages/skills";
+/// The path suffix the source walk looks for under each ancestor of the current
+/// working directory: a checked-out `ainb-toolkit` clone whose curated skills
+/// live flattened at `skills/` (the canonical home — `toolkit/` no longer
+/// exists in this monorepo).
+const TOOLKIT_SUFFIX: &str = "ainb-toolkit/skills";
 
 /// Resolve the default skills source directory for `ainb hangar skills sync`.
 ///
 /// Resolution order:
-/// 1. `$AINB_TOOLKIT_SKILLS_DIR` when set and non-empty.
-/// 2. Otherwise walk up from the current working directory looking for a
-///    `toolkit/packages/skills` directory (the in-repo curated skills).
+/// 1. `$AINB_TOOLKIT_SKILLS_DIR` when set and non-empty (a fetched ainb-toolkit
+///    `skills/` dir).
+/// 2. Otherwise walk up from the current working directory looking for an
+///    `ainb-toolkit/skills` checkout sitting in an ancestor directory.
 ///
 /// Returns `None` when neither is found — the CLI then asks the operator for an
-/// explicit `--source`.
+/// explicit `--source` (e.g. a path to a cloned ainb-toolkit `skills/` dir).
 #[must_use]
 pub fn default_source_dir() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os(SOURCE_ENV).filter(|v| !v.is_empty()) {
@@ -145,7 +149,7 @@ pub trait SkillImporter {
     fn collect(&self) -> Result<Vec<ParsedSkill>, SyncError>;
 }
 
-/// v1 importer: a local `toolkit/packages/skills/`-shaped directory.
+/// v1 importer: a local `ainb-toolkit` `skills/`-shaped directory.
 pub struct ToolkitDirImporter<'a> {
     /// The directory holding `<name>/SKILL.md` skill dirs.
     root: &'a Path,

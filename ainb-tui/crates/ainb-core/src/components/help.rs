@@ -14,67 +14,82 @@ impl HelpComponent {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let popup_area = self.centered_rect(60, 80, area);
+        let popup_area = self.centered_rect(60, 96, area);
 
         frame.render_widget(Clear, popup_area);
 
+        // Capitalised keys are Shift-chords; spell that out ("Shift+A", not a
+        // bare "A") so non-developers aren't left guessing. `head` = section
+        // title, `row` = a key/description pair with the key column padded so
+        // the descriptions line up regardless of key width.
+        let head = |t: &str| {
+            ListItem::new(t.to_string())
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        };
+        let row = |key: &str, desc: &str| ListItem::new(format!("  {key:<12} {desc}"));
+
         let help_items = vec![
-            ListItem::new("Navigation:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  ↓          Next session"),
-            ListItem::new("  ↑          Previous session"),
-            ListItem::new("  ←          Previous workspace"),
-            ListItem::new("  →          Next workspace"),
-            ListItem::new("  Home/End   Top / bottom"),
+            head("Navigation:"),
+            row("↓", "Next session"),
+            row("↑", "Previous session"),
+            row("Home/End", "Top / bottom"),
+            row("Shift+↑/↓", "Scroll the selected session's output"),
             ListItem::new(""),
-            ListItem::new("Session Actions:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  n          New session (local or remote)"),
-            ListItem::new("  a          Attach to session"),
-            ListItem::new("  1-9        Quick-attach to numbered session"),
-            ListItem::new("  Enter      Resume (stopped) / attach (running)"),
-            ListItem::new("  r          Resume stopped session (tmux)"),
-            ListItem::new("  e          Recreate Boss/Docker session (fresh container)"),
-            ListItem::new("  Space      Select / deselect session"),
-            ListItem::new("  D          Delete selected sessions"),
-            ListItem::new("  d          Delete session"),
-            ListItem::new("  o          Open in editor"),
-            ListItem::new("  $          Quick shell"),
-            ListItem::new("  F2         Rename SSH / 'Other tmux' session"),
-            ListItem::new("  s          Star / unstar workspace"),
-            ListItem::new("  F          Cycle session filter (active/stopped/all)"),
-            ListItem::new("  f          Refresh workspaces"),
-            ListItem::new("  x          Cleanup orphaned containers"),
-            ListItem::new("  A          Re-authenticate credentials"),
+            head("Session Actions:"),
+            row("n", "New session (local or remote)"),
+            row(
+                "a",
+                "Attach — full-screen takeover (Ctrl+B then D to leave)",
+            ),
+            row(
+                "→",
+                "Attach in a split pane (keeps the session list visible)",
+            ),
+            row("1-9", "Quick-attach to numbered session"),
+            row("Enter", "Resume (stopped) / attach (running)"),
+            row("r", "Resume stopped session (tmux)"),
+            row("Space", "Select / deselect session"),
+            row("d", "Delete session"),
+            row("Shift+D", "Delete selected sessions"),
+            row("o", "Open in editor"),
+            row("$", "Quick shell"),
+            row("F2", "Rename SSH / 'Other tmux' session"),
+            row("s / Shift+S", "Star / unstar workspace"),
+            row("Shift+F", "Cycle session filter (active/stopped/all)"),
+            row("f", "Refresh workspaces"),
+            row("u", "Re-authenticate credentials"),
             ListItem::new(""),
-            ListItem::new("Git Actions:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  g          Show git view"),
-            ListItem::new("  p          Commit & push"),
+            head("Git Actions:"),
+            row("g", "Show git view"),
+            row("p", "Commit & push"),
             ListItem::new(""),
-            ListItem::new("Tools:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  c          Toggle Claude chat"),
+            head("Tools:"),
+            row("c", "Toggle Claude chat"),
             ListItem::new(""),
-            ListItem::new("Panels (closing returns here):")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  b          Inbox (Esc closes)"),
-            ListItem::new("  i          Stats / usage analytics (Esc closes)"),
-            ListItem::new("  w          Witr process browser (quit witr to return)"),
-            ListItem::new("  k          Skills browser (Esc closes)"),
-            ListItem::new("  m          Memory / learnings browser (Esc closes)"),
-            ListItem::new("  t          Abtop agent monitor (quit abtop to return)"),
+            head("Panels (closing returns here):"),
+            row("b", "Inbox (Esc closes)"),
+            row("d", "System daemon overlay (Esc closes)"),
+            row("h", "Agent Deck daemon health (Esc closes)"),
+            row("f", "Fleet control panel (Esc closes)"),
+            row("i", "Stats / usage analytics (Esc closes)"),
+            row("w", "Witr process browser (quit witr to return)"),
+            row("c / k", "Skills catalogue (Esc closes)"),
+            row("m", "Memory / learnings browser (Esc closes)"),
+            row("t", "Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),
-            ListItem::new("Views:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  Tab        Switch focus / views"),
-            ListItem::new("  E          Expand / collapse all workspaces"),
+            head("Views:"),
+            row("Tab", "Switch focus (list <-> preview)"),
+            row("Shift+E", "Expand / collapse all workspaces"),
+            row("Shift+B", "Collapse / expand the sidebar"),
             ListItem::new(""),
-            ListItem::new("General:")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ListItem::new("  ?/H        Toggle this help"),
-            ListItem::new("  q/Esc      Quit / home"),
-            ListItem::new("  Ctrl+C     Force quit"),
+            head("General:"),
+            row("? / Shift+H", "Toggle this help"),
+            row("q / Esc", "Quit / home"),
+            row("Ctrl+C", "Force quit"),
+            row(
+                "Shift+drag",
+                "Select text to copy (Opt+drag in some terminals)",
+            ),
         ];
 
         let help_list = List::new(help_items).block(

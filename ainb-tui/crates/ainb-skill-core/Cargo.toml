@@ -1,0 +1,31 @@
+[package]
+name = "ainb-skill-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Enables the test-fixture builder (`src/fixtures.rs`) used by integration
+# tests + manual sandbox testing. Off by default so production binaries
+# never link fixture seeding code or the bytes of seeded SKILL.md content.
+# Dev-deps + integration tests enable it on demand.
+test-fixtures = []
+
+[dependencies]
+fs2 = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+fs2 = { workspace = true }
+proptest = "1"
+tempfile = "3"
+# Self-dev-dep with `test-fixtures` flipped on. Cargo treats this as a
+# separate dependency edge — production builds keep the default feature
+# set (fixture absent), while every integration test under `tests/`
+# automatically sees `build_skill_manager_sandbox`. Standard pattern
+# used by tokio, serde_json, etc. for dev-only API surfaces.
+ainb-skill-core = { path = ".", features = ["test-fixtures"] }

@@ -7,8 +7,10 @@ use anyhow::Result;
 use super::OutputFormat;
 use crate::cli::deps::{self, RealEnv};
 
-/// `ainb doctor` takes no positional/flag args of its own; the global
-/// `--format` flag selects text vs json output.
+/// Classified dependency check for the reflect / statusline toolchain.
+///
+/// Takes no positional/flag args of its own; the global `--format` flag
+/// selects text vs json output.
 #[derive(clap::Args)]
 pub struct DoctorArgs {}
 

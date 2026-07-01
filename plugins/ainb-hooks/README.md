@@ -1,16 +1,16 @@
 # ainb-hooks
 
-Plugin that emits Claude Code and Codex CLI lifecycle events to the
-**ainb notification inbox** via a Unix socket. Powers session-state
+Plugin that emits Claude Code, Codex CLI, and GitHub Copilot CLI lifecycle
+events to the **ainb notification inbox** via a Unix socket. Powers session-state
 badges, the dedicated Inbox screen, and optional OS notifications in
 `ainb-tui`.
 
 ## How it works
 
 ```
-┌─ Claude / Codex session ─────┐
+┌─ Claude / Codex / Copilot ───┐
 │ hook fires (Stop, Notification│
-│   :idle_prompt, ...)         │
+│   / PermissionRequest, ...)  │
 │ ────────────────────────────▶│ notify.sh
 └──────────────────────────────┘    │
                                     ▼
@@ -37,52 +37,68 @@ plugins/ainb-hooks/
 │   └── plugin.json          # Claude Code marketplace manifest
 ├── codex/
 │   └── hooks.json           # Codex ~/.codex/hooks.json merge template
+├── copilot/
+│   └── hooks.json           # Copilot ~/.copilot/hooks/ainb.json drop-in (native format)
 ├── hooks/
-│   └── notify.sh            # universal hook script (claude + codex)
+│   └── notify.sh            # universal hook script (claude + codex + copilot)
 └── README.md
 ```
 
-The same `notify.sh` is used by both agents:
+The same `notify.sh` is used by all three agents:
 
 - **Claude Code** pipes the hook payload as JSON on stdin.
 - **Codex CLI** passes the hook payload as JSON in `argv[1]`.
+- **GitHub Copilot CLI** pipes the hook payload as JSON on stdin.
 
 `notify.sh` autodetects the source and uses the right input. The agent
-is identified via `AINB_AGENT={claude,codex}` set in the registering
+is identified via `AINB_AGENT={claude,codex,copilot}` set in the registering
 command line.
 
 ## Install
 
-The recommended install path is the `ainb hooks install` CLI (in `ainb-tui`),
-which handles plugin manifests, config merges, and notifyd lifecycle:
+The recommended install path is the `ainb-notifyd` CLI (the daemon doubles as
+the hook installer; `ainb notifyd …` is a hidden alias), which handles plugin
+manifests, config merges, and notifyd lifecycle:
 
 ```bash
-ainb hooks install --claude --codex
-ainb hooks status
-ainb hooks uninstall --all
+ainb-notifyd install --claude --codex --copilot   # or: --all
+ainb-notifyd status
+ainb-notifyd uninstall --all
 ```
 
 The CLI:
 
-1. Drops `.claude-plugin/plugin.json` at `~/.claude/plugins/ainb-hooks/` (Claude).
+1. Installs `ainb-hooks@agents-in-a-box` through the Claude plugin marketplace (Claude).
 2. Merges this directory's `codex/hooks.json` into `~/.codex/hooks.json` as a
    managed block (Codex).
-3. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites
-   the `__AINB_HOOK_SCRIPT__` placeholder in the codex template to that
+3. Writes this directory's `copilot/hooks.json` to `~/.copilot/hooks/ainb.json`
+   as a standalone drop-in (Copilot loads every `*.json` in `~/.copilot/hooks/`
+   and combines them, so ainb owns one file; uninstall deletes just that file).
+4. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites
+   the `__AINB_HOOK_SCRIPT__` placeholder in each agent's template to that
    absolute path.
-4. Records the install method in `~/.agents-in-a-box/install.json` so
+5. Records the install method in `~/.agents-in-a-box/install.json` so
    `ainb hooks uninstall` is fully reversible.
 
 ## Hook events
 
-Both agents use identical PascalCase event names: `SessionStart`,
-`UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop`, `PreCompact`.
+Claude and Codex both use PascalCase event names, but Codex now exposes a
+separate `PermissionRequest` hook instead of a `Notification` hook. The
+human-facing registrations are:
 
-The matcher `Notification:idle_prompt` (Claude) and Codex's variants
-(`request_user_input`, `wait_for_user`, etc.) all carry the same
-semantic meaning ("agent awaiting user input"). `notify.sh` preserves
-the raw event name in the `raw_event` field of the envelope so UI
-mapping happens in the consumer, not at the wire.
+| Agent | Hooks registered | Meaning |
+| --- | --- | --- |
+| Claude Code | `Notification`, `Stop` | awaiting input / permission prompt, turn finished |
+| Codex CLI | `PermissionRequest`, `Stop` | approval prompt, turn finished |
+| GitHub Copilot CLI | `notification`, `agentStop` | awaiting input / permission prompt, turn finished |
+
+Only the user-facing events are hooked on every agent; telemetry events are
+intentionally left out so they don't bury the signal.
+
+The matcher `Notification:idle_prompt` (Claude) and `PermissionRequest`
+(Codex) carry different raw names but the same user-facing shape: the agent
+needs Stevie. `notify.sh` preserves the raw event name in the `raw_event` field
+of the envelope so UI mapping happens in the consumer, not at the wire.
 
 ## Envelope shape
 
@@ -101,6 +117,44 @@ mapping happens in the consumer, not at the wire.
 
 `payload` is the verbatim original JSON from the host agent so the
 inbox detail view can show full forensics.
+
+## ATC plumbing (event-driven orchestration)
+
+The same `notify.sh` doubles as the shell shim for the **event-driven ATC
+plumbing**. It is dormant by default and activates only when the hook was
+installed under ATC management — i.e. the command carries `AINB_MANAGED=atc`
+(set by the lifecycle-hook block that `ainb fleet atc setup` merges into
+`~/.claude/settings.json`). A plain notifyd-only install never sets it, so the
+plumbing block is skipped and leaf sessions pay nothing.
+
+When active, after delivering the notifyd envelope the script forwards the parsed
+event to the Rust side:
+
+```sh
+ainb fleet atc hook --event "$AINB_HOOK_EVENT" --session-id "$SID" --cwd "$CWD"
+```
+
+`ainb fleet atc hook` then:
+
+1. Writes an atomic per-session **status file** (`~/.agents-in-a-box/status/<id>.json`).
+2. On `UserPromptSubmit` (a genuine user turn) resets the session's Stop-drain
+   block budget.
+3. On `Stop`: commits a **last-wins completion** to the parent's durable inbox
+   (resolved from `AINB_PARENT_SESSION` or `parents.json`; unresolvable parents
+   dead-letter), then **drains its own inbox** — if it carries child completions
+   and the block budget allows, the script relays
+   `{"decision":"block","reason":<completions>}` on stdout so Claude Code feeds
+   the completions back as the session's next turn.
+
+Empty inbox ⇒ no block, no writes beyond the status file. This durable inbox
+replaces reliance on the claude-peers broker's lossy delivery path. Full design,
+formats, and the consecutive-block budget are documented in
+[`docs/atc-plumbing.md`](../../docs/atc-plumbing.md).
+
+> The lifecycle hooks are installed into `~/.claude/settings.json` by
+> `ainb fleet atc setup` via a read-preserve-modify-write merge that keeps the
+> reflect plugin's and notifyd's hooks intact — they are **not** part of this
+> marketplace manifest (which stays notifyd-only: `Notification` + `Stop`).
 
 ## See also
 

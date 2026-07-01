@@ -172,7 +172,7 @@ The config auto-detects and uses it if installed.
 ## Configuration
 
 Configuration files are loaded from (in order of precedence):
-1. `./.agents-box/config.toml` (project-level)
+1. `./.ainb/config.toml` (project-level; legacy `./.agents-box/config.toml` still read)
 2. `~/.agents-in-a-box/config/config.toml` (user-level)
 3. `/etc/agents-in-a-box/config.toml` (system-level)
 
@@ -188,6 +188,32 @@ See `config/example.config.toml` for all available options with documentation.
 | `[workspace_defaults]` | `exclude_paths` | Patterns to exclude from repo scanning |
 | `[ui_preferences]` | `show_container_status` | Show container mode icons |
 | `[ui_preferences]` | `show_git_status` | Show git changes in session list |
+| `[mcp_pool]` | `enabled` | Share one MCP server process across host sessions (default: true) |
+| `[mcp_pool]` | `idle_grace_secs` | Reap a pooled server N seconds after its last session detaches (default: 300) |
+| `[mcp_servers.*]` | `shared` | Per-server pool opt-out — set false for stateful servers (default: true) |
+
+### Shared MCP Pool
+
+With `[mcp_pool]` enabled, `ainb run` (Claude sessions) ensures a standalone
+`ainb mcp daemon` is running and merge-writes the worktree's `.mcp.json` so
+each pooled server points at the `ainb mcp proxy <socket>` stdio shim. The
+daemon spawns each MCP server ONCE (lazily, on first attach) behind a unix
+socket under `~/.agents-in-a-box/mcp/sockets/`, so N concurrent sessions
+share 1 node/bun process instead of spawning N. Inspect with
+`ainb mcp status`, stop with `ainb mcp stop`, validate end-to-end with
+`scripts/validate-mcp-pool.sh` (repo root). Host/tmux sessions only —
+Docker sessions keep their per-container MCP init. Servers whose commands
+don't resolve on the host (e.g. the built-in container-path defaults) are
+skipped automatically.
+
+No hand-written TOML required: stdio servers found in a worktree's existing
+`.mcp.json` are auto-imported into the pool at session create (sessions
+push definitions to the running daemon over the control socket), and
+`ainb mcp import [--user]` persists project `.mcp.json` + Claude user-scope
+servers into `[mcp_servers.*]` config. `ainb mcp install --codex --copilot`
+points `~/.codex/config.toml` / `~/.copilot/mcp-config.json` at the pool
+shim (with `.bak` backups) so Codex and Copilot sessions share the same
+backend processes as Claude.
 
 ## Conventions (paths & plugins)
 
@@ -204,7 +230,9 @@ See `config/example.config.toml` for all available options with documentation.
 
 ## Monorepo Context
 
-This TUI can reference packages from the parent `toolkit/` directory. Git operations work against the monorepo root.
+The curated skills/agents/installer/catalog live in the standalone
+`stevengonsalvez/ainb-toolkit` repo (flattened at its root); `ainb` consumes
+it as a pinned external source. Git operations work against the monorepo root.
 
 ---
 

@@ -26,12 +26,13 @@ From the home screen, single keys jump to each screen (see [Keyboard shortcuts](
 | Sessions | `s` | List, attach, restart, and delete agent sessions |
 | Agents | `a` | Pick a provider/agent before spawning a session |
 | Recovery | `R` | Find and resume orphaned sessions / broken worktrees |
-| Stats | `i` | Usage analytics: Daily, Weekly, Project, Burndown, Optimize |
+| Stats | `i` | Usage analytics: Daily, Weekly, Project, Burndown, Optimize, [Savings](token-optimization.md) (`[`/`]` switch tabs) |
+| Daemons | `d` | Read-only [Daemons overlay](daemons.md): shared MCP pool + Headroom proxy |
 | Skills | `k` | Browse available skills |
 | Inbox | `I` | ainb-hooks notification inbox |
 | Config | `C` | View configuration |
 
-Git operations, log streaming, and a tmux preview are available from within the session views. Press **`g`** on a session to open the Warp-style **[Code Review](code-review.md)** diff — a file sidebar plus per-file collapsible blocks with syntax highlighting and word-level emphasis (also available standalone as `ainb diff-review`).
+Git operations, log streaming, and a tmux preview are available from within the session views. Press **`g`** on a session to open the Warp-style **[Code Review](code-review.md)** diff — a file sidebar plus per-file collapsible blocks with syntax highlighting and word-level emphasis (also available standalone as `ainb diff-review`). Press **`a`** to [attach](attach.md) full-screen, or **`A`** to turn the preview pane into a live embedded tmux client in-place (`Ctrl+Q` releases it).
 
 ## Multi-provider session model
 

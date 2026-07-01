@@ -19,7 +19,7 @@ use super::OutputFormat;
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::models::session::SessionAgentType;
 
-/// Subcommands for the recover command
+/// Recover orphaned or crashed sessions. Description set in `cli/registry.rs`.
 #[derive(clap::Subcommand)]
 pub enum RecoverCommands {
     /// List orphaned sessions and broken worktree symlinks
@@ -392,6 +392,8 @@ fn execute_resume(session: &str) -> Result<()> {
         workspace_name: workspace.clone(),
         created_at: matched.created_at.unwrap_or_else(Utc::now),
         agent_type: SessionAgentType::default(),
+        headroom_enabled: false,
+        rtk_enabled: false,
     };
 
     let mut store = SessionStore::load();
@@ -612,6 +614,8 @@ mod tests {
             workspace_name: workspace.to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
+            rtk_enabled: false,
         }
     }
 

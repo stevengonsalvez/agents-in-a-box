@@ -49,12 +49,8 @@ impl ConfigScreenComponent {
         self.render_help_bar(frame, main_layout[2], state);
     }
 
-    fn render_title(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let agent_name = state
-            .agent_selection_state
-            .current_model()
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| "No Agent".to_string());
+    fn render_title(&self, frame: &mut Frame, area: Rect, _state: &AppState) {
+        let agent_name = "Configuration".to_string();
 
         let title_block = Block::default()
             .borders(Borders::ALL)

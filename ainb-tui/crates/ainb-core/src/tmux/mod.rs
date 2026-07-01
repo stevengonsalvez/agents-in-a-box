@@ -9,6 +9,8 @@
 // - Lightweight, fast, and responsive interactions
 
 pub mod capture;
+pub mod embed_client;
+pub mod embed_input;
 pub mod process_detection;
 pub mod pty_wrapper;
 pub mod session;
@@ -16,6 +18,24 @@ pub mod session;
 use anyhow::Result;
 use tokio::process::Command;
 use tracing::debug;
+
+/// Sanitize a name into the tmux session name `ainb` actually spawns under.
+///
+/// This is the single source of truth shared by [`session::TmuxSession`] (the
+/// real spawner) and any caller that must *target* a session it did not spawn
+/// (status / teardown). Keeping one implementation means a name containing a
+/// space, `.`, `/`, or `:` resolves to the same session everywhere, instead of
+/// the spawner and the targeter disagreeing and operating on the wrong session.
+#[must_use]
+pub fn sanitize_session_name(name: &str) -> String {
+    let base_name = name.strip_prefix("tmux_").unwrap_or(name);
+    let cleaned = base_name
+        .replace(' ', "_")
+        .replace('.', "_")
+        .replace('/', "_")
+        .replace(':', "_");
+    format!("tmux_{cleaned}")
+}
 
 /// Known valid shells that we allow for reattach-to-user-namespace.
 /// This prevents shell injection attacks via malicious $SHELL values.
@@ -245,11 +265,18 @@ async fn bind_clipboard_for_copy_modes(_session_name: &str, copy_cmd: &str) -> R
 }
 
 #[allow(unused_imports)]
+// lib-facing re-export; the bin target includes this module tree directly
 pub use capture::CaptureOptions;
+#[allow(unused_imports)]
+// lib-facing re-export; the bin target includes this module tree directly
+pub use embed_client::EmbedClient;
+pub use embed_input::{encode_key_event, encode_mouse_event};
 pub use process_detection::ClaudeProcessDetector;
 #[allow(unused_imports)]
+// lib-facing re-export; the bin target includes this module tree directly
 pub use pty_wrapper::PtyWrapper;
 #[allow(unused_imports)]
+// lib-facing re-export; the bin target includes this module tree directly
 pub use session::{AttachState, TmuxSession};
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlan
 use crate::data::usage::{
     ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilters, UsagePeriod,
     UsageProviderFilter, UsageQuery, UsageSourceRoots, analyze_yield, billing_period,
-    compare_models, disabled_cache, optimize_usage, parse_usage_for,
+    compare_models, disabled_cache, filter_usage_data_full, optimize_usage, parse_usage_for,
     parse_usage_for_with_roots_and_cache, shared_cache,
 };
 use crate::output_format::OutputFormat;
@@ -50,6 +50,8 @@ pub enum UsageCommands {
     },
     /// Per-model rollup or per-model × per-activity-category matrix
     Models(UsageModelsArgs),
+    /// Token-savings summary (Headroom, RTK, Caveman estimate)
+    Savings(UsageReportArgs),
 }
 
 #[derive(Args, Clone, Default)]
@@ -282,6 +284,7 @@ pub fn execute_for_plugin(
         UsageCommands::Yield(args) => print_yield_with_data(data, &args, format),
         UsageCommands::ModelAlias(args) => model_alias_command_plugin(args),
         UsageCommands::Models(args) => print_models_with_data(data, &args, format),
+        UsageCommands::Savings(_args) => print_savings_with_data(data, format),
         // Plan / Currency / Cache stay in the host-side `cli/usage.rs`
         // shim — they're config admin, not analytics.
         UsageCommands::Plan { .. } | UsageCommands::Currency(_) | UsageCommands::Cache { .. } => {
@@ -296,15 +299,17 @@ fn print_report_with_data(
     format: OutputFormat,
     title: &str,
 ) -> Result<()> {
-    // Apply the same filter pipeline the host-side `print_report` uses,
-    // but operate on the supplied snapshot directly instead of opening
-    // the cache.
+    // Apply the same period / provider / chip filter pipeline the
+    // host-side cache path applies, but re-aggregate the supplied
+    // snapshot's `calls` instead of opening the cache. `--period`
+    // (today/week/30days/month/all/--month/--quarter/--last-n-days/--ytd/
+    // --from/--to) genuinely scopes the data here: `filter_usage_data_full`
+    // date-bounds the call set and re-rolls every dimension, so the plugin
+    // path is no longer a lifetime-only all-time snapshot.
     let filters = build_filters_from_args(args);
-    let view = if filters.is_empty() {
-        data.clone()
-    } else {
-        crate::data::usage::filter_usage_data(data, &filters)
-    };
+    let period = period_from_args(args)?;
+    let provider = provider_filter_from_args(args);
+    let view = filter_usage_data_full(data, &filters, &period, provider);
     match format {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report_json(&view))?);
@@ -660,6 +665,89 @@ fn print_yield_with_data(
     Ok(())
 }
 
+/// Plugin-mode `savings` — prints the same three figures as the TUI
+/// Savings tab: Headroom (fetched live), RTK (shelled out), and the
+/// Caveman estimate (output_tokens × 0.74). Operates on the
+/// pre-loaded usage snapshot for the Caveman figure; the other two
+/// are fetched synchronously via a single-shot tokio runtime so the
+/// CLI path doesn't block the plugin mutex for I/O.
+fn print_savings_with_data(data: &UsageData, format: OutputFormat) -> Result<()> {
+    use crate::data::savings::{CAVEMAN_OUTPUT_RATIO, fetch_savings};
+    // The plugin binary has a tokio runtime already, but cli_dispatch is
+    // synchronous once we're inside capture_stdout. We spawn a one-shot
+    // runtime for the fetch rather than holding the async mutex.
+    let output_tokens = data.grand_total.output_tokens;
+    // Run on a DEDICATED OS thread with its own runtime. cli_dispatch already
+    // runs on the plugin's tokio runtime, so a nested current-thread runtime
+    // here deadlocks `tokio::process` child-reaping (rtk gain never returns).
+    // A fresh runtime on its own thread owns its I/O+signal driver, so the
+    // subprocess fetch completes. ponytail: own thread, the standard
+    // block-on-from-within-async escape hatch.
+    let sd = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| rt.block_on(fetch_savings(output_tokens)))
+            .unwrap_or_default()
+    })
+    .join()
+    .unwrap_or_default();
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "headroom": {
+                        "running": sd.headroom_running,
+                        "tokens_saved": sd.headroom_tokens_saved,
+                    },
+                    "rtk": {
+                        "installed": sd.rtk_installed,
+                        "tokens_saved": sd.rtk_total_saved,
+                    },
+                    "caveman": {
+                        "tokens_est": sd.caveman_est,
+                        "ratio": CAVEMAN_OUTPUT_RATIO,
+                        "note": "modelled potential, not measured",
+                    },
+                    "net_real": sd.net_real(),
+                }))?
+            );
+        }
+        _ => {
+            println!("Token Savings");
+            println!(
+                "  Headroom   {:>10} tokens  {}",
+                sd.headroom_tokens_saved,
+                if sd.headroom_running {
+                    "● live"
+                } else {
+                    "○ proxy down"
+                }
+            );
+            println!(
+                "  RTK        {:>10} tokens  {}",
+                sd.rtk_total_saved,
+                if sd.rtk_installed {
+                    "● installed"
+                } else {
+                    "○ not installed"
+                }
+            );
+            println!(
+                "  Caveman    {:>10} tokens  modelled ×{:.2} (est)",
+                sd.caveman_est, CAVEMAN_OUTPUT_RATIO
+            );
+            println!("  ---");
+            println!("  NET        {:>10} tokens  Headroom + RTK", sd.net_real());
+            println!();
+            println!("  (est) = modelled potential; install Headroom/RTK for real data.");
+        }
+    }
+    Ok(())
+}
+
 /// Plugin-mode `model-alias`. The host-side path persists aliases via
 /// `AppConfig::save()` — filesystem write through the plugin's config
 /// dir. Inside wasmi we have no arbitrary fs path access, so the
@@ -715,6 +803,10 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
         UsageCommands::Models(args) => {
             let data = load_usage(&args.report)?;
             print_models_with_data(&data, &args, format)
+        }
+        UsageCommands::Savings(_args) => {
+            let data = load_usage(&_args)?;
+            print_savings_with_data(&data, format)
         }
     }
 }
@@ -1366,15 +1458,21 @@ fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
     }
 }
 
-fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
-    // Period precedence (top wins; clap rejects combinations via the
-    // conflicts_with_all groups on UsageReportArgs):
-    //   --month YYYY-MM            -> SpecificMonth
-    //   --quarter YYYY-Qn          -> SpecificQuarter
-    //   --last-n-days N            -> LastNDays(N)
-    //   --ytd                      -> YearToDate
-    //   --from / --to              -> Custom (existing free-text behaviour)
-    //   --period {today|week|30days|month|all}  (default)
+/// Resolve the effective [`UsagePeriod`] from the report args.
+///
+/// Period precedence (top wins; clap rejects combinations via the
+/// `conflicts_with_all` groups on [`UsageReportArgs`]):
+///   --month YYYY-MM            -> SpecificMonth
+///   --quarter YYYY-Qn          -> SpecificQuarter
+///   --last-n-days N            -> LastNDays(N)
+///   --ytd                      -> YearToDate
+///   --from / --to              -> Custom (existing free-text behaviour)
+///   --period {today|week|30days|month|all}  (default)
+///
+/// Shared by the host cache path ([`query_from_args`]) and the plugin
+/// snapshot path ([`print_report_with_data`]) so `--period` scopes the
+/// data identically regardless of which path produced the [`UsageData`].
+fn period_from_args(args: &UsageReportArgs) -> Result<UsagePeriod> {
     let period = if let Some(month_str) = &args.month {
         parse_month_arg(month_str)?
     } else if let Some(quarter_str) = &args.quarter {
@@ -1408,17 +1506,25 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
             PeriodArg::All => UsagePeriod::All,
         }
     };
+    Ok(period)
+}
 
+/// Map the `--provider` arg onto the internal [`UsageProviderFilter`].
+fn provider_filter_from_args(args: &UsageReportArgs) -> UsageProviderFilter {
+    match args.provider {
+        ProviderArg::All => UsageProviderFilter::All,
+        ProviderArg::Claude => UsageProviderFilter::Claude,
+        ProviderArg::Codex => UsageProviderFilter::Codex,
+        ProviderArg::Cursor => UsageProviderFilter::Cursor,
+        ProviderArg::Copilot => UsageProviderFilter::Copilot,
+        ProviderArg::Gemini => UsageProviderFilter::Gemini,
+    }
+}
+
+fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
     Ok(UsageQuery {
-        period,
-        provider_filter: match args.provider {
-            ProviderArg::All => UsageProviderFilter::All,
-            ProviderArg::Claude => UsageProviderFilter::Claude,
-            ProviderArg::Codex => UsageProviderFilter::Codex,
-            ProviderArg::Cursor => UsageProviderFilter::Cursor,
-            ProviderArg::Copilot => UsageProviderFilter::Copilot,
-            ProviderArg::Gemini => UsageProviderFilter::Gemini,
-        },
+        period: period_from_args(args)?,
+        provider_filter: provider_filter_from_args(args),
         include_projects: args.include.clone(),
         exclude_projects: args.exclude.clone(),
         filters: UsageFilters {

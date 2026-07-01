@@ -25,7 +25,7 @@ pub use favorites_store::{
     DeriveFavoriteError, Favorite, FavoritesStore, MigrationReport,
     SourceType as FavoriteSourceType, favorite_from_local_repo,
 };
-pub use mcp::{McpInitStrategy, McpServerConfig};
+pub use mcp::{McpInitStrategy, McpInstallation, McpServerConfig, McpServerDefinition};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
@@ -255,6 +255,84 @@ pub struct AppConfig {
     /// Where the single `presets.toml` lives. See [`PresetsConfig`].
     #[serde(default)]
     pub presets: PresetsConfig,
+
+    /// Fleet orchestration configuration (budget caps, etc.). See
+    /// [`FleetConfig`].
+    #[serde(default)]
+    pub fleet: FleetConfig,
+
+    /// Shared MCP pool settings. See [`McpPoolConfig`].
+    #[serde(default)]
+    pub mcp_pool: McpPoolConfig,
+}
+
+/// Shared MCP server pool for host (tmux) sessions.
+///
+/// When enabled, ainb runs a standalone `ainb mcp daemon` that spawns each
+/// shared MCP server ONCE and fronts it with a unix socket under
+/// `~/.agents-in-a-box/mcp/sockets/`. Sessions attach via the
+/// `ainb mcp proxy <socket>` stdio shim written into each worktree's
+/// `.mcp.json`, so N sessions share one server process instead of spawning
+/// N node/bun processes.
+///
+/// Per-server opt-out: set `shared = false` on an `[mcp_servers.<name>]`
+/// table to keep that server spawning per-session (use for stateful servers
+/// like browser/db bridges).
+///
+/// Example `config.toml`:
+/// ```toml
+/// [mcp_pool]
+/// enabled = true
+/// idle_grace_secs = 300
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPoolConfig {
+    /// Master switch for the shared pool. Off → sessions spawn MCP servers
+    /// per-session exactly as before.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Seconds a pooled server child stays alive after its LAST client
+    /// detaches before the daemon reaps it. The next attach respawns it.
+    #[serde(default = "default_idle_grace_secs")]
+    pub idle_grace_secs: u64,
+
+    /// Auto-refresh cadence (seconds) for the TUI pool overlay while it's
+    /// OPEN. `0` = refresh on open + manual (`r`) only. The overlay never
+    /// polls when closed, so this only affects an actively-watched view.
+    #[serde(default = "default_monitor_refresh_secs")]
+    pub monitor_refresh_secs: u64,
+
+    /// Seconds the daemon itself stays up with ZERO attached clients (across
+    /// all servers) before it exits cleanly — removing its sockets and
+    /// freeing the process. `ainb run` / import restart it on demand, so this
+    /// just stops an unused (or orphaned) pool from lingering forever. `0`
+    /// disables self-shutdown (the daemon runs until explicitly stopped).
+    #[serde(default = "default_daemon_idle_grace_secs")]
+    pub daemon_idle_grace_secs: u64,
+}
+
+impl Default for McpPoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_grace_secs: default_idle_grace_secs(),
+            monitor_refresh_secs: default_monitor_refresh_secs(),
+            daemon_idle_grace_secs: default_daemon_idle_grace_secs(),
+        }
+    }
+}
+
+fn default_idle_grace_secs() -> u64 {
+    300
+}
+
+fn default_monitor_refresh_secs() -> u64 {
+    2
+}
+
+fn default_daemon_idle_grace_secs() -> u64 {
+    900
 }
 
 /// Where the single `presets.toml` file lives.
@@ -362,6 +440,83 @@ pub struct PluginsConfig {
     /// deterministic across saves.
     #[serde(default, flatten)]
     pub values: BTreeMap<String, toml::Value>,
+}
+
+/// Fleet orchestration configuration.
+///
+/// Currently only carries cost budget caps; reserved as the home for
+/// future fleet-wide knobs so they share one `[fleet]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FleetConfig {
+    /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
+    #[serde(default)]
+    pub cost: CostBudgetConfig,
+}
+
+/// Spend ceilings consumed by `ainb fleet cost`.
+///
+/// A breach fires a notifyd alert (`Notification:budget_exceeded`) for the
+/// offending session or group. All thresholds are lifetime USD totals over
+/// the reporting window. The blanket `session_usd` / `group_usd` apply to
+/// every session / group; the per-key override maps pin a tighter (or
+/// looser) ceiling for a named session id or group, taking precedence over
+/// the blanket value.
+///
+/// Example `config.toml`:
+/// ```toml
+/// [fleet.cost]
+/// session_usd = 5.0     # warn when any single session crosses $5
+/// group_usd = 25.0      # warn when any workspace group crosses $25
+///
+/// [fleet.cost.session_overrides]
+/// "abc123" = 50.0       # this long-running session gets a $50 ceiling
+///
+/// [fleet.cost.group_overrides]
+/// "infra" = 100.0       # the infra workspace gets a $100 ceiling
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CostBudgetConfig {
+    /// Blanket per-session USD ceiling. `None` disables session caps
+    /// (except where a `session_overrides` entry sets one explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_usd: Option<f64>,
+    /// Blanket per-group USD ceiling. `None` disables group caps (except
+    /// where a `group_overrides` entry sets one explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_usd: Option<f64>,
+    /// Per-session USD ceilings keyed by session id. Overrides
+    /// `session_usd` for the named session.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_overrides: HashMap<String, f64>,
+    /// Per-group USD ceilings keyed by group name. Overrides `group_usd`
+    /// for the named group.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub group_overrides: HashMap<String, f64>,
+}
+
+impl CostBudgetConfig {
+    /// True when no cap of any kind is configured. The default value is
+    /// empty; an empty project layer must not clobber a populated user
+    /// layer (see `merge_loaded`).
+    pub fn is_empty(&self) -> bool {
+        self.session_usd.is_none()
+            && self.group_usd.is_none()
+            && self.session_overrides.is_empty()
+            && self.group_overrides.is_empty()
+    }
+
+    /// Resolve the effective USD ceiling for a session id: the override
+    /// map wins over the blanket `session_usd`.
+    pub fn session_limit(&self, session_id: &str) -> Option<f64> {
+        self.session_overrides.get(session_id).copied().or(self.session_usd)
+    }
+
+    /// Resolve the effective USD ceiling for a group name: the override
+    /// map wins over the blanket `group_usd`.
+    pub fn group_limit(&self, group: &str) -> Option<f64> {
+        self.group_overrides.get(group).copied().or(self.group_usd)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -543,6 +698,12 @@ pub struct UiPreferences {
     #[serde(default)]
     pub sessions_sidebar_collapsed: Option<bool>,
 
+    /// Preferred SkillManager screen Sources-panel width in terminal
+    /// columns. `None` falls back to the 32-column default. Persisted
+    /// on divider-drag / `[`-`]` resize-finish.
+    #[serde(default)]
+    pub skill_manager_sources_width: Option<u16>,
+
     /// User's response to the "wire up Claude Code statusline" prompt.
     /// `Unset` means we'll prompt again (init wizard) and surface the
     /// CTA in the Budget panel. `Declined` suppresses the top-bar CTA
@@ -596,6 +757,7 @@ impl Default for UiPreferences {
             home_sidebar_width: None,
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
+            skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
         }
@@ -740,9 +902,12 @@ impl AppConfig {
     pub fn get_config_paths() -> Vec<PathBuf> {
         let mut paths = vec![];
 
-        // 1. Local project config
+        // 1. Local project config — `.ainb/` is canonical; `.agents-box/`
+        //    is the legacy location, still read but listed first so an
+        //    `.ainb/` file wins when both exist (later files override).
         if let Ok(cwd) = std::env::current_dir() {
             paths.push(cwd.join(".agents-box").join("config.toml"));
+            paths.push(cwd.join(".ainb").join("config.toml"));
         }
 
         // 2. User config (~/.agents-in-a-box/config.toml)
@@ -839,6 +1004,10 @@ impl AppConfig {
             self.ui_preferences.sessions_sidebar_collapsed =
                 other.ui_preferences.sessions_sidebar_collapsed;
         }
+        if other.ui_preferences.skill_manager_sources_width.is_some() {
+            self.ui_preferences.skill_manager_sources_width =
+                other.ui_preferences.skill_manager_sources_width;
+        }
         // Decision fields: always trust on-disk, even when the value equals
         // the default. "Unset" is itself a meaningful decision (means: prompt
         // again next time), and "Declined" must round-trip across loads or
@@ -857,6 +1026,24 @@ impl AppConfig {
 
         if usage_present {
             self.usage = other.usage;
+        }
+
+        // Fleet cost budgets layer like the plugin tables: a higher layer
+        // (project) that declares any cap replaces the lower layer's caps,
+        // so a project can pin a tighter spend ceiling without the user
+        // default leaking through. An all-empty `[fleet.cost]` (the
+        // default) is treated as "not set" and leaves the lower layer
+        // intact.
+        if !other.fleet.cost.is_empty() {
+            self.fleet.cost = other.fleet.cost;
+        }
+
+        // Pool settings: trust the loaded layer whenever it differs from the
+        // defaults. `enabled = false` must survive (it IS the default-diverging
+        // case); a layer that omits [mcp_pool] deserializes to defaults and
+        // changes nothing.
+        if other.mcp_pool != McpPoolConfig::default() {
+            self.mcp_pool = other.mcp_pool;
         }
 
         // Plugin enable/disable lists: a higher layer that sets either list
@@ -925,6 +1112,8 @@ impl Default for AppConfig {
             usage: UsageConfig::default(),
             plugins: PluginsConfig::default(),
             presets: PresetsConfig::default(),
+            fleet: FleetConfig::default(),
+            mcp_pool: McpPoolConfig::default(),
         };
 
         // Load built-in templates
@@ -1235,6 +1424,100 @@ mod tests {
     }
 
     #[test]
+    fn project_config_paths_prefer_ainb_over_legacy() {
+        let paths = AppConfig::get_config_paths();
+        let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
+        let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
+        let (ainb, legacy) = (
+            ainb.expect(".ainb path missing"),
+            legacy.expect("legacy path missing"),
+        );
+        // Later files override earlier ones in load(), so `.ainb` must come
+        // after `.agents-box` for the canonical location to win.
+        assert!(ainb > legacy, "expected .ainb after legacy, got {paths:?}");
+    }
+
+    #[test]
+    fn mcp_pool_round_trips_through_toml() {
+        let mut config = AppConfig::default();
+        config.mcp_pool.enabled = false;
+        config.mcp_pool.idle_grace_secs = 42;
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            toml_str.contains("[mcp_pool]"),
+            "missing section:\n{toml_str}"
+        );
+
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!parsed.mcp_pool.enabled);
+        assert_eq!(parsed.mcp_pool.idle_grace_secs, 42);
+    }
+
+    #[test]
+    fn mcp_pool_defaults_when_section_absent() {
+        let parsed: AppConfig = toml::from_str("version = \"1.0.0\"").unwrap();
+        assert!(parsed.mcp_pool.enabled);
+        assert_eq!(parsed.mcp_pool.idle_grace_secs, 300);
+        // Daemon self-shutdown is on by default (15 min idle) so an unused or
+        // orphaned pool can't linger forever; 0 would disable it.
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 900);
+    }
+
+    #[test]
+    fn mcp_pool_daemon_idle_grace_round_trips() {
+        let mut config = AppConfig::default();
+        config.mcp_pool.daemon_idle_grace_secs = 0; // disable self-shutdown
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 0);
+    }
+
+    #[test]
+    fn layered_merge_respects_mcp_pool_disable() {
+        let mut base = AppConfig::default();
+        let mut higher = AppConfig::default();
+        higher.mcp_pool.enabled = false;
+
+        base.merge_loaded(higher, false);
+        assert!(
+            !base.mcp_pool.enabled,
+            "explicit disable must survive merge"
+        );
+
+        // A layer that omits [mcp_pool] (== defaults) must not clobber it back.
+        base.merge_loaded(AppConfig::default(), false);
+        assert!(!base.mcp_pool.enabled, "defaulted layer must not re-enable");
+    }
+
+    #[test]
+    fn mcp_server_shared_flag_defaults_true_and_round_trips() {
+        let toml_str = r#"
+            [mcp_servers.ctx]
+            name = "ctx"
+            description = "d"
+            installation = { type = "PreInstalled" }
+            definition = { type = "Command", command = "npx", args = ["-y", "pkg"] }
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.mcp_servers["ctx"].shared, "shared defaults to true");
+
+        let toml_str = r#"
+            [mcp_servers.browser]
+            name = "browser"
+            description = "stateful"
+            shared = false
+            installation = { type = "PreInstalled" }
+            definition = { type = "Command", command = "npx", args = [] }
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            !parsed.mcp_servers["browser"].shared,
+            "explicit opt-out parses"
+        );
+    }
+
+    #[test]
     fn test_plugins_values_roundtrip() {
         // config.toml with a `[plugins.learnings]` value table parses into
         // `PluginsConfig.values["learnings"]`, survives a save()→reload round
@@ -1272,6 +1555,59 @@ qmd_collection = "learnings"
         // Absent `[plugins.<x>]` → empty map via serde default.
         let bare: AppConfig = toml::from_str("[plugins]\n").expect("bare plugins");
         assert!(bare.plugins.values.is_empty(), "absent table → empty map");
+    }
+
+    #[test]
+    fn test_fleet_cost_budget_roundtrip_and_resolution() {
+        let toml_src = r#"
+[fleet.cost]
+session_usd = 5.0
+group_usd = 25.0
+
+[fleet.cost.session_overrides]
+"abc123" = 50.0
+
+[fleet.cost.group_overrides]
+"infra" = 100.0
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).expect("parse fleet.cost");
+        let cost = &cfg.fleet.cost;
+        assert_eq!(cost.session_usd, Some(5.0));
+        assert_eq!(cost.group_usd, Some(25.0));
+
+        // Overrides win over the blanket caps; everything else falls back.
+        assert_eq!(cost.session_limit("abc123"), Some(50.0));
+        assert_eq!(cost.session_limit("other"), Some(5.0));
+        assert_eq!(cost.group_limit("infra"), Some(100.0));
+        assert_eq!(cost.group_limit("other"), Some(25.0));
+
+        // save()→reload identity.
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let reloaded: AppConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reloaded.fleet.cost, cfg.fleet.cost);
+
+        // Absent `[fleet.cost]` → empty (no caps).
+        let bare: AppConfig = toml::from_str("[fleet]\n").expect("bare fleet");
+        assert!(bare.fleet.cost.is_empty());
+        assert_eq!(bare.fleet.cost.session_limit("x"), None);
+    }
+
+    #[test]
+    fn test_fleet_cost_project_layer_overrides_user_layer() {
+        // User layer sets a $5 session cap; an empty project `[fleet.cost]`
+        // must NOT clobber it, but a populated one must replace it.
+        let mut user: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 5.0\n").unwrap();
+
+        // Empty project fleet config → user cap preserved.
+        let empty_project: AppConfig = toml::from_str("[fleet]\n").unwrap();
+        let mut merged = user.clone();
+        merged.merge(empty_project);
+        assert_eq!(merged.fleet.cost.session_usd, Some(5.0));
+
+        // Populated project config → replaces the user cap.
+        let project: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 2.0\n").unwrap();
+        user.merge(project);
+        assert_eq!(user.fleet.cost.session_usd, Some(2.0));
     }
 
     #[test]
@@ -1346,6 +1682,7 @@ mod old_config_tests {
                 home_sidebar_width: None,
                 sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: None,
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },
@@ -1390,6 +1727,7 @@ mod old_config_tests {
                 home_sidebar_width: Some(38),
                 sessions_sidebar_width: Some(46),
                 sessions_sidebar_collapsed: Some(true),
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },

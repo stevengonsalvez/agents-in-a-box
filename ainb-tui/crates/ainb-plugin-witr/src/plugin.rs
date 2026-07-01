@@ -230,14 +230,17 @@ impl WitrPlugin {
         // No usable witr binary — print the install hint to stdout and
         // exit 1 (acceptance: "Missing-witr CLI exit 1").
         let Some(path) = self.witr_path.clone() else {
+            // Full docsite URL on its own line: terminals auto-linkify it, it
+            // stays copyable, and it never truncates.
+            let docs = "What it does + screenshots: https://stevengonsalvez.github.io/agents-in-a-box/plugins/witr/";
             let hint = match &self.lifecycle {
                 Lifecycle::Outdated {
                     found_version,
                     minimum,
                 } => format!(
-                    "witr {found_version} is too old (need >= {minimum}). Upgrade: brew upgrade witr\n"
+                    "witr {found_version} is too old (need >= {minimum}). Upgrade: brew upgrade witr\n{docs}\n"
                 ),
-                _ => "witr not found on PATH. Install: brew install witr\n".to_string(),
+                _ => format!("witr not found on PATH. Install: brew install witr\n{docs}\n"),
             };
             return CliOutput {
                 stdout: hint.into_bytes(),

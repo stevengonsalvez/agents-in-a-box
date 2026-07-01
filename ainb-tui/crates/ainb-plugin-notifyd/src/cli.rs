@@ -13,10 +13,12 @@ use tracing::warn;
 use crate::install::{Agent, ClaudeRegister};
 use crate::{Paths, RunConfig, install_for, run_daemon, status, uninstall};
 
-/// Resolve the agent set from the three CLI flags. Empty selection or
-/// `--all` means every known agent.
-pub fn agents_from_flags(claude: bool, codex: bool, all: bool) -> Vec<Agent> {
-    if all || (!claude && !codex) {
+/// Resolve the agent set from the per-agent CLI flags. Empty selection
+/// or `--all` means every known agent. The empty-selection guard MUST
+/// list every flag — a missing one silently turns a single-agent
+/// install into an install-for-everyone.
+pub fn agents_from_flags(claude: bool, codex: bool, copilot: bool, all: bool) -> Vec<Agent> {
+    if all || (!claude && !codex && !copilot) {
         return Agent::ALL.to_vec();
     }
     let mut out = Vec::new();
@@ -25,6 +27,9 @@ pub fn agents_from_flags(claude: bool, codex: bool, all: bool) -> Vec<Agent> {
     }
     if codex {
         out.push(Agent::Codex);
+    }
+    if copilot {
+        out.push(Agent::Copilot);
     }
     out
 }
@@ -60,6 +65,42 @@ pub fn cmd_stop() -> Result<()> {
     Ok(())
 }
 
+/// `reap` — kill every notifyd process that isn't the healthy live owner
+/// (orphans + a wedged stale owner). The live daemon is left running. This
+/// is the typed verb behind the Daemons overlay's "to clean up" hint —
+/// safer than a hand-typed `kill <pid>` against a possibly-recycled pid.
+pub fn cmd_reap(json: bool) -> Result<()> {
+    let report = crate::procs::reap();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.killed.is_empty() && report.failed.is_empty() {
+        println!("no orphan notifyd processes to reap");
+    } else {
+        for pid in &report.killed {
+            println!("reaped pid {pid}");
+        }
+        for (pid, why) in &report.failed {
+            println!("could not reap pid {pid}: {why}");
+        }
+        println!(
+            "reaped {} orphan(s){}",
+            report.killed.len(),
+            if report.failed.is_empty() {
+                String::new()
+            } else {
+                format!(", {} failed", report.failed.len())
+            }
+        );
+    }
+    match report.spared {
+        Some(p) => println!("left live daemon running (pid {p})"),
+        None => println!("no live daemon remains — next hook event will lazy-spawn one"),
+    }
+    Ok(())
+}
+
 /// `install` — wire the ainb-hooks hook into the chosen agents and
 /// print the resolved on-disk paths.
 pub fn cmd_install(agents: &[Agent]) -> Result<()> {
@@ -70,6 +111,9 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     println!("hook script:   {}", record.hook_script.display());
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+    }
+    if let Some(p) = &record.copilot_hooks_json {
+        println!("copilot hooks: {}", p.display());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
@@ -129,27 +173,99 @@ pub fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+/// `list` — print persisted notifications (most recent first) straight from
+/// the SQLite store.
+// ponytail: DB read only — a live daemon's not-yet-persisted in-memory events
+// won't appear. Add a daemon control-socket query if that ever matters.
+pub fn cmd_list(
+    include_dismissed: bool,
+    agent: Option<&str>,
+    project: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> Result<()> {
+    let paths = Paths::from_home()?;
+    let store = crate::store::Store::open(&paths.db).context("open notifications store")?;
+    let rows = store.list(include_dismissed, agent, project, limit)?;
+    if json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "ts": r.ts,
+                    "agent": r.agent,
+                    "session_id": r.session_id,
+                    "cwd": r.cwd,
+                    "project": r.project,
+                    "raw_event": r.raw_event,
+                    "read": r.read,
+                    "dismissed": r.dismissed,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+    } else if rows.is_empty() {
+        println!("no notifications");
+    } else {
+        println!(
+            "{:<14} {:<8} {:<22} {}",
+            "ts(ms)", "agent", "project", "event"
+        );
+        for r in &rows {
+            println!(
+                "{:<14} {:<8} {:<22} {}",
+                r.ts, r.agent, r.project, r.raw_event
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn agents_from_flags_defaults_to_all() {
-        assert_eq!(agents_from_flags(false, false, false), Agent::ALL.to_vec());
-        assert_eq!(agents_from_flags(true, true, true), Agent::ALL.to_vec());
+        // No flags → all; `--all` (with or without per-agent flags) → all.
+        assert_eq!(
+            agents_from_flags(false, false, false, false),
+            Agent::ALL.to_vec()
+        );
+        assert_eq!(
+            agents_from_flags(true, true, true, true),
+            Agent::ALL.to_vec()
+        );
     }
 
     #[test]
     fn agents_from_flags_respects_single_selection() {
-        assert_eq!(agents_from_flags(true, false, false), vec![Agent::Claude]);
-        assert_eq!(agents_from_flags(false, true, false), vec![Agent::Codex]);
+        assert_eq!(
+            agents_from_flags(true, false, false, false),
+            vec![Agent::Claude]
+        );
+        assert_eq!(
+            agents_from_flags(false, true, false, false),
+            vec![Agent::Codex]
+        );
+        // Regression guard: `--copilot` alone must NOT fall through the
+        // empty-selection branch and install for everyone.
+        assert_eq!(
+            agents_from_flags(false, false, true, false),
+            vec![Agent::Copilot]
+        );
     }
 
     #[test]
     fn agents_from_flags_both_explicit() {
         assert_eq!(
-            agents_from_flags(true, true, false),
+            agents_from_flags(true, true, false, false),
             vec![Agent::Claude, Agent::Codex]
+        );
+        assert_eq!(
+            agents_from_flags(true, true, true, false),
+            vec![Agent::Claude, Agent::Codex, Agent::Copilot]
         );
     }
 }
