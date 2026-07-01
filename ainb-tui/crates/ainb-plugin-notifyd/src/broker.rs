@@ -29,10 +29,13 @@
 //! blocks on at most one permission request per session at a time.
 
 use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -343,6 +346,141 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Blocking clients.
+//
+// The server above is async — it rides notifyd's tokio runtime. Its clients
+// are not: the `PermissionRequest` hook is a short-lived synchronous process,
+// and the CLI decide/list verbs are one-shot. So the client side is plain
+// blocking `std::os::unix::net` — dial in, write one line, read one line.
+// No runtime, no async colouring bleeding into the sync hook path.
+
+/// How long a re-dialing waiter keeps trying before giving up and letting the
+/// caller fall back to deny. Sits *above* the broker's own AWAIT ceiling
+/// ([`DEFAULT_AWAIT_TIMEOUT`], 600s) so a live broker's decision always wins
+/// the race, and *below* the Claude `PermissionRequest` hook timeout (660s)
+/// so we answer before Claude hard-kills the hook. The re-dial loop only
+/// matters across a notifyd restart — the single resume path.
+pub const CLIENT_AWAIT_DEADLINE: Duration = Duration::from_secs(640);
+
+/// Pause between re-dials when the broker is unreachable mid-wait.
+const REDIAL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Read timeout for the one-shot decide/list round-trips.
+const CLIENT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Dial the approve socket, register an AWAIT for `session_id`, and block
+/// until a human decides. Re-dials and re-sends AWAIT if the connection drops
+/// mid-wait (a notifyd restart), so restarting the daemon is the single
+/// resume command: every still-alive waiter re-registers itself. Falls back
+/// to **deny** if no decision lands within `deadline`; never returns without
+/// a decision, so the waiting hook is never lost.
+#[must_use]
+pub fn client_await(
+    sock: &Path,
+    session_id: &str,
+    tool: &str,
+    context: &str,
+    deadline: Duration,
+) -> Decision {
+    let started = Instant::now();
+    let req = serde_json::json!({
+        "op": "await",
+        "session_id": session_id,
+        "tool": tool,
+        "context": context,
+    });
+    let line = serde_json::to_string(&req).unwrap_or_default();
+    loop {
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Decision::timed_out();
+        }
+        match try_await_once(sock, &line, remaining) {
+            Ok(Some(decision)) => return decision,
+            // EOF or connect/read error → broker down or dropped us mid-wait.
+            // Re-dial + re-register until the deadline.
+            Ok(None) | Err(_) => std::thread::sleep(REDIAL_INTERVAL),
+        }
+    }
+}
+
+/// One AWAIT attempt: connect, send, block for a decision. `Ok(None)` means
+/// the broker closed the connection before deciding (re-dial); `Err` means
+/// connect/read failed (re-dial).
+fn try_await_once(
+    sock: &Path,
+    line: &str,
+    read_timeout: Duration,
+) -> std::io::Result<Option<Decision>> {
+    let mut stream = StdUnixStream::connect(sock)?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut resp = String::new();
+    if reader.read_line(&mut resp)? == 0 {
+        return Ok(None);
+    }
+    let decision: Decision = serde_json::from_str(resp.trim())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(Some(decision))
+}
+
+/// Deliver a decision for `session_id` to the broker (the TUI/CLI approve/deny
+/// lever). Returns whether a waiter was actually blocked on that session
+/// (`matched` false = nothing was waiting, e.g. it already timed out).
+pub fn client_decide(
+    sock: &Path,
+    session_id: &str,
+    decision: DecisionKind,
+    reason: &str,
+) -> std::io::Result<bool> {
+    let resp = client_round_trip(
+        sock,
+        &serde_json::json!({
+            "op": "decide",
+            "session_id": session_id,
+            "decision": decision,
+            "reason": reason,
+        }),
+    )?;
+    Ok(resp
+        .get("matched")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
+/// List sessions currently blocked on a human decision (Daemons overlay / CLI
+/// status).
+pub fn client_list(sock: &Path) -> std::io::Result<Vec<PendingInfo>> {
+    let resp = client_round_trip(sock, &serde_json::json!({ "op": "list" }))?;
+    let pending = resp
+        .get("pending")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(serde_json::from_value(pending).unwrap_or_default())
+}
+
+/// Shared one-shot request/response for decide + list.
+fn client_round_trip(
+    sock: &Path,
+    req: &serde_json::Value,
+) -> std::io::Result<serde_json::Value> {
+    let mut stream = StdUnixStream::connect(sock)?;
+    stream.set_read_timeout(Some(CLIENT_RPC_TIMEOUT))?;
+    let mut line = serde_json::to_string(req).unwrap_or_default();
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut resp = String::new();
+    reader.read_line(&mut resp)?;
+    serde_json::from_str(resp.trim())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +650,70 @@ mod tests {
 
         handle.abort();
         let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_clients_round_trip_with_server() {
+        // Proves the sync client (hook/CLI side) and the async server agree on
+        // the wire: client_await blocks, client_list sees it, client_decide
+        // approves, client_await returns approve.
+        let (sock, _state, handle) = spawn_broker(Duration::from_secs(30)).await;
+
+        let sock_w = sock.clone();
+        let waiter = tokio::task::spawn_blocking(move || {
+            client_await(
+                &sock_w,
+                "cli-A",
+                "Bash",
+                "rm -rf /tmp/x",
+                Duration::from_secs(10),
+            )
+        });
+
+        // Wait for the AWAIT to register.
+        let mut pending = Vec::new();
+        for _ in 0..100 {
+            pending = client_list(&sock).unwrap_or_default();
+            if !pending.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(pending.len(), 1, "list should report one pending await");
+        assert_eq!(pending[0].session_id, "cli-A");
+        assert_eq!(pending[0].tool, "Bash");
+
+        let matched = client_decide(&sock, "cli-A", DecisionKind::Approve, "ok").unwrap();
+        assert!(matched, "decide should match the waiting session");
+
+        let decision = waiter.await.unwrap();
+        assert_eq!(decision.decision, DecisionKind::Approve);
+        assert_eq!(decision.reason, "ok");
+
+        handle.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn client_await_denies_when_socket_dead() {
+        // Fault tolerance: no broker listening at all → the waiter never hangs
+        // forever and never auto-approves; it re-dials until the deadline and
+        // falls back to deny. The waiting hook is never lost.
+        let sock = std::env::temp_dir().join(format!(
+            "ainb-broker-dead-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let sock_w = sock.clone();
+        let decision = tokio::task::spawn_blocking(move || {
+            client_await(&sock_w, "orphan", "Bash", "x", Duration::from_secs(1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Deny,
+            "dead socket must fall back to deny, never approve"
+        );
     }
 }
