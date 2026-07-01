@@ -6360,6 +6360,24 @@ impl EventHandler {
             AppEvent::OnboardingNext => {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding next step");
+                // Guard: on the OTel step, refuse to advance with partial creds
+                // (1 or 2 of 3 fields) — otherwise complete_onboarding() skips
+                // OTel setup silently and the entered creds are lost. Snapshot
+                // the bool under an immutable borrow, then warn under a mutable
+                // one (borrow dance).
+                let otel_partial = state
+                    .onboarding_state
+                    .as_ref()
+                    .map(|o| o.current_step == OnboardingStep::OtelSetup && o.otel_creds_partial())
+                    .unwrap_or(false);
+                if otel_partial {
+                    state.add_warning_notification(
+                        "OpenTelemetry needs all three fields (endpoint, instance ID, token) \
+                         — telemetry not configured. Fill all three or clear them to skip."
+                            .to_string(),
+                    );
+                    return;
+                }
                 let mut trigger_dep_check = false;
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     if onboarding_state.is_final_step() {
@@ -6507,7 +6525,14 @@ impl EventHandler {
                 };
 
                 if typing_key {
-                    let key = key_buf.trim().to_string();
+                    // The API-key row pre-seeds the buffer with "sk-ant-" as a
+                    // hint. Users paste a FULL key (also starting "sk-ant-"),
+                    // producing "sk-ant-sk-ant-...". Collapse any repeated
+                    // leading prefix so storage is idempotent (N repeats -> 1).
+                    let mut key = key_buf.trim().to_string();
+                    while let Some(rest) = key.strip_prefix("sk-ant-sk-ant-") {
+                        key = format!("sk-ant-{rest}");
+                    }
                     if key.is_empty() || key == "sk-ant-" {
                         state.add_warning_notification(
                             "Enter an API key first (or Esc to cancel)".to_string(),

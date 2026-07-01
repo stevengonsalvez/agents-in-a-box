@@ -479,19 +479,31 @@ impl OnboardingComponent {
         // the whole width is used instead of one tall narrow list. The focused
         // dep is highlighted; its full docs link + install action live in the
         // detail band below (full width, so long URLs never truncate).
+        // SEQUENTIAL split (not height-balanced): fill column 0 with the first
+        // run of topics until it holds ~half the total rendered height, then the
+        // rest go to column 1. This keeps the visual order equal to the flat
+        // topic order that `flattened_deps()`/`dep_cursor` walk, so the focus
+        // cursor reads down col 0 then down col 1 with no cross-column zig-zag.
+        // Each topic renders `deps.len() + 2` lines (header + deps + spacer),
+        // matching what `push_topic_items` produces.
         let focused_id = state.focused_dep().map(|d| d.id);
+        let topic_height = |t: &TopicReport| t.deps.len() + 2;
+        let total_lines: usize = status.topics.iter().map(topic_height).sum();
+        let half = total_lines / 2;
         let mut col_items: [Vec<ListItem>; 2] = [Vec::new(), Vec::new()];
-        let mut col_lines = [0usize, 0usize];
+        let mut cumulative = 0usize;
         for topic in &status.topics {
-            let target = if col_lines[0] <= col_lines[1] { 0 } else { 1 };
-            let before = col_items[target].len();
+            // Switch to column 1 once column 0 has reached half the total. The
+            // pre-add cumulative is the test, so column 0 always gets at least
+            // the first topic and the split point respects topic order.
+            let target = if cumulative < half { 0 } else { 1 };
             push_topic_items(
                 &mut col_items[target],
                 topic,
                 focused_id,
                 &state.install_states,
             );
-            col_lines[target] += col_items[target].len() - before;
+            cumulative += topic_height(topic);
         }
 
         let cols = Layout::default()

@@ -561,6 +561,17 @@ impl OnboardingState {
             && !self.otel_api_token.trim().is_empty()
     }
 
+    /// True when the OTEL creds are partially filled: at least one of the three
+    /// fields is non-empty but not all three. Advancing in this state would
+    /// silently discard the entered creds (setup needs all three), so callers
+    /// warn instead of losing them.
+    pub fn otel_creds_partial(&self) -> bool {
+        let any = !self.otel_otlp_endpoint.trim().is_empty()
+            || !self.otel_instance_id.trim().is_empty()
+            || !self.otel_api_token.trim().is_empty();
+        any && !self.otel_creds_complete()
+    }
+
     /// Whether OTEL setup should run on finish (not skipped + creds complete).
     pub fn otel_should_setup(&self) -> bool {
         !self.otel_skip && self.otel_creds_complete()
