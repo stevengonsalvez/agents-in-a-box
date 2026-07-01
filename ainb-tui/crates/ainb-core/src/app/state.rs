@@ -3947,6 +3947,10 @@ impl AppState {
             }
         }
 
+        // Detect current per-agent auth up front so the Authentication step
+        // always opens showing real current values (config + keychain).
+        state.refresh_auth_statuses();
+
         self.onboarding_state = Some(state);
         self.current_screen = screen_ids::ONBOARDING.to_string();
     }

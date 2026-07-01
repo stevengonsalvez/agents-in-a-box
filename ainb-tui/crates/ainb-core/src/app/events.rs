@@ -457,12 +457,12 @@ pub enum AppEvent {
     OnboardingCursorEnd,          // Move cursor to end of input
     OnboardingCheckDeps,          // Run dependency check
     OnboardingSkipAuth,           // Skip authentication step
-    OnboardingAuthUp,             // Auth step: move option cursor up
-    OnboardingAuthDown,           // Auth step: move option cursor down
-    OnboardingAuthSelect,         // Auth step: choose focused option / save key
+    OnboardingAuthUp,             // Auth step: move cursor up (agent list / method picker)
+    OnboardingAuthDown,           // Auth step: move cursor down (agent list / method picker)
+    OnboardingAuthSelect,         // Auth step: drill in / choose method / save key
     OnboardingAuthKeyChar(char),  // Auth step: type into the API-key field
     OnboardingAuthKeyBackspace,   // Auth step: backspace the API-key field
-    OnboardingAuthKeyCancel,      // Auth step: leave API-key entry (Esc)
+    OnboardingAuthCancel,         // Auth step: leave a sub-pane (Esc) back one level
     OnboardingEditorUp,           // Move editor selection up
     OnboardingEditorDown,         // Move editor selection down
     OnboardingFinish,             // Complete onboarding
@@ -2321,31 +2321,40 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::Authentication => {
-                    let typing_key = state
-                        .onboarding_state
-                        .as_ref()
-                        .map(|o| o.auth_api_key_input.is_some())
-                        .unwrap_or(false);
-                    if typing_key {
-                        match key_event.code {
+                    use crate::components::onboarding::AuthPane;
+                    let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
+                    match pane {
+                        // Typing an API key.
+                        Some(AuthPane::KeyEntry { .. }) => match key_event.code {
                             KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
-                            KeyCode::Esc => Some(AppEvent::OnboardingAuthKeyCancel),
+                            KeyCode::Esc => Some(AppEvent::OnboardingAuthCancel),
                             KeyCode::Backspace => Some(AppEvent::OnboardingAuthKeyBackspace),
                             KeyCode::Char(c) => Some(AppEvent::OnboardingAuthKeyChar(c)),
                             _ => None,
-                        }
-                    } else {
-                        match key_event.code {
+                        },
+                        // Choosing a method for one agent.
+                        Some(AuthPane::MethodPicker { .. }) => match key_event.code {
                             KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
                             KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
                             KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc | KeyCode::Left => Some(AppEvent::OnboardingAuthCancel),
+                            _ => None,
+                        },
+                        // Per-agent list (default). Enter drills in; Right/n advance.
+                        _ => match key_event.code {
+                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
+                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
+                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                Some(AppEvent::OnboardingNext)
+                            }
                             KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                             KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                             KeyCode::Char('s') | KeyCode::Char('S') => {
                                 Some(AppEvent::OnboardingSkipAuth)
                             }
                             _ => None,
-                        }
+                        },
                     }
                 }
                 OnboardingStep::OtelSetup => match key_event.code {
@@ -6355,6 +6364,12 @@ impl EventHandler {
                         if onboarding_state.current_step == OnboardingStep::EditorSelection {
                             onboarding_state.init_editors_if_needed();
                         }
+                        // Detect current per-agent auth when entering the step.
+                        if onboarding_state.current_step == OnboardingStep::Authentication {
+                            onboarding_state.auth_pane =
+                                crate::components::onboarding::AuthPane::AgentList;
+                            onboarding_state.refresh_auth_statuses();
+                        }
                     }
                 }
                 // Auto-trigger dependency check if entering DependencyCheck step
@@ -6368,9 +6383,16 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingBack => {
+                use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding back step");
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     onboarding_state.go_back();
+                    // Refresh per-agent auth when stepping back into the step.
+                    if onboarding_state.current_step == OnboardingStep::Authentication {
+                        onboarding_state.auth_pane =
+                            crate::components::onboarding::AuthPane::AgentList;
+                        onboarding_state.refresh_auth_statuses();
+                    }
                 }
             }
             AppEvent::OnboardingToMenu => {
@@ -6420,61 +6442,77 @@ impl EventHandler {
                 state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
             }
             AppEvent::OnboardingSkipAuth => {
-                tracing::debug!("Skipping authentication");
+                // "Configure later" — advance without changing anything. The
+                // per-agent statuses already reflect the real current auth.
+                tracing::debug!("Skipping authentication configuration");
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
-                    onboarding_state.auth_completed = true;
-                    onboarding_state.auth_method = Some("skipped".to_string());
                     onboarding_state.advance();
                 }
             }
             AppEvent::OnboardingAuthUp => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.move_auth_cursor(-1);
+                    match &mut o.auth_pane {
+                        AuthPane::MethodPicker { cursor, .. } => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        AuthPane::AgentList => o.move_auth_agent_cursor(-1),
+                        AuthPane::KeyEntry { .. } => {}
+                    }
                 }
             }
             AppEvent::OnboardingAuthDown => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.move_auth_cursor(1);
+                    match &mut o.auth_pane {
+                        AuthPane::MethodPicker { cursor, .. } => {
+                            if *cursor < 2 {
+                                *cursor += 1;
+                            }
+                        }
+                        AuthPane::AgentList => o.move_auth_agent_cursor(1),
+                        AuthPane::KeyEntry { .. } => {}
+                    }
                 }
             }
             AppEvent::OnboardingAuthKeyChar(ch) => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                    if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.push(ch);
                     }
                 }
             }
             AppEvent::OnboardingAuthKeyBackspace => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                    if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.pop();
                     }
                 }
             }
-            AppEvent::OnboardingAuthKeyCancel => {
+            AppEvent::OnboardingAuthCancel => {
+                // Esc backs out one level: key entry → its method picker,
+                // method picker → the agent list.
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.auth_api_key_input = None;
+                    o.auth_pane = match &o.auth_pane {
+                        AuthPane::KeyEntry { agent, .. } => {
+                            AuthPane::MethodPicker { agent: *agent, cursor: 1 }
+                        }
+                        _ => AuthPane::AgentList,
+                    };
                 }
             }
             AppEvent::OnboardingAuthSelect => {
+                use crate::components::onboarding::{AuthAgent, AuthMethodKind, AuthPane};
                 use crate::config::{AppConfig, ClaudeAuthProvider};
-                // Decide from an immutable read, then mutate/notify without a
-                // held borrow. Rows: 0=Claude OAuth, 1=Claude API key,
-                // 2=Codex OAuth, 3=Skip. While typing a key, Enter = save.
-                let (typing_key, key_buf, idx) = state
-                    .onboarding_state
-                    .as_ref()
-                    .map(|o| {
-                        (
-                            o.auth_api_key_input.is_some(),
-                            o.auth_api_key_input.clone().unwrap_or_default(),
-                            o.auth_selected_index,
-                        )
-                    })
-                    .unwrap_or((false, String::new(), 0));
+
+                // Read the active pane, then mutate/notify without a held borrow.
+                let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
 
                 // Persist the Claude auth provider so build_env_setup() honours it.
-                let set_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
+                let set_claude_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
                     Ok(mut c) => {
                         c.authentication.claude_provider = p;
                         if let Err(e) = c.save() {
@@ -6484,73 +6522,105 @@ impl EventHandler {
                     Err(e) => tracing::error!("Failed to load config for auth provider: {}", e),
                 };
 
-                if typing_key {
-                    let key = key_buf.trim().to_string();
-                    if key.is_empty() || key == "sk-ant-" {
-                        state.add_warning_notification(
-                            "Enter an API key first (or Esc to cancel)".to_string(),
-                        );
-                    } else {
-                        match credentials::store_anthropic_api_key(&key) {
-                            Ok(()) => {
-                                set_provider(ClaudeAuthProvider::ApiKey);
-                                if let Some(o) = state.onboarding_state.as_mut() {
-                                    o.auth_api_key_input = None;
-                                    o.auth_completed = true;
-                                    o.auth_method = Some("claude-api-key".to_string());
-                                    o.advance();
-                                }
-                                state.add_success_notification(
-                                    "API key saved to keychain; sessions will use ANTHROPIC_API_KEY"
-                                        .to_string(),
-                                );
-                            }
-                            Err(e) => {
-                                state.add_error_notification(format!(
-                                    "Failed to save API key: {}",
-                                    e
-                                ));
+                match pane {
+                    // Drill into the focused agent's method picker, defaulting the
+                    // cursor to that agent's current method.
+                    Some(AuthPane::AgentList) => {
+                        if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(st) = o.auth_statuses.get(o.auth_agent_cursor) {
+                                let agent = st.agent;
+                                let cursor = match st.method {
+                                    AuthMethodKind::Login => 0,
+                                    AuthMethodKind::ApiKey => 1,
+                                };
+                                o.auth_pane = AuthPane::MethodPicker { agent, cursor };
                             }
                         }
                     }
-                } else {
-                    match idx {
+                    // Choose a method for the agent. Stays on the step (no advance).
+                    Some(AuthPane::MethodPicker { agent, cursor }) => match cursor {
+                        // Login / OAuth
                         0 => {
-                            set_provider(ClaudeAuthProvider::SystemAuth);
-                            if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("claude-oauth".to_string());
-                                o.advance();
+                            match agent {
+                                AuthAgent::Claude => {
+                                    set_claude_provider(ClaudeAuthProvider::SystemAuth);
+                                }
+                                AuthAgent::Codex => {
+                                    // No config flag for Codex — a stored key would
+                                    // force API-key mode, so drop it to honour Login.
+                                    let had = credentials::has_openai_api_key();
+                                    let _ = credentials::delete_openai_api_key();
+                                    if had {
+                                        state.add_info_notification(
+                                            "Removed stored OpenAI key; Codex will use `codex login`"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
                             }
-                            state.add_info_notification(
-                                "Claude: subscription/OAuth - run /login inside Claude on first launch"
-                                    .to_string(),
-                            );
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_pane = AuthPane::AgentList;
+                                o.refresh_auth_statuses();
+                            }
+                            state.add_info_notification(format!(
+                                "{}: {}",
+                                agent.label(),
+                                agent.login_hint()
+                            ));
                         }
+                        // API key → inline entry seeded with the expected prefix.
                         1 => {
                             if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_api_key_input = Some("sk-ant-".to_string());
+                                o.auth_pane = AuthPane::KeyEntry {
+                                    agent,
+                                    buf: agent.key_seed().to_string(),
+                                };
                             }
                         }
-                        2 => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("codex-oauth".to_string());
-                                o.advance();
-                            }
-                            state.add_info_notification(
-                                "Codex: run `codex login` (or /login in Codex) before first use"
-                                    .to_string(),
-                            );
-                        }
+                        // Back
                         _ => {
                             if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("skipped".to_string());
-                                o.advance();
+                                o.auth_pane = AuthPane::AgentList;
+                            }
+                        }
+                    },
+                    // Save the typed API key for the agent, then return to the list.
+                    Some(AuthPane::KeyEntry { agent, buf }) => {
+                        let key = buf.trim().to_string();
+                        if key.is_empty() || key == agent.key_seed() {
+                            state.add_warning_notification(
+                                "Enter an API key first (or Esc to cancel)".to_string(),
+                            );
+                        } else {
+                            let stored = match agent {
+                                AuthAgent::Claude => credentials::store_anthropic_api_key(&key),
+                                AuthAgent::Codex => credentials::store_openai_api_key(&key),
+                            };
+                            match stored {
+                                Ok(()) => {
+                                    if agent == AuthAgent::Claude {
+                                        set_claude_provider(ClaudeAuthProvider::ApiKey);
+                                    }
+                                    if let Some(o) = state.onboarding_state.as_mut() {
+                                        o.auth_pane = AuthPane::AgentList;
+                                        o.refresh_auth_statuses();
+                                    }
+                                    state.add_success_notification(format!(
+                                        "{} saved to keychain",
+                                        agent.key_label()
+                                    ));
+                                }
+                                Err(e) => {
+                                    state.add_error_notification(format!(
+                                        "Failed to save {}: {}",
+                                        agent.key_label(),
+                                        e
+                                    ));
+                                }
                             }
                         }
                     }
+                    None => {}
                 }
             }
             AppEvent::OnboardingEditorUp => {

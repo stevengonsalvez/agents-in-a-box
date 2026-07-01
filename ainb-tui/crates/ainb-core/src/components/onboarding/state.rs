@@ -273,24 +273,103 @@ pub struct OnboardingState {
     pub dep_cursor: usize,
     /// Per-dep install state, keyed by dep id (idle deps absent).
     pub install_states: std::collections::HashMap<String, DepInstall>,
-    /// Authentication step: cursor over the selectable auth option rows.
-    pub auth_selected_index: usize,
-    /// Authentication step: `Some(buffer)` while typing a Claude API key
-    /// inline (the "Claude - API key" row was chosen); `None` in normal
-    /// list-navigation mode.
-    pub auth_api_key_input: Option<String>,
+    /// Authentication step: cursor over the agent rows in the `AgentList` pane.
+    pub auth_agent_cursor: usize,
+    /// Authentication step: active sub-view (agent list / method picker / key entry).
+    pub auth_pane: AuthPane,
+    /// Authentication step: detected current auth per agent, cached so render
+    /// never touches the keychain. Refreshed on entering the step and after any
+    /// change via `refresh_auth_statuses`.
+    pub auth_statuses: Vec<AgentAuthStatus>,
 }
 
-/// Selectable rows on the onboarding Authentication step. `(agent, method)`.
-/// Index order is load-bearing - the `OnboardingAuthSelect` handler matches on
-/// it. Real auth still happens in each tool (`/login`); only the API-key row
-/// persists anything (keychain + `claude_provider = ApiKey`).
-pub const AUTH_OPTIONS: [(&str, &str); 4] = [
-    ("Claude", "Login - subscription / OAuth"),
-    ("Claude", "API key - pay-per-use"),
-    ("Codex", "Login - OAuth"),
-    ("Skip", "Configure later"),
-];
+/// Agents whose auth is configurable on the onboarding Authentication step.
+/// Each can run in `Login` (native OAuth/subscription) or `ApiKey` mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthAgent {
+    Claude,
+    Codex,
+}
+
+impl AuthAgent {
+    /// The configurable agents, in row order.
+    pub fn all() -> &'static [AuthAgent] {
+        &[Self::Claude, Self::Codex]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+
+    /// What the user runs inside the tool to complete native OAuth/subscription
+    /// login — shown after choosing the Login method.
+    pub fn login_hint(&self) -> &'static str {
+        match self {
+            Self::Claude => "run `claude` then /login (subscription / OAuth)",
+            Self::Codex => "run `codex login` (OAuth)",
+        }
+    }
+
+    /// Expected key prefix, used to seed the inline API-key entry buffer.
+    pub fn key_seed(&self) -> &'static str {
+        match self {
+            Self::Claude => "sk-ant-",
+            Self::Codex => "sk-",
+        }
+    }
+
+    pub fn key_label(&self) -> &'static str {
+        match self {
+            Self::Claude => "Anthropic API key",
+            Self::Codex => "OpenAI API key",
+        }
+    }
+}
+
+/// Auth method an agent is currently using (detected) or being switched to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethodKind {
+    /// Native OAuth / subscription login, handled inside the tool.
+    Login,
+    /// API key stored in the system keychain.
+    ApiKey,
+}
+
+impl AuthMethodKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Login => "Login (subscription / OAuth)",
+            Self::ApiKey => "API key (pay-per-use)",
+        }
+    }
+}
+
+/// Detected current auth for a single agent. Cached in `OnboardingState` and
+/// refreshed on entering the step / after a change — never read from the
+/// keychain during render (which runs every frame).
+#[derive(Debug, Clone)]
+pub struct AgentAuthStatus {
+    pub agent: AuthAgent,
+    pub method: AuthMethodKind,
+    /// Masked key (e.g. "sk-ant-xxxx••••") when `method == ApiKey` and a key is
+    /// actually stored; `None` otherwise.
+    pub key_masked: Option<String>,
+}
+
+/// Which sub-view of the Authentication step is active. Drives both the render
+/// and the key dispatch so the flat option list becomes a per-agent drill-down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthPane {
+    /// Browsing the per-agent list (default).
+    AgentList,
+    /// Choosing a method for `agent`. `cursor`: 0 = Login, 1 = API key, 2 = Back.
+    MethodPicker { agent: AuthAgent, cursor: usize },
+    /// Typing an API key for `agent` into `buf`.
+    KeyEntry { agent: AuthAgent, buf: String },
+}
 
 /// Background-install state for a single dependency on the deps screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,20 +409,92 @@ impl OnboardingState {
             otel_field: 0,
             dep_cursor: 0,
             install_states: std::collections::HashMap::new(),
-            auth_selected_index: 0,
-            auth_api_key_input: None,
+            auth_agent_cursor: 0,
+            auth_pane: AuthPane::AgentList,
+            auth_statuses: Vec::new(),
         }
     }
 
-    /// Move the auth-option cursor by `delta`, clamped to `AUTH_OPTIONS`.
-    /// No-op while an API key is being typed.
-    pub fn move_auth_cursor(&mut self, delta: isize) {
-        if self.auth_api_key_input.is_some() {
+    /// Move the agent-list cursor by `delta`, clamped to `auth_statuses`.
+    pub fn move_auth_agent_cursor(&mut self, delta: isize) {
+        if self.auth_statuses.is_empty() {
+            self.auth_agent_cursor = 0;
             return;
         }
-        let max = (AUTH_OPTIONS.len() - 1) as isize;
-        self.auth_selected_index =
-            (self.auth_selected_index as isize + delta).clamp(0, max) as usize;
+        let max = (self.auth_statuses.len() - 1) as isize;
+        self.auth_agent_cursor =
+            (self.auth_agent_cursor as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// The agent under the list cursor, if any.
+    pub fn auth_agent_at_cursor(&self) -> Option<AuthAgent> {
+        self.auth_statuses.get(self.auth_agent_cursor).map(|s| s.agent)
+    }
+
+    /// Re-detect each agent's current auth from config + keychain and cache it.
+    /// Call on entering the Authentication step and after every change; never
+    /// from render. Also refreshes the summary string shown on the Summary step.
+    pub fn refresh_auth_statuses(&mut self) {
+        use crate::config::{AppConfig, ClaudeAuthProvider};
+        use crate::credentials;
+
+        // Claude: driven by config `claude_provider` (+ keychain for the mask).
+        let claude_method = match AppConfig::load() {
+            Ok(c) => match c.authentication.claude_provider {
+                ClaudeAuthProvider::ApiKey => AuthMethodKind::ApiKey,
+                _ => AuthMethodKind::Login,
+            },
+            Err(_) => AuthMethodKind::Login,
+        };
+        let claude_key = if claude_method == AuthMethodKind::ApiKey
+            && credentials::has_anthropic_api_key()
+        {
+            Some(credentials::get_anthropic_api_key_masked())
+        } else {
+            None
+        };
+
+        // Codex: no config flag — a stored OpenAI key means API-key mode,
+        // otherwise the user logs in via `codex login`.
+        let (codex_method, codex_key) = if credentials::has_openai_api_key() {
+            (AuthMethodKind::ApiKey, Some(credentials::get_openai_api_key_masked()))
+        } else {
+            (AuthMethodKind::Login, None)
+        };
+
+        self.auth_statuses = vec![
+            AgentAuthStatus {
+                agent: AuthAgent::Claude,
+                method: claude_method,
+                key_masked: claude_key,
+            },
+            AgentAuthStatus {
+                agent: AuthAgent::Codex,
+                method: codex_method,
+                key_masked: codex_key,
+            },
+        ];
+        // Auth is always in *some* state now — reflect that for the Summary step.
+        self.auth_completed = true;
+        self.auth_method = Some(self.auth_summary());
+    }
+
+    /// One-line summary of current per-agent auth for the Summary step.
+    pub fn auth_summary(&self) -> String {
+        if self.auth_statuses.is_empty() {
+            return "not configured".to_string();
+        }
+        self.auth_statuses
+            .iter()
+            .map(|s| {
+                let m = match s.method {
+                    AuthMethodKind::Login => "login",
+                    AuthMethodKind::ApiKey => "api key",
+                };
+                format!("{} {}", s.agent.label(), m)
+            })
+            .collect::<Vec<_>>()
+            .join(" • ")
     }
 
     /// Deps flattened in topic order — the cursor indexes into this. Empty until
@@ -638,20 +789,48 @@ mod tests {
     }
 
     #[test]
-    fn auth_cursor_navigates_and_clamps() {
+    fn auth_agent_cursor_navigates_and_clamps() {
         let mut s = OnboardingState::new();
-        assert_eq!(s.auth_selected_index, 0);
-        s.move_auth_cursor(-1); // clamp at 0
-        assert_eq!(s.auth_selected_index, 0);
-        s.move_auth_cursor(1);
-        assert_eq!(s.auth_selected_index, 1);
-        s.move_auth_cursor(100); // clamp at the last option
-        assert_eq!(s.auth_selected_index, AUTH_OPTIONS.len() - 1);
-        // While typing an API key the cursor is frozen.
-        s.auth_api_key_input = Some("sk-ant-".to_string());
-        let before = s.auth_selected_index;
-        s.move_auth_cursor(-1);
-        assert_eq!(s.auth_selected_index, before);
+        // Seed two agents (avoids touching the real keychain in this unit test).
+        s.auth_statuses = vec![
+            AgentAuthStatus {
+                agent: AuthAgent::Claude,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+            AgentAuthStatus {
+                agent: AuthAgent::Codex,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+        ];
+        assert_eq!(s.auth_agent_cursor, 0);
+        s.move_auth_agent_cursor(-1); // clamp at 0
+        assert_eq!(s.auth_agent_cursor, 0);
+        assert_eq!(s.auth_agent_at_cursor(), Some(AuthAgent::Claude));
+        s.move_auth_agent_cursor(1);
+        assert_eq!(s.auth_agent_cursor, 1);
+        assert_eq!(s.auth_agent_at_cursor(), Some(AuthAgent::Codex));
+        s.move_auth_agent_cursor(100); // clamp at the last agent
+        assert_eq!(s.auth_agent_cursor, s.auth_statuses.len() - 1);
+    }
+
+    #[test]
+    fn auth_summary_lists_each_agent() {
+        let mut s = OnboardingState::new();
+        s.auth_statuses = vec![
+            AgentAuthStatus {
+                agent: AuthAgent::Claude,
+                method: AuthMethodKind::ApiKey,
+                key_masked: Some("sk-ant-xxxx••••".to_string()),
+            },
+            AgentAuthStatus {
+                agent: AuthAgent::Codex,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+        ];
+        assert_eq!(s.auth_summary(), "Claude api key • Codex login");
     }
 
     #[test]
