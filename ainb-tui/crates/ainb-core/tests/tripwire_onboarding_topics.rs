@@ -75,11 +75,17 @@ fn onboarding_dependency_step_renders_topics() {
         panic!("wizard welcome never rendered:\n{last}");
     }
 
-    // Advance Welcome -> DependencyCheck (auto-triggers the catalog detect).
-    Command::new("tmux")
-        .args(["send-keys", "-t", &session, "Enter"])
-        .status()
-        .unwrap();
+    // Advance Welcome -> Source -> Role -> UseCase -> DependencyCheck. The
+    // wizard has three questionnaire steps between Welcome and the dependency
+    // step; each accepts its default selection on Enter. The final Enter lands
+    // on DependencyCheck and auto-triggers the catalog detect.
+    for _ in 0..4 {
+        Command::new("tmux")
+            .args(["send-keys", "-t", &session, "Enter"])
+            .status()
+            .unwrap();
+        sleep(Duration::from_millis(400));
+    }
 
     // The new topic-grouped model must render these headers — none of which
     // existed in the old flat category list (Core/Container/Session/Toolkit/
