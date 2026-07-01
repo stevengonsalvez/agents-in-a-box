@@ -370,6 +370,11 @@ pub enum AppEvent {
     FleetPanelAnswer,     // Fleet panel: answer selected ASK with the option (Enter/a)
     FleetPanelBroadcast,  // Fleet panel: broadcast a ping to the selected session (B)
     FleetPanelRefresh,    // Fleet panel: force-refresh from current_state (r)
+    FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
+    FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
+    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
     PanelBack,            // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,           // Navigate to the Hangar control plane (plugin screen)
     InboxMoveUp,          // Inbox: move selection up one row
@@ -2721,7 +2726,19 @@ impl EventHandler {
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
     /// `GoToFleetPanel` saved, instead of hardcoding home (mirrors Daemons L2).
-    fn handle_fleet_panel_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+    fn handle_fleet_panel_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        // Name-prompt mode captures every key: chars build the name, Enter
+        // creates, Esc cancels. Nothing else (move/answer/back) fires while a
+        // create is being named.
+        if state.fleet_panel_state.is_naming_atc() {
+            return match key_event.code {
+                KeyCode::Esc => Some(AppEvent::FleetPanelNewAtcCancel),
+                KeyCode::Enter => Some(AppEvent::FleetPanelNewAtcSubmit),
+                KeyCode::Backspace => Some(AppEvent::FleetPanelNewAtcBackspace),
+                KeyCode::Char(c) => Some(AppEvent::FleetPanelNewAtcType(c)),
+                _ => None,
+            };
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
@@ -2730,6 +2747,7 @@ impl EventHandler {
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
             KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
+            KeyCode::Char('n') => Some(AppEvent::FleetPanelNewAtcOpen),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
             _ => None,
         }
@@ -5199,6 +5217,11 @@ impl EventHandler {
             AppEvent::FleetPanelOptionNext => state.fleet_panel_state.option_next(),
             AppEvent::FleetPanelOptionPrev => state.fleet_panel_state.option_prev(),
             AppEvent::FleetPanelRefresh => state.fleet_panel_state.refresh(),
+            AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
+            AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
+            AppEvent::FleetPanelNewAtcBackspace => state.fleet_panel_state.new_atc_backspace(),
+            AppEvent::FleetPanelNewAtcCancel => state.fleet_panel_state.new_atc_cancel(),
+            AppEvent::FleetPanelNewAtcSubmit => state.fleet_panel_state.new_atc_submit(),
             AppEvent::FleetPanelAnswer => {
                 // Answer the selected ASK by sending the highlighted option's
                 // label to the target session via the EXISTING fleet send path

@@ -1107,7 +1107,7 @@ fn require_name(matches: &clap::ArgMatches) -> Result<String> {
 /// Resolve the `ainb` binary to shell out to: `$AINB_BIN` if set (tests point it
 /// at a fake / the test binary), else this executable, else the literal `ainb`
 /// on `$PATH`.
-fn atc_bin() -> String {
+pub(crate) fn atc_bin() -> String {
     std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
         std::env::current_exe()
             .ok()
