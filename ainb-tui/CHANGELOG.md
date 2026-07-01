@@ -7,6 +7,178 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-01
+### Added
+- Merge pull request #372 from stevengonsalvez/o/debug-1
+- **ainb-fleet**: add Telegram phone bridge daemon
+- **ainb-fleet**: add atc skill, mark daemon superseded
+- **ainb-hooks**: forward managed lifecycle events to the ATC plumbing
+- **bridge**: add Discord channel via the raw gateway WebSocket
+- **bridge**: add token-redaction helper for channel diagnostics
+- **bridge**: emit daemon heartbeat with channel + last-relay
+- **bridge**: native Rust phone-bridge core (Telegram + Slack)
+- **bridge**: wire Discord into the daemon heartbeat and unify token redaction
+- **cli**: add `ainb fleet daemons` unified health verb
+- **cli**: register `ainb web` subcommand
+- **cli**: wire `ainb fleet bridge run/install/uninstall/status`
+- **config**: add fleet cost budget caps to config.toml
+- **fleet**: add 'ainb fleet cost' spend rollups with budget alerts
+- **fleet**: add ATC poll-mode brain via `ainb fleet atc`
+- **fleet**: add daemon heartbeat + status aggregation core
+- **fleet**: create a new ATC session from the Fleet panel
+- **fleet**: durable orchestration plumbing module
+- **fleet**: emit daemon heartbeat from the auto-continue watcher
+- **fleet**: hook appends a canonical events.jsonl line
+- **fleet**: install PreToolUse(AskUserQuestion) + StopFailure hooks
+- **fleet**: read needs from current_state with tmux fallback
+- **fleet-atc**: event-driven hook + inbox verbs, wire drain into heartbeat
+- **models**: refresh Claude model ring to current ids
+- **notifyd**: add events + current_state schema and store API
+- **notifyd**: ingest events.jsonl into the event log
+- **notifyd**: materialize current_state from the event log
+- **notifyd**: spawn the events.jsonl ingest tailer in the daemon loop
+- **onboarding**: make the auth step selectable
+- **onboarding**: show a Claude statusline preview on the deps screen
+- **reflect**: add [issues] config block for the issues mode
+- **reflect**: consume [issues] config block and print audit flags in CLI
+- **reflect**: stamp filed issues with reflect: prefix + reflect label
+- **reflect-kb**: add transcripts-to-issues pipeline core
+- **reflect-kb**: wire 'reflect issues' command group into the CLI
+- **run**: add --parent to link a spawned session to an orchestrator
+- **setup**: install harness plugins for every agent, not just Claude+Codex
+- **setup**: make Claude Code statusline installable from the deps screen
+- **tui**: add read-only Daemons observability screen
+- **tui**: answer interviews + broadcast from the fleet panel
+- **tui**: fleet control panel reading current_state
+- **tui**: register + route the fleet panel screen
+- **tui**: right arrow attaches in a split pane on the sessions screen
+- **usage**: carry raw project_path on SessionUsage rows
+- **web**: WS terminal + VAPID web-push backend for the dashboard
+- **web**: add ainb-web crate — read-only SSE-live fleet dashboard
+- **web**: installable PWA frontend — terminal UI, push toggle, service worker
+- **web**: scope the query-token fallback to the WS terminal route
+
+### Fixed
+- Merge pull request #373 from stevengonsalvez/f/agent-deck-rvw
+- **ainb-fleet**: harden bridge transcript reads and tmux send
+- **ainb-fleet**: make Telegram reply send tag-safe and fault-tolerant
+- **ainb-fleet**: reject pre-send backlog in rotated transcript reply
+- **atc**: drain delivered completion snapshots
+- **atc**: self-heal the durable parent map and stop host-wide dead-letter growth
+- **bridge**: accept null stop_reason as turn-end in reply capture
+- **bridge**: accept reply written in the same millisecond as the send
+- **bridge**: address Telegram media messages mentioned only in caption
+- **bridge**: back off Discord reconnects instead of hammering
+- **bridge**: convert adjacent italic spans sharing a separator space
+- **bridge**: detect half-open Discord sockets via heartbeat ACK tracking
+- **bridge**: honour Retry-After once on Discord 429 before dropping
+- **bridge**: jitter the first Discord heartbeat per gateway spec
+- **bridge**: keep channel tokens out of the persisted last_error
+- **bridge**: redact Discord tokens with 7-char middle segment
+- **bridge**: route by session run-name, not workspace, and never silently fall back
+- **bridge**: run Discord relay off the socket task to protect heartbeat
+- **bridge**: run Slack relay off the socket read loop
+- **bridge**: run Telegram relay off the long-poll loop
+- **bridge**: stabilize Telegram getUpdates long-poll and surface real errors
+- **burndown**: apply --period in plugin report path
+- **daemons**: collect daemon health on a background thread, not on render
+- **daemons**: report notifyd db as "file present" not "reachable"
+- **daemons**: scrub secrets in DaemonHeartbeat::record_error
+- **fleet**: add systemd Persistent=true for missed heartbeat catch-up
+- **fleet**: avoid leaking bridge secrets
+- **fleet**: cap event payload under PIPE_BUF
+- **fleet**: close ATC consumer data-loss seams around the inbox
+- **fleet**: confirm a notifyd listener, not just a socket file
+- **fleet**: cross-check process identity in daemon liveness probe
+- **fleet**: debounce budget alerts so standing breaches don't re-page
+- **fleet**: fall back on empty-cwd and stale healthy rows
+- **fleet**: fence child completion summaries as untrusted data
+- **fleet**: join fleet cost sessions on raw cwd, not project name
+- **fleet**: lock parents.json read-modify-write to prevent lost updates
+- **fleet**: open current_state read-only
+- **fleet**: refuse ambiguous-cwd interview answers
+- **fleet**: sanitize ATC instance name to block path traversal
+- **fleet**: terminate send-keys args with --
+- **fleet**: time-bound panel duplicate sends
+- **fleet**: treat heartbeat-disabled ATC instances as not running
+- **fleet**: treat null stop_reason as turn-end in IDLE + sequence detection
+- **fleet-atc**: harden teardown, heartbeat state, retry cap, and injection
+- **fleet/daemon**: bound the auto-continue dedup set to live sessions
+- **notifyd**: bound ingest read, atomic pass, detect events.jsonl truncate-regrow
+- **notifyd**: claim exclusive startup ownership before binding the socket
+- **notifyd**: keep parent sticky across batches
+- **notifyd**: re-sweep stopped rows so IDLE fires on age
+- **notifyd**: recover poisoned store mutex, add open_readonly, escalate task failure
+- **notifyd**: strip control chars from notification text
+- **notifyd**: write hooks.json and install.json atomically
+- **onboarding**: make all arrows navigation on the deps screen
+- **plumbing**: guard settings.json read-merge-write with an advisory lock
+- **plumbing**: never destroy completions on budget exhaustion; evict consumed markers by recency; fold budget RMW under the inbox lock
+- **reflect**: make transcript de-dup order by latest enqueue
+- **reflect**: redact fine-grained GitHub PATs in issue sanitizer
+- **reflect**: redact provider tokens and embedded-keyword secrets in sanitizer
+- **reflect**: redact uppercase long hex tokens
+- **reflect**: stop sanitizer audit re-flagging its own placeholders
+- **reflect**: surface sanitizer audit and save ledger incrementally
+- **reflect**: tighten gh dedupe to symmetric Jaccard with shared-token floor
+- **scanner**: reconcile session project_path in absorb for determinism
+- **setup**: make cross-harness hooks onboarding actually reach every agent
+- **tui**: guard against concurrent panel sends
+- **tui**: route Daemons screen back through PanelBack
+- **web**: cap push subscription store and bound the subscribe body
+- **web**: correct push attention kinds and ainb-managed session resolution
+- **web**: create vapid keys with private mode
+- **web**: emit an explicit SSE error frame on snapshot serialize failure
+- **web**: keep cache receiver alive so poller refreshes snapshot
+- **web**: make needDetail kind-aware so need cards render real detail
+- **web**: re-auth instead of silently looping the SSE stream forever
+- **web**: refuse unauthenticated --insecure-bind with the terminal write surface
+- **web**: render nested cost report shape in dashboard cost panel
+- **web**: scope ?token= query auth to the SSE route only
+- keep help panel entries visible
+
+### Documentation
+- chore(docs): regenerate CLI reference for the statusline --install flag
+- **ainb-fleet**: document ATC, bump plugin to 0.2.0
+- **ainb-fleet**: link the Telegram phone bridge from the fleet README
+- **atc**: document the event-driven plumbing
+- **bridge**: document the Discord channel and [fleet.bridge.discord]
+- **bridge**: document the native fleet bridge (config, channels, migration)
+- **bridge**: mark the Python phone bridge deprecated
+- **bridge**: note keychain watchdog thread self-reaps via timeout
+- **fleet**: add bridge skill
+- **fleet**: add daemons skill
+- **fleet**: clarify --period scopes fleet cost data
+- **fleet**: correct settings.json lock scope comment
+- **fleet**: correct the hook subcommand about text
+- **fleet**: document ainb fleet cost verb and budget caps
+- **fleet**: point needs/standup/atc skills at current_state
+- **fleet**: reconcile needs vs fleet-needs roles
+- **plugins**: add a harness-plugins README at plugins/
+- **plugins**: correct the harness-plugins README per review
+- **reflect**: document expanded sanitizer coverage, audit surfacing, config fallback
+- **reflect**: document the issues mode and its GitHub-publish safety model
+- **toolkit**: mark caveman-stats Claude-only in the plugin overview
+- **tui**: add Sessions + attach keys to the getting-started panel
+- **tui**: document `ainb web` routes, flags, and security model
+- **web**: document the terminal, web-push, PWA, and their security model
+
+### Other
+- **docs**: regenerate CLI reference for the statusline --install flag
+- **tests**: retire dead AsyncAction::NewSessionNormal test
+- **web**: harden take_output single-call contract with a debug_assert
+- **ainb-web**: poll fleet cost on a slower cadence than sessions/needs
+- **web**: hash the snapshot fingerprint structurally, not via triple stringify
+- **web**: serve all routes from one cached snapshot
+- **bridge**: use shared is_turn_end_stop_reason helper
+- **daemons**: derive the text-table separator width from column widths
+- **fleet**: ATC heartbeat reads current_state
+- **fleet**: retire status/<id>.json
+- **tui**: drop catalog, fold into Skills Catalogue on "c"
+- **tui**: remove dead agent-selection screen
+- **tui**: reorder home menu + all-lowercase shortcuts
+
+
 ## [1.10.1] - 2026-06-30
 ### Added
 - **docs**: map setup-catalog dep ids to docsite pages
