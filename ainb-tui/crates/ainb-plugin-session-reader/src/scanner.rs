@@ -134,7 +134,9 @@ pub struct ProviderRoots {
     pub codex_sessions: Option<PathBuf>,
     /// Gemini Code Assist sessions root.
     pub gemini_sessions: Option<PathBuf>,
-    /// `~/.config/github-copilot/sessions/`.
+    /// GitHub Copilot CLI sessions: `~/.copilot/session-state/`
+    /// (`$COPILOT_HOME/session-state` when set). Each `<uuid>/` holds an
+    /// `events.jsonl` event stream.
     pub copilot_sessions: Option<PathBuf>,
     /// Cursor IDE chat sessions. macOS:
     /// `~/Library/Application Support/Cursor/User/workspaceStorage`;
@@ -154,7 +156,7 @@ impl ProviderRoots {
                 claude_projects: Some(home.join(".claude/projects")),
                 codex_sessions: Some(home.join(".codex/sessions")),
                 gemini_sessions: Some(home.join(".gemini/sessions")),
-                copilot_sessions: Some(home.join(".config/github-copilot/sessions")),
+                copilot_sessions: Some(copilot_default_root(&home)),
                 cursor_sessions: Some(cursor_default_root(&home)),
             },
             None => Self::default(),
@@ -172,6 +174,17 @@ fn cursor_default_root(home: &Path) -> PathBuf {
     } else {
         home.join(".config/Cursor/User/workspaceStorage")
     }
+}
+
+/// Root of the GitHub Copilot CLI session tree:
+/// `~/.copilot/session-state/`. Copilot CLI anchors its config to
+/// `$HOME/.copilot` on every OS (it does *not* follow XDG);
+/// `COPILOT_HOME` relocates the whole `.copilot` tree, so honor it first.
+fn copilot_default_root(home: &Path) -> PathBuf {
+    let base = std::env::var_os("COPILOT_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".copilot"));
+    base.join("session-state")
 }
 
 /// Per-scan instrumentation. Counted in the per-file read path so
@@ -284,9 +297,9 @@ pub(crate) struct RecentMemo {
     /// Sorted `(path, mtime_nanos, size)` of every recent
     /// cached-provider file.
     pub(crate) recent_present: Vec<(String, u64, u64)>,
-    /// Gemini / Copilot / Cursor output, in walk order. These parsers
-    /// are uncached so fingerprints don't exist for them; whole-output
-    /// equality is the (cheap — usually empty) correctness guard.
+    /// Gemini / Cursor output, in walk order. These parsers are uncached
+    /// so fingerprints don't exist for them; whole-output equality is the
+    /// (cheap — usually empty) correctness guard.
     pub(crate) uncached_calls: Vec<ProviderCall>,
 }
 
@@ -342,7 +355,7 @@ pub fn scan(roots: &ProviderRoots) -> UsageData {
 /// when `(mtime, size)` matches the previous run; `None` is equivalent
 /// to the legacy [`scan`] call site.
 ///
-/// Gemini and Copilot parsers are stubs that don't read files; they're
+/// Gemini and Cursor parsers are stubs that don't read files; they're
 /// invoked without the cache.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn scan_with_cache(
@@ -357,16 +370,16 @@ pub fn scan_with_cache(
 /// from each per-file parse so the plugin's async publish loop can
 /// fan progress out to the host without blocking the scan thread.
 ///
-/// Pre-walks the Claude and Codex provider dirs to count `.jsonl`
-/// files before the actual parse loop, then calls
+/// Pre-walks the Claude, Codex, and Copilot provider dirs to count
+/// session files before the actual parse loop, then calls
 /// [`ProgressReporter::set_total`] so the burndown UI can render a
 /// real `N/M` progress bar (instead of the open-ended `N files`
 /// fallback). The pre-walk is cheap — directory enumeration only, no
 /// file reads — typically under 50 ms even for 5000+ Claude session
-/// JSONLs. Gemini, Copilot, and Cursor parsers aren't progress-aware
-/// (they don't emit `note_file`) so they're excluded from the total
-/// to keep the bar honest; their file counts are usually small enough
-/// that the under-count is invisible.
+/// JSONLs. Gemini and Cursor parsers aren't progress-aware (they don't
+/// emit `note_file`) so they're excluded from the total to keep the bar
+/// honest; their file counts are usually small enough that the
+/// under-count is invisible.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn scan_with_cache_and_progress(
     roots: &ProviderRoots,
@@ -378,7 +391,11 @@ pub fn scan_with_cache_and_progress(
     // root is None or unreadable — same semantics as the parse path.
     let claude_files = roots.claude_projects.as_deref().map_or(0, count_jsonl_in_two_level_tree);
     let codex_files = roots.codex_sessions.as_deref().map_or(0, count_jsonl_recursive);
-    let total = claude_files.saturating_add(codex_files);
+    // Copilot: count exactly `<root>/<uuid>/events.jsonl` so the bar
+    // matches the parser's per-session `note_file` cadence and can't
+    // over-count on stray `.jsonl` elsewhere under the tree.
+    let copilot_files = roots.copilot_sessions.as_deref().map_or(0, count_copilot_events);
+    let total = claude_files.saturating_add(codex_files).saturating_add(copilot_files);
     if total > 0 {
         // Saturate at u32::MAX — unlikely in practice (would require
         // ~4 billion .jsonl files) but keeps the cast explicit.
@@ -390,8 +407,8 @@ pub fn scan_with_cache_and_progress(
     aggregate(all_calls)
 }
 
-/// Walk every provider through `ctx`. Claude and Codex go through the
-/// cached, watermark-aware per-file path; Gemini / Copilot / Cursor
+/// Walk every provider through `ctx`. Claude, Codex and Copilot go
+/// through the cached, watermark-aware per-file path; Gemini / Cursor
 /// parsers are uncached and always contribute to the returned (recent)
 /// calls — identically in the full and incremental paths, so the
 /// partition stays a valid split of the same total.
@@ -406,8 +423,11 @@ fn walk_providers(
     calls
 }
 
-/// The cache-aware half of [`walk_providers`]: Claude and Codex,
-/// through the watermark-partitioned per-file path.
+/// The cache-aware half of [`walk_providers`]: Claude, Codex, and
+/// Copilot, through the watermark-partitioned per-file path. Each of
+/// their session files (Claude/Codex `.jsonl`, Copilot `events.jsonl`)
+/// has a stable `(mtime, size)` once its session ends, so the per-file
+/// cache + stable/recent partition apply uniformly.
 #[cfg(not(target_arch = "wasm32"))]
 fn walk_cached_providers(
     roots: &ProviderRoots,
@@ -425,21 +445,23 @@ fn walk_cached_providers(
             root, ctx, reporter,
         ));
     }
+    if let Some(root) = &roots.copilot_sessions {
+        calls.extend(crate::parsers::copilot::parse_dir_cached_with_progress(
+            root, ctx, reporter,
+        ));
+    }
     calls
 }
 
-/// The uncached half of [`walk_providers`]: Gemini / Copilot / Cursor
-/// parse from scratch on every scan (no per-file cache, no watermark
-/// partition). Split out so [`scan_incremental`] can compare their
-/// output across refreshes for the unchanged-snapshot short-circuit.
+/// The uncached half of [`walk_providers`]: Gemini / Cursor parse from
+/// scratch on every scan (no per-file cache, no watermark partition).
+/// Split out so [`scan_incremental`] can compare their output across
+/// refreshes for the unchanged-snapshot short-circuit.
 #[cfg(not(target_arch = "wasm32"))]
 fn parse_uncached_providers(roots: &ProviderRoots) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     if let Some(root) = &roots.gemini_sessions {
         calls.extend(crate::parsers::gemini::parse_dir(root));
-    }
-    if let Some(root) = &roots.copilot_sessions {
-        calls.extend(crate::parsers::copilot::parse_dir(root));
     }
     if let Some(root) = &roots.cursor_sessions {
         calls.extend(crate::parsers::cursor::parse_dir(root));
@@ -618,6 +640,25 @@ fn count_jsonl_recursive(root: &Path) -> usize {
             } else if ft.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
+        }
+    }
+    count
+}
+
+/// Count Copilot session files: `<root>/<uuid>/events.jsonl`. One-level
+/// walk that counts exactly the files
+/// `copilot::parse_dir_cached_with_progress` will `note_file`, so the
+/// progress total stays honest (stray `.jsonl` elsewhere don't inflate it).
+#[cfg(not(target_arch = "wasm32"))]
+fn count_copilot_events(root: &Path) -> usize {
+    let mut count = 0usize;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if dir.is_dir() && dir.join("events.jsonl").is_file() {
+            count = count.saturating_add(1);
         }
     }
     count
@@ -1565,6 +1606,28 @@ mod tests {
         let missing = std::path::PathBuf::from("/nonexistent/path/to/nowhere");
         assert_eq!(count_jsonl_in_two_level_tree(&missing), 0);
         assert_eq!(count_jsonl_recursive(&missing), 0);
+        assert_eq!(count_copilot_events(&missing), 0);
+    }
+
+    #[test]
+    fn count_copilot_events_counts_only_uuid_events_files() {
+        // Copilot layout: <root>/<uuid>/events.jsonl
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for uuid in ["a-1", "b-2"] {
+            let d = root.join(uuid);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("events.jsonl"), b"{}").unwrap();
+            std::fs::write(d.join("workspace.yaml"), b"x").unwrap(); // ignored
+        }
+        // A uuid dir with no events.jsonl, and a stray nested .jsonl that
+        // the parser never visits — neither should be counted.
+        std::fs::create_dir_all(root.join("c-3")).unwrap();
+        std::fs::write(root.join("c-3").join("session.db"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("b-2/checkpoints")).unwrap();
+        std::fs::write(root.join("b-2/checkpoints/note.jsonl"), b"{}").unwrap();
+
+        assert_eq!(count_copilot_events(root), 2);
     }
 
     #[test]

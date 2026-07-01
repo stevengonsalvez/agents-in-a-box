@@ -311,7 +311,7 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
     let mut spans = vec![
         Span::styled("🧠 ", Style::default().fg(GOLD)),
         Span::styled(
-            "Skills",
+            "Skills Catalogue",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
     ];

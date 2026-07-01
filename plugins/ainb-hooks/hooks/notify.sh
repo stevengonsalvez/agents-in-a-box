@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ainb-hooks: universal notification hook for Claude Code + Codex CLI.
+# ainb-hooks: universal notification hook for Claude Code, Codex CLI, and Copilot CLI.
 #
-# Reads a hook event payload (Claude pipes JSON on stdin; Codex passes JSON
-# as argv[1]), builds a normalized envelope, and delivers it to ainb-notifyd
+# Reads a hook event payload (Claude/Copilot pipe JSON on stdin; Codex passes
+# JSON as argv[1]), builds a normalized envelope, and delivers it to ainb-notifyd
 # via a Unix socket at $HOME/.agents-in-a-box/notify.sock. On any delivery
 # failure the payload is appended to a fallback JSONL file that notifyd
 # replays on its next startup. The script always exits 0 so a delivery
@@ -66,7 +66,8 @@ fi
 
 # Codex emits `type` values like `agent-turn-complete`, `request_user_input`.
 # We preserve the raw_event verbatim per spec (no canonical mapping in MVP)
-# but include a matcher slot for Claude's `Notification:idle_prompt` style.
+# but include a matcher slot for Claude's `Notification:idle_prompt` and
+# Codex's `PermissionRequest` style.
 if [ -n "${AINB_MATCHER}" ]; then
   AINB_RAW_EVENT="${AINB_RAW_EVENT}:${AINB_MATCHER}"
 fi
@@ -143,35 +144,71 @@ ainb_send() {
   return 2
 }
 
+ainb_socket_alive() {
+  # True only when a daemon is actually ACCEPTING on the socket. A bare
+  # socket *file* left behind by a crashed daemon must NOT count — testing
+  # `[ -S ]` alone is what let a stale socket block respawn for days.
+  [ -S "${AINB_SOCK}" ] || return 1
+  if command -v nc >/dev/null 2>&1; then
+    # `-N` closes the socket after stdin EOF so an accepting daemon answers
+    # instantly; without it BSD/macOS nc waits out the full `-w` timeout.
+    : | nc -U -N -w 1 "${AINB_SOCK}" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v socat >/dev/null 2>&1; then
+    : | socat - UNIX-CONNECT:"${AINB_SOCK}" >/dev/null 2>&1
+    return $?
+  fi
+  # No probe client available — assume present to avoid spawn storms.
+  return 0
+}
+
 ainb_lazy_spawn() {
-  # Best-effort lazy spawn of ainb notifyd. Uses a flock to avoid races
-  # when multiple hooks fire concurrently. Silent on success and failure;
+  # Best-effort lazy spawn of ainb notifyd. Silent on success and failure;
   # the fallback file is the safety net.
-  if [ -S "${AINB_SOCK}" ]; then
+  if [ "${AINB_NOTIFY_DISABLE_LAZY_SPAWN:-}" = "1" ]; then
+    return 1
+  fi
+  if ainb_socket_alive; then
     return 0
   fi
   if ! command -v ainb >/dev/null 2>&1; then
     return 1
   fi
-  # flock acquisition is non-blocking — concurrent first-fires let the
-  # winner spawn and the others fall through to the fallback file.
-  if command -v flock >/dev/null 2>&1; then
-    (
-      flock -n 9 || exit 1
-      nohup ainb notifyd >/dev/null 2>&1 &
-    ) 9>"${AINB_SPAWN_LOCK}"
-  else
-    nohup ainb notifyd >/dev/null 2>&1 &
+  # Mutual exclusion across concurrent first-fires. `mkdir` is atomic on
+  # POSIX *and* present on macOS — unlike `flock`, whose absence on macOS
+  # silently disabled the old guard and let every fire spawn its own
+  # daemon. The winner spawns; everyone else falls through to the fallback
+  # file. A distinct `.d` path is used (not the old flock lock *file*) so a
+  # leftover regular file from a previous version can't make mkdir fail
+  # forever. A lock dir older than 60s (spawner crashed mid-flight) is
+  # reclaimed so a stale lock can't wedge spawning permanently.
+  ainb_lock_dir="${AINB_SPAWN_LOCK}.d"
+  if [ -d "${ainb_lock_dir}" ] && command -v find >/dev/null 2>&1; then
+    if [ -z "$(find "${ainb_lock_dir}" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
+      rmdir "${ainb_lock_dir}" 2>/dev/null || true
+    fi
   fi
-  # Wait up to 500ms for the socket to appear.
+  if ! mkdir "${ainb_lock_dir}" 2>/dev/null; then
+    # Another fire is already spawning — let it win, we fall back.
+    return 1
+  fi
+  # Detach hard: stdin from /dev/null (an inherited hook pipe on stdin is
+  # the suspected cause of daemons wedging in startup before they ever
+  # bind), stdout/stderr discarded, nohup so a closing pane/tmux can't
+  # SIGHUP it.
+  nohup ainb notifyd </dev/null >/dev/null 2>&1 &
+  # Wait up to 1s for the socket to come up, then release the lock.
   ainb_attempts=0
-  while [ "${ainb_attempts}" -lt 50 ]; do
-    if [ -S "${AINB_SOCK}" ]; then
+  while [ "${ainb_attempts}" -lt 100 ]; do
+    if ainb_socket_alive; then
+      rmdir "${ainb_lock_dir}" 2>/dev/null || true
       return 0
     fi
     sleep 0.01 2>/dev/null || sleep 1
     ainb_attempts=$((ainb_attempts + 1))
   done
+  rmdir "${ainb_lock_dir}" 2>/dev/null || true
   return 1
 }
 

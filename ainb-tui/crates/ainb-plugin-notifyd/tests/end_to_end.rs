@@ -2,9 +2,9 @@
 //!
 //! Spins up the real `ainb-notifyd` accept loop in a temporary
 //! directory, fires the real `plugins/ainb-hooks/hooks/notify.sh`
-//! bash script against the socket with both a Claude-shaped (stdin
-//! JSON) payload and a Codex-shaped (argv JSON) payload, and asserts
-//! that two rows with the correct `agent` + `raw_event` end up in
+//! bash script against the socket with a Claude-shaped (stdin
+//! JSON) payload and Codex-shaped (argv JSON) payloads, and asserts
+//! that rows with the correct `agent` + `raw_event` end up in
 //! `notifications.db`.
 //!
 //! This is the wiring proof referenced in the spec's success
@@ -42,6 +42,7 @@ fn fire_claude_hook(script: &Path, home: &Path, json: &str) {
         .arg(script)
         .env("HOME", home)
         .env("AINB_AGENT", "claude")
+        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -68,6 +69,7 @@ fn fire_codex_hook(script: &Path, home: &Path, json: &str) {
         .arg(json)
         .env("HOME", home)
         .env("AINB_AGENT", "codex")
+        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -81,8 +83,34 @@ fn fire_codex_hook(script: &Path, home: &Path, json: &str) {
     );
 }
 
+fn fire_copilot_hook(script: &Path, home: &Path, json: &str) {
+    let out = Command::new("bash")
+        .arg(script)
+        .env("HOME", home)
+        .env("AINB_AGENT", "copilot")
+        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(json.as_bytes()).unwrap();
+            }
+            child.wait_with_output()
+        })
+        .expect("running copilot hook");
+    assert!(
+        out.status.success(),
+        "copilot hook failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[tokio::test]
-async fn hook_script_into_real_daemon_persists_both_agents() {
+async fn hook_script_into_real_daemon_persists_supported_agents() {
     // Skip if the bash script is missing — useful when running from
     // a CI matrix entry that hasn't checked out the plugin tree
     // (defensive, not expected).
@@ -123,13 +151,24 @@ async fn hook_script_into_real_daemon_persists_both_agents() {
     let codex_json = r#"{"type":"agent-turn-complete","session_id":"sess-codex-1","cwd":"/Users/example/codex-proj"}"#;
     fire_codex_hook(&script, &home, codex_json);
 
-    // Give the daemon a tick to drain both writes.
+    // Codex approval path: PermissionRequest is the native Codex event
+    // that ainb-hooks registers for blocked approval prompts.
+    let codex_permission_json = r#"{"hook_event_name":"PermissionRequest","session_id":"sess-codex-2","cwd":"/Users/example/codex-proj"}"#;
+    fire_codex_hook(&script, &home, codex_permission_json);
+
+    // Copilot path: JSON on stdin, camelCase/native event names.
+    let copilot_notification_json = r#"{"type":"notification","sessionId":"sess-copilot-1","working_directory":"/Users/example/copilot-proj"}"#;
+    fire_copilot_hook(&script, &home, copilot_notification_json);
+    let copilot_stop_json = r#"{"type":"agentStop","sessionId":"sess-copilot-2","working_directory":"/Users/example/copilot-proj"}"#;
+    fire_copilot_hook(&script, &home, copilot_stop_json);
+
+    // Give the daemon a tick to drain the writes.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Open the same DB the daemon wrote.
     let store = Store::open(&paths.db).unwrap();
     let rows = store.list(false, None, None, 100).unwrap();
-    assert_eq!(rows.len(), 2, "expected 2 rows, got {:?}", rows);
+    assert_eq!(rows.len(), 5, "expected 5 rows, got {:?}", rows);
 
     let mut by_agent: std::collections::HashMap<String, _> = std::collections::HashMap::new();
     for row in &rows {
@@ -141,9 +180,24 @@ async fn hook_script_into_real_daemon_persists_both_agents() {
     assert_eq!(claude_row.session_id, "sess-claude-1");
     assert!(claude_row.project.contains("proj"));
 
-    let codex_row = by_agent.get("codex").expect("codex row missing");
-    assert_eq!(codex_row.raw_event, "agent-turn-complete");
-    assert_eq!(codex_row.session_id, "sess-codex-1");
+    let codex_events: std::collections::HashMap<_, _> = rows
+        .iter()
+        .filter(|row| row.agent == "codex")
+        .map(|row| (row.raw_event.as_str(), row.session_id.as_str()))
+        .collect();
+    assert_eq!(
+        codex_events.get("agent-turn-complete"),
+        Some(&"sess-codex-1")
+    );
+    assert_eq!(codex_events.get("PermissionRequest"), Some(&"sess-codex-2"));
+
+    let copilot_events: std::collections::HashMap<_, _> = rows
+        .iter()
+        .filter(|row| row.agent == "copilot")
+        .map(|row| (row.raw_event.as_str(), row.session_id.as_str()))
+        .collect();
+    assert_eq!(copilot_events.get("notification"), Some(&"sess-copilot-1"));
+    assert_eq!(copilot_events.get("agentStop"), Some(&"sess-copilot-2"));
 
     daemon.abort();
 }
@@ -161,8 +215,8 @@ async fn hook_falls_back_when_daemon_down_then_daemon_replays() {
     paths.ensure_base().unwrap();
 
     // Fire the hook BEFORE the daemon starts. The script should
-    // detect no socket, fail the lazy spawn (because `ainb` is not on
-    // PATH in a test context), and write to the fallback file.
+    // detect no socket, skip lazy spawn via the test env, and write to
+    // the fallback file.
     let claude_json = r#"{"hook_event_name":"Stop","session_id":"sess-fallback","cwd":"/Users/example/proj","payload":{}}"#;
     fire_claude_hook(&script, &home, claude_json);
 

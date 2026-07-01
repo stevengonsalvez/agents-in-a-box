@@ -25,7 +25,7 @@ fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
     assert!(first.is_none());
     assert_eq!(
         state.home_screen_v2_state.sidebar.selected_item(),
-        SidebarItem::Catalog
+        SidebarItem::Inbox
     );
 
     let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state);

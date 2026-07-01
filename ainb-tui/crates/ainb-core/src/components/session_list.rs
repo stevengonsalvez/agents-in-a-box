@@ -24,10 +24,25 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
 const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
 
+// Per-agent brand colors for the coding-agent pill chip. The chip is a
+// filled block in these colors so the agent is identifiable at a glance —
+// orange = Claude, blue = Gemini, etc. — even before the glyph resolves.
+const BRAND_CLAUDE: Color = Color::Rgb(217, 119, 87); // Anthropic clay-orange
+const BRAND_CODEX: Color = Color::Rgb(236, 236, 241); // OpenAI near-white
+const BRAND_COPILOT: Color = Color::Rgb(46, 160, 67); // GitHub green
+const BRAND_GEMINI: Color = Color::Rgb(66, 133, 244); // Google blue
+const BRAND_KIRO: Color = Color::Rgb(171, 121, 224); // crystal purple
+const BRAND_SHELL: Color = Color::Rgb(150, 150, 165); // muted slate
+const BRAND_SSH: Color = Color::Rgb(255, 165, 0); // amber
+
+// Powerline rounded caps that wrap the pill chip's filled middle.
+const PILL_LEFT: &str = "\u{e0b6}"; //
+const PILL_RIGHT: &str = "\u{e0b4}"; //
+
 use ainb_plugin_notifyd::AlertKind;
 
 use crate::app::AppState;
-use crate::models::{SessionMode, SessionStatus, ShellSessionStatus, Workspace};
+use crate::models::{SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace};
 
 /// Width of the leading badge slot rendered before every list row.
 /// Two characters: a digit (or space) and a trailing space separator.
@@ -106,7 +121,7 @@ impl SessionListComponent {
             .count();
 
         let mut title_spans = vec![
-            Span::styled(" 📁 ", Style::default().fg(GOLD)),
+            Span::styled(" \u{f07b} ", Style::default().fg(GOLD)),
             Span::styled(
                 "Workspaces ",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
@@ -284,11 +299,13 @@ impl SessionListComponent {
                 "▶"
             };
 
-            // Premium workspace styling
+            // Premium workspace styling. Folder headers are cornflower blue
+            // (and bold) so they read distinctly as folders/containers against
+            // the grey/green/white session rows; selected folder turns green.
             let (symbol_color, name_color) = if is_selected_workspace {
                 (SELECTION_GREEN, SELECTION_GREEN)
             } else {
-                (MUTED_GRAY, SOFT_WHITE)
+                (CORNFLOWER_BLUE, CORNFLOWER_BLUE)
             };
 
             let count_display = if total_count > 0 {
@@ -301,13 +318,13 @@ impl SessionListComponent {
             // (resolved off the render path in
             // `AppState::recompute_favorite_workspaces`). No git2 / YAML here.
             let is_favorite = state.favorite_workspace_paths.contains(&workspace.path);
-            let star_indicator = if is_favorite { "⭐ " } else { "" };
+            let star_indicator = if is_favorite { "\u{f005} " } else { "" }; // fa-star, 1-cell
 
             let workspace_line = Line::from(vec![
                 empty_badge(),
                 Span::styled(workspace_symbol, Style::default().fg(symbol_color)),
                 Span::styled(
-                    " 📁 ",
+                    " \u{f07b} ",
                     Style::default().fg(if is_selected_workspace {
                         GOLD
                     } else {
@@ -317,11 +334,8 @@ impl SessionListComponent {
                 Span::styled(star_indicator, Style::default().fg(GOLD)),
                 Span::styled(
                     workspace.name.clone(),
-                    Style::default().fg(name_color).add_modifier(if is_selected_workspace {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
+                    // Always bold — folder headers carry hierarchy weight.
+                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(count_display, Style::default().fg(MUTED_GRAY)),
             ]);
@@ -350,23 +364,17 @@ impl SessionListComponent {
 
                     let status_indicator = session.status.indicator();
 
-                    // Mode indicator (controlled by show_container_status config)
+                    // Mode indicator (controlled by show_container_status config).
+                    // 1-cell Nerd Font glyphs (dev-docker / fa-desktop) instead of
+                    // the 🐳/🖥️ emoji — emoji render 2-cell and the variation
+                    // selector made width unpredictable across terminals.
                     let mode_indicator = if state.app_config.ui_preferences.show_container_status {
                         match session.mode {
-                            SessionMode::Boss => "🐳 ",
-                            SessionMode::Interactive => "🖥️ ",
+                            SessionMode::Boss => "\u{e7b0} ",        // dev-docker
+                            SessionMode::Interactive => "\u{f108} ", // fa-desktop
                         }
                     } else {
                         ""
-                    };
-
-                    // Tmux status indicator
-                    let tmux_indicator = if session.is_attached {
-                        "🔗"
-                    } else if session.tmux_session_name.is_some() {
-                        "●"
-                    } else {
-                        "○"
                     };
 
                     // Git changes (controlled by show_git_status config)
@@ -378,29 +386,55 @@ impl SessionListComponent {
                         String::new()
                     };
 
-                    // Premium session styling
-                    let (branch_color, tmux_color) = if is_selected_session {
-                        (SELECTION_GREEN, SELECTION_GREEN)
+                    // Session state drives the row colour so active vs stopped
+                    // reads at a glance: running = green, idle = soft white,
+                    // stopped = muted grey, error = red. The selected row is
+                    // always green (reinforced by the ▶ arrow + highlight bar).
+                    let state_color = if is_selected_session {
+                        SELECTION_GREEN
                     } else {
                         match session.status {
-                            SessionStatus::Running => (SELECTION_GREEN, SOFT_WHITE),
-                            SessionStatus::Stopped => (MUTED_GRAY, MUTED_GRAY),
-                            SessionStatus::Idle => (WARNING_ORANGE, SOFT_WHITE),
-                            SessionStatus::Error(_) => (Color::Rgb(230, 100, 100), SOFT_WHITE),
+                            SessionStatus::Running => SELECTION_GREEN,
+                            SessionStatus::Idle => SOFT_WHITE,
+                            SessionStatus::Stopped => MUTED_GRAY,
+                            SessionStatus::Error(_) => Color::Rgb(230, 100, 100),
                         }
+                    };
+                    let branch_color = state_color;
+                    // Background behind the agent pill's powerline caps so they
+                    // blend with the row (panel bg normally, highlight bar when
+                    // selected).
+                    let row_bg = if is_selected_session {
+                        LIST_HIGHLIGHT_BG
+                    } else {
+                        DARK_BG
                     };
 
                     let agent_icon = session.agent_type.icon();
-                    let is_multi_selected = state.selected_sessions.contains(&session.id);
-
-                    let checkbox = if is_multi_selected {
-                        Span::styled(
-                            "[x]",
-                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                    let agent_color = agent_brand_color(&session.agent_type);
+                    // Agent chip: non-selected rows get the filled brand pill;
+                    // the selected row drops the fill (bold brand glyph only) so
+                    // there is no square box around the glyph on the highlight
+                    // bar. Caps collapse to spaces to preserve column width.
+                    let (pill_l, pill_r, agent_style) = if is_selected_session {
+                        (
+                            " ",
+                            " ",
+                            Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
                         )
                     } else {
-                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
+                        (
+                            PILL_LEFT,
+                            PILL_RIGHT,
+                            Style::default()
+                                .fg(DARK_BG)
+                                .bg(agent_color)
+                                .add_modifier(Modifier::BOLD),
+                        )
                     };
+                    let is_multi_selected = state.selected_sessions.contains(&session.id);
+
+                    let checkbox = ballot_checkbox(is_multi_selected);
 
                     // ainb-hooks attention marker for this session row.
                     // Live "needs you" marker, recomputed from the
@@ -415,13 +449,18 @@ impl SessionListComponent {
                         next_badge(&mut attach_no),
                         checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(format!(" {} ", status_indicator), Style::default()),
-                        Span::styled(mode_indicator.to_string(), Style::default()),
-                        Span::styled(format!("{} ", agent_icon), Style::default()),
                         Span::styled(
-                            format!("{} ", tmux_indicator),
-                            Style::default().fg(tmux_color),
+                            format!(" {} ", status_indicator),
+                            Style::default().fg(state_color),
                         ),
+                        Span::styled(mode_indicator.to_string(), Style::default().fg(MUTED_GRAY)),
+                        // Coding-agent chip — brand colour carries identity
+                        // (orange Claude, blue Gemini, …). Filled pill on normal
+                        // rows; bold glyph only on the selected row (no square).
+                        Span::styled(pill_l, Style::default().fg(agent_color).bg(row_bg)),
+                        Span::styled(format!(" {} ", agent_icon), agent_style),
+                        Span::styled(pill_r, Style::default().fg(agent_color).bg(row_bg)),
+                        Span::raw(" "),
                         Span::styled(
                             session.branch_name.clone(),
                             Style::default().fg(branch_color).add_modifier(
@@ -679,14 +718,7 @@ impl SessionListComponent {
                     let is_being_renamed = is_selected && state.other_tmux_rename_mode;
 
                     let badge = next_badge(&mut attach_no);
-                    let checkbox = if is_multi_selected {
-                        Span::styled(
-                            "[x]",
-                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
-                    };
+                    let checkbox = ballot_checkbox(is_multi_selected);
                     let session_line = if is_being_renamed {
                         // Show inline rename input
                         Line::from(vec![
@@ -926,4 +958,31 @@ impl SessionListComponent {
 #[allow(dead_code)]
 fn workspace_running_count(workspace: &Workspace) -> usize {
     workspace.running_sessions().len()
+}
+
+/// Multi-select ballot toggle shared by the workspace-session and
+/// other-tmux rows: ☑ (green, marked) / ☐ (muted, unmarked).
+fn ballot_checkbox(checked: bool) -> Span<'static> {
+    if checked {
+        Span::styled(
+            "☑ ",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("☐ ", Style::default().fg(MUTED_GRAY))
+    }
+}
+
+/// Brand color for a coding agent's pill chip. Drives the filled-block
+/// identity in the session list (orange Claude, blue Gemini, …).
+fn agent_brand_color(agent: &SessionAgentType) -> Color {
+    match agent {
+        SessionAgentType::Claude => BRAND_CLAUDE,
+        SessionAgentType::Codex => BRAND_CODEX,
+        SessionAgentType::Copilot => BRAND_COPILOT,
+        SessionAgentType::Gemini => BRAND_GEMINI,
+        SessionAgentType::Kiro => BRAND_KIRO,
+        SessionAgentType::Shell => BRAND_SHELL,
+        SessionAgentType::Ssh => BRAND_SSH,
+    }
 }

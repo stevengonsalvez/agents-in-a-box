@@ -60,6 +60,18 @@ impl LiveWindowWatcher {
                 // don't pin the Arc longer than necessary.
                 drop(strong);
 
+                // Keep the Codex usage cache warm while the TUI is open.
+                // Codex (unlike Claude) has no external driver feeding it —
+                // so we pull it here. The pull is throttled internally
+                // (~60s) so firing it every REFRESH_INTERVAL (5s) is a
+                // cheap cache-read no-op on most ticks. Fire-and-forget so
+                // a slow network pull never delays the Claude refresh
+                // below; the freshly-written `codex-live.json` is picked up
+                // by the next `current()` tick (which overlays it).
+                tokio::spawn(async {
+                    let _ = crate::cli::codex_statusline::execute(false).await;
+                });
+
                 let fresh = tokio::task::spawn_blocking(live_window::current).await;
                 let Some(strong) = weak.upgrade() else {
                     break;

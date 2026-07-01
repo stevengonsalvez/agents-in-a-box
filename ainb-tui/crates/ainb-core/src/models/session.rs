@@ -48,13 +48,18 @@ pub enum SessionAgentType {
 impl SessionAgentType {
     pub fn icon(&self) -> &'static str {
         match self {
-            SessionAgentType::Claude => "✻", // Claude's own starburst/pinwheel from its spinner
-            SessionAgentType::Shell => "🐚",
-            SessionAgentType::Ssh => "🔐",
-            SessionAgentType::Codex => "✦", // OpenAI geometric 4-pointed star
-            SessionAgentType::Gemini => "✨",
-            SessionAgentType::Copilot => "🐙",
-            SessionAgentType::Kiro => "🔮",
+            // Anthropic ships no Nerd Font brand mark; the six-point
+            // starburst (painted brand-orange at the render site) reads as
+            // Claude's sunburst. Single-cell.
+            SessionAgentType::Claude => "✻",
+            // OpenAI ships no Nerd Font brand mark; geometric 4-point star
+            // (painted near-white at the render site). Single-cell.
+            SessionAgentType::Codex => "✦",
+            SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot — real GitHub Copilot logo
+            SessionAgentType::Gemini => "\u{f1a0}",  // fa-google — Gemini is a Google product
+            SessionAgentType::Kiro => "\u{e62f}",    // seti-crystal — Kiro crystal motif
+            SessionAgentType::Shell => "\u{ea85}",   // cod-terminal
+            SessionAgentType::Ssh => "\u{f023}",     // fa-lock
         }
     }
 
@@ -123,7 +128,7 @@ impl SessionAgentType {
 /// The `SystemDefault` variant is special: when selected, `--model` is omitted
 /// from the launched CLI command entirely so the user's `claude` defaults
 /// apply. Real model variants serialize their full canonical IDs (e.g.
-/// `claude-opus-4-7`, not the `opus` alias) — but `parse()` still accepts the
+/// `claude-opus-4-8`, not the `opus` alias) — but `parse()` still accepts the
 /// short aliases so existing user-saved presets (`agent_model = "opus"`)
 /// continue to deserialize correctly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -131,9 +136,13 @@ pub enum ClaudeModel {
     /// Omit `--model` from the spawned `claude` command; user's CLI default wins.
     #[default]
     SystemDefault,
-    /// `claude-opus-4-7` — 1M ctx, flagship.
+    /// `claude-fable-5` -- 1M ctx, most capable.
+    Fable,
+    /// `claude-opus-4-8` -- 1M ctx, flagship Opus.
     Opus,
-    /// `claude-opus-4-6` — 1M ctx, previous Opus (still live).
+    /// `claude-opus-4-7` -- 1M ctx, previous flagship (still live).
+    Opus47,
+    /// `claude-opus-4-6` -- 1M ctx, older Opus (still live).
     Opus46,
     /// `claude-sonnet-4-6` — 1M ctx, balanced.
     Sonnet,
@@ -148,7 +157,9 @@ impl ClaudeModel {
     pub fn cli_value(&self) -> Option<&'static str> {
         match self {
             ClaudeModel::SystemDefault => None,
-            ClaudeModel::Opus => Some("claude-opus-4-7"),
+            ClaudeModel::Fable => Some("claude-fable-5"),
+            ClaudeModel::Opus => Some("claude-opus-4-8"),
+            ClaudeModel::Opus47 => Some("claude-opus-4-7"),
             ClaudeModel::Opus46 => Some("claude-opus-4-6"),
             ClaudeModel::Sonnet => Some("claude-sonnet-4-6"),
             ClaudeModel::Haiku => Some("claude-haiku-4-5"),
@@ -162,7 +173,9 @@ impl ClaudeModel {
     pub fn display_label(&self) -> &'static str {
         match self {
             ClaudeModel::SystemDefault => "system default",
-            ClaudeModel::Opus => "claude-opus-4-7 [1M]",
+            ClaudeModel::Fable => "claude-fable-5 [1M]",
+            ClaudeModel::Opus => "claude-opus-4-8 [1M]",
+            ClaudeModel::Opus47 => "claude-opus-4-7 [1M]",
             ClaudeModel::Opus46 => "claude-opus-4-6 [1M]",
             ClaudeModel::Sonnet => "claude-sonnet-4-6 [1M]",
             ClaudeModel::Haiku => "claude-haiku-4-5 [200K]",
@@ -180,8 +193,10 @@ impl ClaudeModel {
     pub fn description(&self) -> &'static str {
         match self {
             ClaudeModel::SystemDefault => "Use the CLI's built-in default model",
-            ClaudeModel::Opus => "Most capable, best for complex reasoning",
-            ClaudeModel::Opus46 => "Previous flagship Opus, still live",
+            ClaudeModel::Fable => "Most capable, deepest reasoning and agentic work",
+            ClaudeModel::Opus => "Flagship Opus, best for complex reasoning",
+            ClaudeModel::Opus47 => "Previous flagship Opus, still live",
+            ClaudeModel::Opus46 => "Older Opus, still live",
             ClaudeModel::Sonnet => "Balanced speed and intelligence",
             ClaudeModel::Haiku => "Fastest, best for simple tasks",
             ClaudeModel::OpusPlan => "Opus for planning, Sonnet for execution",
@@ -192,7 +207,9 @@ impl ClaudeModel {
     pub fn all() -> Vec<ClaudeModel> {
         vec![
             ClaudeModel::SystemDefault,
+            ClaudeModel::Fable,
             ClaudeModel::Opus,
+            ClaudeModel::Opus47,
             ClaudeModel::Opus46,
             ClaudeModel::Sonnet,
             ClaudeModel::Haiku,
@@ -204,7 +221,9 @@ impl ClaudeModel {
     pub fn icon(&self) -> &'static str {
         match self {
             ClaudeModel::SystemDefault => "·",
+            ClaudeModel::Fable => "✨",
             ClaudeModel::Opus => "🎭",
+            ClaudeModel::Opus47 => "🎭",
             ClaudeModel::Opus46 => "🎭",
             ClaudeModel::Sonnet => "⚖️",
             ClaudeModel::Haiku => "⚡",
@@ -214,14 +233,17 @@ impl ClaudeModel {
 
     /// Parse a TOML / preset string into a `ClaudeModel`. Accepts:
     ///   * `""` or `"default"` → `SystemDefault`
-    ///   * Canonical IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`, `opusplan`)
+    ///   * Canonical IDs (`claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`,
+    ///     `claude-sonnet-4-6`, `claude-haiku-4-5`, `opusplan`)
     ///   * Legacy short aliases (`opus`, `sonnet`, `haiku`) so user-saved
     ///     presets written before the 2026-05 refresh still resolve.
     /// Unknown values fall back to `SystemDefault` and emit a tracing::warn.
     pub fn parse(value: &str) -> ClaudeModel {
         match value.trim().to_lowercase().as_str() {
             "" | "default" => ClaudeModel::SystemDefault,
-            "opus" | "claude-opus" | "claude-3-opus" | "claude-opus-4-7" => ClaudeModel::Opus,
+            "fable" | "claude-fable" | "claude-fable-5" => ClaudeModel::Fable,
+            "opus" | "claude-opus" | "claude-3-opus" | "claude-opus-4-8" => ClaudeModel::Opus,
+            "opus-4-7" | "claude-opus-4-7" | "opus47" => ClaudeModel::Opus47,
             "opus-4-6" | "claude-opus-4-6" | "opus46" => ClaudeModel::Opus46,
             "sonnet" | "claude-sonnet" | "claude-3-sonnet" | "claude-sonnet-4-6" => {
                 ClaudeModel::Sonnet
@@ -428,7 +450,11 @@ impl SessionStatus {
     pub fn indicator(&self) -> &'static str {
         match self {
             SessionStatus::Running => "●",
-            SessionStatus::Stopped => "⏸",
+            // cod-debug-pause: a 1-cell Nerd Font glyph. The literal ⏸
+            // (U+23F8) is unicode-width 1 but renders 2-cell as an emoji in
+            // most terminals, so paused rows used to push everything after
+            // them one column right (ragged pill alignment).
+            SessionStatus::Stopped => "\u{ead1}",
             SessionStatus::Idle => "○", // Empty circle for idle
             SessionStatus::Error(_) => "✗",
         }

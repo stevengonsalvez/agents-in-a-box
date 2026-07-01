@@ -76,6 +76,14 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Step 5: Parse model
     let model = parse_model(&args.model);
 
+    // Step 5.5: Wire shared MCP pool (Claude only; never blocks creation).
+    // Ensures the pool daemon is up and merge-writes the worktree's
+    // .mcp.json so pooled servers point at the `ainb mcp proxy` shim.
+    // Any failure falls back to today's per-session behavior.
+    if matches!(args.tool.to_cli_provider(), CliProvider::Claude) {
+        setup_mcp_pool(&work_dir, &session_name);
+    }
+
     // Step 6: Build Claude command
     let claude_cmd = build_agent_command(&args, Some(model));
 
@@ -131,6 +139,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         workspace_name: workspace_name.clone(),
         created_at: Utc::now(),
         agent_type,
+        headroom_enabled: false,
+        rtk_enabled: false,
     };
 
     let mut store = SessionStore::load();
@@ -162,6 +172,66 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Best-effort shared-MCP-pool setup for a new session. Pool disabled, no
+/// eligible servers, daemon spawn failure, or .mcp.json write failure all
+/// degrade to per-session MCP spawning — a session must never fail to start
+/// because of the pool.
+fn setup_mcp_pool(work_dir: &std::path::Path, session_name: &str) {
+    use crate::config::AppConfig;
+    use crate::mcp_pool;
+
+    let config = AppConfig::load().unwrap_or_default();
+    if !config.mcp_pool.enabled {
+        return;
+    }
+    let mut pooled = mcp_pool::pooled_servers(&config);
+
+    // Auto-import: stdio servers already declared in the worktree's
+    // .mcp.json join the pool too (config entries win on name conflict).
+    // Users who never touched ainb config still get pooling for free.
+    // Auto-import runs whatever a repo's .mcp.json declares as a pooled
+    // (and later spawned) process. That matches Claude Code's own
+    // project-.mcp.json trust model, but log the exact command/args loudly
+    // so it's auditable — a freshly-cloned repo could declare anything.
+    let known: std::collections::HashSet<String> = pooled.iter().map(|s| s.name.clone()).collect();
+    for server in mcp_pool::mcp_json::parse_stdio_servers(&work_dir.join(".mcp.json")) {
+        if !known.contains(&server.name) && server.resolvable_on_host() {
+            warn!(
+                "mcp pool: auto-importing '{}' from project .mcp.json — will pool+spawn: {} {}",
+                server.name,
+                server.command,
+                server.args.join(" ")
+            );
+            pooled.push(server);
+        }
+    }
+    if pooled.is_empty() {
+        return;
+    }
+
+    if let Err(e) = mcp_pool::client::ensure_daemon() {
+        warn!("mcp pool: daemon unavailable, falling back to per-session MCP: {e}");
+        return;
+    }
+    // Teach the (possibly long-running, other-project-started) daemon every
+    // server this session expects. Existing names are no-ops.
+    if let Err(e) = mcp_pool::client::register_servers(&pooled) {
+        warn!("mcp pool: register failed, falling back to per-session MCP: {e}");
+        return;
+    }
+    match mcp_pool::mcp_json::write_session_mcp_json(work_dir, &pooled, Some(session_name)) {
+        Ok(wired) if !wired.is_empty() => {
+            println!(
+                "MCP pool: shared servers wired via {}: {}",
+                work_dir.join(".mcp.json").display(),
+                wired.join(", ")
+            );
+        }
+        Ok(_) => {}
+        Err(e) => warn!("mcp pool: could not write .mcp.json: {e}"),
+    }
 }
 
 /// Resolve the repository path from args or current directory
@@ -309,7 +379,7 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
 /// Build the agent CLI command with appropriate flags for the selected provider.
 ///
 /// **Model emission semantics (2026-05 refresh):**
-///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-7`) emitted ONLY
+///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-8`) emitted ONLY
 ///     when `model` resolves to a non-`SystemDefault` variant. The
 ///     `ClaudeModel::SystemDefault` variant (or `None`) causes the flag to be
 ///     omitted entirely so the installed `claude` CLI's default applies.
@@ -405,8 +475,10 @@ mod tests {
         assert_eq!(parse_model("opus"), ClaudeModel::Opus);
         assert_eq!(parse_model("haiku"), ClaudeModel::Haiku);
         assert_eq!(parse_model("claude-sonnet"), ClaudeModel::Sonnet);
-        // Canonical IDs (2026-05 refresh) also resolve.
-        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus);
+        // Canonical IDs (2026-06 refresh) also resolve.
+        assert_eq!(parse_model("claude-fable-5"), ClaudeModel::Fable);
+        assert_eq!(parse_model("claude-opus-4-8"), ClaudeModel::Opus);
+        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus47);
         assert_eq!(parse_model("claude-sonnet-4-6"), ClaudeModel::Sonnet);
         assert_eq!(parse_model("claude-haiku-4-5"), ClaudeModel::Haiku);
         assert_eq!(parse_model("opusplan"), ClaudeModel::OpusPlan);
@@ -462,7 +534,7 @@ mod tests {
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Opus));
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--model claude-opus-4-7"));
+        assert!(cmd.contains("--model claude-opus-4-8"));
         assert!(!cmd.contains("--dangerously-skip-permissions"));
     }
 

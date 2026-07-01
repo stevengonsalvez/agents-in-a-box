@@ -100,6 +100,12 @@ bincode = { workspace = true }
 # Plugin runtime (Phase 7 — subprocess + JSON-RPC, replaces wasmi host).
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
+
+# Skill manager CLI surface (source/search/skill/migrate/doctor — spec §10.1).
+ainb-cli = { path = "../ainb-cli", version = "0.1.0" }
+# Manifest + URI types — needed by the SkillManager screen's discovery
+# banner (spec §User Flow 1 / P5) to load + write `manifest.yaml`.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0" }
 # Notification daemon — used in-process for the Inbox screen reader.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
 # Read-only web dashboard — backs the `ainb web` subcommand.
@@ -125,6 +131,8 @@ bytes = "1.6"
 
 # Fleet — filesystem watch for JSONL transcript tail (assistant-turn detection).
 notify = { workspace = true }
+# No-echo terminal read for the Grafana Cloud API token in `ainb otel setup`.
+rpassword = "7"
 
 [features]
 default = []
@@ -151,6 +159,13 @@ rexpect = { workspace = true }
 proptest = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
 bytes = "1.6"
+# Skill-core's sandbox fixture for the SkillManager tripwires that drive
+# the screen against a seeded $HOME (see tripwire_core_skill_manager_
+# sandbox_*.rs). Production binary stays unaffected since this is a
+# dev-only dep edge — see also crates/ainb-skill-core/Cargo.toml where
+# the same self-dev-dep enables tests in skill-core itself.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = ["test-fixtures"] }
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -26,7 +26,8 @@ From the home screen, single keys jump to each screen (see [Keyboard shortcuts](
 | Sessions | `s` | List, attach, restart, and delete agent sessions |
 | Agents | `a` | Pick a provider/agent before spawning a session |
 | Recovery | `R` | Find and resume orphaned sessions / broken worktrees |
-| Stats | `i` | Usage analytics: Daily, Weekly, Project, Burndown, Optimize |
+| Stats | `i` | Usage analytics: Daily, Weekly, Project, Burndown, Optimize, [Savings](token-optimization.md) (`[`/`]` switch tabs) |
+| Daemons | `d` | Read-only [Daemons overlay](daemons.md): shared MCP pool + Headroom proxy |
 | Skills | `k` | Browse available skills |
 | Inbox | `I` | ainb-hooks notification inbox |
 | Config | `C` | View configuration |

@@ -1,0 +1,13 @@
+[package]
+name = "ainb-diff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ainb-adapters-tool = { path = "../ainb-adapters-tool" }
+anyhow = { workspace = true }
+similar = { workspace = true }
+
+[dev-dependencies]
+ainb-skill-core = { path = "../ainb-skill-core" }
+tempfile = "3"

@@ -212,6 +212,8 @@ pub enum ConfigureRow {
     Model,
     Mode,
     Yolo,
+    HeadroomProxy,
+    Rtk,
     Host,
     User,
     Port,
@@ -287,6 +289,19 @@ pub struct ConfigureState {
     pub base_selection: Option<BaseSelection>,
     /// Base-branch popup state — `Some` while the popup is open.
     pub branch_picker: Option<BranchPickerState>,
+    /// Route this session's CLI through the local Headroom compression proxy.
+    /// Only active for Claude and Codex agents.
+    pub headroom_enabled: bool,
+    /// Whether the `headroom` binary was found on PATH when this screen opened.
+    /// Detected once at construction (cheap PATH lookup) — gates the toggle so
+    /// we never offer routing through a proxy that can't run.
+    pub headroom_available: bool,
+    /// Wire RTK as a project-local Claude Code PreToolUse hook in the session's
+    /// worktree. Claude only (Codex path is AGENTS.md prompt-injection, out of
+    /// scope for this phase).
+    pub rtk_enabled: bool,
+    /// Whether the `rtk` binary was found on PATH when this screen opened.
+    pub rtk_available: bool,
 }
 
 impl ConfigureState {
@@ -378,6 +393,10 @@ impl ConfigureState {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
+            headroom_available: crate::headroom::is_installed(),
+            rtk_enabled: false,
+            rtk_available: crate::rtk::is_installed(),
         }
     }
 
@@ -546,6 +565,14 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
+                    rows.push(ConfigureRow::Rtk);
+                }
             }
         } else {
             // Real preset — Mode/Yolo are shown locked, but only when the
@@ -553,6 +580,14 @@ impl ConfigureState {
             if preset.agent_provider != "shell" {
                 rows.push(ConfigureRow::Mode);
                 rows.push(ConfigureRow::Yolo);
+                if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+                    rows.push(ConfigureRow::HeadroomProxy);
+                }
+                // RTK is a Claude Code hook (`.claude/settings.json`) — Claude
+                // only. Codex/Gemini/Copilot never read it, so don't offer it.
+                if preset.agent_provider == "claude" {
+                    rows.push(ConfigureRow::Rtk);
+                }
             }
         }
         // Branch row visible for everything that isn't SSH.
@@ -626,6 +661,9 @@ pub struct LaunchSpec {
     /// (HEAD for local repos, origin/HEAD for remote/star launches).
     pub base: Option<BaseSelection>,
     pub prompt: Option<String>,
+    pub headroom_enabled: bool,
+    /// Wire RTK project-local PreToolUse hook in this session's worktree.
+    pub rtk_enabled: bool,
 }
 
 impl LaunchSpec {
@@ -709,6 +747,12 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             ConfigureRow::Yolo => {
                 render_yolo_row(f, state, area_for_row, focused);
             }
+            ConfigureRow::HeadroomProxy => {
+                render_headroom_row(f, state, area_for_row, focused);
+            }
+            ConfigureRow::Rtk => {
+                render_rtk_row(f, state, area_for_row, focused);
+            }
             ConfigureRow::Host | ConfigureRow::User | ConfigureRow::Port | ConfigureRow::Key => {
                 render_ssh_field(f, state, area_for_row, *row);
             }
@@ -716,6 +760,16 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             ConfigureRow::Prompt => render_prompt_row(f, state, area_for_row, focused),
             ConfigureRow::Launch => render_launch_row(f, area_for_row, focused),
         }
+    }
+
+    // Contextual help in the filler space (the Min(1) chunk between the rows
+    // and the help bar), keyed to the focused row. Headroom card for now — the
+    // pattern extends to other rows when they need it.
+    let filler_chunk = chunks[rows.len()];
+    if state.focused_row == ConfigureRow::HeadroomProxy && state.headroom_available {
+        render_headroom_guide(f, filler_chunk);
+    } else if state.focused_row == ConfigureRow::Rtk && state.rtk_available {
+        render_rtk_guide(f, filler_chunk);
     }
 
     // Help bar — always last chunk.
@@ -825,7 +879,7 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let mut options: Vec<String> = state.available_presets.clone();
     options.push(CUSTOM_PRESET_LABEL.to_string());
 
-    let line = build_pills_line("Preset:  ", &options, &current, focused, area.width);
+    let line = build_pills_line("Preset:  ", &options, &current, focused, &[], area.width);
 
     // Tack on the modified badge to the same line (after the pills).
     let line = if modified {
@@ -870,17 +924,44 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
 
 fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     let preset = state.effective_preset();
-    let current = match preset.agent_provider.as_str() {
-        "claude" => "Claude",
-        "codex" => "Codex",
-        "shell" => "Shell",
-        "ssh" => "SSH",
-        other => other,
+    let current = agent_label(preset.agent_provider.as_str()).to_string();
+    // Gemini is shown but greyed-out / non-selectable for now (kept out of the
+    // `AGENTS` cycle ring) — `build_pills_line` renders it muted with a
+    // `[soon]` tag. Copilot is a real, selectable option. `DISABLED_AGENTS` is
+    // the single source of truth shared with the launch guard.
+    let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let disabled: Vec<&str> = DISABLED_AGENTS.iter().map(|p| agent_label(p)).collect();
+
+    // Width-fit gate (mirrors render_model_row): the row grew to six pills, so
+    // on narrow terminals fall back to the single `◀ value ▶` cycle display
+    // rather than overflowing and truncating pills off the right edge.
+    let pill_width = estimate_pill_width("Agent:   ", &options, &disabled, focused);
+    if pill_width > area.width as usize {
+        let spans = vec![
+            focus_indicator(focused),
+            label_span("Agent:   "),
+            cyclable_arrow_left(focused),
+            Span::styled(
+                current,
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            cyclable_arrow_right(focused),
+        ];
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
     }
-    .to_string();
-    let options: Vec<String> =
-        ["Claude", "Codex", "Shell", "SSH"].iter().map(|s| (*s).to_string()).collect();
-    let line = build_pills_line("Agent:   ", &options, &current, focused, area.width);
+
+    let line = build_pills_line(
+        "Agent:   ",
+        &options,
+        &current,
+        focused,
+        &disabled,
+        area.width,
+    );
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -911,7 +992,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
     // single-value cycle display. The Model row's labels include ctx hints
     // like "[1M]" so they grow fast; on narrow terminals the cycle form is
     // more readable.
-    let pill_width = estimate_pill_width("Model:   ", &options, focused);
+    let pill_width = estimate_pill_width("Model:   ", &options, &[], focused);
     if pill_width > area.width as usize {
         // Mute "system default" so the user can tell at a glance.
         let is_default = current == "system default";
@@ -931,7 +1012,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         return;
     }
 
-    let line = build_pills_line("Model:   ", &options, &current, focused, area.width);
+    let line = build_pills_line("Model:   ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -968,57 +1049,14 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
 
-    // Cyclable (Custom selected): build the pills line manually so Boss can
-    // render muted with `[alpha]` suffix regardless of selection state.
-    // Interactive stays as a normal pill.
-    let current = if is_boss { "Boss" } else { "Interactive" };
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(focus_indicator(focused));
-    spans.push(label_span("Mode:    "));
-
-    // Interactive pill.
-    let interactive_selected = current == "Interactive";
-    if interactive_selected {
-        spans.push(Span::styled(
-            "[",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "Interactive",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "]",
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.push(Span::styled("Interactive", Style::default().fg(MUTED_GRAY)));
-    }
-
-    spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
-
-    // Boss pill — always muted (the alpha tag and de-emphasis stay even when
-    // selected). Selection still uses brackets so the user knows they picked
-    // it, but the brackets + label render muted, not green-bold.
-    let boss_selected = current == "Boss";
-    let boss_style = Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC);
-    if boss_selected {
-        spans.push(Span::styled("[", boss_style));
-        spans.push(Span::styled("Boss", boss_style));
-        spans.push(Span::styled("]", boss_style));
-    } else {
-        spans.push(Span::styled("Boss", boss_style));
-    }
-    spans.push(Span::styled(" [alpha]", boss_style));
-
-    if focused {
-        spans.push(Span::styled(
-            "   \u{2190}/\u{2192} to change",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        ));
-    }
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // ponytail: Boss/container mode is hidden for now — the only mode is
+    // Interactive, so even the Custom path renders a fixed value (no pills, no
+    // arrows). Restore the Interactive/Boss pill picker when the container
+    // session path is wired up again.
+    f.render_widget(
+        Paragraph::new(value_row_locked("Mode:    ", "Interactive", focused, false)),
+        area,
+    );
 }
 
 fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
@@ -1037,8 +1075,126 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
         return;
     }
     let options = vec!["ON".to_string(), "OFF".to_string()];
-    let line = build_pills_line("Yolo:    ", &options, &current, focused, area.width);
+    let line = build_pills_line("Yolo:    ", &options, &current, focused, &[], area.width);
     f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_headroom_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    // Gate: if the headroom binary isn't on PATH, the toggle can't work — show
+    // a muted, non-interactive row with the install command instead of pills.
+    if !state.headroom_available {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Headroom: "),
+            Span::styled(
+                "unavailable \u{2014} install: uv tool install 'headroom-ai[proxy]'",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let current = if state.headroom_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    let options = vec!["on".to_string(), "off".to_string()];
+    let mut line = build_pills_line("Headroom: ", &options, &current, focused, &[], area.width);
+    // Brief muted explainer + link. Terminals auto-linkify the bare URL, so a
+    // cmd/ctrl-click opens it — no OSC-8 escape juggling needed.
+    line.spans.push(Span::styled(
+        "  \u{2014} proxy that trims token usage \u{00b7} github.com/chopratejas/headroom",
+        Style::default().fg(MUTED_GRAY),
+    ));
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Contextual "when to use Headroom" card, shown in the new-session filler
+/// space while the Headroom row is focused. Honest pros/cons at the point of
+/// choice — token savings vs. latency + a proxy dependency that auto-degrades.
+fn render_headroom_guide(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "  Headroom \u{00b7} local compression proxy",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Use when token budget matters more than speed.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} trims context \u{2192} fewer tokens billed",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} ~100ms latency per call",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} proxy dependency \u{2014} auto-degrades to direct on failure",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "  Off = straight to the provider \u{00b7} fastest \u{00b7} no savings",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_rtk_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    if !state.rtk_available {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("RTK:      "),
+            Span::styled(
+                "unavailable \u{2014} install: brew install rtk",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let current = if state.rtk_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    let options = vec!["on".to_string(), "off".to_string()];
+    let mut line = build_pills_line("RTK:      ", &options, &current, focused, &[], area.width);
+    line.spans.push(Span::styled(
+        "  \u{2014} compress tool output via hooks \u{00b7} Claude only \u{00b7} github.com/rtk-ai/rtk",
+        Style::default().fg(MUTED_GRAY),
+    ));
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Contextual RTK guide card, shown while the RTK row is focused.
+fn render_rtk_guide(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "  RTK \u{00b7} project-local Claude Code hook",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Wires a PreToolUse hook into this session's worktree .claude/settings.json.",
+            Style::default().fg(MUTED_GRAY),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} compresses Bash/test/diff output \u{2192} fewer tokens",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2713} hook-based \u{2014} zero latency overhead",
+            Style::default().fg(SELECTION_GREEN),
+        )),
+        Line::from(Span::styled(
+            "    \u{2717} Claude only \u{2014} Codex hook path out of scope for this phase",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Inline marker + guidance sub-line for a Branch-row problem. Returns
@@ -1320,6 +1476,7 @@ fn build_pills_line(
     options: &[String],
     current: &str,
     focused: bool,
+    disabled: &[&str],
     _available_width: u16,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1330,7 +1487,25 @@ fn build_pills_line(
         if i > 0 {
             spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
         }
-        if opt == current {
+        let is_disabled = disabled.contains(&opt.as_str());
+        let is_current = opt == current;
+        if is_disabled {
+            // Greyed-out, non-selectable option (e.g. Gemini): muted + italic
+            // with a `[soon]` tag so it reads as unavailable — distinct from a
+            // merely-not-current option, which is plain muted with no tag. If a
+            // disabled option is somehow also the current one (a hand-authored
+            // preset), still bracket it — muted — so the row always shows a
+            // selection rather than nothing.
+            let style = Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC);
+            if is_current {
+                spans.push(Span::styled("[", style));
+                spans.push(Span::styled(opt.clone(), style));
+                spans.push(Span::styled("]", style));
+            } else {
+                spans.push(Span::styled(opt.clone(), style));
+            }
+            spans.push(Span::styled(" [soon]", style));
+        } else if is_current {
             spans.push(Span::styled(
                 "[",
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
@@ -1362,7 +1537,7 @@ fn build_pills_line(
 /// Used to gate fallback to the `◀ value ▶` single-cycle display on narrow
 /// terminals. Slightly over-approximates: counts char_indices (Unicode) but
 /// charges 1 cell per char (good enough for ASCII + the few `·` separators).
-fn estimate_pill_width(label: &str, options: &[String], focused: bool) -> usize {
+fn estimate_pill_width(label: &str, options: &[String], disabled: &[&str], focused: bool) -> usize {
     // 2 chars for focus indicator ("▸ " or "  "), then label, then pills.
     let mut w = 2 + label.chars().count();
     for (i, opt) in options.iter().enumerate() {
@@ -1372,6 +1547,10 @@ fn estimate_pill_width(label: &str, options: &[String], focused: bool) -> usize 
         // Plus 2 for the [ ] around the current item — over-counts for
         // non-current options, but we want the gate to fire generously.
         w += opt.chars().count() + 2;
+        // Disabled options carry a trailing " [soon]" tag.
+        if disabled.contains(&opt.as_str()) {
+            w += " [soon]".chars().count();
+        }
     }
     if focused {
         w += "   ←/→ to change".chars().count();
@@ -1807,6 +1986,15 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         state.focused_row = ConfigureRow::Branch;
         return ConfigureOutcome::Stay;
     }
+    // Defense-in-depth: a greyed-out agent (e.g. Gemini) is never selectable in
+    // the UI, but a hand-authored preset could still carry one. Refuse to launch
+    // a disabled provider and refocus the Agent row, mirroring the collision
+    // guard above. `DISABLED_AGENTS` is the shared source of truth with the
+    // Agent-row greying, so the two never disagree.
+    if DISABLED_AGENTS.contains(&state.effective_preset().agent_provider.as_str()) {
+        state.focused_row = ConfigureRow::Agent;
+        return ConfigureOutcome::Stay;
+    }
     let preset = state.effective_preset();
     let prompt = state.prompt.to_non_empty_string();
     // Checkout-direct pick: the session branch IS the picked branch — the
@@ -1826,6 +2014,11 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         branch_override: state.branch_override.clone(),
         base: state.base_selection.clone(),
         prompt,
+        // Defensive: never launch with Headroom on if the binary isn't there,
+        // even if some stale state slipped through.
+        headroom_enabled: state.headroom_enabled && state.headroom_available,
+        // Same guard for RTK.
+        rtk_enabled: state.rtk_enabled && state.rtk_available,
     })
 }
 
@@ -1852,6 +2045,18 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
         ConfigureRow::Yolo => {
             if state.preset_selection == PresetSelection::Custom {
                 cycle_yolo(state);
+            }
+        }
+        ConfigureRow::HeadroomProxy => {
+            // No-op when headroom isn't installed — the row is informational only.
+            if state.headroom_available {
+                state.headroom_enabled = !state.headroom_enabled;
+            }
+        }
+        ConfigureRow::Rtk => {
+            // No-op when rtk isn't installed — the row is informational only.
+            if state.rtk_available {
+                state.rtk_enabled = !state.rtk_enabled;
             }
         }
         ConfigureRow::Branch => {
@@ -1927,9 +2132,28 @@ fn ensure_overrides_seed(state: &mut ConfigureState) -> &mut CustomOverrides {
     state.custom_overrides.as_mut().expect("just seeded")
 }
 
-const AGENTS: &[&str] = &["claude", "codex", "shell", "ssh"];
+const AGENTS: &[&str] = &["claude", "codex", "copilot", "shell", "ssh"];
 
-/// Cycle agent for Custom selection: rotates through claude → codex → shell → ssh.
+/// Agent providers shown in the Agent row but greyed-out / non-selectable:
+/// kept OUT of the `AGENTS` cycle ring AND refused at launch. Single source of
+/// truth so the greyed pill and the launch guard never disagree.
+const DISABLED_AGENTS: &[&str] = &["gemini"];
+
+/// Map an `agent_provider` id to its Agent-row display label.
+fn agent_label(provider: &str) -> &str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "copilot" => "Copilot",
+        "shell" => "Shell",
+        "ssh" => "SSH",
+        other => other,
+    }
+}
+
+/// Cycle agent for Custom selection: rotates through claude → codex → copilot → shell → ssh.
+/// Gemini is intentionally excluded — it renders greyed-out (non-selectable) in the Agent row.
 fn cycle_agent(state: &mut ConfigureState, delta: i32) {
     let prev_provider = {
         let overrides = ensure_overrides_seed(state);
@@ -1940,10 +2164,11 @@ fn cycle_agent(state: &mut ConfigureState, delta: i32) {
         overrides.agent_provider = AGENTS[next].to_string();
         prev
     };
-    // Crossing the Claude/Codex boundary: reset the model field to the new
-    // provider's `default` so a Claude-flavoured id doesn't linger on a
-    // Codex agent (or vice versa). Stays on `"default"` so `--model` keeps
-    // getting omitted by default.
+    // Crossing the Claude/Codex boundary directly: reset the model field to
+    // `"default"` so a Claude-flavoured id doesn't linger on a Codex agent (or
+    // vice versa). Non-adjacent paths (e.g. codex → copilot → … → claude) skip
+    // this, but `ClaudeModel::parse` / `CodexModel::parse` map any stale/unknown
+    // id to SystemDefault and omit `--model`, so it stays safe either way.
     {
         let overrides = state.custom_overrides.as_mut().expect("just seeded");
         let crossed = matches!(
@@ -1996,16 +2221,11 @@ fn cycle_model(state: &mut ConfigureState, delta: i32) {
 }
 
 fn cycle_mode(state: &mut ConfigureState) {
+    // ponytail: Boss/container mode is hidden for now, so cycling pins the
+    // mode to Interactive. Restore the Boss<->Interactive toggle (and the
+    // Prompt-row reveal it drove) when the container path is wired up again.
     let overrides = ensure_overrides_seed(state);
-    overrides.mode = match overrides.mode {
-        SessionMode::Boss => SessionMode::Interactive,
-        SessionMode::Interactive => SessionMode::Boss,
-    };
-    // Switching reveals/hides the Prompt row; re-anchor focus if needed.
-    let rows = state.visible_rows();
-    if !rows.contains(&state.focused_row) {
-        state.focused_row = ConfigureRow::Mode;
-    }
+    overrides.mode = SessionMode::Interactive;
 }
 
 fn cycle_yolo(state: &mut ConfigureState) {
@@ -2216,7 +2436,181 @@ mod tests {
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
+            headroom_enabled: false,
+            headroom_available: true,
+            rtk_enabled: false,
+            rtk_available: true,
         }
+    }
+
+    #[test]
+    fn agent_pills_gemini_greyed_copilot_selectable() {
+        // The Agent row shows Gemini greyed-out (non-selectable, `[soon]` tag)
+        // and Copilot as a real, selectable pill. Current pill stays green/bold.
+        let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let line = build_pills_line("Agent:   ", &options, "Claude", false, &["Gemini"], 200);
+
+        let find = |needle: &str| {
+            line.spans.iter().find(|s| s.content.as_ref() == needle).unwrap_or_else(|| {
+                panic!(
+                    "no span with content {needle:?}; spans: {:?}",
+                    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+                )
+            })
+        };
+
+        // Current pill (Claude): green + bold, bracketed.
+        let claude = find("Claude");
+        assert_eq!(
+            claude.style.fg,
+            Some(SELECTION_GREEN),
+            "current pill must be green"
+        );
+        assert!(
+            claude.style.add_modifier.contains(Modifier::BOLD),
+            "current pill must be bold"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.content.as_ref() == "[" && s.style.fg == Some(SELECTION_GREEN)),
+            "current pill must be bracketed in green"
+        );
+
+        // Gemini: greyed-out (muted + italic) with a ` [soon]` tag, never green/bold.
+        let gemini = find("Gemini");
+        assert_eq!(
+            gemini.style.fg,
+            Some(MUTED_GRAY),
+            "Gemini must be muted grey"
+        );
+        assert!(
+            gemini.style.add_modifier.contains(Modifier::ITALIC),
+            "Gemini must be italic (disabled)"
+        );
+        assert!(
+            !gemini.style.add_modifier.contains(Modifier::BOLD),
+            "Gemini must not be bold"
+        );
+        let soon = find(" [soon]");
+        assert_eq!(soon.style.fg, Some(MUTED_GRAY));
+        assert!(soon.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            !line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == " [soon]" && s.style.fg == Some(SELECTION_GREEN)),
+            "the [soon] tag must never render as the green current pill"
+        );
+
+        // Copilot: a real, selectable (not current) pill — plain muted, no italic, no tag.
+        let copilot = find("Copilot");
+        assert_eq!(
+            copilot.style.fg,
+            Some(MUTED_GRAY),
+            "Copilot must be muted grey"
+        );
+        assert!(
+            !copilot.style.add_modifier.contains(Modifier::ITALIC),
+            "Copilot must not be italic (it is selectable, not disabled)"
+        );
+        assert!(!copilot.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn agent_cycle_ring_excludes_gemini_includes_copilot() {
+        // Copilot is selectable (in the cycle ring); Gemini is not.
+        assert!(
+            AGENTS.contains(&"copilot"),
+            "copilot must be a selectable agent"
+        );
+        assert!(
+            !AGENTS.contains(&"gemini"),
+            "gemini stays out of the cycle ring (greyed-out)"
+        );
+    }
+
+    #[test]
+    fn render_agent_row_shows_gemini_greyed_and_copilot() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = mk_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        terminal.draw(|f| render_agent_row(f, &state, f.size(), true)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains("Agent:"),
+            "agent row label missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Gemini"),
+            "Gemini pill missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("[soon]"),
+            "Gemini greyed [soon] tag missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Copilot"),
+            "Copilot pill missing: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn agents_picker_gemini_disabled_copilot_available() {
+        use crate::app::state::{AgentProvider, ProviderStatus};
+        assert_eq!(
+            AgentProvider::gemini().status,
+            ProviderStatus::Disabled,
+            "Gemini must be greyed-out / non-launchable in the Agents picker"
+        );
+        assert_eq!(
+            AgentProvider::copilot().status,
+            ProviderStatus::Available,
+            "Copilot stays selectable in the Agents picker"
+        );
+    }
+
+    #[test]
+    fn disabled_current_pill_still_shows_selection() {
+        // A hand-authored preset could make a disabled agent the current one.
+        // The row must still bracket it (muted) so a selection always reads,
+        // and must never render it in the green current style.
+        let options: Vec<String> = ["Claude", "Gemini"].iter().map(|s| (*s).to_string()).collect();
+        let line = build_pills_line("Agent:   ", &options, "Gemini", false, &["Gemini"], 200);
+        assert!(
+            line.spans.iter().any(|s| s.content.as_ref() == "["),
+            "disabled-current must still show a bracket; otherwise nothing reads selected"
+        );
+        assert!(
+            !line.spans.iter().any(|s| s.style.fg == Some(SELECTION_GREEN)),
+            "disabled-current must never use the green current style"
+        );
+        assert!(
+            line.spans.iter().any(|s| s.content.as_ref() == " [soon]"),
+            "disabled-current must still carry the [soon] tag"
+        );
+    }
+
+    #[test]
+    fn launch_refused_for_disabled_agent_preset() {
+        // Gemini is non-selectable in the UI, but a TOML preset could carry it.
+        // Launch must be refused and focus moved to the Agent row.
+        let mut s = mk_state();
+        s.presets_cache.get_mut("a").unwrap().agent_provider = "gemini".into();
+        let outcome = launch_outcome(&mut s);
+        assert!(
+            matches!(outcome, ConfigureOutcome::Stay),
+            "a disabled-agent preset must not launch"
+        );
+        assert_eq!(
+            s.focused_row,
+            ConfigureRow::Agent,
+            "launch refusal should refocus the Agent row"
+        );
     }
 
     #[test]
@@ -2387,15 +2781,59 @@ mod tests {
     }
 
     #[test]
+    fn headroom_toggle_gated_when_unavailable() {
+        let mut s = mk_state();
+        s.headroom_available = false;
+        s.focused_row = ConfigureRow::HeadroomProxy;
+        // Cycling the row must NOT enable Headroom when the binary is absent.
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            !s.headroom_enabled,
+            "toggle must not flip when headroom unavailable"
+        );
+        cycle_value_in_focused_row(&mut s, -1);
+        assert!(!s.headroom_enabled);
+
+        // And when available it flips normally.
+        s.headroom_available = true;
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(
+            s.headroom_enabled,
+            "toggle flips when headroom is available"
+        );
+    }
+
+    #[test]
+    fn rtk_toggle_gated_when_unavailable() {
+        let mut s = mk_state();
+        s.rtk_available = false;
+        s.focused_row = ConfigureRow::Rtk;
+        // Cycling the row must NOT enable RTK when the binary is absent.
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(!s.rtk_enabled, "toggle must not flip when rtk unavailable");
+        cycle_value_in_focused_row(&mut s, -1);
+        assert!(!s.rtk_enabled);
+
+        // And when available it flips normally.
+        s.rtk_available = true;
+        cycle_value_in_focused_row(&mut s, 1);
+        assert!(s.rtk_enabled, "toggle flips when rtk is available");
+    }
+
+    #[test]
     fn tab_cycles_focus_through_visible_rows() {
         let mut s = mk_state();
-        // Named preset, default mode = Boss → rows =
-        // [Preset, Mode, Yolo, Branch, Prompt, Launch].
+        // Named preset, default mode = Boss, Claude/Codex provider → rows =
+        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Branch, Prompt, Launch].
         assert_eq!(s.focused_row, ConfigureRow::Preset);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Mode);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Yolo);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::HeadroomProxy);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::Rtk);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Branch);
         s.cycle_focus(1);
@@ -2513,7 +2951,7 @@ mod tests {
     #[test]
     fn cycle_model_ring_for_claude_uses_new_canonical_ids() {
         // Custom + claude agent. Start at "default" → cycle once forward →
-        // canonical Opus id ("claude-opus-4-7"). The Configure render reads
+        // canonical Fable id ("claude-fable-5"). The Configure render reads
         // this field through ClaudeModel::parse for label rendering, but the
         // stored string is the canonical id.
         let mut s = mk_state();
@@ -2527,7 +2965,7 @@ mod tests {
         cycle_value_in_focused_row(&mut s, 1);
         assert_eq!(
             s.custom_overrides.as_ref().unwrap().agent_model,
-            "claude-opus-4-7"
+            "claude-fable-5"
         );
     }
 

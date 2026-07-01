@@ -178,7 +178,7 @@ impl HomeScreenV2State {
             return None;
         }
 
-        let item_index = SidebarComponent::item_index_at(rect, y)?;
+        let item_index = SidebarComponent::item_index_at(rect, y, self.sidebar.selected_index)?;
         self.sidebar.select_index(item_index);
         self.focus = HomeScreenFocus::Sidebar;
         self.sidebar.is_focused = true;
@@ -752,13 +752,15 @@ mod tests {
         state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
         let now = Instant::now();
 
-        let first = state.click_sidebar_item_at(3, 10, now).unwrap();
-        assert_eq!(first.item, SidebarItem::Catalog);
+        // first_item_y = rect.y + 3 = 7. Config (item 0) is selected and 2 rows
+        // tall (rows 7-8), so Sessions (item 1) sits at row 9.
+        let first = state.click_sidebar_item_at(3, 9, now).unwrap();
+        assert_eq!(first.item, SidebarItem::Sessions);
         assert!(!first.double_click);
-        assert_eq!(state.sidebar.selected_item(), SidebarItem::Catalog);
+        assert_eq!(state.sidebar.selected_item(), SidebarItem::Sessions);
 
-        let second = state.click_sidebar_item_at(3, 10, now + SIDEBAR_DOUBLE_CLICK_WINDOW).unwrap();
-        assert_eq!(second.item, SidebarItem::Catalog);
+        let second = state.click_sidebar_item_at(3, 9, now + SIDEBAR_DOUBLE_CLICK_WINDOW).unwrap();
+        assert_eq!(second.item, SidebarItem::Sessions);
         assert!(second.double_click);
     }
 

@@ -5,10 +5,9 @@ use ratatui::{Frame, layout::Rect};
 use super::{EventOutcome, Screen, ids};
 use crate::app::AppState;
 use crate::components::{
-    AgentSelectionComponent, AttachedTerminalComponent, AuthProviderPopupComponent,
-    AuthSetupComponent, ChangelogComponent, ConfigPopupComponent, ConfigScreenComponent,
-    GitViewComponent, HomeScreenV2Component, LogHistoryViewerComponent, OnboardingComponent,
-    SessionRecovery, SetupMenuComponent,
+    AttachedTerminalComponent, AuthProviderPopupComponent, AuthSetupComponent, ChangelogComponent,
+    ConfigPopupComponent, ConfigScreenComponent, GitViewComponent, HomeScreenV2Component,
+    LogHistoryViewerComponent, OnboardingComponent, SessionRecovery, SetupMenuComponent,
 };
 
 /// Centred sub-rect helper, mirroring `components::layout::centered_rect`.
@@ -572,6 +571,17 @@ impl Screen for SkillsScreen {
 }
 
 #[derive(Default)]
+pub struct SkillManagerScreen;
+impl Screen for SkillManagerScreen {
+    fn id(&self) -> &str {
+        ids::SKILL_MANAGER
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
+    }
+}
+
+#[derive(Default)]
 pub struct ChangelogScreen;
 impl Screen for ChangelogScreen {
     fn id(&self) -> &str {
@@ -691,34 +701,6 @@ impl Screen for HomeScreen {
             &state.workspaces,
             state.is_loading_workspaces,
         );
-    }
-}
-
-pub struct AgentSelectionScreen {
-    component: AgentSelectionComponent,
-}
-
-impl AgentSelectionScreen {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            component: AgentSelectionComponent::new(),
-        }
-    }
-}
-
-impl Default for AgentSelectionScreen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Screen for AgentSelectionScreen {
-    fn id(&self) -> &str {
-        ids::AGENT_SELECTION
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        self.component.render(frame, area, state);
     }
 }
 
@@ -929,7 +911,6 @@ use super::super::registry::ScreenRegistry;
 /// in `LayoutComponent::render`.
 pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(HomeScreen::new()));
-    registry.register(Box::new(AgentSelectionScreen::new()));
     registry.register(Box::new(ConfigScreen::new()));
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
@@ -939,6 +920,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(PluginScreen::new(ids::ABTOP)));
     registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
+    registry.register(Box::new(SkillManagerScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
     registry.register(Box::new(SessionRecoveryScreen::default()));
     registry.register(Box::new(OnboardingScreen::new()));
@@ -995,7 +977,6 @@ mod tests {
         // Every full-screen view gets a Screen impl.
         for id in [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
             ids::LOG_HISTORY,
             ids::CHANGELOG,
@@ -1004,6 +985,7 @@ mod tests {
             ids::ABTOP,
             ids::HANGAR,
             ids::SKILLS,
+            ids::SKILL_MANAGER,
             ids::GIT_VIEW,
             ids::SESSION_RECOVERY,
             ids::ONBOARDING,

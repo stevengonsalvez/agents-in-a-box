@@ -1,4 +1,4 @@
-//! Tripwire: the Daemons observability screen opens via `d` from the home
+//! Tripwire: the Daemons observability screen opens via `h` from the home
 //! menu and renders the four-daemon runtime-health table, with a seeded bridge
 //! heartbeat flipping the phone-bridge row to "running" + "Telegram".
 //!
@@ -11,7 +11,7 @@
 //!    (alive → the aggregator's pid cross-check reports it running, not stale),
 //!    connected to "Telegram (@tripwire_bot)".
 //!
-//! Then sends `d`, polls the pane for the Daemons chrome + all four daemon rows
+//! Then sends `h`, polls the pane for the Daemons chrome + all four daemon rows
 //! + the running bridge's channel label.
 //!
 //! Skips gracefully if `tmux` isn't on `$PATH`.
@@ -53,7 +53,7 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 
     // Suppress the ainb-hooks first-run install dialog (it overlays home and
-    // would swallow the `d` keystroke).
+    // would swallow the `h` keystroke).
     let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
 
@@ -183,17 +183,17 @@ fn daemons_opens_and_renders_four_rows() {
         "pre-key capture already on daemons — state leaked.\n{pre}"
     );
 
-    // Discoverability gate: the HomeScreen V2 sidebar MUST list the Daemons
-    // tile with its `[d]` shortcut, else the screen is unreachable by a fresh
-    // user who can't see it.
+    // Discoverability gate: the HomeScreen V2 sidebar MUST list the Daemon
+    // Health tile with its `[h]` shortcut, else the screen is unreachable by a
+    // fresh user who can't see it.
     assert!(
-        pre.contains("Daemons") && pre.contains("[d]"),
-        "HomeScreen V2 sidebar missing Daemons tile — discoverability regression.\n{pre}"
+        pre.contains("Daemon Health") && pre.contains("[h]"),
+        "HomeScreen V2 sidebar missing Daemon Health tile — discoverability regression.\n{pre}"
     );
 
     let post_cap = poll_capture_resending(
         &session,
-        "d",
+        "h",
         Instant::now() + Duration::from_secs(30),
         |c| {
             c.contains("Daemons")
@@ -206,7 +206,7 @@ fn daemons_opens_and_renders_four_rows() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!(
-            "Daemons screen didn't render all four rows after pressing d; \
+            "Daemons screen didn't render all four rows after pressing h; \
              last capture:\n---\n{last}\n---"
         );
     }

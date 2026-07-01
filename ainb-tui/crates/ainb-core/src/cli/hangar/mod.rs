@@ -59,11 +59,13 @@ const DEFAULT_CREATOR_ID: &str = "stevie";
 /// Lifecycle state a freshly-created issue lands in.
 const DEFAULT_ISSUE_STATE: &str = "open";
 
-/// The `hangar` subcommand tree.
-///
-/// The single derive enum the registry's [`HangarCommand`](crate::cli::registry)
-/// augments onto the root `ainb` command. Each variant is a noun group whose
-/// inner enum carries the verbs.
+// The single derive enum the registry's `HangarCommand` augments onto the root
+// `ainb` command. Each variant is a noun group whose inner enum carries the
+// verbs. The user-facing `about` is set in `cli/registry.rs` (`.about()` after
+// `augment_subcommands`). Keep the doc-comment below a SINGLE line — a
+// multi-line doc also becomes clap `long_about` and would leak into
+// `ainb hangar --help`.
+/// Hangar managed-agents control plane.
 #[derive(Subcommand, Debug)]
 pub enum HangarCommand {
     /// Manage Hangar issues.
@@ -232,7 +234,7 @@ pub struct TemplatesUseArgs {
 
 /// `hangar skills <verb>`.
 ///
-/// `sync` imports a `toolkit/packages/skills/`-shaped directory into the default
+/// `sync` imports a `ainb-toolkit/skills/`-shaped directory into the default
 /// workspace (idempotent on `(workspace, name)`); `list` shows the imported
 /// skills. Both are workspace-scoped via `--workspace`.
 #[derive(Subcommand, Debug)]
@@ -251,7 +253,7 @@ pub struct SkillsSyncArgs {
     #[arg(long)]
     pub workspace: Option<String>,
     /// Source directory holding `<name>/SKILL.md` skill dirs. Defaults to
-    /// `$AINB_TOOLKIT_SKILLS_DIR`, else a walk up to `toolkit/packages/skills`.
+    /// `$AINB_TOOLKIT_SKILLS_DIR`, else a walk up to `ainb-toolkit/skills`.
     #[arg(long)]
     pub source: Option<std::path::PathBuf>,
     /// Print the skills that would be imported without writing anything.
@@ -924,7 +926,7 @@ async fn resolve_skills_workspace(store: &Store, slug: Option<&str>) -> Result<S
 /// `hangar skills sync`: import a toolkit skills directory into a workspace.
 ///
 /// Resolves the source directory (`--source`, else `$AINB_TOOLKIT_SKILLS_DIR`,
-/// else a walk up to `toolkit/packages/skills`), then either previews the
+/// else a walk up to `ainb-toolkit/skills`), then either previews the
 /// imports (`--dry-run`) or upserts them workspace-scoped via the daemon's
 /// idempotent importer.
 async fn run_skills_sync(store: &Store, args: SkillsSyncArgs) -> Result<()> {

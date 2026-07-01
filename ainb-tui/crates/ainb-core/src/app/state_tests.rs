@@ -283,6 +283,8 @@ mod tests {
             workspace_name: "ws".to_string(),
             created_at: chrono::Utc::now(),
             agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let session = AppState::stopped_session_from_metadata(&metadata);
@@ -1059,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_hook_name_maps_claude_and_codex_only() {
+    fn agent_hook_name_maps_supported_hook_agents() {
         assert_eq!(
             AppState::agent_hook_name(SessionAgentType::Claude),
             Some("claude")
@@ -1067,6 +1069,10 @@ mod tests {
         assert_eq!(
             AppState::agent_hook_name(SessionAgentType::Codex),
             Some("codex")
+        );
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Copilot),
+            Some("copilot")
         );
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
@@ -1206,5 +1212,62 @@ mod tests {
             Some(AsyncAction::CleanupOrphaned),
             "an already-queued action must not be overwritten by the refresh hand-off"
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_pool_config_screen_tests {
+    use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
+    use crate::config::AppConfig;
+
+    fn set_bool(screen: &mut ConfigScreenState, key: &str, value: bool) {
+        let setting = screen
+            .settings
+            .get_mut(&ConfigCategory::McpPool)
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("missing setting {key}"));
+        setting.value = ConfigValue::Bool(value);
+    }
+
+    #[test]
+    fn mcp_pool_settings_round_trip() {
+        let mut config = AppConfig::default();
+        config.mcp_servers = crate::config::McpServerConfig::defaults();
+        config.mcp_pool.idle_grace_secs = 120;
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+
+        // Loaded values reflect config.
+        let settings = screen.settings.get(&ConfigCategory::McpPool).unwrap();
+        let grace = settings.iter().find(|s| s.key == "idle_grace_secs").unwrap();
+        assert_eq!(grace.value.display(), "120");
+        // Per-server toggles exist for the built-in defaults.
+        assert!(
+            settings.iter().any(|s| s.key == "shared.context7"),
+            "expected per-server toggle, got: {:?}",
+            settings.iter().map(|s| &s.key).collect::<Vec<_>>()
+        );
+
+        // Edit: disable pool + opt context7 out of sharing.
+        set_bool(&mut screen, "pool_enabled", false);
+        set_bool(&mut screen, "shared.context7", false);
+        screen.apply_to_app_config(&mut config);
+
+        assert!(!config.mcp_pool.enabled);
+        assert!(!config.mcp_servers["context7"].shared);
+        assert!(
+            config.mcp_servers["serena"].shared,
+            "untouched server keeps default"
+        );
+
+        // Reopen → edited values shown.
+        let reopened = ConfigScreenState::from_app_config(&config);
+        let settings = reopened.settings.get(&ConfigCategory::McpPool).unwrap();
+        let enabled = settings.iter().find(|s| s.key == "pool_enabled").unwrap();
+        assert_eq!(enabled.value.display(), "✗ Disabled");
+        let ctx = settings.iter().find(|s| s.key == "shared.context7").unwrap();
+        assert_eq!(ctx.value.display(), "✗ Disabled");
     }
 }

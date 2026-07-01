@@ -1,0 +1,36 @@
+---
+title: "Daemons overlay"
+description: "Press d in the ainb TUI to open the read-only Daemons overlay — every ainb-managed background daemon in one place: the shared MCP pool, the Headroom compression proxy with its live saved-token count, and the in-loop watchdog watching it."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+ainb runs a few background daemons on your behalf — the shared MCP server pool and the Headroom compression proxy. Rather than make you hunt for them with `ps`, every ainb-managed daemon shows up in one place: press **`d`** from anywhere in the TUI to open the read-only **Daemons** overlay.
+
+![ainb TUI Daemons overlay showing the shared MCP pool row as down and the Headroom proxy on port 8787 as up with a saved-tokens count and a watched marker, plus the consuming-sessions line; r refreshes and esc closes](../assets/screenshots/daemons-overlay.gif)
+
+*The overlay lists each daemon with a live status dot, and for the Headroom proxy: its port (`:8787`), the tokens it has saved so far (the same figure as the [Savings tab](token-optimization.md) and `ainb usage savings`), and which sessions are routed through it. `r` refreshes; `Esc` closes.*
+
+## What's on it
+
+- **MCP pool** — the shared `ainb mcp daemon` that spawns each MCP server once behind a unix socket. See [Shared MCP pool](mcp-pool.md).
+- **Headroom proxy** — the ainb-managed compression proxy. Its row carries the live saved-token count and a **`watched`** marker when the in-loop watchdog is keeping it alive for a routed session.
+
+<Aside type="note">
+The watchdog isn't a separate process — it's an in-loop tick (~10 s) that re-ensures the proxy if a routed session is live but the proxy has died. Because it belongs to the Headroom proxy, it's surfaced as the `watched` attribute on that row rather than as its own daemon. Every ainb-managed daemon lives on this screen.
+</Aside>
+
+## Read-only by design
+
+The overlay is for **observing**, not controlling — it never stops anything from under a running session. Stop a daemon deliberately from the CLI instead:
+
+```bash
+ainb mcp stop          # stop the shared MCP pool daemon
+ainb headroom stop     # stop the ainb-managed Headroom proxy
+```
+
+## See also
+
+- [Token optimisation — Headroom & RTK](token-optimization.md) — the proxy this overlay watches.
+- [Shared MCP pool](mcp-pool.md) — the other daemon on this screen.
+- [Keyboard shortcuts](keyboard-shortcuts.md).

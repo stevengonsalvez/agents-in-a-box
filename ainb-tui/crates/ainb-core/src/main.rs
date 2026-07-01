@@ -34,18 +34,25 @@ mod app;
 mod audit;
 mod claude;
 mod cli;
+mod clipboard;
 mod components;
 mod config;
 mod credentials;
 mod docker;
+mod docs;
 mod editors;
 mod fleet;
 mod git;
+mod headroom;
 mod interactive;
+mod mcp_pool;
 mod models;
+mod otel;
 mod perf;
 mod plugins;
 mod providers;
+mod rtk;
+mod setup;
 mod tmux;
 mod usage_cache;
 mod widgets;
@@ -87,8 +94,29 @@ where
     Ok(())
 }
 
+/// argv[1] values that route to the `ainb-cli` crate before tokio
+/// spins up. These commands are pure CLI (no Docker, no tmux, no
+/// alt-screen) so they short-circuit the TUI bootstrap entirely.
+/// Keep in sync with the safety-tag's CLI_COMMANDS list — adding a
+/// new top-level command means adding it here AND wiring an arm in
+/// ainb-cli's Command enum.
+const SKILL_MANAGER_CLI_COMMANDS: &[&str] = &["source", "search", "skill", "doctor"];
+
+fn is_skill_manager_cli_invocation() -> bool {
+    std::env::args()
+        .nth(1)
+        .is_some_and(|arg| SKILL_MANAGER_CLI_COMMANDS.contains(&arg.as_str()))
+}
+
+fn main() -> Result<()> {
+    if is_skill_manager_cli_invocation() {
+        return ainb_cli::run();
+    }
+    tokio_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn tokio_main() -> Result<()> {
     crate::perf::init();
     setup_logging();
     setup_panic_handler();
@@ -114,6 +142,12 @@ async fn main() -> Result<()> {
                 clap::Arg::new("path")
                     .help("Repository path (default: current directory)")
                     .default_value("."),
+            )
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb diff-review                 Review uncommitted changes in the current repo\n  \
+                 ainb diff-review ~/code/proj     Review a specific repo\n  \
+                 ainb diff-review --format json   Emit the structured diff as JSON (headless)",
             ),
     );
     app = registry.build_clap(app);
@@ -230,17 +264,27 @@ async fn main() -> Result<()> {
                 rt.shutdown();
             }
 
+            // Best-effort: stop the shared Headroom proxy so it does not
+            // orphan after the TUI exits.
+            headroom::stop();
+
             tui_result
         }
 
         // diff-review: interactive Code Review surface for a repo path (owns the
         // alternate screen, so it is handled inline rather than via the registry).
         Some(("diff-review", sub)) => {
-            entered_tui = true;
             let path = sub
                 .get_one::<String>("path")
                 .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
-            cli::diff_review::run(path)
+            // `--format text` (default) opens the interactive surface; any
+            // machine format emits the diff as JSON headless.
+            if matches!(format, cli::OutputFormat::Text) {
+                entered_tui = true;
+                cli::diff_review::run(path)
+            } else {
+                cli::diff_review::run_headless(path)
+            }
         }
 
         // Every other subcommand routes through the registry.
@@ -387,28 +431,52 @@ async fn run_tui_loop(
 
         if needs_redraw {
             let draw_start = Instant::now();
-            terminal.draw(|frame| {
+            match terminal.draw(|frame| {
                 layout.render(frame, &mut app.state);
-            })?;
-            crate::perf::record_draw(draw_start.elapsed());
-            // This paint is the first one to reflect any key read in the
-            // previous iteration, so it marks the end of the key-to-render
-            // interval.
-            if let Some(key_at) = pending_key_at.take() {
-                crate::perf::record_key_to_render(key_at.elapsed());
+            }) {
+                Ok(_) => {
+                    crate::perf::record_draw(draw_start.elapsed());
+                    // This paint is the first one to reflect any key read in the
+                    // previous iteration, so it marks the end of the key-to-render
+                    // interval.
+                    if let Some(key_at) = pending_key_at.take() {
+                        crate::perf::record_key_to_render(key_at.elapsed());
+                    }
+                    needs_redraw = false;
+                }
+                // Transient frame-write failure (e.g. EINTR over a flaky SSH
+                // link) — keep the TUI alive and repaint next iteration instead
+                // of tearing the whole session down. Only genuinely fatal I/O
+                // errors propagate.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    needs_redraw = true;
+                }
+                Err(e) => return Err(e.into()),
             }
-            needs_redraw = false;
         }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
-        if crossterm::event::poll(timeout)? {
+        // Tolerate transient terminal-read failures: EINTR (e.g. SIGWINCH on
+        // resize, common over SSH) must not crash the session. Only fatal I/O
+        // errors propagate.
+        let has_event = match crossterm::event::poll(timeout) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
+            Err(e) => return Err(e.into()),
+        };
+        if has_event {
             // Any input (key/mouse/paste/resize) warrants a repaint on the next
             // loop iteration (perf: bead `wai` dirty-gate).
             needs_redraw = true;
-            match event::read()? {
+            let read_event = match event::read() {
+                Ok(ev) => ev,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            match read_event {
                 Event::Key(key_event) => {
                     // Windows fires Press + Release for every key; macOS/Linux fire only Press.
                     // Drop Release so Enter doesn't immediately re-trigger and close popups.
@@ -1730,6 +1798,7 @@ fn setup_logging() {
                 | "presets"
                 | "usage"
                 | "claudecode"
+                | "codex"
                 | "statusline"
                 | "completion"
                 | "--help"

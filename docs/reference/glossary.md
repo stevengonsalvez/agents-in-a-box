@@ -20,9 +20,9 @@ Definitions for the terms that recur across the agents-in-a-box docs. Where a te
 
 ## Toolkit units
 
-**Skill** — a structured workflow invoked by slash command (e.g. `/commit`, `/plan`), shared across harnesses from `toolkit/packages/skills/`.
+**Skill** — a structured workflow invoked by slash command (e.g. `/commit`, `/plan`), shared across harnesses from `skills/` in the [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo.
 
-**Agent (toolkit)** — a specialised sub-agent definition (e.g. `code-reviewer`, `distinguished-engineer`) from `toolkit/packages/agents/`, delegated to for focused work.
+**Agent (toolkit)** — a specialised sub-agent definition (e.g. `code-reviewer`, `distinguished-engineer`) from `agents/` in the [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo, delegated to for focused work.
 
 **Workflow** — a multi-phase orchestration that chains skills (plan → implement → validate) under a structured delivery process.
 

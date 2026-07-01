@@ -6,6 +6,7 @@
 //! unchanged from the pre-Phase-3 core implementation.
 
 pub mod repo_lookup;
+pub mod savings;
 pub mod usage;
 
 // Re-export the surface that `crate::models::*` provided in core, so

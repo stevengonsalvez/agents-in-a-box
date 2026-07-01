@@ -39,6 +39,19 @@ pub enum AppEvent {
     NextWorkspace,
     PreviousWorkspace,
     ToggleHelp,
+    // Shared MCP pool overlay
+    McpOverlayOpen,
+    McpOverlayClose,
+    McpOverlayPrev,
+    McpOverlayNext,
+    McpOverlayRefresh,
+    McpOverlayStopServer,
+    McpOverlayStopDaemon,
+    McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
+    // Daemons overlay (MCP pool + Headroom, read-only)
+    DaemonsOverlayOpen,
+    DaemonsOverlayClose,
+    DaemonsOverlayRefresh,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -49,6 +62,10 @@ pub enum AppEvent {
     KillContainer,
     ReauthenticateCredentials,
     RestartSession,
+    /// Flip headroom off for the selected running session and respawn its CLI
+    /// process directly (no proxy env). Only valid for Claude/Codex sessions
+    /// that currently have headroom_enabled=true in the SessionStore.
+    DowngradeHeadroom,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
     ResumeSelectedSessions(String), // Resume all multi-selected Stopped interactive sessions (carries trigger key)
@@ -206,8 +223,6 @@ pub enum AppEvent {
     WelcomePanelPageUp,      // Page up in welcome panel
     WelcomePanelPageDown,    // Page down in welcome panel
     WelcomePanelCopyContent, // Copy welcome panel content to clipboard (y)
-    GoToAgentSelection,      // Navigate to agent selection view
-    GoToCatalog,             // Navigate to catalog view (coming soon)
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
@@ -215,37 +230,157 @@ pub enum AppEvent {
     GoToLearnings,           // Navigate to the learnings (knowledge-base) plugin screen
     GoToAbtop,               // Launch the abtop (top-for-agents) monitor full-screen
     GoToSkills,              // Navigate to skills view
-    GoToRecovery,            // Navigate to session recovery view
-    GoToInbox,               // Navigate to ainb-hooks notification inbox
-    GoToDaemons,             // Navigate to the daemon runtime-health view
-    GoToFleetPanel,          // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,        // Fleet panel: move row selection up
-    FleetPanelMoveDown,      // Fleet panel: move row selection down
-    FleetPanelOptionNext,    // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,    // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,        // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,     // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelRefresh,       // Fleet panel: force-refresh from current_state (r)
-    PanelBack,               // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,              // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,             // Inbox: move selection up one row
-    InboxMoveDown,           // Inbox: move selection down one row
-    InboxPageUp,             // Inbox: jump 10 rows up
-    InboxPageDown,           // Inbox: jump 10 rows down
-    InboxOpenSelected,       // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,    // Inbox: dismiss selected row (d)
-    InboxDismissVisible,     // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,     // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,         // Inbox: cycle agent filter (p)
-    InboxRefresh,            // Inbox: force-refresh from store (r)
+    GoToSkillManager,        // Navigate to skill-manager view (spec §10.1)
+    SkillManagerBack,        // Return to home screen from SkillManager (Esc/q)
+    /// Discovery banner: import all detected units into the manifest
+    /// (Enter on the §User Flow 1 banner).
+    SkillManagerDiscoveryImport,
+    /// Discovery banner: toggle the compact / expanded view.
+    SkillManagerDiscoveryToggleDetails,
+    /// Discovery banner: skip + persist marker so the banner does
+    /// not re-show on subsequent opens.
+    SkillManagerDiscoverySkip,
+    /// Units panel: flip `shadowed_by` between the currently-selected
+    /// unit and its conflict peer (spec §User Flow 3, hdt.8). No-op
+    /// when the selected unit is not part of a conflict pair.
+    SkillManagerConflictFlip,
+    /// Units panel: run `ainb skill sync` for the selected unit
+    /// (Phase D bidirectional content sync, bead v12.D.5). Routed
+    /// when `[s]` is pressed and the selected unit is NOT part of a
+    /// conflict pair — otherwise [`Self::SkillManagerConflictFlip`]
+    /// fires instead.
+    SkillManagerSync,
+    /// Units panel: move selection up one row (k / Up arrow). Wraps
+    /// to last row when at top. Recomputes detail pane on move.
+    SkillManagerSelectPrev,
+    /// Units panel: move selection down one row (j / Down arrow).
+    /// Wraps to first row when at bottom. Recomputes detail pane.
+    SkillManagerSelectNext,
+    /// Units panel: jump selection to first row (g / Home).
+    SkillManagerSelectFirst,
+    /// Units panel: jump selection to last row (G / End).
+    SkillManagerSelectLast,
+    /// `Tab` / `Shift-Tab` — toggle keyboard focus between the Sources
+    /// and Units panels.
+    SkillManagerToggleFocus,
+    /// Sources panel focused: move the source cursor up one row
+    /// (k / Up). Does not apply the filter (Enter does).
+    SkillManagerSourceSelectPrev,
+    /// Sources panel focused: move the source cursor down one row
+    /// (j / Down).
+    SkillManagerSourceSelectNext,
+    /// Sources panel focused: apply the highlighted source as the Units
+    /// filter and move focus to the Units panel (Enter).
+    SkillManagerApplySourceFilter,
+    /// `Esc` — clear the active source filter (if any). Falls through to
+    /// [`Self::SkillManagerBack`] when no filter is set.
+    SkillManagerClearSourceFilter,
+    /// `[` — shrink the Sources panel by one column (clamped). Persists
+    /// the new width.
+    SkillManagerShrinkSources,
+    /// `]` — grow the Sources panel by one column (clamped). Persists
+    /// the new width.
+    SkillManagerGrowSources,
+    /// A Source row was clicked: focus the Sources panel, move its
+    /// cursor to row `index`, and apply that source as the filter.
+    SkillManagerSourceClick {
+        index: usize,
+    },
+    /// A Unit row was clicked: focus the Units panel and move the unit
+    /// cursor to the visible-row `position`.
+    SkillManagerUnitClick {
+        position: usize,
+    },
+    /// A Sources/Units divider drag finished — persist the resized
+    /// Sources-panel width to config.
+    SkillManagerPersistSourcesWidth,
+    /// `[m]` on the SkillManager screen — re-run the discovery
+    /// walkers and force the banner to re-appear (ignores any prior
+    /// skip-marker). Fixes the empty-state "press [m] to refresh"
+    /// hint that previously did nothing.
+    SkillManagerRefreshDiscovery,
+    /// `[c]` — re-trigger the background drift scan so the Units
+    /// status column refreshes (✓ / ⚠ / ▲ / ⟷).
+    SkillManagerCheck,
+    /// `[u]` — update the selected unit: re-fetch its source, diff,
+    /// apply. Runs the `ainb skill update <uri>` flow in-process and
+    /// surfaces the result as a notification.
+    SkillManagerUpdate,
+    /// `[r]` — remove (uninstall) the selected unit from its target
+    /// tools via the `ainb skill remove <uri>` flow.
+    SkillManagerRemove,
+    /// `[i]` — open the add-source input prompt (type a `gh:owner/repo`
+    /// URI). On submit, runs `ainb source add` then re-discovers.
+    SkillManagerOpenAddSource,
+    /// `[/]` — open the search/filter input prompt.
+    SkillManagerOpenSearch,
+    /// A character typed while an input prompt is active.
+    SkillManagerInputChar(char),
+    /// Backspace in the active input prompt.
+    SkillManagerInputBackspace,
+    /// Enter — submit the active input prompt.
+    SkillManagerInputSubmit,
+    /// Esc — cancel the active input prompt.
+    SkillManagerInputCancel,
+    /// `[l]` — open the own-skill Library view, sourced from
+    /// `library.yaml` (bead ai-lgk).
+    SkillManagerOpenLibrary,
+    /// Move the Library-view selection up one row.
+    SkillManagerLibrarySelectPrev,
+    /// Move the Library-view selection down one row.
+    SkillManagerLibrarySelectNext,
+    /// Enter — expand the selected Library row into its Detail band.
+    SkillManagerLibraryEnter,
+    /// Esc/q — close the Library view, returning to the Units screen.
+    SkillManagerLibraryClose,
+    /// `[b]` — open the catalog browse modal (bead ai-a20). Starts in
+    /// Query mode; type a query then Enter to search via a
+    /// `CatalogBackend` (mock under `AINB_CATALOG_MOCK=1`).
+    SkillManagerOpenBrowse,
+    /// A character typed into the browse query buffer (Query mode).
+    SkillManagerBrowseInputChar(char),
+    /// Backspace in the browse query buffer (Query mode).
+    SkillManagerBrowseInputBackspace,
+    /// Enter in Query mode — run the catalog search.
+    SkillManagerBrowseSearch,
+    /// Move the browse result selection up (Results mode).
+    SkillManagerBrowseSelectPrev,
+    /// Move the browse result selection down (Results mode).
+    SkillManagerBrowseSelectNext,
+    /// Enter on a selected result (Results mode) — install it through the
+    /// existing install flow (add source + skill install).
+    SkillManagerBrowseInstall,
+    /// `/` in Results mode — return to Query mode to refine the search.
+    SkillManagerBrowseEditQuery,
+    /// `Tab` — switch the browse modal between the curated (`ainb`) and
+    /// `skills.sh` catalogs, re-running the search for the new source.
+    SkillManagerBrowseToggleCatalog,
+    /// Esc — close the browse modal, discarding the ephemeral results.
+    SkillManagerBrowseClose,
+    GoToRecovery,         // Navigate to session recovery view
+    GoToInbox,            // Navigate to ainb-hooks notification inbox
+    GoToDaemons,          // Navigate to the daemon runtime-health view
+    GoToFleetPanel,       // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,     // Fleet panel: move row selection up
+    FleetPanelMoveDown,   // Fleet panel: move row selection down
+    FleetPanelOptionNext, // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev, // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer,     // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast,  // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelRefresh,    // Fleet panel: force-refresh from current_state (r)
+    PanelBack,            // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,           // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,          // Inbox: move selection up one row
+    InboxMoveDown,        // Inbox: move selection down one row
+    InboxPageUp,          // Inbox: jump 10 rows up
+    InboxPageDown,        // Inbox: jump 10 rows down
+    InboxOpenSelected,    // Inbox: mark selected row read (Enter)
+    InboxDismissSelected, // Inbox: dismiss selected row (d)
+    InboxDismissVisible,  // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,  // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,      // Inbox: cycle agent filter (p)
+    InboxRefresh,         // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
-    AgentSelectionBack,         // Return to home screen (Esc)
-    AgentSelectionNextProvider, // Navigate to next provider
-    AgentSelectionPrevProvider, // Navigate to previous provider
-    AgentSelectionNextModel,    // Navigate to next model
-    AgentSelectionPrevModel,    // Navigate to previous model
-    AgentSelectionToggleExpand, // Toggle provider expand
-    AgentSelectionSelect,       // Select current agent (Enter)
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
     ConfigNextCategory,    // Navigate to next category
@@ -308,22 +443,38 @@ pub enum AppEvent {
     LogHistoryScrollHome,    // Reset horizontal scroll to start (Home)
     LogHistoryCleanup,       // Delete all log files (C)
     // Onboarding wizard events
-    OnboardingNext,            // Go to next step (Enter/Right Arrow)
-    OnboardingBack,            // Go to previous step (Backspace/Left Arrow)
-    OnboardingCancel,          // Cancel onboarding (Esc)
-    OnboardingInputChar(char), // Input character for git directories
-    OnboardingBackspace,       // Backspace in git directories input
-    OnboardingDelete,          // Delete character in input
-    OnboardingCursorLeft,      // Move cursor left in input
-    OnboardingCursorRight,     // Move cursor right in input
-    OnboardingCursorHome,      // Move cursor to start of input
-    OnboardingCursorEnd,       // Move cursor to end of input
-    OnboardingCheckDeps,       // Run dependency check
-    OnboardingSkipAuth,        // Skip authentication step
-    OnboardingEditorUp,        // Move editor selection up
-    OnboardingEditorDown,      // Move editor selection down
-    OnboardingFinish,          // Complete onboarding
-    OnboardingInstallConfig,   // Install recommended config (I key)
+    OnboardingNext,               // Go to next step (Enter/Right Arrow)
+    OnboardingBack,               // Go to previous step (Backspace/Left Arrow)
+    OnboardingToMenu,             // Leave wizard for the Setup menu (Esc)
+    OnboardingInputChar(char),    // Input character for git directories
+    OnboardingBackspace,          // Backspace in git directories input
+    OnboardingDelete,             // Delete character in input
+    OnboardingCursorLeft,         // Move cursor left in input
+    OnboardingCursorRight,        // Move cursor right in input
+    OnboardingCursorHome,         // Move cursor to start of input
+    OnboardingCursorEnd,          // Move cursor to end of input
+    OnboardingCheckDeps,          // Run dependency check
+    OnboardingSkipAuth,           // Skip authentication step
+    OnboardingAuthUp,             // Auth step: move option cursor up
+    OnboardingAuthDown,           // Auth step: move option cursor down
+    OnboardingAuthSelect,         // Auth step: choose focused option / save key
+    OnboardingAuthKeyChar(char),  // Auth step: type into the API-key field
+    OnboardingAuthKeyBackspace,   // Auth step: backspace the API-key field
+    OnboardingAuthKeyCancel,      // Auth step: leave API-key entry (Esc)
+    OnboardingEditorUp,           // Move editor selection up
+    OnboardingEditorDown,         // Move editor selection down
+    OnboardingFinish,             // Complete onboarding
+    OnboardingInstallConfig,      // Install recommended tmux config (t key)
+    OnboardingDepCursorUp,        // Move the focused-dep cursor up
+    OnboardingDepCursorDown,      // Move the focused-dep cursor down
+    OnboardingInstallFocusedDep,  // i key: install the focused dependency
+    OnboardingScriptPrompt,       // G key: ask which agent to generate a script for
+    OnboardingCancelScriptPrompt, // Esc out of the agent picker
+    OnboardingGenerateScript(crate::setup::Agent), // Generate installer for agent
+    OnboardingOtelChar(char),     // Type into the focused OTEL field
+    OnboardingOtelBackspace,      // Backspace the focused OTEL field
+    OnboardingOtelNextField,      // Focus next OTEL field (Tab/Down)
+    OnboardingOtelPrevField,      // Focus previous OTEL field (Shift-Tab/Up)
     // Setup menu events
     SetupMenuBack,   // Return to home screen (Esc)
     SetupMenuSelect, // Select menu item (Enter)
@@ -536,6 +687,87 @@ impl EventHandler {
         }
     }
 
+    /// Apply the persisted SkillManager Sources-panel width to the live
+    /// screen state on screen-open. `None` keeps the in-memory default
+    /// (32). The width is clamped against the current terminal so a
+    /// stale oversized value can never starve the Units table.
+    fn apply_skill_manager_sources_width(state: &mut AppState) {
+        if let Some(width) = state.app_config.ui_preferences.skill_manager_sources_width {
+            let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+            state.skill_manager_state.sources_width =
+                crate::components::skill_manager_screen::clamp_sources_width(width, term_w);
+        }
+    }
+
+    /// Persist the current SkillManager Sources-panel width to config.
+    /// Called on `[`/`]` resize and on divider-drag-end.
+    fn persist_skill_manager_sources_width(state: &mut AppState) {
+        state.app_config.ui_preferences.skill_manager_sources_width =
+            Some(state.skill_manager_state.sources_width);
+        if let Err(e) = state.app_config.save() {
+            tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
+        }
+    }
+
+    /// True when a SkillManager overlay (banner / input prompt / library
+    /// / browse modal) is open OR the help overlay is visible — i.e. the
+    /// underlying Sources/Units panels are NOT the active surface. Mouse
+    /// hit-testing on the panels is suppressed in that case so a click
+    /// meant for the modal doesn't leak through.
+    fn skill_manager_overlay_open(state: &AppState) -> bool {
+        let s = &state.skill_manager_state;
+        state.help_visible
+            || s.banner.is_active()
+            || s.input.is_some()
+            || s.library.is_some()
+            || s.browse.is_some()
+    }
+
+    /// Recompute the SkillManager top-row rects (Sources panel + Units
+    /// table) from the current terminal size + persisted `sources_width`,
+    /// mirroring the deterministic layout in `skill_manager_screen::render`:
+    ///
+    /// ```text
+    /// outer (vertical):  [ Min(8) top ][ Length(8) detail ][ Length(1) help ]
+    /// top   (horizontal):[ Length(sources_w) ][ Min(40) units ]
+    /// ```
+    ///
+    /// The render path always draws into the full terminal Rect
+    /// `(0,0,w,h)`, so we reconstruct that here rather than threading a
+    /// Rect through the immutable render. Returns `(sources_rect,
+    /// units_rect, sources_w)` or `None` when the terminal is too small
+    /// to host the top row.
+    fn skill_manager_top_rects(
+        state: &AppState,
+    ) -> Option<(ratatui::layout::Rect, ratatui::layout::Rect, u16)> {
+        use ratatui::layout::Rect;
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        // Vertical layout: the top row is everything above the 8-row
+        // detail pane + 1-row help bar. Mirror `Constraint::Min(8)`.
+        let top_h = term_h.saturating_sub(9);
+        if term_w == 0 || top_h == 0 {
+            return None;
+        }
+        let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
+            state.skill_manager_state.sources_width,
+            term_w,
+        );
+        let sources_rect = Rect::new(0, 0, sources_w, top_h);
+        let units_x = sources_w;
+        let units_w = term_w.saturating_sub(sources_w);
+        let units_rect = Rect::new(units_x, 0, units_w, top_h);
+        Some((sources_rect, units_rect, sources_w))
+    }
+
+    /// True when `(x, y)` falls inside `rect` (half-open on the far
+    /// edges, matching ratatui's Rect convention).
+    fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
+        x >= rect.x
+            && x < rect.x.saturating_add(rect.width)
+            && y >= rect.y
+            && y < rect.y.saturating_add(rect.height)
+    }
+
     /// Map a slash-command name (leading `/` already stripped by the
     /// palette) to the host `AppEvent` it dispatches, or `None` if no host
     /// mapping exists (e.g. a plugin-owned or unknown command — the caller
@@ -578,6 +810,70 @@ impl EventHandler {
                         }
                     }
 
+                    return None;
+                }
+
+                // SkillManager: divider-drag-resize + click-to-select on
+                // Sources / Units. Guarded so clicks meant for an open
+                // overlay (banner / input / library / browse / help)
+                // don't leak through to the panels.
+                if state.current_screen == screen_ids::SKILL_MANAGER
+                    && !Self::skill_manager_overlay_open(state)
+                {
+                    if let Some((sources_rect, units_rect, sources_w)) =
+                        Self::skill_manager_top_rects(state)
+                    {
+                        // Resize edge = the Sources panel's right border
+                        // column. Begin a drag (consumed on subsequent
+                        // MouseDragging events).
+                        let edge_x = sources_w.saturating_sub(1);
+                        let on_edge = x == edge_x
+                            && y >= sources_rect.y
+                            && y < sources_rect.y.saturating_add(sources_rect.height);
+                        if on_edge {
+                            state.skill_manager_state.resize_active = true;
+                            return None;
+                        }
+
+                        // Click inside the Sources panel body → focus +
+                        // select that source (applies the filter). Source
+                        // rows start at `rect.y + 1` (after the top
+                        // border); row 0 is the "All sources" affordance,
+                        // rows 1.. map onto `sources[index]`.
+                        if Self::point_in_rect(x, y, sources_rect) {
+                            let row = y.saturating_sub(sources_rect.y).saturating_sub(1);
+                            if row == 0 {
+                                // "All sources" → clear the filter.
+                                return Some(AppEvent::SkillManagerClearSourceFilter);
+                            }
+                            let index = usize::from(row.saturating_sub(1));
+                            if index < state.skill_manager_state.sources.len() {
+                                return Some(AppEvent::SkillManagerSourceClick { index });
+                            }
+                            // Empty area inside the panel → just focus it.
+                            state.skill_manager_state.focused_pane =
+                                crate::components::skill_manager_screen::FocusedSkillPane::Sources;
+                            return None;
+                        }
+
+                        // Click inside the Units table → focus + select
+                        // the clicked unit. Unit data rows start at
+                        // `rect.y + 2` (top border + header row); map y
+                        // onto a position within `visible_indices()`.
+                        if Self::point_in_rect(x, y, units_rect) {
+                            let data_y = sources_rect.y.saturating_add(2);
+                            if y >= data_y {
+                                let position = usize::from(y - data_y);
+                                let visible_len = state.skill_manager_state.visible_indices().len();
+                                if position < visible_len {
+                                    return Some(AppEvent::SkillManagerUnitClick { position });
+                                }
+                            }
+                            state.skill_manager_state.focused_pane =
+                                crate::components::skill_manager_screen::FocusedSkillPane::Units;
+                            return None;
+                        }
+                    }
                     return None;
                 }
 
@@ -653,6 +949,21 @@ impl EventHandler {
                     return None;
                 }
 
+                // SkillManager divider drag: the new Sources width is the
+                // pointer's x + 1 (the panel spans columns 0..=x). Clamped
+                // by `grow`/`shrink`'s shared clamp via the setter below.
+                if state.current_screen == screen_ids::SKILL_MANAGER
+                    && state.skill_manager_state.resize_active
+                {
+                    let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                    let requested = x.saturating_add(1);
+                    state.skill_manager_state.sources_width =
+                        crate::components::skill_manager_screen::clamp_sources_width(
+                            requested, term_w,
+                        );
+                    return None;
+                }
+
                 // Update selection during drag
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -678,6 +989,15 @@ impl EventHandler {
                     state.sessions_pane_state.update_hover(x, y);
                     if state.sessions_pane_state.finish_resize() {
                         Self::persist_sessions_pane_preferences(state);
+                    }
+                    return None;
+                }
+
+                if state.current_screen == screen_ids::SKILL_MANAGER {
+                    let _ = (x, y);
+                    if state.skill_manager_state.resize_active {
+                        state.skill_manager_state.resize_active = false;
+                        return Some(AppEvent::SkillManagerPersistSourcesWidth);
                     }
                     return None;
                 }
@@ -814,6 +1134,18 @@ impl EventHandler {
         // (e.g. publish on `host.input_mode`) and read it here.
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
+        // SkillManager add-source / search prompt — when its input
+        // overlay is open the user is typing a URI or filter, which
+        // routinely contains `:` (e.g. `gh:owner/repo`,
+        // `git:file://…`). Without this, the global `:` slash-command
+        // palette would open mid-URI and swallow the rest of the
+        // keystrokes — exactly the bug that made `[i] add source`
+        // appear broken.
+        let skill_manager_input_active = state.current_screen == screen_ids::SKILL_MANAGER
+            && (state.skill_manager_state.input.is_some()
+                || state.skill_manager_state.browse.as_ref().is_some_and(|b| {
+                    b.mode == crate::components::skill_manager_screen::BrowseMode::Query
+                }));
         let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
@@ -841,6 +1173,7 @@ impl EventHandler {
             || config_text_active
             || state.auth_provider_popup_state.show_popup
             || skills_text_active
+            || skill_manager_input_active
             || git_view_text_active
     }
 
@@ -902,6 +1235,34 @@ impl EventHandler {
                 }
                 _ => return None,
             }
+        }
+
+        // MCP pool overlay captures all keys while open (after the
+        // confirmation dialog, so a stop-confirmation sits on top of it).
+        if state.mcp_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
+                    Some(AppEvent::McpOverlayClose)
+                }
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
+                KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
+                KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
+                KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
+                KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
+                _ => None,
+            };
+        }
+
+        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        if state.daemons_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
+                    Some(AppEvent::DaemonsOverlayClose)
+                }
+                KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+                _ => None,
+            };
         }
 
         // Handle "Other tmux" rename mode (high priority)
@@ -989,6 +1350,30 @@ impl EventHandler {
         }
 
         if !in_text_input {
+            // Session-list-specific intercept for `H`: downgrade Headroom
+            // routing on the selected running session. Must be checked before
+            // the global `H` → ToggleHelp handler below because the global
+            // handler fires first and the session-list has no early-return
+            // path of its own. Only intercepts on the SESSION_LIST screen when
+            // the selected session is a Headroom-capable agent (Claude/Codex).
+            if matches!(key_event.code, KeyCode::Char('H'))
+                && state.current_screen == screen_ids::SESSION_LIST
+            {
+                use crate::models::session::SessionAgentType;
+                let is_headroom_capable = state
+                    .selected_session()
+                    .map(|s| {
+                        matches!(
+                            s.agent_type,
+                            SessionAgentType::Claude | SessionAgentType::Codex
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_headroom_capable {
+                    return Some(AppEvent::DowngradeHeadroom);
+                }
+            }
+
             // Global help toggle: `?` or `Shift+H` from any non-text view.
             if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
                 return Some(AppEvent::ToggleHelp);
@@ -1073,9 +1458,6 @@ impl EventHandler {
         }
 
         // AINB 2.0: Handle agent selection view
-        if state.current_screen == screen_ids::AGENT_SELECTION {
-            return Self::handle_agent_selection_keys(key_event, state);
-        }
 
         // AINB 2.0: Handle auth provider popup (overlays config screen)
         if state.auth_provider_popup_state.show_popup {
@@ -1169,6 +1551,171 @@ impl EventHandler {
             return Self::handle_skills_keys(key_event, state);
         }
 
+        // Handle skill-manager view (spec §10.1)
+        if state.current_screen == screen_ids::SKILL_MANAGER {
+            // Text-input prompt (add-source URI or search) takes
+            // priority over every other key — while it's open the
+            // user is typing, so chars must reach the buffer rather
+            // than trigger shortcuts.
+            if state.skill_manager_state.input.is_some() {
+                return match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::SkillManagerInputSubmit),
+                    KeyCode::Esc => Some(AppEvent::SkillManagerInputCancel),
+                    KeyCode::Backspace => Some(AppEvent::SkillManagerInputBackspace),
+                    KeyCode::Char(c) => Some(AppEvent::SkillManagerInputChar(c)),
+                    _ => None,
+                };
+            }
+
+            // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
+            //   * Query mode — every char goes into the query buffer
+            //     (so `/`, `:`, spaces all reach it); Enter searches.
+            //   * Results mode — arrows select; Enter installs the
+            //     selected hit; `/` returns to Query mode to refine.
+            // Esc closes from either mode. Intercepts before the banner
+            // + normal keymap, just like the Library overlay.
+            if let Some(browse) = &state.skill_manager_state.browse {
+                use crate::components::skill_manager_screen::BrowseMode;
+                return match browse.mode {
+                    BrowseMode::Query => match key_event.code {
+                        // Tab switches catalog (before Char so it doesn't
+                        // land in the query buffer).
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
+                        }
+                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseSearch),
+                        KeyCode::Esc => Some(AppEvent::SkillManagerBrowseClose),
+                        KeyCode::Backspace => Some(AppEvent::SkillManagerBrowseInputBackspace),
+                        KeyCode::Char(c) => Some(AppEvent::SkillManagerBrowseInputChar(c)),
+                        _ => None,
+                    },
+                    BrowseMode::Results => match key_event.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            Some(AppEvent::SkillManagerBrowseSelectPrev)
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            Some(AppEvent::SkillManagerBrowseSelectNext)
+                        }
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
+                        }
+                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseInstall),
+                        KeyCode::Char('/') => Some(AppEvent::SkillManagerBrowseEditQuery),
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            Some(AppEvent::SkillManagerBrowseClose)
+                        }
+                        _ => None,
+                    },
+                };
+            }
+
+            // Own-skill Library overlay (`[l]`, bead ai-lgk): when
+            // open, arrows / j-k move the selection, Enter expands the
+            // selected row's Detail band, and Esc/q closes the overlay
+            // (back to the Units screen — NOT home, so the user doesn't
+            // lose the SkillManager context). Intercepts before the
+            // banner + normal keymap.
+            if state.skill_manager_state.library.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Some(AppEvent::SkillManagerLibrarySelectPrev)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some(AppEvent::SkillManagerLibrarySelectNext)
+                    }
+                    KeyCode::Enter => Some(AppEvent::SkillManagerLibraryEnter),
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
+                        Some(AppEvent::SkillManagerLibraryClose)
+                    }
+                    _ => None,
+                };
+            }
+
+            // Discovery banner (spec §User Flow 1 / P5): when the
+            // overlay is visible, Enter/d/s drive its state machine
+            // instead of the normal Skills shortcuts. Esc/q still
+            // returns to Home so the user can always escape.
+            if state.skill_manager_state.banner.is_active() {
+                return match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::SkillManagerDiscoveryImport),
+                    KeyCode::Char('d') => Some(AppEvent::SkillManagerDiscoveryToggleDetails),
+                    KeyCode::Char('s') => Some(AppEvent::SkillManagerDiscoverySkip),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                    _ => None,
+                };
+            }
+            tracing::debug!("In skill-manager view, handling full keymap");
+            use crate::components::skill_manager_screen::FocusedSkillPane;
+            let sources_focused =
+                state.skill_manager_state.focused_pane == FocusedSkillPane::Sources;
+            return match key_event.code {
+                // `q` always returns home. `Esc` first clears an active
+                // source filter (if any) before returning home, so it
+                // doubles as the "back to All sources" affordance.
+                KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                KeyCode::Esc => {
+                    if state.skill_manager_state.source_filter.is_some() {
+                        Some(AppEvent::SkillManagerClearSourceFilter)
+                    } else {
+                        Some(AppEvent::SkillManagerBack)
+                    }
+                }
+                // Tab / Shift-Tab toggle focus between Sources and Units.
+                KeyCode::Tab | KeyCode::BackTab => Some(AppEvent::SkillManagerToggleFocus),
+                // `[` / `]` resize the Sources panel regardless of focus.
+                KeyCode::Char('[') => Some(AppEvent::SkillManagerShrinkSources),
+                KeyCode::Char(']') => Some(AppEvent::SkillManagerGrowSources),
+                // Navigation + Enter are focus-aware. When the Sources
+                // panel is focused, arrows/jk step the source cursor and
+                // Enter applies the filter; otherwise they drive the
+                // Units table as before.
+                KeyCode::Up | KeyCode::Char('k') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceSelectPrev)
+                }
+                KeyCode::Down | KeyCode::Char('j') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceSelectNext)
+                }
+                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
+                // Units panel `[s]` — dual-purpose:
+                //   * if the selected unit is part of a conflict pair,
+                //     flip the shadowed_by edge (legacy behaviour);
+                //   * otherwise, fire `SkillManagerSync` to run the
+                //     Phase D bidirectional content sync on the
+                //     selected unit (bead v12.D.5).
+                // The banner branch above intercepts `s` first when
+                // the discovery overlay is visible (skip-banner).
+                KeyCode::Char('s') => {
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    if selected_unit_has_conflict_peer(state, &ainb_home) {
+                        Some(AppEvent::SkillManagerConflictFlip)
+                    } else {
+                        Some(AppEvent::SkillManagerSync)
+                    }
+                }
+                // Help-bar shortcuts — now wired (were advertised but
+                // dropped before this change):
+                KeyCode::Char('i') => Some(AppEvent::SkillManagerOpenAddSource),
+                KeyCode::Char('u') => Some(AppEvent::SkillManagerUpdate),
+                KeyCode::Char('c') => Some(AppEvent::SkillManagerCheck),
+                KeyCode::Char('r') => Some(AppEvent::SkillManagerRemove),
+                KeyCode::Char('b') => Some(AppEvent::SkillManagerOpenBrowse),
+                KeyCode::Char('l') => Some(AppEvent::SkillManagerOpenLibrary),
+                KeyCode::Char('/') => Some(AppEvent::SkillManagerOpenSearch),
+                // `[m]` re-runs discovery (the empty-state hint
+                // finally tells the truth).
+                KeyCode::Char('m') => Some(AppEvent::SkillManagerRefreshDiscovery),
+                // Selection navigation — arrows + vim-style j/k +
+                // Home/End/g/G. Wraps at list ends. Detail pane
+                // recomputed on every move so the right-hand pane
+                // mirrors the cursor without an extra keystroke.
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSelectPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSelectNext),
+                KeyCode::Home | KeyCode::Char('g') => Some(AppEvent::SkillManagerSelectFirst),
+                KeyCode::End | KeyCode::Char('G') => Some(AppEvent::SkillManagerSelectLast),
+                _ => None,
+            };
+        }
+
         // Handle session recovery view
         if state.current_screen == screen_ids::SESSION_RECOVERY {
             tracing::debug!("In session recovery view, handling session recovery keys");
@@ -1220,7 +1767,7 @@ impl EventHandler {
             KeyCode::Char('f') => Some(AppEvent::RefreshWorkspaces), // Manual refresh
             KeyCode::Char('F') => Some(AppEvent::CycleSessionFilter), // Cycle session filter (active/stopped/all)
             KeyCode::Char('n') => Some(AppEvent::NewSession),
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') | KeyCode::Char('S') => {
                 // Star/unstar the selected workspace (only if a workspace is selected)
                 if state.selected_workspace_index.is_some() {
                     Some(AppEvent::StarSelectedWorkspace)
@@ -1409,32 +1956,16 @@ impl EventHandler {
                     }
                 }
             }
-            KeyCode::Left => {
-                tracing::debug!("Left key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering PreviousWorkspace");
-                        Some(AppEvent::PreviousWorkspace)
-                    }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, no left/right scrolling");
-                        None // No left/right scrolling in logs
-                    }
-                }
-            }
-            KeyCode::Right => {
-                tracing::debug!("Right key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering NextWorkspace");
-                        Some(AppEvent::NextWorkspace)
-                    }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, no left/right scrolling");
-                        None // No left/right scrolling in logs
-                    }
-                }
-            }
+            // ← no longer switches workspace (use the mouse / sidebar for that);
+            // it's a no-op so it can't be mistaken for navigation.
+            KeyCode::Left => None,
+            // → attaches the selected session in a split pane (the in-place
+            // sibling of `a`/full-screen) — same verb as Shift+A. Workspace
+            // switching moved to the mouse.
+            KeyCode::Right => match state.focused_pane {
+                FocusedPane::Sessions => Some(AppEvent::EnterInteractivePane),
+                FocusedPane::LiveLogs | FocusedPane::Preview => None,
+            },
             KeyCode::Home => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToTop),
                 FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
@@ -1726,7 +2257,7 @@ impl EventHandler {
                     // Note: Left/Backspace used for text editing, use Up arrow to go back
                     match key_event.code {
                         KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Up => Some(AppEvent::OnboardingBack), // Go back (since Left is cursor)
                         KeyCode::Backspace => Some(AppEvent::OnboardingBackspace),
                         KeyCode::Delete => Some(AppEvent::OnboardingDelete),
@@ -1739,38 +2270,97 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::DependencyCheck => {
-                    match key_event.code {
-                        KeyCode::Enter | KeyCode::Right => {
-                            // If deps not checked yet, check them; otherwise advance
-                            if onboarding_state.dependency_status.is_none() {
-                                Some(AppEvent::OnboardingCheckDeps)
-                            } else {
-                                Some(AppEvent::OnboardingNext)
+                    if onboarding_state.agent_pick_open {
+                        // Agent picker (after G): choose which agent's installer to write.
+                        match key_event.code {
+                            KeyCode::Char('c') | KeyCode::Char('C') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Claude),
+                            ),
+                            KeyCode::Char('x') | KeyCode::Char('X') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
+                            ),
+                            KeyCode::Char('p') | KeyCode::Char('P') => Some(
+                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
+                            ),
+                            KeyCode::Esc => Some(AppEvent::OnboardingCancelScriptPrompt),
+                            _ => None,
+                        }
+                    } else {
+                        match key_event.code {
+                            // All four arrows are navigation (move the focused-dep
+                            // cursor) — never a screen change, so they don't fight
+                            // each other. Enter advances, Esc goes back one screen.
+                            KeyCode::Enter => {
+                                // If deps not checked yet, check them; otherwise advance.
+                                if onboarding_state.dependency_status.is_none() {
+                                    Some(AppEvent::OnboardingCheckDeps)
+                                } else {
+                                    Some(AppEvent::OnboardingNext)
+                                }
                             }
+                            KeyCode::Esc => Some(AppEvent::OnboardingBack),
+                            KeyCode::Up | KeyCode::Left => Some(AppEvent::OnboardingDepCursorUp),
+                            KeyCode::Down | KeyCode::Right => {
+                                Some(AppEvent::OnboardingDepCursorDown)
+                            }
+                            KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
+                            // `i` installs the focused dep; tmux config moved to `t`.
+                            KeyCode::Char('i') | KeyCode::Char('I') => {
+                                Some(AppEvent::OnboardingInstallFocusedDep)
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                Some(AppEvent::OnboardingInstallConfig)
+                            } // Install tmux config
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                Some(AppEvent::OnboardingScriptPrompt)
+                            } // Generate install script
+                            _ => None,
                         }
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
-                        KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                            Some(AppEvent::OnboardingBack)
-                        }
-                        KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
-                        KeyCode::Char('i') | KeyCode::Char('I') => {
-                            Some(AppEvent::OnboardingInstallConfig)
-                        } // Install config
-                        _ => None,
                     }
                 }
-                OnboardingStep::Authentication => match key_event.code {
-                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
-                    KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                        Some(AppEvent::OnboardingBack)
+                OnboardingStep::Authentication => {
+                    let typing_key = state
+                        .onboarding_state
+                        .as_ref()
+                        .map(|o| o.auth_api_key_input.is_some())
+                        .unwrap_or(false);
+                    if typing_key {
+                        match key_event.code {
+                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc => Some(AppEvent::OnboardingAuthKeyCancel),
+                            KeyCode::Backspace => Some(AppEvent::OnboardingAuthKeyBackspace),
+                            KeyCode::Char(c) => Some(AppEvent::OnboardingAuthKeyChar(c)),
+                            _ => None,
+                        }
+                    } else {
+                        match key_event.code {
+                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
+                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
+                            KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                            KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                Some(AppEvent::OnboardingSkipAuth)
+                            }
+                            _ => None,
+                        }
                     }
-                    KeyCode::Char('s') | KeyCode::Char('S') => Some(AppEvent::OnboardingSkipAuth),
+                }
+                OnboardingStep::OtelSetup => match key_event.code {
+                    // Enter advances; if all 3 creds are filled, finish-time
+                    // setup runs, otherwise the step is effectively skipped.
+                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                    KeyCode::Left => Some(AppEvent::OnboardingBack),
+                    KeyCode::Tab | KeyCode::Down => Some(AppEvent::OnboardingOtelNextField),
+                    KeyCode::BackTab | KeyCode::Up => Some(AppEvent::OnboardingOtelPrevField),
+                    KeyCode::Backspace => Some(AppEvent::OnboardingOtelBackspace),
+                    KeyCode::Char(ch) => Some(AppEvent::OnboardingOtelChar(ch)),
                     _ => None,
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                     KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
                     KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
@@ -1780,7 +2370,7 @@ impl EventHandler {
                 },
                 OnboardingStep::Summary => match key_event.code {
                     KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
-                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
                     }
@@ -1790,7 +2380,7 @@ impl EventHandler {
                     // Welcome and other steps - basic navigation
                     match key_event.code {
                         KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                         KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                             Some(AppEvent::OnboardingBack)
                         }
@@ -2154,11 +2744,11 @@ impl EventHandler {
         // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
         // unused across every screen handler.
         match key_event.code {
-            KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
-            KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
+            // `h` for health opens the Agent Deck daemon-health screen. Plain
+            // `d` remains the system daemon overlay from main.
+            KeyCode::Char('h') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
-            KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
@@ -2169,9 +2759,18 @@ impl EventHandler {
             // keybinding open path the P3 tripwire drives.
             KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
             KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
-            KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('c') => return Some(AppEvent::GoToSkills),
+            // `m` is the Memory/Learnings browser (main); SkillManager moved
+            // to `z` to avoid the collision when the two features merged.
+            KeyCode::Char('z') => return Some(AppEvent::GoToSkillManager),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
+            // `p` for "pool" — opens the shared MCP pool observability
+            // overlay. `m` is taken by the learnings/Memory browser, so the
+            // pool tile + global keybind use `p` instead.
+            KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
+            // `d` for "daemons" — opens the MCP pool + Headroom status overlay.
+            KeyCode::Char('d') => return Some(AppEvent::DaemonsOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -2209,33 +2808,6 @@ impl EventHandler {
 
         tracing::debug!("HomeScreen V2 key handler returning: {:?}", event);
         event
-    }
-
-    // AINB 2.0: Agent selection key handling
-    fn handle_agent_selection_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        let agent_state = &state.agent_selection_state;
-
-        // Check if a provider is expanded (showing models)
-        if agent_state.expanded_provider.is_some() {
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::AgentSelectionBack),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AgentSelectionPrevModel),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AgentSelectionNextModel),
-                KeyCode::Tab => Some(AppEvent::AgentSelectionNextProvider),
-                KeyCode::BackTab => Some(AppEvent::AgentSelectionPrevProvider),
-                KeyCode::Enter => Some(AppEvent::AgentSelectionSelect),
-                KeyCode::Char(' ') => Some(AppEvent::AgentSelectionToggleExpand),
-                _ => None,
-            }
-        } else {
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::AgentSelectionBack),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AgentSelectionPrevProvider),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AgentSelectionNextProvider),
-                KeyCode::Enter | KeyCode::Char(' ') => Some(AppEvent::AgentSelectionToggleExpand),
-                _ => None,
-            }
-        }
     }
 
     fn handle_config_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
@@ -2393,6 +2965,57 @@ impl EventHandler {
                 state.current_screen = target;
             }
             AppEvent::ToggleHelp => state.toggle_help(),
+            AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
+            AppEvent::McpOverlayClose => state.close_mcp_overlay(),
+            AppEvent::McpOverlayPrev => state.mcp_overlay_move(-1),
+            AppEvent::McpOverlayNext => state.mcp_overlay_move(1),
+            AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
+            AppEvent::McpOverlayStopServer => {
+                if let Some(name) =
+                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                {
+                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                        title: "Stop MCP server".to_string(),
+                        message: format!(
+                            "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
+                        ),
+                        confirm_action: crate::app::state::ConfirmAction::McpStopServer(name),
+                        selected_option: false,
+                        warning: None,
+                        options: None,
+                        selected_index: 0,
+                    });
+                }
+            }
+            AppEvent::McpOverlayStopDaemon => {
+                let (servers, sessions) = state
+                    .mcp_overlay
+                    .as_ref()
+                    .map(|o| {
+                        let s: usize = o.servers.iter().map(|x| x.clients).sum();
+                        (o.servers.len(), s)
+                    })
+                    .unwrap_or((0, 0));
+                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    title: "Stop the MCP pool".to_string(),
+                    message: format!(
+                        "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
+                    ),
+                    confirm_action: crate::app::state::ConfirmAction::McpStopDaemon,
+                    selected_option: false,
+                    warning: None,
+                    options: None,
+                    selected_index: 0,
+                });
+            }
+            // The overlay is a global pool view (not bound to any worktree),
+            // so import always targets the user config — the only config read
+            // from anywhere. cwd's .mcp.json is still pulled in as a source.
+            // Additive (never overwrites), so it fires without a confirmation.
+            AppEvent::McpOverlayImport => state.mcp_import(true),
+            AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
+            AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
+            AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -2756,6 +3379,11 @@ impl EventHandler {
                     state.pending_async_action = Some(AsyncAction::RestartSession(session_id));
                 }
             }
+            AppEvent::DowngradeHeadroom => {
+                if let Some(session_id) = state.get_selected_session_id() {
+                    state.pending_async_action = Some(AsyncAction::DowngradeHeadroom(session_id));
+                }
+            }
             AppEvent::DeleteSession => {
                 tracing::info!("[ACTION] Processing DeleteSession event");
                 tracing::debug!(
@@ -3113,7 +3741,7 @@ impl EventHandler {
                                         }
                                         _ => {
                                             state.add_info_notification(
-                                                "Notifications enabled (Claude + Codex). Restart \
+                                                "Notifications enabled (Claude + Codex + Copilot). Restart \
                                                  your agent sessions to load the hooks; the Inbox \
                                                  (b) lights up when a session needs you."
                                                     .to_string(),
@@ -3131,6 +3759,12 @@ impl EventHandler {
                                 if let Ok(paths) = ainb_plugin_notifyd::Paths::from_home() {
                                     let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
                                 }
+                            }
+                            crate::app::state::ConfirmAction::McpStopServer(name) => {
+                                state.mcp_stop_server(&name);
+                            }
+                            crate::app::state::ConfirmAction::McpStopDaemon => {
+                                state.mcp_stop_daemon();
                             }
                             crate::app::state::ConfirmAction::Cancel => {
                                 // Explicit Cancel ("Not now"): dialog already
@@ -3516,10 +4150,6 @@ impl EventHandler {
                 if let Some(tile) = state.home_screen_state.selected().cloned() {
                     tracing::info!("Selected tile: {:?}", tile);
                     match tile {
-                        HomeTile::Agents => {
-                            tracing::info!("Navigating to AgentSelection view");
-                            state.current_screen = screen_ids::AGENT_SELECTION.to_string();
-                        }
                         HomeTile::Sessions => {
                             tracing::info!("Navigating to SessionList view");
                             state.current_screen = screen_ids::SESSION_LIST.to_string();
@@ -3536,7 +4166,16 @@ impl EventHandler {
                             tracing::info!("Navigating to SessionRecovery view");
                             state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
-                        HomeTile::Catalog | HomeTile::Stats => {
+                        HomeTile::SkillManager => {
+                            tracing::info!("Navigating to SkillManager view (spec §10.1)");
+                            state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                            Self::apply_skill_manager_sources_width(state);
+                        }
+                        HomeTile::Mcp => {
+                            tracing::info!("Opening MCP pool overlay");
+                            state.toggle_mcp_overlay();
+                        }
+                        HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
                             state.add_info_notification(format!(
@@ -3580,12 +4219,6 @@ impl EventHandler {
                 tracing::debug!("HomeScreen V2 sidebar select");
                 let selected = state.home_screen_v2_state.sidebar.selected_item();
                 match selected {
-                    SidebarItem::Agents => {
-                        state.current_screen = screen_ids::AGENT_SELECTION.to_string();
-                    }
-                    SidebarItem::Catalog => {
-                        state.add_info_notification("Skill catalog coming soon!".to_string());
-                    }
                     SidebarItem::Config => {
                         state.current_screen = screen_ids::CONFIG.to_string();
                     }
@@ -3609,6 +4242,14 @@ impl EventHandler {
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                    }
+                    SidebarItem::Mcp => {
+                        // Opens the overlay on top of the current screen (not a
+                        // screen switch) and fires the first lazy fetch.
+                        state.toggle_mcp_overlay();
+                    }
+                    SidebarItem::DaemonOverlay => {
+                        state.toggle_daemons_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -3655,6 +4296,35 @@ impl EventHandler {
                         // Canonical event saves `previous_screen` so the
                         // panel's Esc-close returns here, not to a stale origin.
                         Self::process_event(AppEvent::GoToLearnings, state);
+                    }
+                    SidebarItem::SkillManager => {
+                        tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
+                        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        Self::apply_skill_manager_sources_width(state);
+                        // Mirror the discovery flow from the `m` keybind
+                        // handler (AppEvent::GoToSkillManager) — sidebar entry
+                        // must trigger the same hdt.9 live-data rehydrate +
+                        // hdt.6 banner overlay, otherwise the screen opens
+                        // empty and the user never sees their orphan units.
+                        let ainb_home = ainb_skill_core::default_ainb_home();
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        // Also start the drift poll (bead v12.E.4).
+                        let backend: std::sync::Arc<
+                            dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                        > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
+                        state.start_background_drift_load(&ainb_home, backend);
+                        let claude_home = std::env::var_os("HOME")
+                            .map(std::path::PathBuf::from)
+                            .map(|h| h.join(".claude"))
+                            .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                        let walker = crate::components::skill_manager_screen::run_discovery_walkers(
+                            &claude_home,
+                        );
+                        crate::components::skill_manager_screen::maybe_show_discovery_banner(
+                            &mut state.skill_manager_state,
+                            &ainb_home,
+                            walker,
+                        );
                     }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
@@ -3806,13 +4476,6 @@ impl EventHandler {
                     }
                 }
             }
-            AppEvent::GoToAgentSelection => {
-                tracing::info!("Navigating to AgentSelection");
-                state.current_screen = screen_ids::AGENT_SELECTION.to_string();
-            }
-            AppEvent::GoToCatalog => {
-                state.add_info_notification("Skill catalog coming soon!".to_string());
-            }
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
                 state.current_screen = screen_ids::CONFIG.to_string();
@@ -3881,6 +4544,611 @@ impl EventHandler {
                 }
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
+            }
+            AppEvent::GoToSkillManager => {
+                tracing::info!("Navigating to SkillManager (spec §10.1)");
+                state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                Self::apply_skill_manager_sources_width(state);
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                // P8 live-data binding (hdt.9): rehydrate Sources /
+                // Units / Detail panels from $AINB_HOME/manifest.yaml
+                // + lock.yaml on every screen-open so out-of-band
+                // edits (e.g. `ainb skill install`, hand-edited
+                // manifest) are reflected without
+                // requiring a TUI restart. Banner state is preserved
+                // by `reload_from_disk` — the subsequent
+                // `maybe_show_discovery_banner` call only flips
+                // banner to Visible when the manifest is empty AND
+                // walkers find candidates, so the two steps compose
+                // cleanly.
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                // Bead v12.E.4: kick off a background drift scan so
+                // the Units panel's `status` column fills in (`✓` /
+                // `⚠` / `▲` / `⟷`) on the next tick. Until results
+                // land, the column shows the muted "…" placeholder.
+                // `start_background_drift_load` coalesces if a
+                // previous scan is still in flight.
+                let backend: std::sync::Arc<
+                    dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
+                state.start_background_drift_load(&ainb_home, backend);
+                // Spec §User Flow 1: on screen-enter, when the
+                // manifest is empty AND we have not been told to
+                // skip, run the discovery walkers and pop the
+                // banner overlay. Idempotent — re-entering an
+                // already-Visible banner is a no-op (the user
+                // sees the same counts they did first time, per
+                // spec edge case "Banner re-appears next open
+                // until dismissed via [s]").
+                let claude_home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|h| h.join(".claude"))
+                    .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                let walker =
+                    crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
+                crate::components::skill_manager_screen::maybe_show_discovery_banner(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    walker,
+                );
+            }
+            AppEvent::SkillManagerBack => {
+                tracing::info!("Returning to home from SkillManager (Esc/q)");
+                // Leaving the screen cancels any armed remove confirm.
+                state.skill_manager_state.pending_remove_confirm = None;
+                state.current_screen = screen_ids::HOME.to_string();
+            }
+            AppEvent::SkillManagerDiscoveryImport => {
+                tracing::info!("Discovery banner: import all");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                if let Err(e) = crate::components::skill_manager_screen::apply_discovery_import(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
+                    tracing::warn!(error = %e, "discovery import failed");
+                }
+            }
+            AppEvent::SkillManagerDiscoveryToggleDetails => {
+                crate::components::skill_manager_screen::toggle_discovery_details(
+                    &mut state.skill_manager_state,
+                );
+            }
+            AppEvent::SkillManagerDiscoverySkip => {
+                tracing::info!("Discovery banner: skip + persist marker");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                if let Err(e) = crate::components::skill_manager_screen::apply_discovery_skip(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
+                    tracing::warn!(error = %e, "discovery skip failed");
+                }
+            }
+            AppEvent::SkillManagerSync => {
+                // Phase D (v12.D.5): run `ainb skill sync` for the
+                // selected unit. The actual sync runs out-of-band via
+                // the CLI surface; here we only fire-and-forget the
+                // intent + reload the screen state so a successful
+                // sync surfaces fresh deployed paths / usage on next
+                // paint. Tests assert routing-only behaviour against
+                // the dispatch table; integration tests for the CLI
+                // path live in `ainb-cli/tests/skill_sync_*`.
+                //
+                // Surface a `sync: <unit>` info notification so the user
+                // sees that `[s]` routed to Sync (not ConflictFlip) and
+                // so the live tmux tripwire (v12.1.T3) can observe the
+                // routing decision in the captured pane.
+                tracing::info!("Units panel: sync selected unit");
+                let unit_name = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.name.clone());
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                if let Some(name) = unit_name {
+                    state.add_info_notification(format!("sync: {name}"));
+                }
+            }
+            AppEvent::SkillManagerConflictFlip => {
+                tracing::info!("Units panel: flip shadowed_by on selected unit");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let unit_name = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.name.clone());
+                match crate::components::skill_manager_screen::apply_conflict_flip(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
+                    // `[s]` on a conflict-peer unit flips which side wins.
+                    // Surface a toast so the keystroke isn't a silent no-op
+                    // (the alternative, non-conflict, branch fires Sync).
+                    Ok(()) => {
+                        if let Some(name) = unit_name {
+                            state.add_info_notification(format!("shadow flipped: {name}"));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "conflict flip failed");
+                        state.add_error_notification(format!("conflict flip failed: {e}"));
+                    }
+                }
+            }
+            AppEvent::SkillManagerRefreshDiscovery => {
+                // `[m]` — explicit discovery refresh. Re-walk the tool
+                // homes + force the banner even past a prior skip-marker.
+                tracing::info!("SkillManager: refresh discovery (m)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                let claude_home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|h| h.join(".claude"))
+                    .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                let walker =
+                    crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
+                crate::components::skill_manager_screen::force_show_discovery_banner(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    walker,
+                );
+                if !state.skill_manager_state.banner.is_active() {
+                    state.add_info_notification("discovery: no un-adopted units found".to_string());
+                }
+            }
+            AppEvent::SkillManagerCheck => {
+                // `[c]` — re-run the background drift scan so the Units
+                // status column (✓ / ⚠ / ▲ / ⟷) refreshes.
+                tracing::info!("SkillManager: check drift (c)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let backend: std::sync::Arc<
+                    dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                > = std::sync::Arc::new(ainb_skill_core::drift::GitLsRemoteBackend::new());
+                state.start_background_drift_load(&ainb_home, backend);
+                state.add_info_notification(
+                    "drift check running — status column refreshes shortly".to_string(),
+                );
+            }
+            AppEvent::SkillManagerUpdate => {
+                // `[u]` — re-fetch + apply for the selected unit.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let uri = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.declared_uri.clone());
+                match uri {
+                    None => {
+                        state.add_warning_notification("update: no unit selected".to_string());
+                    }
+                    Some(uri) => {
+                        let cmd = ainb_cli::SkillCommand::Update(ainb_cli::UpdateArgs {
+                            uri: Some(uri.clone()),
+                            all: false,
+                            check: false,
+                            yes: true,
+                            dry_run: false,
+                        });
+                        let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            state.add_success_notification(format!("updated: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("update failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerRemove => {
+                // `[r]` — uninstall the selected unit from its tools.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let uri = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.declared_uri.clone());
+                match uri {
+                    None => {
+                        state.skill_manager_state.pending_remove_confirm = None;
+                        state.add_warning_notification("remove: no unit selected".to_string());
+                    }
+                    Some(uri) => {
+                        let armed = state.skill_manager_state.pending_remove_confirm.as_deref()
+                            == Some(uri.as_str());
+                        if !armed {
+                            // First `[r]`: arm a one-shot confirm for THIS unit.
+                            // Moving the cursor changes the selected URI and
+                            // re-arms for the new row, so a stray `r` can't
+                            // uninstall.
+                            state.skill_manager_state.pending_remove_confirm = Some(uri.clone());
+                            state.add_warning_notification(format!(
+                                "remove {uri}? press r again to confirm"
+                            ));
+                        } else {
+                            // Confirmed. Two-step uninstall:
+                            //   1. `skill remove --yes` tears down any deployed
+                            //      tool files recorded in the lockfile (per-file,
+                            //      never wipes config — guarded in convention.rs).
+                            //   2. drop the unit from the *manifest* so the
+                            //      Units table (which is manifest-driven) loses
+                            //      the row.
+                            // A manifest-declared unit that was never installed
+                            // has no lockfile entry, so step 1 reports "not in
+                            // the lockfile" — that's not a user-facing failure,
+                            // the unit still vanishes from the table. We only
+                            // surface an error when neither step removed anything.
+                            // reload_from_disk clears pending_remove_confirm.
+                            let cmd = ainb_cli::SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
+                                uri: uri.clone(),
+                                targets: None,
+                                yes: true,
+                                dry_run: false,
+                            });
+                            let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
+                            let manifest_dropped = drop_unit_from_manifest(&ainb_home, &uri);
+                            state.skill_manager_state.reload_from_disk(&ainb_home);
+                            if lockfile_ok {
+                                state.add_success_notification(format!("removed: {msg}"));
+                            } else if manifest_dropped {
+                                state.add_success_notification(format!("removed: {uri}"));
+                            } else {
+                                state.add_error_notification(format!("remove failed: {msg}"));
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerOpenAddSource => {
+                state.skill_manager_state.input =
+                    Some(crate::components::skill_manager_screen::InputState::new(
+                        crate::components::skill_manager_screen::InputKind::AddSource,
+                    ));
+            }
+            AppEvent::SkillManagerOpenSearch => {
+                // Pre-fill the prompt with the current filter so the
+                // user can edit rather than retype.
+                let mut input = crate::components::skill_manager_screen::InputState::new(
+                    crate::components::skill_manager_screen::InputKind::Search,
+                );
+                if let Some(existing) = &state.skill_manager_state.search {
+                    input.buffer = existing.clone();
+                }
+                state.skill_manager_state.input = Some(input);
+            }
+            AppEvent::SkillManagerInputChar(c) => {
+                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                    input.buffer.push(c);
+                }
+            }
+            AppEvent::SkillManagerInputBackspace => {
+                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                    input.buffer.pop();
+                }
+            }
+            AppEvent::SkillManagerInputCancel => {
+                state.skill_manager_state.input = None;
+            }
+            AppEvent::SkillManagerInputSubmit => {
+                let Some(input) = state.skill_manager_state.input.take() else {
+                    return;
+                };
+                use crate::components::skill_manager_screen::InputKind;
+                match input.kind {
+                    InputKind::Search => {
+                        let q = input.buffer.trim().to_lowercase();
+                        state.skill_manager_state.search =
+                            if q.is_empty() { None } else { Some(q) };
+                        // Reset the cursor to the first row visible under the new
+                        // filter (mirrors the source-filter handlers). Otherwise
+                        // `selected` keeps its old absolute index — which the new
+                        // filter may hide — so the highlighted row and the unit
+                        // that `[r]` remove / `[i]` install act on would diverge.
+                        state.skill_manager_state.selected = state
+                            .skill_manager_state
+                            .visible_indices()
+                            .first()
+                            .copied()
+                            .unwrap_or(0);
+                    }
+                    InputKind::AddSource => {
+                        // Bare `owner/repo` is GitHub shorthand — resolve it to
+                        // `gh:owner/repo` so the user need not type the scheme.
+                        // Schemes / non-repo shapes pass through unchanged.
+                        let uri = crate::components::skill_manager_screen::normalize_source_input(
+                            &input.buffer,
+                        );
+                        tracing::info!(uri = %uri, "SkillManager: add-source submit");
+                        if uri.is_empty() {
+                            return;
+                        }
+                        let ainb_home = ainb_skill_core::default_ainb_home();
+                        let cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
+                            uri: uri.clone(),
+                            name: None,
+                            kind: None,
+                        });
+                        let (ok, msg) = run_source_cli(&ainb_home, cmd);
+                        tracing::info!(ok, msg = %msg, "SkillManager: add-source result");
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            state.add_success_notification(format!("source added: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("add source failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerSelectPrev => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Prev,
+                );
+            }
+            AppEvent::SkillManagerSelectNext => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Next,
+                );
+            }
+            AppEvent::SkillManagerSelectFirst => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::First,
+                );
+            }
+            AppEvent::SkillManagerSelectLast => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Last,
+                );
+            }
+            AppEvent::SkillManagerToggleFocus => {
+                state.skill_manager_state.toggle_focus();
+            }
+            AppEvent::SkillManagerSourceSelectPrev => {
+                state.skill_manager_state.move_source_selection(
+                    crate::components::skill_manager_screen::SelectionMove::Prev,
+                );
+            }
+            AppEvent::SkillManagerSourceSelectNext => {
+                state.skill_manager_state.move_source_selection(
+                    crate::components::skill_manager_screen::SelectionMove::Next,
+                );
+            }
+            AppEvent::SkillManagerApplySourceFilter => {
+                state.skill_manager_state.apply_selected_source_filter();
+                // Refresh the detail pane against the newly-selected unit.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerClearSourceFilter => {
+                state.skill_manager_state.clear_source_filter();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerShrinkSources => {
+                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                state.skill_manager_state.shrink_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerGrowSources => {
+                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                state.skill_manager_state.grow_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerSourceClick { index } => {
+                state.skill_manager_state.source_selected = index;
+                state.skill_manager_state.apply_selected_source_filter();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerUnitClick { position } => {
+                use crate::components::skill_manager_screen::FocusedSkillPane;
+                state.skill_manager_state.focused_pane = FocusedSkillPane::Units;
+                let visible = state.skill_manager_state.visible_indices();
+                if let Some(&abs) = visible.get(position) {
+                    state.skill_manager_state.selected = abs;
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    crate::components::skill_manager_screen::recompute_detail(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    );
+                }
+            }
+            AppEvent::SkillManagerPersistSourcesWidth => {
+                Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerOpenLibrary => {
+                // `[l]` — open the own-skill Library view, sourced from
+                // `library.yaml` (bead ai-lgk). Built fresh on open so
+                // out-of-band `ainb skill library` edits are reflected.
+                tracing::info!("SkillManager: open own-skill Library (l)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.library = Some(
+                    crate::components::skill_manager_screen::LibraryViewState::load_from_disk(
+                        &ainb_home,
+                    ),
+                );
+            }
+            AppEvent::SkillManagerLibrarySelectPrev => {
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    lib.select_prev();
+                }
+            }
+            AppEvent::SkillManagerLibrarySelectNext => {
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    lib.select_next();
+                }
+            }
+            AppEvent::SkillManagerLibraryEnter => {
+                // Enter expands the selected own-skill into its Detail
+                // band (idempotent — pressing again keeps it open).
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    if lib.selected_row().is_some() {
+                        lib.show_detail = true;
+                    }
+                }
+            }
+            AppEvent::SkillManagerLibraryClose => {
+                state.skill_manager_state.library = None;
+            }
+            AppEvent::SkillManagerOpenBrowse => {
+                // `[b]` — open the catalog browse modal in Query mode,
+                // defaulting to the curated (`ainb`) catalog. The fetch is
+                // user-initiated: pressing Enter (even blank, for curated)
+                // lists the shelf, so opening the modal never blocks the
+                // event loop on a network call.
+                tracing::info!("SkillManager: open catalog browse (b)");
+                state.skill_manager_state.browse =
+                    Some(crate::components::skill_manager_screen::BrowseViewState::new());
+            }
+            AppEvent::SkillManagerBrowseInputChar(c) => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.query.push(c);
+                    b.status = None;
+                }
+            }
+            AppEvent::SkillManagerBrowseInputBackspace => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.query.pop();
+                    b.status = None;
+                }
+            }
+            AppEvent::SkillManagerBrowseSearch => {
+                // Enter in Query mode — run the catalog search via the
+                // selected backend. Curated reads its release index (offline
+                // under AINB_CATALOG_INDEX_FILE); skills.sh hits HTTP (mock
+                // under AINB_CATALOG_MOCK=1) — both keep the tripwire offline.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let (query, kind) = state
+                    .skill_manager_state
+                    .browse
+                    .as_ref()
+                    .map(|b| (b.query.clone(), b.catalog))
+                    .unwrap_or_default();
+                if query.trim().is_empty() && !kind.lists_on_blank() {
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        b.set_error("type a query to search the catalog");
+                    }
+                } else {
+                    let result = run_catalog_search(&ainb_home, query.trim(), kind);
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        match result {
+                            Ok(rows) => b.set_results(rows),
+                            Err(msg) => b.set_error(msg),
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseToggleCatalog => {
+                // `Tab` — flip catalog, then refresh: curated lists its whole
+                // shelf on a blank query; skills.sh returns to Query mode to
+                // await a typed query unless one is already buffered.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let next_and_query = state
+                    .skill_manager_state
+                    .browse
+                    .as_ref()
+                    .map(|b| (b.catalog.toggled(), b.query.clone()));
+                if let Some((next, query)) = next_and_query {
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        b.catalog = next;
+                        b.status = None;
+                    }
+                    if next.lists_on_blank() || !query.trim().is_empty() {
+                        let result = run_catalog_search(&ainb_home, query.trim(), next);
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            match result {
+                                Ok(rows) => b.set_results(rows),
+                                Err(msg) => b.set_error(msg),
+                            }
+                        }
+                    } else if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        // skills.sh with no query → Query mode, cleared results.
+                        b.results.clear();
+                        b.selected = 0;
+                        b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
+                        b.pending_command_confirm = false;
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseSelectPrev => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.select_prev();
+                }
+            }
+            AppEvent::SkillManagerBrowseSelectNext => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.select_next();
+                }
+            }
+            AppEvent::SkillManagerBrowseEditQuery => {
+                // `/` in Results mode — back to Query mode to refine. Disarm
+                // any pending command-install confirm (keeps the gate invariant
+                // local rather than relying on a downstream reset).
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
+                    b.status = None;
+                    b.pending_command_confirm = false;
+                }
+            }
+            AppEvent::SkillManagerBrowseInstall => {
+                // Enter on a selected result. A `skill` installs immediately
+                // via the unit flow. A command-kind (npx/plugin/mcp) RUNS a
+                // shell command, so the FIRST Enter only arms a confirm (shows
+                // the exact command); a SECOND Enter runs it.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let selected = state.skill_manager_state.browse.as_ref().and_then(|b| {
+                    b.selected_row()
+                        .map(|r| (r.install_uri.clone(), r.kind, b.pending_command_confirm))
+                });
+                match selected {
+                    None => {
+                        state.add_warning_notification("browse: no result selected".to_string());
+                    }
+                    Some((uri, kind, pending)) if kind.is_command() && !pending => {
+                        // First Enter on a command-kind — arm the confirm.
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            b.pending_command_confirm = true;
+                            b.set_status_confirm(&uri);
+                        }
+                    }
+                    Some((uri, kind, _)) => {
+                        let (ok, msg) = install_catalog_hit(&ainb_home, &uri, kind);
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            b.pending_command_confirm = false;
+                        }
+                        if ok {
+                            // Close the modal on a successful install so the
+                            // user lands back on the (now-updated) Units table.
+                            state.skill_manager_state.browse = None;
+                            state.add_success_notification(format!("installed: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("install failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseClose => {
+                state.skill_manager_state.browse = None;
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
@@ -4040,49 +5308,7 @@ impl EventHandler {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
                 state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
-            }
-            // AINB 2.0: Agent selection events
-            AppEvent::AgentSelectionBack => {
-                state.current_screen = screen_ids::HOME.to_string();
-            }
-            AppEvent::AgentSelectionNextProvider => {
-                state.agent_selection_state.select_next_provider();
-            }
-            AppEvent::AgentSelectionPrevProvider => {
-                state.agent_selection_state.select_prev_provider();
-            }
-            AppEvent::AgentSelectionNextModel => {
-                state.agent_selection_state.select_next_model();
-            }
-            AppEvent::AgentSelectionPrevModel => {
-                state.agent_selection_state.select_prev_model();
-            }
-            AppEvent::AgentSelectionToggleExpand => {
-                state.agent_selection_state.toggle_expand();
-            }
-            AppEvent::AgentSelectionSelect => {
-                if state.agent_selection_state.is_current_available() {
-                    // Store selected agent and proceed to session creation
-                    state.add_success_notification(format!(
-                        "Selected: {} - {}",
-                        state
-                            .agent_selection_state
-                            .current_provider()
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("Unknown"),
-                        state
-                            .agent_selection_state
-                            .current_model()
-                            .map(|m| m.name.as_str())
-                            .unwrap_or("Unknown")
-                    ));
-                    // Go to session list or new session
-                    state.current_screen = screen_ids::SESSION_LIST.to_string();
-                } else {
-                    state.add_warning_notification("This agent is not available yet.".to_string());
-                }
-            }
-            // AINB 2.0: Config screen events
+            } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
                 state.current_screen = screen_ids::HOME.to_string();
@@ -5133,9 +6359,9 @@ impl EventHandler {
                     onboarding_state.go_back();
                 }
             }
-            AppEvent::OnboardingCancel => {
-                tracing::debug!("Onboarding cancelled");
-                state.cancel_onboarding();
+            AppEvent::OnboardingToMenu => {
+                tracing::debug!("Leaving onboarding wizard for the Setup menu");
+                state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
@@ -5187,6 +6413,132 @@ impl EventHandler {
                     onboarding_state.advance();
                 }
             }
+            AppEvent::OnboardingAuthUp => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.move_auth_cursor(-1);
+                }
+            }
+            AppEvent::OnboardingAuthDown => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.move_auth_cursor(1);
+                }
+            }
+            AppEvent::OnboardingAuthKeyChar(ch) => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                        buf.push(ch);
+                    }
+                }
+            }
+            AppEvent::OnboardingAuthKeyBackspace => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                        buf.pop();
+                    }
+                }
+            }
+            AppEvent::OnboardingAuthKeyCancel => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.auth_api_key_input = None;
+                }
+            }
+            AppEvent::OnboardingAuthSelect => {
+                use crate::config::{AppConfig, ClaudeAuthProvider};
+                // Decide from an immutable read, then mutate/notify without a
+                // held borrow. Rows: 0=Claude OAuth, 1=Claude API key,
+                // 2=Codex OAuth, 3=Skip. While typing a key, Enter = save.
+                let (typing_key, key_buf, idx) = state
+                    .onboarding_state
+                    .as_ref()
+                    .map(|o| {
+                        (
+                            o.auth_api_key_input.is_some(),
+                            o.auth_api_key_input.clone().unwrap_or_default(),
+                            o.auth_selected_index,
+                        )
+                    })
+                    .unwrap_or((false, String::new(), 0));
+
+                // Persist the Claude auth provider so build_env_setup() honours it.
+                let set_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
+                    Ok(mut c) => {
+                        c.authentication.claude_provider = p;
+                        if let Err(e) = c.save() {
+                            tracing::error!("Failed to save auth provider: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to load config for auth provider: {}", e),
+                };
+
+                if typing_key {
+                    let key = key_buf.trim().to_string();
+                    if key.is_empty() || key == "sk-ant-" {
+                        state.add_warning_notification(
+                            "Enter an API key first (or Esc to cancel)".to_string(),
+                        );
+                    } else {
+                        match credentials::store_anthropic_api_key(&key) {
+                            Ok(()) => {
+                                set_provider(ClaudeAuthProvider::ApiKey);
+                                if let Some(o) = state.onboarding_state.as_mut() {
+                                    o.auth_api_key_input = None;
+                                    o.auth_completed = true;
+                                    o.auth_method = Some("claude-api-key".to_string());
+                                    o.advance();
+                                }
+                                state.add_success_notification(
+                                    "API key saved to keychain; sessions will use ANTHROPIC_API_KEY"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                state.add_error_notification(format!(
+                                    "Failed to save API key: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    match idx {
+                        0 => {
+                            set_provider(ClaudeAuthProvider::SystemAuth);
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("claude-oauth".to_string());
+                                o.advance();
+                            }
+                            state.add_info_notification(
+                                "Claude: subscription/OAuth - run /login inside Claude on first launch"
+                                    .to_string(),
+                            );
+                        }
+                        1 => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_api_key_input = Some("sk-ant-".to_string());
+                            }
+                        }
+                        2 => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("codex-oauth".to_string());
+                                o.advance();
+                            }
+                            state.add_info_notification(
+                                "Codex: run `codex login` (or /login in Codex) before first use"
+                                    .to_string(),
+                            );
+                        }
+                        _ => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("skipped".to_string());
+                                o.advance();
+                            }
+                        }
+                    }
+                }
+            }
             AppEvent::OnboardingEditorUp => {
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     if onboarding_state.selected_editor_index > 0 {
@@ -5202,14 +6554,68 @@ impl EventHandler {
                     }
                 }
             }
+            AppEvent::OnboardingOtelChar(ch) => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_input_char(ch);
+                }
+            }
+            AppEvent::OnboardingOtelBackspace => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_backspace();
+                }
+            }
+            AppEvent::OnboardingOtelNextField => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_next_field();
+                }
+            }
+            AppEvent::OnboardingOtelPrevField => {
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    onboarding_state.otel_prev_field();
+                }
+            }
+            AppEvent::OnboardingDepCursorUp => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.move_dep_cursor(-1);
+                }
+            }
+            AppEvent::OnboardingDepCursorDown => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.move_dep_cursor(1);
+                }
+            }
+            AppEvent::OnboardingInstallFocusedDep => {
+                use crate::components::onboarding::state::DepInstall;
+                // Snapshot the focused dep, then queue the install. The drain
+                // does the catalog lookup + run (and reports manual-only deps as
+                // an error via install_dep_capture).
+                let target = state.onboarding_state.as_ref().and_then(|os| {
+                    os.focused_dep().map(|d| (d.id.to_string(), d.name.to_string(), d.satisfied))
+                });
+                if let (Some((id, name, satisfied)), Some(os)) =
+                    (target, state.onboarding_state.as_mut())
+                {
+                    if satisfied {
+                        os.status_message = Some(format!("{name} is already installed"));
+                    } else {
+                        os.error_message = None;
+                        os.status_message = Some(format!("installing {name}…"));
+                        os.install_states.insert(id.clone(), DepInstall::Installing);
+                        state.pending_async_action = Some(AsyncAction::OnboardingInstallDep(id));
+                    }
+                }
+            }
             AppEvent::OnboardingInstallConfig => {
-                use crate::components::onboarding::dependency_checker::DependencyChecker;
+                use crate::setup::install_tmux_config;
                 tracing::debug!("Installing recommended tmux config");
-                match DependencyChecker::install_tmux_config() {
+                match install_tmux_config() {
                     Ok(()) => {
                         tracing::info!("Successfully installed tmux.conf");
                         // Re-run dependency check to update status
                         if let Some(ref mut onboarding_state) = state.onboarding_state {
+                            onboarding_state.error_message = None;
+                            onboarding_state.status_message =
+                                Some("✓ Installed optimized tmux.conf → ~/.tmux.conf (backup saved if one existed)".to_string());
                             onboarding_state.dependency_check_running = true;
                         }
                         state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
@@ -5217,7 +6623,53 @@ impl EventHandler {
                     Err(e) => {
                         tracing::error!("Failed to install tmux.conf: {}", e);
                         if let Some(ref mut onboarding_state) = state.onboarding_state {
-                            onboarding_state.error_message = Some(format!("Install failed: {}", e));
+                            onboarding_state.status_message = None;
+                            onboarding_state.error_message =
+                                Some(format!("✗ tmux.conf install failed: {e}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::OnboardingScriptPrompt => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = true;
+                    os.error_message = None;
+                    os.status_message = None;
+                }
+            }
+            AppEvent::OnboardingCancelScriptPrompt => {
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = false;
+                }
+            }
+            AppEvent::OnboardingGenerateScript(agent) => {
+                use crate::setup::{RealEnv, generate_install_script};
+                if let Some(os) = &mut state.onboarding_state {
+                    os.agent_pick_open = false;
+                }
+                match generate_install_script(agent, &RealEnv) {
+                    Ok(path) => {
+                        tracing::info!("Generated installer at {}", path.display());
+                        // Auto-copy the run command to the clipboard (OSC 52) —
+                        // you can't mouse-select in the TUI. Best-effort.
+                        let run_cmd = format!("bash {}", path.display());
+                        let copied = crate::clipboard::copy_osc52(&run_cmd).is_ok();
+                        if let Some(os) = &mut state.onboarding_state {
+                            os.error_message = None;
+                            let suffix = if copied { " (copied to clipboard)" } else { "" };
+                            os.status_message = Some(format!(
+                                "✓ Wrote {} installer{} — run:  {}",
+                                agent.label(),
+                                suffix,
+                                run_cmd
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to generate installer: {}", e);
+                        if let Some(os) = &mut state.onboarding_state {
+                            os.status_message = None;
+                            os.error_message = Some(format!("✗ installer generation failed: {e}"));
                         }
                     }
                 }
@@ -5356,6 +6808,313 @@ impl EventHandler {
     }
 }
 
+/// `true` when the currently-selected SkillManager unit is part of a
+/// conflict pair — i.e. either it carries `shadowed_by` or another
+/// manifest entry points its `shadowed_by` back at it. Used by the
+/// `[s]` keybind to route between conflict-flip (existing) and
+/// `SkillManagerSync` (bead v12.D.5).
+///
+/// Loads the manifest from `ainb_home/manifest.yaml`. Missing /
+/// invalid manifests, empty unit lists, or an out-of-range selection
+/// all resolve to "no conflict peer" so the keybind falls through to
+/// sync — that's the conservative default since the legacy
+/// flip-on-no-pair behaviour was a silent no-op.
+/// Run an `ainb skill ...` command in-process against `ainb_home`,
+/// capturing its stdout. Returns `(success, message)` where `message`
+/// is the last non-empty line of output (or the error string). Used by
+/// the SkillManager update / remove keybinds so the TUI can surface a
+/// notification without shelling out.
+///
+/// NOTE: these calls run synchronously on the UI thread. For a local
+/// `file://` source (and the sandbox) they're instant; a real network
+/// source could briefly block. The git no-prompt env (set inside the
+/// skill-core git helpers) makes an unreachable remote fail fast rather
+/// than hang, so the worst case is a short stall + an error toast.
+fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Run a catalog search via the production [`SkillsShHttpBackend`]
+/// (mock under `AINB_CATALOG_MOCK=1`) and project the hits into the
+/// TUI's `BrowseRow` view-model. Returns `Err(msg)` on a backend error
+/// so the modal can surface it without panicking. Bead ai-a20.
+fn run_catalog_search(
+    ainb_home: &std::path::Path,
+    query: &str,
+    kind: crate::components::skill_manager_screen::CatalogKind,
+) -> Result<Vec<crate::components::skill_manager_screen::BrowseRow>, String> {
+    use crate::components::skill_manager_screen::CatalogKind;
+    use ainb_skill_core::catalog::CatalogBackend;
+    // Both backends use `reqwest::blocking`, which builds its own runtime and
+    // PANICS when constructed on a thread that is already inside a tokio
+    // runtime. The TUI event loop runs under `#[tokio::main]`, so run the
+    // (synchronous) search on a dedicated OS thread — the blocking client is
+    // then built off the runtime thread. The curated file path + the skills.sh
+    // mock path both return before ever touching reqwest, so this is a no-op
+    // cost in tests / the offline tripwire.
+    let ainb_home = ainb_home.to_path_buf();
+    let query = query.to_string();
+    let hits = std::thread::spawn(move || match kind {
+        CatalogKind::Curated => {
+            let backend =
+                ainb_cli::catalog_curated::AinbCuratedCatalogBackend::from_env(&ainb_home);
+            backend.search(&query).map_err(|e| e.to_string())
+        }
+        CatalogKind::SkillsSh => {
+            let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(&ainb_home);
+            backend.search(&query).map_err(|e| e.to_string())
+        }
+    })
+    .join()
+    .map_err(|_| "catalog search thread panicked".to_string())??;
+    Ok(hits
+        .into_iter()
+        .map(|h| crate::components::skill_manager_screen::BrowseRow {
+            name: h.name,
+            repo: h.repo,
+            stars: h.stars,
+            install_uri: h.install_uri,
+            description: h.description,
+            kind: h.kind,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod catalog_search_tokio_guard {
+    use super::run_catalog_search;
+
+    // Serialize env mutation against other env-touching tests in this binary.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: `run_catalog_search` must run the `reqwest::blocking`
+    /// search off the runtime thread. Building a blocking client inside a
+    /// tokio runtime panics — before the thread-offload fix this test aborted
+    /// with that panic instead of returning a network error.
+    #[tokio::test]
+    async fn search_from_tokio_context_does_not_panic() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_mock = std::env::var_os("AINB_CATALOG_MOCK");
+        let prev_base = std::env::var_os("AINB_SKILLS_API_BASE");
+        // Force the real (non-mock) path at an unreachable endpoint so the
+        // search fails fast with a connection error rather than hitting a
+        // real catalog.
+        std::env::remove_var("AINB_CATALOG_MOCK");
+        std::env::set_var("AINB_SKILLS_API_BASE", "http://127.0.0.1:1/nope");
+
+        let res = run_catalog_search(
+            std::path::Path::new("/nonexistent-ainb-home"),
+            "react",
+            crate::components::skill_manager_screen::CatalogKind::SkillsSh,
+        );
+
+        match prev_mock {
+            Some(v) => std::env::set_var("AINB_CATALOG_MOCK", v),
+            None => std::env::remove_var("AINB_CATALOG_MOCK"),
+        }
+        match prev_base {
+            Some(v) => std::env::set_var("AINB_SKILLS_API_BASE", v),
+            None => std::env::remove_var("AINB_SKILLS_API_BASE"),
+        }
+
+        // The assertion that matters is "the call returned at all" (no panic
+        // unwind). A connect to a dead port yields Err.
+        assert!(res.is_err(), "expected a connection error, got: {res:?}");
+    }
+}
+
+/// Install a catalog hit, routing by [`CatalogEntryKind`]:
+/// - `Skill` → the unit flow: derive the source URI, `ainb source add` it
+///   (idempotent), then `ainb skill install <uri> --yes`.
+/// - `Npx` / `Plugin` / `Mcp` → run the entry's documented install COMMAND
+///   (carried in `install_uri`) via `sh -c`, since those tools install via
+///   their own CLI. The caller gates this on an explicit confirm.
+///
+/// Returns `(ok, last_line)`. Bead ai-a20 + curated-catalog expansion.
+fn install_catalog_hit(
+    ainb_home: &std::path::Path,
+    install_uri: &str,
+    kind: ainb_skill_core::catalog::CatalogEntryKind,
+) -> (bool, String) {
+    use ainb_skill_core::Uri;
+    if kind.is_command() {
+        return run_install_command(install_uri);
+    }
+    let Ok(uri) = Uri::parse(install_uri) else {
+        return (false, format!("invalid install URI `{install_uri}`"));
+    };
+    if !uri.is_unit() {
+        return (false, format!("`{install_uri}` is not a unit URI"));
+    }
+    // Source URI = `<type>:<locator>[@<ref>]` with NO `/path`.
+    let mut source_uri = format!("{}:{}", uri.source_type, uri.locator);
+    if let Some(r) = &uri.ref_ {
+        source_uri.push('@');
+        source_uri.push_str(r);
+    }
+
+    // 1. Add the source. "already exists" is fine — the source may have
+    //    been added by a previous browse / `source add`.
+    let add_cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
+        uri: source_uri.clone(),
+        name: None,
+        kind: None,
+    });
+    let (add_ok, add_msg) = run_source_cli(ainb_home, add_cmd);
+    if !add_ok && !add_msg.contains("already exists") {
+        return (false, format!("add source `{source_uri}`: {add_msg}"));
+    }
+
+    // 2. Install the unit (non-interactive).
+    let install_cmd = ainb_cli::SkillCommand::Install(ainb_cli::InstallArgs {
+        uri: install_uri.to_string(),
+        targets: None,
+        dry_run: false,
+        yes: true,
+    });
+    run_skill_cli(ainb_home, install_cmd)
+}
+
+#[cfg(test)]
+mod catalog_command_install {
+    use super::{install_catalog_hit, run_install_command};
+    use ainb_skill_core::catalog::CatalogEntryKind;
+
+    #[test]
+    fn run_command_reports_success_and_last_line() {
+        let (ok, msg) = run_install_command("echo hello-from-cmd");
+        assert!(ok, "echo should succeed: {msg}");
+        assert_eq!(msg, "hello-from-cmd");
+    }
+
+    #[test]
+    fn run_command_reports_failure_on_nonzero_exit() {
+        let (ok, _msg) = run_install_command("exit 3");
+        assert!(!ok, "a non-zero exit must report failure");
+    }
+
+    #[test]
+    fn command_kind_routes_to_shell_not_uri_parse() {
+        // A command-kind install never parses install_uri as a unit URI; it
+        // runs it. Prove it by having the "command" create a temp marker.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran-marker");
+        let cmd = format!("touch '{}'", marker.display());
+        let (ok, _msg) = install_catalog_hit(dir.path(), &cmd, CatalogEntryKind::Npx);
+        assert!(ok, "command-kind install should run the shell command");
+        assert!(marker.exists(), "the install command did not run");
+    }
+
+    #[test]
+    fn skill_kind_rejects_a_non_uri() {
+        // A skill-kind install still parses install_uri as a unit URI, so a
+        // bare command string is rejected (not executed).
+        let dir = tempfile::tempdir().unwrap();
+        let (ok, msg) =
+            install_catalog_hit(dir.path(), "echo should-not-run", CatalogEntryKind::Skill);
+        assert!(!ok, "skill-kind must not run a shell command");
+        assert!(msg.contains("invalid install URI"), "{msg}");
+    }
+}
+
+/// Run a command-kind install (npx / plugin / mcp) by handing its documented
+/// command to `sh -c`. Inherits the ainb process env (so it installs into the
+/// active HOME). Returns `(success, last_non_blank_output_line)`. The caller
+/// must have obtained an explicit user confirm first — this shells out.
+fn run_install_command(cmd: &str) -> (bool, String) {
+    let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+    match output {
+        Ok(out) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            let last = combined
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let ok = out.status.success();
+            let msg = if last.is_empty() {
+                format!("ran: {cmd}")
+            } else {
+                last
+            };
+            (ok, msg)
+        }
+        Err(e) => (false, format!("failed to run `{cmd}`: {e}")),
+    }
+}
+
+/// Remove the unit whose `declared_uri` matches `uri` from the manifest
+/// under `ainb_home`, persisting the change. Returns `true` when a unit
+/// was found and the rewrite succeeded. Best-effort: a missing /
+/// malformed manifest, or a save failure, returns `false` rather than
+/// panicking — the caller surfaces the appropriate notification.
+///
+/// The Units table is rendered from the manifest, so this is what makes
+/// the row vanish after `[r] remove`.
+fn drop_unit_from_manifest(ainb_home: &std::path::Path, uri: &str) -> bool {
+    use ainb_skill_core::manifest::Manifest;
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let Ok(mut manifest) = Manifest::load_from(&manifest_path) else {
+        return false;
+    };
+    let before = manifest.units.len();
+    manifest.units.retain(|u| u.uri != uri);
+    if manifest.units.len() == before {
+        return false; // nothing matched — leave the file untouched
+    }
+    manifest.save_to(&manifest_path).is_ok()
+}
+
+/// Same shape as [`run_skill_cli`] for `ainb source ...` commands.
+fn run_source_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SourceCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::source::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Last non-empty, non-comment line of captured CLI output — the most
+/// useful one-liner for a notification (CLI flows print a trailing
+/// summary like `installed ... → 1 tool(s)`). Falls back to a generic
+/// "done" when output is empty.
+fn last_meaningful_line(buf: &[u8]) -> String {
+    let text = String::from_utf8_lossy(buf);
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .next_back()
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "done".to_string())
+}
+
+fn selected_unit_has_conflict_peer(state: &AppState, ainb_home: &std::path::Path) -> bool {
+    use ainb_skill_core::manifest::Manifest;
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let Ok(manifest) = Manifest::load_from(&manifest_path) else {
+        return false;
+    };
+    let sel = state.skill_manager_state.selected;
+    let Some(unit) = manifest.units.get(sel) else {
+        return false;
+    };
+    if unit.shadowed_by.is_some() {
+        return true;
+    }
+    let sel_uri = unit.uri.clone();
+    manifest
+        .units
+        .iter()
+        .any(|u| u.shadowed_by.as_ref().map(|x| x.to_string()) == Some(sel_uri.clone()))
+}
+
 /// `true` if `id` matches one of the built-in screen ids declared in
 /// `crate::app::screens::ids`. Phase 4 will replace this with a probe into
 /// the live `ScreenRegistry` so plugin-supplied ids resolve too.
@@ -5364,9 +7123,7 @@ fn is_known_screen_id(id: &str) -> bool {
     matches!(
         id,
         ids::HOME
-            | ids::AGENT_SELECTION
             | ids::CONFIG
-            | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
             | ids::LEARNINGS
@@ -5471,9 +7228,7 @@ mod navigate_to_tests {
     fn is_known_screen_id_accepts_all_builtin_ids() {
         for id in [
             ids::HOME,
-            ids::AGENT_SELECTION,
             ids::CONFIG,
-            ids::CATALOG,
             ids::ANALYTICS,
             ids::WITR,
             ids::ABTOP,
@@ -5543,6 +7298,84 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// `[r]` in the Skill Manager must arm a confirm on the first press
+    /// (so a single keystroke can't uninstall), and leaving the screen
+    /// must cancel that arm. The actual removal (second press) is the
+    /// `skill remove` path, guarded + tested in convention.rs.
+    #[test]
+    fn skill_manager_remove_arms_on_first_r_and_back_cancels() {
+        let mut state = AppState::default();
+        state.skill_manager_state.units = vec![crate::components::skill_manager_screen::UnitRow {
+            idx: 0,
+            name: "foo".to_string(),
+            kind: "skill".to_string(),
+            source: "gh:o/r".to_string(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: "gh:o/r@main/skills/foo".to_string(),
+        }];
+        state.skill_manager_state.selected = 0;
+        assert!(state.skill_manager_state.pending_remove_confirm.is_none());
+
+        // First [r]: arms for the selected unit; does NOT remove it.
+        EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
+        assert_eq!(
+            state.skill_manager_state.pending_remove_confirm.as_deref(),
+            Some("gh:o/r@main/skills/foo"),
+            "first r must arm the confirm"
+        );
+        assert_eq!(
+            state.skill_manager_state.units.len(),
+            1,
+            "the unit must still be present after the first r"
+        );
+
+        // Leaving the screen cancels the arm.
+        EventHandler::process_event(AppEvent::SkillManagerBack, &mut state);
+        assert!(
+            state.skill_manager_state.pending_remove_confirm.is_none(),
+            "SkillManagerBack must cancel a pending remove confirm"
+        );
+    }
+
+    /// Applying a search filter must move the cursor onto a visible row.
+    /// Otherwise `selected` keeps a now-hidden absolute index and the
+    /// highlighted row (visible-row-0) diverges from the unit that `[r]`
+    /// remove / `[i]` install act on — a wrong-unit action.
+    #[test]
+    fn skill_manager_search_resets_cursor_to_first_visible_unit() {
+        use crate::components::skill_manager_screen::{InputKind, InputState, UnitRow};
+        let mk = |i: usize, name: &str| UnitRow {
+            idx: i,
+            name: name.to_string(),
+            kind: "skill".to_string(),
+            source: "gh:o/r".to_string(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: format!("gh:o/r@main/skills/{name}"),
+        };
+        let mut state = AppState::default();
+        state.skill_manager_state.units = vec![mk(0, "alpha"), mk(1, "beta"), mk(2, "gamma")];
+        state.skill_manager_state.selected = 0;
+
+        // Submit a search that matches only the last unit.
+        let mut input = InputState::new(InputKind::Search);
+        input.buffer = "gamma".to_string();
+        state.skill_manager_state.input = Some(input);
+        EventHandler::process_event(AppEvent::SkillManagerInputSubmit, &mut state);
+
+        assert_eq!(state.skill_manager_state.search.as_deref(), Some("gamma"));
+        assert_eq!(
+            state.skill_manager_state.visible_indices(),
+            vec![2],
+            "only gamma should be visible under the filter"
+        );
+        assert_eq!(
+            state.skill_manager_state.selected, 2,
+            "cursor must reset onto the visible unit, not stay at hidden index 0"
+        );
     }
 
     /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
@@ -5766,6 +7599,59 @@ mod panel_back_tests {
 
         assert_eq!(state.current_screen, ids::LEARNINGS);
         assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+    }
+
+    /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
+    /// the learnings/Memory browser. Locking both arms here guards against
+    /// a future refactor re-colliding the two on `m` (which silently made
+    /// the overlay unreachable when the Memory tile landed).
+    #[test]
+    fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
+        let mut state = AppState::default();
+        state.current_screen = ids::HOME.to_string();
+
+        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(p, &mut state)
+            .expect("`p` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayOpen),
+            "`p` must open the MCP pool overlay, got {evt:?}"
+        );
+
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(m, &mut state)
+            .expect("`m` on home must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "`m` must stay the learnings/Memory browser, got {evt:?}"
+        );
+    }
+
+    /// While the MCP overlay is open it captures all keys. `i` imports (into
+    /// the global user config — the overlay isn't bound to a worktree). Lock
+    /// the keybind so the action bar can't drift from it.
+    #[test]
+    fn mcp_overlay_import_key_dispatches() {
+        let mut state = AppState::default();
+        state.mcp_overlay = Some(crate::app::state::McpOverlayState {
+            pool_enabled: true,
+            daemon_running: true,
+            servers: vec![],
+            selected: 0,
+            loading: false,
+            last_refreshed: None,
+            refresh_secs: 0,
+            fetch_rx: None,
+            last_action: None,
+        });
+
+        let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        let evt = EventHandler::handle_key_event(i, &mut state)
+            .expect("`i` in the overlay must dispatch an event");
+        assert!(
+            matches!(evt, AppEvent::McpOverlayImport),
+            "`i` must dispatch McpOverlayImport, got {evt:?}"
+        );
     }
 
     /// Re-firing the open event while already on the panel must not
@@ -6181,6 +8067,121 @@ mod text_input_guard_tests {
             !EventHandler::is_text_input_context(&state),
             "Creating is render-only, not a text input"
         );
+    }
+}
+
+/// Bead v12.D.5 tripwire — `[s]` on the SkillManager Units panel
+/// routes to `SkillManagerSync` when no conflict pair is present,
+/// and to the legacy `SkillManagerConflictFlip` when the manifest
+/// holds a shadowed_by edge for the selected unit.
+#[cfg(test)]
+mod skill_manager_sync_keybind_tests {
+    use super::*;
+    use crate::app::screens::ids as screen_ids;
+    use ainb_skill_core::Uri;
+    use ainb_skill_core::manifest::{Manifest, UnitEntry};
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press_s(state: &mut AppState) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), state)
+    }
+
+    fn switch_to_skill_manager(state: &mut AppState) {
+        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+    }
+
+    /// AINB_HOME points at the supplied tempdir for the duration of
+    /// the closure; `selected_unit_has_conflict_peer` is one of the
+    /// few code paths that has to read the on-disk manifest, so we
+    /// pin the env to a tempdir to keep the test hermetic.
+    fn with_ainb_home<R>(dir: &std::path::Path, body: impl FnOnce() -> R) -> R {
+        // The lock keeps parallel-running tests in the same process
+        // from clobbering each other's AINB_HOME.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("AINB_HOME").ok();
+        std::env::set_var("AINB_HOME", dir);
+        let r = body();
+        match prev {
+            Some(v) => std::env::set_var("AINB_HOME", v),
+            None => std::env::remove_var("AINB_HOME"),
+        }
+        r
+    }
+
+    #[test]
+    fn s_routes_to_sync_when_no_conflict_pair() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            // Empty manifest on disk — no conflict pair possible.
+            Manifest::default().save_to(&tmp.path().join("manifest.yaml")).unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerSync)),
+                "expected SkillManagerSync, got {ev:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn s_routes_to_conflict_flip_when_selected_carries_shadowed_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            let mut manifest = Manifest::default();
+            manifest.units.push(UnitEntry {
+                uri: "gh:owner/repo@main/skills/commit".into(),
+                targets: None,
+                // Selected unit IS shadowed → conflict pair present.
+                shadowed_by: Some(Uri::parse("local:/tmp/orphan@head/commit").unwrap()),
+            });
+            manifest.units.push(UnitEntry {
+                uri: "local:/tmp/orphan@head/commit".into(),
+                targets: None,
+                shadowed_by: None,
+            });
+            manifest.save_to(&tmp.path().join("manifest.yaml")).unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            state.skill_manager_state.selected = 0; // unit with shadowed_by
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
+                "expected SkillManagerConflictFlip, got {ev:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn s_routes_to_conflict_flip_when_selected_is_shadowed_by_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            let mut manifest = Manifest::default();
+            // unit[0] is the active side; unit[1] points back at it.
+            manifest.units.push(UnitEntry {
+                uri: "gh:owner/repo@main/skills/commit".into(),
+                targets: None,
+                shadowed_by: None,
+            });
+            manifest.units.push(UnitEntry {
+                uri: "local:/tmp/orphan@head/commit".into(),
+                targets: None,
+                shadowed_by: Some(Uri::parse("gh:owner/repo@main/skills/commit").unwrap()),
+            });
+            manifest.save_to(&tmp.path().join("manifest.yaml")).unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            state.skill_manager_state.selected = 0; // active side
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
+                "expected SkillManagerConflictFlip, got {ev:?}"
+            );
+        });
     }
 }
 

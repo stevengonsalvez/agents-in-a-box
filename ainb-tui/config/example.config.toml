@@ -132,6 +132,29 @@ show_git_status = true
 # args = ["-y", "@context7/mcp-server"]
 # environment = {}
 # init_strategy = "lazy"  # Options: "lazy", "eager", "none"
+# shared = true           # Pool this server across sessions (default: true).
+#                         # Set false for stateful servers (browser/db bridges).
+
+# =============================================================================
+# MCP Pool (shared MCP server processes for host/tmux sessions)
+# =============================================================================
+# When enabled, ainb runs `ainb mcp daemon` which spawns each shared MCP
+# server ONCE and fronts it with a unix socket under
+# ~/.agents-in-a-box/mcp/sockets/. New sessions get a generated .mcp.json in
+# their worktree whose pooled entries point at the `ainb mcp proxy` stdio
+# shim — so N concurrent sessions share 1 server process instead of N.
+#
+# [mcp_pool]
+# enabled = true          # Master switch (default: true)
+# idle_grace_secs = 300   # Reap a pooled server's child process this many
+#                         # seconds after its last client detaches (default: 300)
+# daemon_idle_grace_secs = 900 # Exit the whole daemon after this long with NO
+#                         # clients attached anywhere (default: 900; 0 = never).
+#                         # `ainb run`/import restart it on demand, so this just
+#                         # stops an unused or orphaned pool lingering forever.
+# monitor_refresh_secs = 2 # TUI pool overlay (sidebar MCP / `p`) auto-refresh
+#                         # cadence while OPEN (default: 2; 0 = on-open + manual).
+#                         # The overlay never polls when closed.
 
 # =============================================================================
 # Plugins
@@ -157,6 +180,24 @@ show_git_status = true
 #
 # Load everything EXCEPT these (denylist). Ignored when `enabled` is set.
 # disabled = ["burndown"]
+
+# ─────────────────────────────────────────────────────────────────────────
+# Skill catalog (the `[b]` browse modal / `ainb skill browse`)
+# ─────────────────────────────────────────────────────────────────────────
+# Settings for browsing + installing skills from a catalog. Both keys are
+# optional; env vars override them.
+#
+# [skills]
+# Which release of the ainb-curated catalog index to browse + install from.
+# `latest` (default) tracks the newest published release; pin an exact tag
+# (e.g. "v1.5.0") to freeze what the curated `[b]` shelf shows and installs.
+# Overridden by AINB_CATALOG_RELEASE.
+# catalog_release = "latest"
+#
+# API key for the skills.sh catalog (the non-curated `--catalog skills`
+# path). Overridden by AINB_SKILLS_API_KEY. Not needed for the curated
+# (`ainb`) catalog.
+# api_key = "sk-..."
 
 # ── Session-reader plugin ─────────────────────────────────────────────
 # The session-reader plugin (usage analytics data backend) refreshes

@@ -63,15 +63,17 @@ fn test_manifest_parses() {
         "event_bus required",
     );
 
-    // Surfaces (design §C1 / §C4). TUI-only — NO cli_namespaces.
+    // Surfaces (design §C1 / §C4): TUI screen + slash commands, plus the
+    // headless `learnings` cli_namespace (powers `ainb learnings search`).
     assert_eq!(m.provides.screens, vec!["learnings".to_string()]);
     assert_eq!(
         m.provides.commands,
         vec!["/recall".to_string(), "/memory".to_string()],
     );
-    assert!(
-        m.provides.cli_namespaces.is_empty(),
-        "learnings is TUI-only — must NOT declare a cli_namespace",
+    assert_eq!(
+        m.provides.cli_namespaces,
+        vec!["learnings".to_string()],
+        "learnings exposes the `learnings` cli_namespace for headless search",
     );
     assert!(m.subscribes.snapshots.is_empty());
 

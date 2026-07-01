@@ -139,6 +139,8 @@ mod tests {
             workspace_name: "project-alpha".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         let session2 = SessionMetadata {
@@ -148,6 +150,8 @@ mod tests {
             workspace_name: "project-beta".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
+            headroom_enabled: false,
+            rtk_enabled: false,
         };
 
         store.sessions.insert(session1.tmux_session_name.clone(), session1);

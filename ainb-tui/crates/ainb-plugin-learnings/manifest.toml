@@ -33,8 +33,8 @@ event_bus         = true
 [provides]
 screens  = ["learnings"]
 commands = ["/recall", "/memory"]
-# NO cli_namespaces — TUI-only (v1 verification is tmux-ui-tripwire, not
-# a CLI parity leg). See design spec §C4.
+# Headless `ainb learnings search <query>` routes here via cli_dispatch.
+cli_namespaces = ["learnings"]
 snapshots = []
 
 [subscribes]

@@ -7,7 +7,7 @@ A terminal-native ecosystem for managing AI coding agents. Three components shar
 | # | Component | What it is |
 |---|---|---|
 | 1 | **`ainb` TUI + CLI** | Rust terminal app for spawning and supervising AI coding sessions. Each session gets its own git worktree and tmux session. Multi-provider: Claude Code, Codex, Gemini, Copilot, Kiro, raw shell, SSH. |
-| 2 | **Toolkit** | Portable skills + agents + workflows that deploy to 11 different AI coding tools from a single source. 86 skills, 37 agents. |
+| 2 | **ainb-toolkit** | Portable skills + agents + workflows that deploy to 11 different AI coding tools from a single source. 86 skills, 37 agents. Lives in the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb consumes it as a pinned external source. |
 | 3 | **Plugins (v2 ABI)** | Native-binary plugins for the TUI host. Capability-gated, JSON-RPC over stdio. Own screens, CLIs, statusline segments. Two reference plugins ship in-tree (`burndown`, `session-reader`). |
 | 4 | **`reflect-kb`** | Knowledge capture and retrieval library. Two-tier: QMD for fast vector search + nano-graphrag for cross-project entity-relation queries. Installed as the `reflect` CLI. |
 
@@ -53,12 +53,14 @@ If you've ever had two Claude Code sessions stomp on each other's branches, lost
    └─────────────────────────────────────────────────────────────┘
         │                              │
         ▼                              ▼
-   ┌──────────────────────┐    ┌────────────────────────────────┐
-   │  Claude · Codex      │    │  Toolkit (deployed via         │
-   │  Gemini · Copilot    │    │  toolkit/bootstrap.js to:      │
-   │  Kiro · shell · SSH  │    │  ~/.claude, ~/.codex,          │
-   └──────────────────────┘    │  ~/.copilot, ~/.gemini, …)     │
-                               └────────────────────────────────┘
+   ┌──────────────────────┐    ┌────────────────────────────────────┐
+   │  Claude · Codex      │    │  ainb-toolkit (external repo)      │
+   │  Gemini · Copilot    │    │  github.com/stevengonsalvez/       │
+   │  Kiro · shell · SSH  │    │  ainb-toolkit — deployed via       │
+   └──────────────────────┘    │  bootstrap.js to:                  │
+                               │  ~/.claude, ~/.codex,              │
+                               │  ~/.copilot, ~/.gemini, …)         │
+                               └────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────────┐
    │  reflect-kb · GraphRAG + QMD · captured learnings across all │
@@ -66,7 +68,7 @@ If you've ever had two Claude Code sessions stomp on each other's branches, lost
    └──────────────────────────────────────────────────────────────┘
 ```
 
-Each component is independently useful. You can use the toolkit without ever opening the TUI; you can use the TUI without ever writing a plugin; you can use `reflect-kb` standalone.
+Each component is independently useful. You can use ainb-toolkit without ever opening the TUI; you can use the TUI without ever writing a plugin; you can use `reflect-kb` standalone.
 
 ---
 

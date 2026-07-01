@@ -51,6 +51,11 @@ const CARGO_INSTALL: &str = "cargo install abtop";
 /// Public repository URL. Shown verbatim as the canonical reference.
 const REPO_URL: &str = "https://github.com/graykode/abtop";
 
+/// ainb docsite page for the abtop plugin — shows what it looks like inside
+/// ainb (screenshots). Full bare URL so terminals auto-linkify it and it stays
+/// copyable; left-aligned painting keeps it from truncating at >=80 cols.
+const DOCSITE_URL: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/";
+
 /// One install-command hint, resolved for the current platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallHint {
@@ -131,7 +136,8 @@ fn compose_missing_layout(hint: &InstallHint) -> Vec<String> {
         "or, with a Rust toolchain:".to_string(),
         format!("  {CARGO_INSTALL}"),
         String::new(),
-        format!("see {REPO_URL}"),
+        format!("install help: {REPO_URL}"),
+        format!("docs: {DOCSITE_URL}"),
         String::new(),
         "press r to re-check".to_string(),
     ]
@@ -142,6 +148,8 @@ fn compose_ready_layout() -> Vec<String> {
         "abtop is installed".to_string(),
         String::new(),
         "open it from the menu (press t) to view agents full-screen".to_string(),
+        String::new(),
+        format!("docs: {DOCSITE_URL}"),
     ]
 }
 
@@ -259,6 +267,18 @@ mod tests {
         assert!(buffer_contains(&buf, "abtop is installed"));
         assert!(buffer_contains(&buf, "press t"));
         assert!(buffer_contains(&buf, "full-screen"));
+        // Docsite link present + untruncated at the 80-col minimum.
+        assert!(buffer_contains(&buf, DOCSITE_URL));
+    }
+
+    #[test]
+    fn empty_states_show_full_docsite_url_at_80_cols() {
+        let mut miss = WireBuffer::new(80, 20);
+        render_missing(&mut miss, vp(80, 20), &MissingReason::NotOnPath);
+        assert!(
+            buffer_contains(&miss, DOCSITE_URL),
+            "docsite URL truncated/missing on abtop missing-state at 80 cols"
+        );
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "//": "ainb-hooks managed drop-in, written verbatim to ~/.copilot/hooks/ainb.json by `ainb-notifyd install --copilot`. Do not edit by hand; uninstall deletes this whole file. Unlike Codex (one shared ~/.codex/hooks.json merged in place), Copilot loads every *.json in ~/.copilot/hooks/ and combines them, so ainb owns this one file standalone. Only the events that need the human are registered (notification = awaiting-input/permission, agentStop = turn finished). Telemetry events are intentionally NOT hooked — they would bury the signal. The daemon also drops any non-user-facing event defensively.",
+  "version": 1,
+  "hooks": {
+    "notification": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=copilot __AINB_HOOK_SCRIPT__",
+        "timeoutSec": 5
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=copilot __AINB_HOOK_SCRIPT__",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

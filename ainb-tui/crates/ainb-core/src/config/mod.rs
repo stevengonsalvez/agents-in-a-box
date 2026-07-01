@@ -25,7 +25,7 @@ pub use favorites_store::{
     DeriveFavoriteError, Favorite, FavoritesStore, MigrationReport,
     SourceType as FavoriteSourceType, favorite_from_local_repo,
 };
-pub use mcp::{McpInitStrategy, McpServerConfig};
+pub use mcp::{McpInitStrategy, McpInstallation, McpServerConfig, McpServerDefinition};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
@@ -260,6 +260,79 @@ pub struct AppConfig {
     /// [`FleetConfig`].
     #[serde(default)]
     pub fleet: FleetConfig,
+
+    /// Shared MCP pool settings. See [`McpPoolConfig`].
+    #[serde(default)]
+    pub mcp_pool: McpPoolConfig,
+}
+
+/// Shared MCP server pool for host (tmux) sessions.
+///
+/// When enabled, ainb runs a standalone `ainb mcp daemon` that spawns each
+/// shared MCP server ONCE and fronts it with a unix socket under
+/// `~/.agents-in-a-box/mcp/sockets/`. Sessions attach via the
+/// `ainb mcp proxy <socket>` stdio shim written into each worktree's
+/// `.mcp.json`, so N sessions share one server process instead of spawning
+/// N node/bun processes.
+///
+/// Per-server opt-out: set `shared = false` on an `[mcp_servers.<name>]`
+/// table to keep that server spawning per-session (use for stateful servers
+/// like browser/db bridges).
+///
+/// Example `config.toml`:
+/// ```toml
+/// [mcp_pool]
+/// enabled = true
+/// idle_grace_secs = 300
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPoolConfig {
+    /// Master switch for the shared pool. Off → sessions spawn MCP servers
+    /// per-session exactly as before.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Seconds a pooled server child stays alive after its LAST client
+    /// detaches before the daemon reaps it. The next attach respawns it.
+    #[serde(default = "default_idle_grace_secs")]
+    pub idle_grace_secs: u64,
+
+    /// Auto-refresh cadence (seconds) for the TUI pool overlay while it's
+    /// OPEN. `0` = refresh on open + manual (`r`) only. The overlay never
+    /// polls when closed, so this only affects an actively-watched view.
+    #[serde(default = "default_monitor_refresh_secs")]
+    pub monitor_refresh_secs: u64,
+
+    /// Seconds the daemon itself stays up with ZERO attached clients (across
+    /// all servers) before it exits cleanly — removing its sockets and
+    /// freeing the process. `ainb run` / import restart it on demand, so this
+    /// just stops an unused (or orphaned) pool from lingering forever. `0`
+    /// disables self-shutdown (the daemon runs until explicitly stopped).
+    #[serde(default = "default_daemon_idle_grace_secs")]
+    pub daemon_idle_grace_secs: u64,
+}
+
+impl Default for McpPoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_grace_secs: default_idle_grace_secs(),
+            monitor_refresh_secs: default_monitor_refresh_secs(),
+            daemon_idle_grace_secs: default_daemon_idle_grace_secs(),
+        }
+    }
+}
+
+fn default_idle_grace_secs() -> u64 {
+    300
+}
+
+fn default_monitor_refresh_secs() -> u64 {
+    2
+}
+
+fn default_daemon_idle_grace_secs() -> u64 {
+    900
 }
 
 /// Where the single `presets.toml` file lives.
@@ -625,6 +698,12 @@ pub struct UiPreferences {
     #[serde(default)]
     pub sessions_sidebar_collapsed: Option<bool>,
 
+    /// Preferred SkillManager screen Sources-panel width in terminal
+    /// columns. `None` falls back to the 32-column default. Persisted
+    /// on divider-drag / `[`-`]` resize-finish.
+    #[serde(default)]
+    pub skill_manager_sources_width: Option<u16>,
+
     /// User's response to the "wire up Claude Code statusline" prompt.
     /// `Unset` means we'll prompt again (init wizard) and surface the
     /// CTA in the Budget panel. `Declined` suppresses the top-bar CTA
@@ -678,6 +757,7 @@ impl Default for UiPreferences {
             home_sidebar_width: None,
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
+            skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
         }
@@ -822,9 +902,12 @@ impl AppConfig {
     pub fn get_config_paths() -> Vec<PathBuf> {
         let mut paths = vec![];
 
-        // 1. Local project config
+        // 1. Local project config — `.ainb/` is canonical; `.agents-box/`
+        //    is the legacy location, still read but listed first so an
+        //    `.ainb/` file wins when both exist (later files override).
         if let Ok(cwd) = std::env::current_dir() {
             paths.push(cwd.join(".agents-box").join("config.toml"));
+            paths.push(cwd.join(".ainb").join("config.toml"));
         }
 
         // 2. User config (~/.agents-in-a-box/config.toml)
@@ -921,6 +1004,10 @@ impl AppConfig {
             self.ui_preferences.sessions_sidebar_collapsed =
                 other.ui_preferences.sessions_sidebar_collapsed;
         }
+        if other.ui_preferences.skill_manager_sources_width.is_some() {
+            self.ui_preferences.skill_manager_sources_width =
+                other.ui_preferences.skill_manager_sources_width;
+        }
         // Decision fields: always trust on-disk, even when the value equals
         // the default. "Unset" is itself a meaningful decision (means: prompt
         // again next time), and "Declined" must round-trip across loads or
@@ -949,6 +1036,14 @@ impl AppConfig {
         // intact.
         if !other.fleet.cost.is_empty() {
             self.fleet.cost = other.fleet.cost;
+        }
+
+        // Pool settings: trust the loaded layer whenever it differs from the
+        // defaults. `enabled = false` must survive (it IS the default-diverging
+        // case); a layer that omits [mcp_pool] deserializes to defaults and
+        // changes nothing.
+        if other.mcp_pool != McpPoolConfig::default() {
+            self.mcp_pool = other.mcp_pool;
         }
 
         // Plugin enable/disable lists: a higher layer that sets either list
@@ -1018,6 +1113,7 @@ impl Default for AppConfig {
             plugins: PluginsConfig::default(),
             presets: PresetsConfig::default(),
             fleet: FleetConfig::default(),
+            mcp_pool: McpPoolConfig::default(),
         };
 
         // Load built-in templates
@@ -1328,6 +1424,100 @@ mod tests {
     }
 
     #[test]
+    fn project_config_paths_prefer_ainb_over_legacy() {
+        let paths = AppConfig::get_config_paths();
+        let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
+        let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
+        let (ainb, legacy) = (
+            ainb.expect(".ainb path missing"),
+            legacy.expect("legacy path missing"),
+        );
+        // Later files override earlier ones in load(), so `.ainb` must come
+        // after `.agents-box` for the canonical location to win.
+        assert!(ainb > legacy, "expected .ainb after legacy, got {paths:?}");
+    }
+
+    #[test]
+    fn mcp_pool_round_trips_through_toml() {
+        let mut config = AppConfig::default();
+        config.mcp_pool.enabled = false;
+        config.mcp_pool.idle_grace_secs = 42;
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            toml_str.contains("[mcp_pool]"),
+            "missing section:\n{toml_str}"
+        );
+
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!parsed.mcp_pool.enabled);
+        assert_eq!(parsed.mcp_pool.idle_grace_secs, 42);
+    }
+
+    #[test]
+    fn mcp_pool_defaults_when_section_absent() {
+        let parsed: AppConfig = toml::from_str("version = \"1.0.0\"").unwrap();
+        assert!(parsed.mcp_pool.enabled);
+        assert_eq!(parsed.mcp_pool.idle_grace_secs, 300);
+        // Daemon self-shutdown is on by default (15 min idle) so an unused or
+        // orphaned pool can't linger forever; 0 would disable it.
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 900);
+    }
+
+    #[test]
+    fn mcp_pool_daemon_idle_grace_round_trips() {
+        let mut config = AppConfig::default();
+        config.mcp_pool.daemon_idle_grace_secs = 0; // disable self-shutdown
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.mcp_pool.daemon_idle_grace_secs, 0);
+    }
+
+    #[test]
+    fn layered_merge_respects_mcp_pool_disable() {
+        let mut base = AppConfig::default();
+        let mut higher = AppConfig::default();
+        higher.mcp_pool.enabled = false;
+
+        base.merge_loaded(higher, false);
+        assert!(
+            !base.mcp_pool.enabled,
+            "explicit disable must survive merge"
+        );
+
+        // A layer that omits [mcp_pool] (== defaults) must not clobber it back.
+        base.merge_loaded(AppConfig::default(), false);
+        assert!(!base.mcp_pool.enabled, "defaulted layer must not re-enable");
+    }
+
+    #[test]
+    fn mcp_server_shared_flag_defaults_true_and_round_trips() {
+        let toml_str = r#"
+            [mcp_servers.ctx]
+            name = "ctx"
+            description = "d"
+            installation = { type = "PreInstalled" }
+            definition = { type = "Command", command = "npx", args = ["-y", "pkg"] }
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.mcp_servers["ctx"].shared, "shared defaults to true");
+
+        let toml_str = r#"
+            [mcp_servers.browser]
+            name = "browser"
+            description = "stateful"
+            shared = false
+            installation = { type = "PreInstalled" }
+            definition = { type = "Command", command = "npx", args = [] }
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            !parsed.mcp_servers["browser"].shared,
+            "explicit opt-out parses"
+        );
+    }
+
+    #[test]
     fn test_plugins_values_roundtrip() {
         // config.toml with a `[plugins.learnings]` value table parses into
         // `PluginsConfig.values["learnings"]`, survives a save()→reload round
@@ -1492,6 +1682,7 @@ mod old_config_tests {
                 home_sidebar_width: None,
                 sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: None,
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },
@@ -1536,6 +1727,7 @@ mod old_config_tests {
                 home_sidebar_width: Some(38),
                 sessions_sidebar_width: Some(46),
                 sessions_sidebar_collapsed: Some(true),
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },
