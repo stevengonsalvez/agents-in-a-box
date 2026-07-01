@@ -17,6 +17,13 @@ pub struct Paths {
     /// The Unix domain socket used by the hook script to deliver
     /// envelopes.
     pub socket: PathBuf,
+    /// The Unix domain socket the approve/deny broker listens on. Unlike
+    /// [`Paths::socket`] (one-way fire-and-forget), this is a
+    /// request/response socket: a waiting Claude `PermissionRequest` hook
+    /// dials it and BLOCKS (`AWAIT`) until a human issues an approve/deny
+    /// (`DECIDE`) from the fleet TUI or CLI, or the broker times out
+    /// (fallback: deny). The `LIST` op enumerates pending approvals.
+    pub approve_socket: PathBuf,
     /// The PID file written by the daemon at startup.
     pub pid: PathBuf,
     /// The fallback JSONL file that the hook script writes to when
@@ -54,6 +61,7 @@ impl Paths {
         Self {
             db: base.join("notifications.db"),
             socket: base.join("notify.sock"),
+            approve_socket: base.join("approve.sock"),
             pid: base.join("notify.pid"),
             fallback: base.join("notify.fallback.jsonl"),
             events_jsonl: base.join("events.jsonl"),
@@ -81,6 +89,8 @@ mod tests {
         assert_eq!(p.base, dir.path());
         assert!(p.db.starts_with(dir.path()));
         assert!(p.socket.starts_with(dir.path()));
+        assert!(p.approve_socket.starts_with(dir.path()));
+        assert!(p.approve_socket.ends_with("approve.sock"));
         assert!(p.pid.starts_with(dir.path()));
         assert!(p.fallback.starts_with(dir.path()));
         assert!(p.events_jsonl.starts_with(dir.path()));
