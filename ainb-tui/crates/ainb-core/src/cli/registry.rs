@@ -115,7 +115,7 @@ impl CommandRegistry {
         r.register(FleetCommand);
         r.register(HeadroomCommand);
         r.register(McpCommand);
-        r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
+        r.register(NotifydCommand); // ainb-hooks daemon: status/restart/install
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r.register(RtkCommand); // RTK token-killer: install/uninstall/status
         r
@@ -1263,18 +1263,16 @@ impl CliCommand for TmuxCommand {
     }
 }
 
-/// `ainb notifyd {run,stop,install,uninstall,status}` — the ainb-hooks
-/// notification daemon, exposed as a hidden subcommand of the main
-/// binary.
+/// `ainb notifyd {run,stop,reap,restart,install,uninstall,status,list}`
+/// — the ainb-hooks notification daemon.
 ///
-/// The standalone `ainb-notifyd` binary remains the documented
-/// entrypoint, but `notify.sh`'s lazy-spawn fires `ainb notifyd` (the
-/// host binary is the one guaranteed to be on `PATH` after a normal
-/// install). This subcommand makes that path real: it delegates to the
-/// same `ainb_plugin_notifyd` functions the standalone binary uses, so
-/// both entrypoints share one implementation. Hidden from `--help`
-/// because end users should reach for `ainb-notifyd` or the TUI Inbox;
-/// this exists for the hook script's auto-start.
+/// `notify.sh`'s lazy-spawn fires `ainb notifyd` (the host binary is the
+/// one guaranteed to be on `PATH` after a normal install), and it
+/// delegates to the same `ainb_plugin_notifyd` functions the standalone
+/// `ainb-notifyd` binary uses, so both entrypoints share one
+/// implementation. Visible in `--help` because `restart` is the
+/// user-facing single resume/repair command for a dead approve socket —
+/// the very command `ainb fleet approve`'s dead-socket error points at.
 pub struct NotifydCommand;
 impl CliCommand for NotifydCommand {
     fn name(&self) -> &'static str {
@@ -1310,10 +1308,9 @@ impl CliCommand for NotifydCommand {
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "ainb-hooks notification daemon (alias of the ainb-notifyd \
-                     binary; used by notify.sh lazy-spawn).",
+                    "ainb-hooks notification daemon: status, restart (the approve-socket \
+                     resume/repair command), install/uninstall hooks",
                 )
-                .hide(true)
                 .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
                 .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
                 .subcommand(
@@ -2525,7 +2522,7 @@ mod tests {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
-        // otel + abtop + witr + learnings + plugin stub + fleet + mcp + hidden
+        // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
         // notifyd + hangar) + headroom + rtk + the web dashboard = 33.
         // The TUI is NOT in the registry — main.rs handles `tui` /
         // no-subcommand inline.
