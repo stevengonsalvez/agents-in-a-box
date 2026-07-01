@@ -3970,6 +3970,19 @@ impl AppState {
             OnboardingState::new()
         };
 
+        // Seed git directories from the last saved paths so re-opening onboarding
+        // shows what the user set previously, not a fresh default scan. Prefer the
+        // onboarding record; fall back to the app-config scan paths.
+        let saved = crate::config::OnboardingConfig::load()
+            .map(|c| c.git_directories)
+            .unwrap_or_default();
+        let saved = if saved.is_empty() {
+            self.app_config.workspace_defaults.workspace_scan_paths.clone()
+        } else {
+            saved
+        };
+        state.set_git_directories(&saved);
+
         // If a specific start step is provided, jump to it
         if let Some(step) = start_step {
             state.current_step = step;

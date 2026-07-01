@@ -690,6 +690,22 @@ impl OnboardingState {
         }
     }
 
+    /// Seed the git-directories input from previously-saved paths so re-opening
+    /// onboarding shows the user's last choice instead of a fresh default scan.
+    /// No-op on an empty list (keeps the default). Validates after seeding.
+    pub fn set_git_directories(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        self.git_directories_input = paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.cursor_position = self.git_directories_input.len();
+        self.validate_git_directories();
+    }
+
     /// Validate the current git directories input
     pub fn validate_git_directories(&mut self) {
         let paths: Vec<&str> = self
@@ -929,6 +945,21 @@ mod tests {
         state.otel_backspace();
         assert_eq!(state.otel_instance_id, "");
         assert!(!state.otel_creds_complete());
+    }
+
+    #[test]
+    fn set_git_directories_seeds_and_preserves_default_when_empty() {
+        let mut state = OnboardingState::new();
+        let default = state.git_directories_input.clone();
+
+        // Empty list is a no-op — keeps the default scan.
+        state.set_git_directories(&[]);
+        assert_eq!(state.git_directories_input, default);
+
+        // Saved paths replace the input, joined by ", ".
+        state.set_git_directories(&[PathBuf::from("/a/b"), PathBuf::from("/c/d")]);
+        assert_eq!(state.git_directories_input, "/a/b, /c/d");
+        assert_eq!(state.cursor_position, state.git_directories_input.len());
     }
 
     #[test]
