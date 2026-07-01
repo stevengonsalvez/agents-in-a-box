@@ -126,49 +126,52 @@ impl SidebarItem {
 
     /// Get the keyboard shortcut for this item
     pub fn shortcut(&self) -> &'static str {
+        // All lowercase and distinct - no case pairs (order in `all()`).
         match self {
-            Self::Config => "C",
             Self::Sessions => "s",
+            Self::Setup => "u",
+            Self::Config => "o",
+            Self::Skills => "c",
+            Self::SkillManager => "z",
+            Self::Memory => "m",
+            Self::Stats => "i",
             Self::Inbox => "b",
-            Self::Daemons => "h",
             Self::Fleet => "f",
-            Self::Recovery => "R",
+            Self::Daemons => "h",
+            Self::Witr => "w",
+            Self::Abtop => "t",
             Self::Mcp => "p",
             Self::DaemonOverlay => "d",
             Self::Logs => "l",
-            Self::Stats => "i",
-            Self::Witr => "w",
-            Self::Abtop => "t",
-            Self::Skills => "c",
-            // `m` is the Memory browser; SkillManager moved to `z` on merge.
-            Self::SkillManager => "z",
-            Self::Memory => "m",
+            Self::Recovery => "r",
             Self::Changelog => "v",
-            Self::Setup => "S",
             Self::Help => "?",
         }
     }
 
     /// Get all items in order
     pub fn all() -> &'static [SidebarItem] {
+        // UX order: primary work first, then skills/knowledge, insight,
+        // Agent Deck, observability, maintenance; Help last. Keys in
+        // `shortcut()`.
         &[
-            Self::Config,
             Self::Sessions,
-            Self::Inbox,
-            Self::Daemons,
-            Self::Fleet,
-            Self::Recovery,
-            Self::Mcp,
-            Self::DaemonOverlay,
-            Self::Logs,
-            Self::Stats,
-            Self::Witr,
-            Self::Abtop,
+            Self::Setup,
+            Self::Config,
             Self::Skills,
             Self::SkillManager,
             Self::Memory,
+            Self::Stats,
+            Self::Inbox,
+            Self::Fleet,
+            Self::Daemons,
+            Self::Witr,
+            Self::Abtop,
+            Self::Mcp,
+            Self::DaemonOverlay,
+            Self::Logs,
+            Self::Recovery,
             Self::Changelog,
-            Self::Setup,
             Self::Help,
         ]
     }
@@ -455,7 +458,7 @@ impl SidebarComponent {
             // Push shortcut to the right. Measure actual rendered cell width of
             // the spans so far (Span::width uses unicode-width) instead of byte
             // length — emoji icons are 1-2 cells wide and byte counts threw the
-            // `[x]` column out of alignment (notably `[S]`).
+            // `[x]` column out of alignment (notably `[u]`).
             let used_width: usize = main_spans.iter().map(|s| s.width()).sum();
             let shortcut_box = item.shortcut().chars().count() + 2; // [x]
             let right_margin = 2;
@@ -543,7 +546,7 @@ mod tests {
     fn premium_sidebar_shortcuts_share_one_column() {
         let cols = shortcut_columns(0);
         // One shortcut per menu item, all in the same display column —
-        // including [S] (Setup) whose 🛠️ icon carries a variation selector
+        // including [u] (Setup) whose 🛠️ icon carries a variation selector
         // that byte-length math used to mis-count.
         assert_eq!(
             cols.len(),

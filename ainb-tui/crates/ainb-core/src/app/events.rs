@@ -230,6 +230,8 @@ pub enum AppEvent {
     GoToLearnings,           // Navigate to the learnings (knowledge-base) plugin screen
     GoToAbtop,               // Launch the abtop (top-for-agents) monitor full-screen
     GoToSkills,              // Navigate to skills view
+    GoToSetupMenu,           // Open the Setup menu (home `u`)
+    GoToLogHistory,          // Open the log history viewer (home `l`)
     GoToSkillManager,        // Navigate to skill-manager view (spec §10.1)
     SkillManagerBack,        // Return to home screen from SkillManager (Esc/q)
     /// Discovery banner: import all detected units into the manifest
@@ -2749,7 +2751,7 @@ impl EventHandler {
             // `d` remains the system daemon overlay from main.
             KeyCode::Char('h') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
-            KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
+            KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
@@ -2760,11 +2762,13 @@ impl EventHandler {
             KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
             KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
             KeyCode::Char('c') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('u') => return Some(AppEvent::GoToSetupMenu),
+            KeyCode::Char('l') => return Some(AppEvent::GoToLogHistory),
             // `m` is the Memory/Learnings browser (main); SkillManager moved
             // to `z` to avoid the collision when the two features merged.
             KeyCode::Char('z') => return Some(AppEvent::GoToSkillManager),
             KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
-            KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
+            KeyCode::Char('r') => return Some(AppEvent::GoToRecovery),
             // `p` for "pool" — opens the shared MCP pool observability
             // overlay. `m` is taken by the learnings/Memory browser, so the
             // pool tile + global keybind use `p` instead.
@@ -4479,6 +4483,16 @@ impl EventHandler {
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
                 state.current_screen = screen_ids::CONFIG.to_string();
+            }
+            AppEvent::GoToSetupMenu => {
+                state.current_screen = screen_ids::SETUP_MENU.to_string();
+            }
+            AppEvent::GoToLogHistory => {
+                if let Some(log_dir) = state.log_dir() {
+                    state.log_history_state.set_log_dir(log_dir);
+                }
+                state.log_history_state.show();
+                state.current_screen = screen_ids::LOG_HISTORY.to_string();
             }
             AppEvent::GoToSessionList => {
                 tracing::info!("Navigating to SessionList");
