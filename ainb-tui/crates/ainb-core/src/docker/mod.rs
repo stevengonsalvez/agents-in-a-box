@@ -1,7 +1,6 @@
 // ABOUTME: Docker integration for managing development containers
 
 pub mod agents_dev;
-pub mod agents_dev_tests;
 pub mod builder;
 pub mod container_manager;
 pub mod log_streaming;
