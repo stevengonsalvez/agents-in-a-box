@@ -670,10 +670,17 @@ mod tests {
             )
         });
 
-        // Wait for the AWAIT to register.
+        // Wait for the AWAIT to register. The client calls are blocking sync
+        // IO; run them via spawn_blocking so they never occupy a worker thread
+        // — otherwise a blocked `client_list` starves the server task that must
+        // answer it, each call hits CLIENT_RPC_TIMEOUT, and the poll loop stalls
+        // for minutes under whole-suite CPU pressure.
         let mut pending = Vec::new();
         for _ in 0..100 {
-            pending = client_list(&sock).unwrap_or_default();
+            let s = sock.clone();
+            pending = tokio::task::spawn_blocking(move || client_list(&s).unwrap_or_default())
+                .await
+                .unwrap();
             if !pending.is_empty() {
                 break;
             }
@@ -683,7 +690,12 @@ mod tests {
         assert_eq!(pending[0].session_id, "cli-A");
         assert_eq!(pending[0].tool, "Bash");
 
-        let matched = client_decide(&sock, "cli-A", DecisionKind::Approve, "ok").unwrap();
+        let s = sock.clone();
+        let matched =
+            tokio::task::spawn_blocking(move || client_decide(&s, "cli-A", DecisionKind::Approve, "ok"))
+                .await
+                .unwrap()
+                .unwrap();
         assert!(matched, "decide should match the waiting session");
 
         let decision = waiter.await.unwrap();
