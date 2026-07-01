@@ -1014,6 +1014,11 @@ pub struct DaemonsOverlayState {
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
     pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+    /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
+    /// Carries the one-line outcome to show under the notifyd section.
+    pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Last restart outcome line (transient, shown until the next refresh).
+    pub notifyd_restart_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -4838,6 +4843,8 @@ impl AppState {
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -4879,6 +4886,46 @@ impl AppState {
         });
     }
 
+    /// Restart the notifyd daemon from the Daemons overlay — the single
+    /// resume/repair lever. Runs [`ainb_plugin_notifyd::procs::restart`] off the
+    /// UI thread (it SIGTERMs the old owner, reaps stragglers, respawns, and
+    /// polls the approve socket, up to a few seconds). Once the socket rebinds,
+    /// every still-blocked permission waiter re-dials and resumes on its own —
+    /// so this one action both repairs a dead socket and resumes pending
+    /// prompts. One-outstanding guard mirrors the fetch path.
+    pub fn spawn_notifyd_restart(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.notifyd_restart_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.notifyd_restart_rx = Some(rx);
+        o.notifyd_restart_status = Some("restarting notifyd…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
+                    Ok(out) => {
+                        let spawned = out
+                            .spawned
+                            .map(|p| format!("pid {p}"))
+                            .unwrap_or_else(|| "spawn failed".to_string());
+                        if out.socket_bound {
+                            format!("restarted notifyd ({spawned}) — approve socket live, pending prompts resume")
+                        } else {
+                            format!("restarted notifyd ({spawned}) — socket not yet rebound; hooks keep re-dialling")
+                        }
+                    }
+                    Err(e) => format!("restart failed: {e:#}"),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| format!("restart task panicked: {e}"));
+            let _ = tx.send(line);
+        });
+    }
+
     /// Drain a completed daemons fetch. Called from the 250ms app tick.
     pub fn check_daemons_overlay(&mut self) {
         let Some(o) = self.daemons_overlay.as_mut() else {
@@ -4893,6 +4940,15 @@ impl AppState {
                 o.headroom_consumers = result.headroom_consumers;
                 o.notifyd = result.notifyd;
                 o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+        // A finished restart updates the status line and triggers a fresh scan
+        // so the new pid shows up in the notifyd section.
+        if let Some(rx) = o.notifyd_restart_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.notifyd_restart_rx = None;
+                o.notifyd_restart_status = Some(line);
+                self.spawn_daemons_fetch();
             }
         }
     }

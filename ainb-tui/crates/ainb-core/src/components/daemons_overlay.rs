@@ -184,7 +184,11 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 /// This is the only daemon surface that enumerates *every* process rather
 /// than a single pid — orphans are invisible to a pid-file-only view.
 fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
-    let lines = build_notifyd_lines(&state.notifyd, area.height as usize);
+    let lines = build_notifyd_lines(
+        &state.notifyd,
+        state.notifyd_restart_status.as_deref(),
+        area.height as usize,
+    );
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -195,13 +199,14 @@ fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayS
 /// the last visible row becomes a "… +N more" pointer instead.
 fn build_notifyd_lines(
     notifyd: &[ainb_plugin_notifyd::ClassifiedDaemon],
+    restart_status: Option<&str>,
     capacity: usize,
 ) -> Vec<Line<'static>> {
     let orphan_count = notifyd.iter().filter(|d| !d.class.is_healthy()).count();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: "notifyd processes (N)  · M to clean up".
+    // Header: "notifyd processes (N)  · M to clean up  · R restart".
     let mut header = vec![Span::styled(
         format!("  notifyd processes ({})", notifyd.len()),
         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
@@ -212,7 +217,25 @@ fn build_notifyd_lines(
             Style::default().fg(CLAY),
         ));
     }
+    // Restart affordance sits next to the notifyd control it acts on.
+    header.push(Span::styled("   · ", Style::default().fg(MUTED_GRAY)));
+    header.push(Span::styled(
+        "R",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
+    header.push(Span::styled(
+        " restart (resume/repair)",
+        Style::default().fg(MUTED_GRAY),
+    ));
     lines.push(Line::from(header));
+
+    // Transient restart outcome, shown until the next refresh clears it.
+    if let Some(status) = restart_status {
+        lines.push(Line::from(Span::styled(
+            format!("    {status}"),
+            Style::default().fg(GOLD).add_modifier(Modifier::ITALIC),
+        )));
+    }
 
     if notifyd.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -222,9 +245,10 @@ fn build_notifyd_lines(
         return lines;
     }
 
-    // Header consumed one row; if the rest don't fit, reserve one row for the
-    // overflow pointer and fill the remainder with daemon rows.
-    let body_cap = capacity.saturating_sub(1);
+    // Header (+ optional status) consumed the top rows; if the rest don't fit,
+    // reserve one row for the overflow pointer and fill with daemon rows.
+    let head_rows = 1 + restart_status.is_some() as usize;
+    let body_cap = capacity.saturating_sub(head_rows);
     let (shown, overflow) = if notifyd.len() <= body_cap {
         (notifyd.len(), 0)
     } else {
@@ -282,6 +306,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
     let spans = vec![
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("R", Style::default().fg(GOLD)),
+        Span::styled(" restart notifyd  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("esc", Style::default().fg(GOLD)),
         Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         Span::styled(
@@ -320,6 +346,8 @@ mod tests {
             loading: false,
             last_refreshed: Some(std::time::Instant::now()),
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         }
     }
 
@@ -380,6 +408,8 @@ mod tests {
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         };
         let backend = TestBackend::new(120, 30);
         let mut term = Terminal::new(backend).unwrap();
@@ -459,13 +489,13 @@ mod tests {
             })
             .collect();
         // capacity 4 → header + 2 rows + "… +5 more"
-        let lines = build_notifyd_lines(&many, 4);
+        let lines = build_notifyd_lines(&many, None, 4);
         assert!(lines.len() <= 4, "exceeded capacity: {}", lines.len());
         let last: String = lines.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
         assert!(last.contains("more"), "no overflow pointer in: {last}");
 
         // Ample capacity → all 7 rows, no overflow line.
-        let full = build_notifyd_lines(&many, 30);
+        let full = build_notifyd_lines(&many, None, 30);
         assert_eq!(full.len(), 8); // header + 7
         let full_last: String =
             full.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();

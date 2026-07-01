@@ -52,6 +52,8 @@ pub enum AppEvent {
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
+    /// Restart the notifyd daemon (single resume/repair) from the overlay.
+    DaemonsOverlayRestartNotifyd,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -1258,13 +1260,15 @@ impl EventHandler {
             };
         }
 
-        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        // Daemons overlay captures all keys while open: r refresh, R restart
+        // notifyd (single resume/repair), esc/q/d close.
         if state.daemons_overlay.is_some() {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
                 }
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
                 _ => None,
             };
         }
@@ -3024,6 +3028,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
+            AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -5257,9 +5262,10 @@ impl EventHandler {
                 // permission decision to the notifyd approve broker, which
                 // unblocks the parked PermissionRequest hook (it flows back to
                 // Claude as `permissionDecision: allow`). NOT a tmux send.
-                state
-                    .fleet_panel_state
-                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Approve, "approved");
+                state.fleet_panel_state.guarded_decide(
+                    ainb_plugin_notifyd::broker::DecisionKind::Approve,
+                    "approved",
+                );
             }
             AppEvent::FleetPanelDeny => {
                 // Deny the selected APPROVE row (broker relays `deny` back to the
@@ -7493,6 +7499,34 @@ mod panel_back_tests {
 
         let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Char('q')), &mut state);
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
+    }
+
+    /// While the Daemons `d` overlay is open, `R` maps to the notifyd restart
+    /// (single resume/repair) event, and `r` still maps to refresh — the two
+    /// case-paired verbs live on the same surface.
+    #[test]
+    fn daemons_overlay_restart_key_routing() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        // Opening the overlay fires the first lazy fetch (tokio::spawn), so the
+        // test needs a live reactor.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        state.toggle_daemons_overlay();
+        assert!(state.daemons_overlay.is_some(), "overlay must be open");
+
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('R')),
+            Some(AppEvent::DaemonsOverlayRestartNotifyd)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('r')),
+            Some(AppEvent::DaemonsOverlayRefresh)
+        ));
     }
 
     #[test]
