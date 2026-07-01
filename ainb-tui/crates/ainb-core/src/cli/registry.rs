@@ -2573,11 +2573,12 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_ten_subcommands_including_daemons() {
+    fn fleet_exposes_twelve_subcommands_including_approve_deny() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
-        // `daemons` (the health view) are deliberately distinct.
+        // `daemons` (the health view) are deliberately distinct; `approve` /
+        // `deny` are the permission round-trip levers.
         let r = CommandRegistry::built_ins();
         let app = r.build_clap(root());
         let fleet = app
@@ -2589,12 +2590,14 @@ mod tests {
         assert_eq!(
             names,
             [
+                "approve",
                 "atc",
                 "bridge",
                 "broadcast",
                 "cost",
                 "daemon",
                 "daemons",
+                "deny",
                 "enrich-cache",
                 "needs",
                 "sequence",
@@ -2604,8 +2607,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            10,
-            "expected 10 fleet subcommands, got {names:?}"
+            12,
+            "expected 12 fleet subcommands, got {names:?}"
         );
     }
 
