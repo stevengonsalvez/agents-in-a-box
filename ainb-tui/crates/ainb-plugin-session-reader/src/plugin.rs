@@ -1403,6 +1403,7 @@ mod tests {
             .map(|i| SessionUsage {
                 provider: Provider::Claude,
                 project: format!("proj-{i}"),
+                project_path: format!("/tmp/proj-{i}"),
                 session_id: format!("sess-{i}"),
                 first_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
@@ -1430,6 +1431,7 @@ mod tests {
             .map(|i| SessionUsage {
                 provider: Provider::Claude,
                 project: format!("project-with-a-fairly-long-name-{i:04}"),
+                project_path: format!("/tmp/project-with-a-fairly-long-name-{i:04}"),
                 session_id: format!("session-id-uuid-style-{i:020}"),
                 first_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
@@ -1484,6 +1486,7 @@ mod tests {
             .map(|i| SessionUsage {
                 provider: Provider::Claude,
                 project: "p".into(),
+                project_path: "/tmp/p".into(),
                 session_id: format!("s-{i}"),
                 first_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
@@ -1561,6 +1564,7 @@ mod tests {
             .map(|i| SessionUsage {
                 provider: Provider::Claude,
                 project: format!("proj-{i}"),
+                project_path: format!("/tmp/proj-{i}"),
                 session_id: format!("session-{i}"),
                 first_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),

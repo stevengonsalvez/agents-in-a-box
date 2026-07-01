@@ -136,6 +136,8 @@ async fn hook_script_into_real_daemon_persists_supported_agents() {
             max_rows: 0,
         },
         os_notifications: false,
+        ingest_interval: std::time::Duration::from_millis(20),
+        materialize_interval: std::time::Duration::from_millis(20),
     };
     let daemon = tokio::spawn(async move { run_daemon(config).await });
 
@@ -233,6 +235,8 @@ async fn hook_falls_back_when_daemon_down_then_daemon_replays() {
             max_rows: 0,
         },
         os_notifications: false,
+        ingest_interval: std::time::Duration::from_millis(20),
+        materialize_interval: std::time::Duration::from_millis(20),
     };
     let daemon = tokio::spawn(async move { run_daemon(config).await });
     wait_for_socket(&paths.socket).await;

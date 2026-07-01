@@ -154,18 +154,41 @@ fn init_render_shutdown_round_trip() {
         .expect("write scan_progress subscribe reply");
     stdin.flush().expect("flush scan_progress subscribe reply");
 
-    let rev3 = read_frame(&mut stdout, deadline).expect("publish notification");
+    // Before publishing the refresh request, the plugin subscribes to the
+    // `sessions.refresh_request` topic so it doesn't miss the rescan it is
+    // about to trigger (added on main in c058c6d3 to close a startup race).
+    let rev3 = read_frame(&mut stdout, deadline).expect("refresh_request subscribe");
     assert_eq!(
-        rev3["method"], "host/snapshot/publish",
+        rev3["method"], "host/snapshot/subscribe",
         "reverse #3: {rev3}"
     );
     assert_eq!(
         rev3["params"]["topic"], "sessions.refresh_request",
         "reverse #3 topic: {rev3}"
     );
+    let rev3_id = rev3["id"].as_i64().expect("reverse request must have id");
+    let rev3_reply = json!({
+        "jsonrpc": "2.0",
+        "id": rev3_id,
+        "result": {}
+    });
+    stdin
+        .write_all(&encode(&rev3_reply))
+        .expect("write refresh_request subscribe reply");
+    stdin.flush().expect("flush refresh_request subscribe reply");
+
+    let rev4 = read_frame(&mut stdout, deadline).expect("publish notification");
+    assert_eq!(
+        rev4["method"], "host/snapshot/publish",
+        "reverse #4: {rev4}"
+    );
+    assert_eq!(
+        rev4["params"]["topic"], "sessions.refresh_request",
+        "reverse #4 topic: {rev4}"
+    );
     assert!(
-        rev3.get("id").is_none(),
-        "refresh_request publish must be a notification (no id): {rev3}"
+        rev4.get("id").is_none(),
+        "refresh_request publish must be a notification (no id): {rev4}"
     );
 
     // Now the init reply itself.

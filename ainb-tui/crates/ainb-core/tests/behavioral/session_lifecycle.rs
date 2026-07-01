@@ -173,39 +173,31 @@ fn test_session_agent_type_availability() {
 
 /// Verifies that ClaudeModel CLI values match what the Claude CLI expects
 /// and that all models provide proper display information.
-///
-/// QUARANTINED 2026-05-30 (chore/v12-1-testing): pre-existing drift —
-/// cli_value() returns the full model id (e.g. "claude-sonnet-4-6"), not
-/// the short alias ("sonnet") this test was authored against. Test
-/// intent (pin short aliases) no longer matches production behavior.
-/// Migration tracked under agents-in-a-box-887. The Option<&str>
-/// wrap above is required for compile parity; the ignore keeps the
-/// assertion silent until the test is rewritten against the new shape.
-#[ignore = "pre-existing drift, see agents-in-a-box-887"]
 #[test]
 fn test_claude_model_cli_values() {
-    // Assert: CLI values match expected strings
-    // (cli_value returns Option<&str> after the model registry refactor)
+    // Assert: CLI values match the full `claude --model` IDs. `cli_value()`
+    // returns `Option<&str>` (None for the system-default/no-flag variant), so
+    // concrete models compare against `Some(<full-id>)`.
     assert_eq!(
         ClaudeModel::Sonnet.cli_value(),
-        Some("sonnet"),
-        "Sonnet CLI value should be Some(\"sonnet\")"
+        Some("claude-sonnet-4-6"),
+        "Sonnet CLI value should be the full model id"
     );
     assert_eq!(
         ClaudeModel::Opus.cli_value(),
-        Some("opus"),
-        "Opus CLI value should be Some(\"opus\")"
+        Some("claude-opus-4-7"),
+        "Opus CLI value should be the full model id"
     );
     assert_eq!(
         ClaudeModel::Haiku.cli_value(),
-        Some("haiku"),
-        "Haiku CLI value should be Some(\"haiku\")"
+        Some("claude-haiku-4-5"),
+        "Haiku CLI value should be the full model id"
     );
 
-    // Assert: Display names are capitalized versions
-    assert_eq!(ClaudeModel::Sonnet.display_name(), "Sonnet");
-    assert_eq!(ClaudeModel::Opus.display_name(), "Opus");
-    assert_eq!(ClaudeModel::Haiku.display_name(), "Haiku");
+    // Assert: Display names are the full model ids with ctx hints.
+    assert_eq!(ClaudeModel::Sonnet.display_name(), "claude-sonnet-4-6 [1M]");
+    assert_eq!(ClaudeModel::Opus.display_name(), "claude-opus-4-7 [1M]");
+    assert_eq!(ClaudeModel::Haiku.display_name(), "claude-haiku-4-5 [200K]");
 
     // Assert: All models have descriptions and icons
     for model in ClaudeModel::all() {
@@ -221,12 +213,13 @@ fn test_claude_model_cli_values() {
         );
     }
 
-    // Assert: Sonnet is the default model
-    assert_eq!(ClaudeModel::default(), ClaudeModel::Sonnet);
+    // Assert: SystemDefault is the default model (omits the --model flag).
+    assert_eq!(ClaudeModel::default(), ClaudeModel::SystemDefault);
 
-    // Assert: all() returns all three models
+    // Assert: all() returns every variant.
     let all_models = ClaudeModel::all();
-    assert_eq!(all_models.len(), 3);
+    assert_eq!(all_models.len(), 6);
+    assert!(all_models.contains(&ClaudeModel::SystemDefault));
     assert!(all_models.contains(&ClaudeModel::Sonnet));
     assert!(all_models.contains(&ClaudeModel::Opus));
     assert!(all_models.contains(&ClaudeModel::Haiku));

@@ -178,6 +178,12 @@ pub struct RunArgs {
     /// Run in interactive mode (spawn tmux and attach)
     #[arg(long, short)]
     pub interactive: bool,
+
+    /// Parent session id — links this session to an orchestrator (e.g. ATC) so
+    /// its completions route to the parent's durable inbox (event-driven
+    /// plumbing). Exported into the session as `AINB_PARENT_SESSION`.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 /// List sessions (running + idle). Description set in `cli/registry.rs`.

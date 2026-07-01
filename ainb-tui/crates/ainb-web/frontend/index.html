@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0b0f17" />
+  <title>ainb · fleet dashboard</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+  <link rel="stylesheet" href="/static/xterm.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">◆</span>
+        <span class="brand-name">ainb</span>
+        <span class="brand-sub">fleet</span>
+      </div>
+      <div class="topbar-right">
+        <div class="stat">
+          <span class="stat-num" id="stat-sessions">–</span>
+          <span class="stat-label">sessions</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-needs">–</span>
+          <span class="stat-label">need attention</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-cost">–</span>
+          <span class="stat-label">cost</span>
+        </div>
+        <button class="push-toggle" id="push-toggle" type="button" hidden
+                title="Enable push notifications when a session needs attention">
+          <span class="push-icon" aria-hidden="true">◔</span>
+          <span class="push-label">notify</span>
+        </button>
+        <div class="conn" id="conn" title="live connection status">
+          <span class="conn-dot"></span>
+          <span class="conn-label">connecting…</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-sessions">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <span class="panel-meta" id="sessions-meta"></span>
+        </div>
+        <div class="panel-body" id="sessions"></div>
+      </section>
+
+      <section class="panel panel-needs">
+        <div class="panel-head">
+          <h2>Needs attention</h2>
+          <span class="panel-meta" id="needs-meta"></span>
+        </div>
+        <div class="panel-body" id="needs"></div>
+      </section>
+
+      <section class="panel panel-cost">
+        <div class="panel-head">
+          <h2>Cost</h2>
+          <span class="panel-meta" id="cost-meta"></span>
+        </div>
+        <div class="panel-body" id="cost"></div>
+      </section>
+    </main>
+
+    <footer class="footbar">
+      <span id="updated">—</span>
+      <span class="footbar-sep">·</span>
+      <span>read-only</span>
+      <span class="footbar-sep">·</span>
+      <span>SSE live</span>
+    </footer>
+  </div>
+
+  <div class="auth-prompt" id="auth-prompt" hidden>
+    <div class="auth-card">
+      <h3>Token required</h3>
+      <p>This dashboard requires a bearer token. Paste it to connect.</p>
+      <input type="password" id="auth-input" placeholder="bearer token" autocomplete="off" />
+      <button id="auth-go">Connect</button>
+    </div>
+  </div>
+
+  <div class="term-overlay" id="term-overlay" hidden>
+    <div class="term-window">
+      <div class="term-head">
+        <span class="term-title" id="term-title">terminal</span>
+        <span class="term-status" id="term-status"></span>
+        <button class="term-close" id="term-close" type="button" aria-label="Close terminal">✕</button>
+      </div>
+      <div class="term-body" id="term-body"></div>
+    </div>
+  </div>
+
+  <!-- xterm.js is vendored + embedded; no build step, no CDN at runtime. -->
+  <script src="/static/xterm.js"></script>
+  <script src="/static/xterm-addon-fit.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

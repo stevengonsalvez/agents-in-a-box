@@ -1478,33 +1478,33 @@ mod menu_bar_tests {
 
         // The restart slot shows `r resume`.
         for token in [
-            "ew",       // new
-            "xpand",    // expand
-            "focus",    // Tab focus
-            "ttach",    // attach
-            "pane",     // A — in-pane interactive embed
-            "1-9",      // quick attach
-            "Space",    // multi-select
-            "tar",      // star
-            "resume",   // r — resume a stopped tmux session
-            "del-sel",  // D bulk delete
-            "editor",   // o
-            "shell",    // $
-            "F2",       // rename
-            "git",      // g (rendered as g + "it")
-            "commit",   // p
-            "laude",    // c claude
-            "refresh",  // f
-            "filter",   // F  ← the key that was missing before
-            "re-auth",  // u (moved off A for in-pane attach)
-            "?/H",      // help
-            "home",     // q
-            "inbox",    // b
-            "stats",    // i — analytics panel
-            "witr",     // w — process-causality browser
-            "skills",   // k — skills browser
-            "memory",   // m — learnings KB browser
-            "abtop",    // t — top-for-agents monitor
+            "ew",      // new
+            "xpand",   // expand
+            "focus",   // Tab focus
+            "ttach",   // attach
+            "pane",    // A — in-pane interactive embed
+            "1-9",     // quick attach
+            "Space",   // multi-select
+            "tar",     // star
+            "resume",  // r — resume a stopped tmux session
+            "del-sel", // D bulk delete
+            "editor",  // o
+            "shell",   // $
+            "F2",      // rename
+            "git",     // g (rendered as g + "it")
+            "commit",  // p
+            "laude",   // c claude
+            "refresh", // f
+            "filter",  // F  ← the key that was missing before
+            "re-auth", // u (moved off A for in-pane attach)
+            "?/H",     // help
+            "home",    // q
+            "inbox",   // b
+            "stats",   // i — analytics panel
+            "witr",    // w — process-causality browser
+            "skills",  // k — skills browser
+            "memory",  // m — learnings KB browser
+            "abtop",   // t — top-for-agents monitor
         ] {
             assert!(
                 rendered.contains(token),
@@ -1569,33 +1569,33 @@ mod menu_bar_tests {
         );
 
         for token in [
-            "ew",       // new
-            "ttach",    // attach
-            "pane",     // A — in-pane interactive embed
-            "1-9",      // quick attach
-            "Space",    // multi-select
-            "tar",      // star
-            "resume",   // r — resume a stopped tmux session
-            "del-sel",  // D bulk delete
-            "editor",   // o
-            "shell",    // $
-            "F2",       // rename
-            "commit",   // p
-            "refresh",  // f
-            "filter",   // F
-            "re-auth",  // u
-            "inbox",    // b
-            "stats",    // i
-            "witr",     // w
-            "skills",   // k
-            "memory",   // m
-            "abtop",    // t
-            "git",      // g
-            "claude",   // c
-            "xpand",    // E expand
-            "focus",    // Tab focus
-            "?/H",      // help
-            "home",     // q
+            "ew",      // new
+            "ttach",   // attach
+            "pane",    // A — in-pane interactive embed
+            "1-9",     // quick attach
+            "Space",   // multi-select
+            "tar",     // star
+            "resume",  // r — resume a stopped tmux session
+            "del-sel", // D bulk delete
+            "editor",  // o
+            "shell",   // $
+            "F2",      // rename
+            "commit",  // p
+            "refresh", // f
+            "filter",  // F
+            "re-auth", // u
+            "inbox",   // b
+            "stats",   // i
+            "witr",    // w
+            "skills",  // k
+            "memory",  // m
+            "abtop",   // t
+            "git",     // g
+            "claude",  // c
+            "xpand",   // E expand
+            "focus",   // Tab focus
+            "?/H",     // help
+            "home",    // q
         ] {
             assert!(
                 rendered.contains(token),

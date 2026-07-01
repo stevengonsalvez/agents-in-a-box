@@ -1863,6 +1863,7 @@ mod chunk_accumulator_tests {
             SessionUsage {
                 provider: Provider::Claude,
                 project: "p".into(),
+                project_path: "/tmp/p".into(),
                 session_id: id.into(),
                 first_timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::from_timestamp(1_700_000_001, 0).unwrap(),

@@ -346,7 +346,10 @@ impl OnboardingComponent {
             // Sample of what the Claude Code statusline looks like once wired —
             // so the value is visible right on the setup screen.
             Line::from(vec![
-                Span::styled("Claude statusline preview:  ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    "Claude statusline preview:  ",
+                    Style::default().fg(MUTED_GRAY),
+                ),
                 Span::styled(
                     " 5h 42% ",
                     Style::default().fg(DARK_BG).bg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
@@ -355,7 +358,10 @@ impl OnboardingComponent {
                     " 7d 18% ",
                     Style::default().fg(DARK_BG).bg(WARNING_YELLOW).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" $2.10 ", Style::default().fg(SOFT_WHITE).bg(SUBDUED_BORDER)),
+                Span::styled(
+                    " $2.10 ",
+                    Style::default().fg(SOFT_WHITE).bg(SUBDUED_BORDER),
+                ),
                 Span::styled(
                     " ctx 61% ",
                     Style::default().fg(DARK_BG).bg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
@@ -375,7 +381,12 @@ impl OnboardingComponent {
         for topic in &status.topics {
             let target = if col_lines[0] <= col_lines[1] { 0 } else { 1 };
             let before = col_items[target].len();
-            push_topic_items(&mut col_items[target], topic, focused_id, &state.install_states);
+            push_topic_items(
+                &mut col_items[target],
+                topic,
+                focused_id,
+                &state.install_states,
+            );
             col_lines[target] += col_items[target].len() - before;
         }
 
@@ -1219,7 +1230,10 @@ fn focused_detail_lines(
         ))];
     };
     let mut lines = vec![Line::from(vec![
-        Span::styled("▶ ", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "▶ ",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             d.name,
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
@@ -1391,9 +1405,10 @@ mod tests {
     #[test]
     fn focused_dep_install_error_shows_inline_with_manual_hint() {
         let mut state = deps_state_focused_on_witr();
-        state
-            .install_states
-            .insert("witr".to_string(), DepInstall::Error("brew not found".to_string()));
+        state.install_states.insert(
+            "witr".to_string(),
+            DepInstall::Error("brew not found".to_string()),
+        );
         let text = deps_step_text(&state, 100);
         assert!(text.contains("brew not found"), "error message missing");
         assert!(text.contains("try manually"), "manual-retry hint missing");

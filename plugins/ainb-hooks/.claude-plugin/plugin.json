@@ -1,7 +1,7 @@
 {
   "name": "ainb-hooks",
-  "version": "0.2.0",
-  "description": "Emit actionable Claude Code lifecycle events (awaiting-input / permission via Notification, plus Stop) to the ainb notification inbox (ainb-notifyd via Unix socket).",
+  "version": "0.3.0",
+  "description": "Emit actionable Claude Code lifecycle events (awaiting-input / permission via Notification, plus Stop) to the ainb notification inbox (ainb-notifyd via Unix socket). The same notify.sh also powers the event-driven ATC plumbing when installed under ATC management (AINB_MANAGED=atc): it writes per-session status files, commits child completions to the parent's durable inbox, and runs the synchronous Stop-drain. Those ATC lifecycle hooks are installed into ~/.claude/settings.json by `ainb fleet atc setup` (read-preserve-modify-write — reflect/notifyd hooks are preserved), NOT by this marketplace manifest.",
   "author": {
     "name": "Agents-in-a-Box"
   },

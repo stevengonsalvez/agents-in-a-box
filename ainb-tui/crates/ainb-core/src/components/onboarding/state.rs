@@ -342,7 +342,8 @@ impl OnboardingState {
             return;
         }
         let max = (AUTH_OPTIONS.len() - 1) as isize;
-        self.auth_selected_index = (self.auth_selected_index as isize + delta).clamp(0, max) as usize;
+        self.auth_selected_index =
+            (self.auth_selected_index as isize + delta).clamp(0, max) as usize;
     }
 
     /// Deps flattened in topic order — the cursor indexes into this. Empty until

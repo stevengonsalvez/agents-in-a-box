@@ -743,14 +743,23 @@ mod tests {
             r#"{"cwd":"/c","workspace":{"current_dir":"/cur","project_dir":"/proj"}}"#,
         )
         .unwrap();
-        assert_eq!(payload_session_dir(&v), Some(std::path::PathBuf::from("/proj")));
+        assert_eq!(
+            payload_session_dir(&v),
+            Some(std::path::PathBuf::from("/proj"))
+        );
 
         // Falls back to current_dir, then cwd.
         let v2: serde_json::Value =
             serde_json::from_str(r#"{"cwd":"/c","workspace":{"current_dir":"/cur"}}"#).unwrap();
-        assert_eq!(payload_session_dir(&v2), Some(std::path::PathBuf::from("/cur")));
+        assert_eq!(
+            payload_session_dir(&v2),
+            Some(std::path::PathBuf::from("/cur"))
+        );
         let v3: serde_json::Value = serde_json::from_str(r#"{"cwd":"/c"}"#).unwrap();
-        assert_eq!(payload_session_dir(&v3), Some(std::path::PathBuf::from("/c")));
+        assert_eq!(
+            payload_session_dir(&v3),
+            Some(std::path::PathBuf::from("/c"))
+        );
 
         // Absent / empty → None (callers fall back to process cwd).
         let v4: serde_json::Value = serde_json::from_str(r#"{"workspace":{}}"#).unwrap();

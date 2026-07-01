@@ -300,6 +300,11 @@ pub struct SessionUsage {
     pub provider: Provider,
     /// Project label this session belongs to.
     pub project: String,
+    /// Raw working directory the session ran in. `project` is the
+    /// sanitised name; `project_path` is the unmodified cwd — the
+    /// cross-system join key against the fleet `Session.cwd`.
+    #[serde(default)]
+    pub project_path: String,
     /// Provider-assigned session id.
     pub session_id: String,
     /// Earliest call timestamp.
@@ -466,6 +471,7 @@ mod tests {
             sessions: vec![SessionUsage {
                 provider: Provider::Claude,
                 project: "ainb".into(),
+                project_path: "/tmp/ainb".into(),
                 session_id: "s1".into(),
                 first_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
                 last_timestamp: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),

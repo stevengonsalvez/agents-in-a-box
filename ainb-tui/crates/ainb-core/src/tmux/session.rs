@@ -35,6 +35,9 @@ pub struct TmuxSession {
     pty: Option<PtyWrapper>,
     /// Current attach state
     attach_state: AttachState,
+    /// Environment variables to seed into the session at creation time (passed
+    /// as `tmux new-session -e KEY=VAL`). Empty for the common case.
+    env: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for TmuxSession {
@@ -65,7 +68,18 @@ impl TmuxSession {
             program,
             pty: None,
             attach_state: AttachState::Detached,
+            env: Vec::new(),
         }
+    }
+
+    /// Seed environment variables into the session at creation (`-e KEY=VAL`).
+    /// The program launched by `new-session` inherits them. Used to pass the
+    /// event-driven plumbing's `AINB_PARENT_SESSION` to a child session so its
+    /// Stop hook can route completions to the parent's inbox. Chainable.
+    #[must_use]
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
     }
 
     /// Sanitize a session name for use with tmux
@@ -75,15 +89,8 @@ impl TmuxSession {
     ///
     /// # Returns
     /// * A sanitized name with "tmux_" prefix and invalid characters replaced
-    fn sanitize_name(name: &str) -> String {
-        let base_name = name.strip_prefix("tmux_").unwrap_or(name);
-
-        let cleaned = base_name
-            .replace(' ', "_")
-            .replace('.', "_")
-            .replace('/', "_")
-            .replace(':', "_");
-        format!("tmux_{}", cleaned)
+    pub fn sanitize_name(name: &str) -> String {
+        crate::tmux::sanitize_session_name(name)
     }
 
     /// Start the tmux session
@@ -103,21 +110,28 @@ impl TmuxSession {
             self.cleanup().await?;
         }
 
-        // Create new detached tmux session
+        // Create new detached tmux session. Build args as a Vec so we can splice
+        // in any `-e KEY=VAL` environment seeds before the program argument.
+        let work_dir_str = work_dir.to_str().context("Invalid work directory path")?;
+        let mut args: Vec<String> = vec![
+            "new-session".into(),
+            "-d".into(), // Detached
+            "-s".into(),
+            self.sanitized_name.clone(),
+            "-c".into(),
+            work_dir_str.into(),
+            "-x".into(),
+            "80".into(), // Width
+            "-y".into(),
+            "24".into(), // Height
+        ];
+        for (k, v) in &self.env {
+            args.push("-e".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push(self.program.clone());
         let status = Command::new("tmux")
-            .args([
-                "new-session",
-                "-d", // Detached
-                "-s",
-                &self.sanitized_name,
-                "-c",
-                work_dir.to_str().context("Invalid work directory path")?,
-                "-x",
-                "80", // Width
-                "-y",
-                "24", // Height
-                &self.program,
-            ])
+            .args(&args)
             .status()
             .await
             .context("Failed to start tmux session")?;

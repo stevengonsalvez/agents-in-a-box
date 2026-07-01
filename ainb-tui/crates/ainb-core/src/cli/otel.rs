@@ -87,10 +87,11 @@ async fn setup(args: SetupArgs) -> Result<()> {
 
     // 2. Collect Grafana Cloud creds — with how-to-get instructions.
     println!("\n[2/6] Grafana Cloud credentials");
+    println!("      These are the REMOTE Grafana Cloud values Alloy ships to — NOT the local");
     println!(
-        "      These are the REMOTE Grafana Cloud values Alloy ships to — NOT the local"
+        "      {} endpoint above (that one is automatic).",
+        otel::LOCAL_OTLP_ENDPOINT
     );
-    println!("      {} endpoint above (that one is automatic).", otel::LOCAL_OTLP_ENDPOINT);
     println!(
         "      Where to find these: Grafana Cloud \u{2192} Connections \u{2192} \"OpenTelemetry (OTLP)\"."
     );

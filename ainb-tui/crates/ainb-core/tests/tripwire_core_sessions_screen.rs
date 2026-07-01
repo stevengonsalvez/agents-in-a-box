@@ -28,7 +28,8 @@ fn tmux_available() -> bool {
 }
 
 fn seed_isolated_home(home: &Path) {
-    let cfg = home.join(".agents-in-a-box").join("config");
+    let base = home.join(".agents-in-a-box");
+    let cfg = base.join("config");
     fs::create_dir_all(&cfg).unwrap();
     let onboarding = format!(
         r#"completed = true
@@ -40,6 +41,8 @@ git_directories = []
         env!("CARGO_PKG_VERSION")
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).unwrap();
+    let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
+    fs::write(base.join("install.json"), install_record).unwrap();
 }
 
 /// Markers unique to the Session List screen (post-`s` navigation).
@@ -98,6 +101,29 @@ where
     None
 }
 
+fn send_key(session: &str, key: &str) {
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", session, key])
+        .status()
+        .expect("tmux send-keys");
+    assert!(status.success(), "tmux send-keys {key:?} failed");
+}
+
+fn poll_resending<F>(session: &str, key: &str, deadline: Instant, mut ok: F) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        thread::sleep(Duration::from_millis(500));
+        let c = capture(session);
+        if ok(&c) {
+            return Some(c);
+        }
+    }
+    None
+}
+
 #[test]
 fn tui_sessions_screen_renders_after_pressing_s() {
     if !tmux_available() {
@@ -146,17 +172,12 @@ fn tui_sessions_screen_renders_after_pressing_s() {
         "pre-key capture already on sessions screen — state leaked\n{pre_cap}"
     );
 
-    Command::new("tmux")
-        .args(["send-keys", "-t", &session, "s"])
-        .status()
-        .expect("send s");
-
     // Wait for sessions screen markers. Per the layout in
     // `components/session_list.rs`, the screen renders a panel with
     // either a session list or an empty-state hint — accept either
     // because a fresh tempdir HOME has no sessions yet.
     let nav_deadline = Instant::now() + Duration::from_secs(20);
-    let post = poll(&session, nav_deadline, |c| is_on_sessions_screen(c));
+    let post = poll_resending(&session, "s", nav_deadline, |c| is_on_sessions_screen(c));
 
     let final_cap = post.unwrap_or_else(|| capture(&session));
 

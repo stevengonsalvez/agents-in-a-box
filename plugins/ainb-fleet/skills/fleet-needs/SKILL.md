@@ -26,6 +26,22 @@ The session "face" of the sensor-fusion hybrid. The deterministic brain is the
 `hangar` workflow (verb=needs); this skill renders its output and handles the
 irreducibly-interactive last mile (HUD + AskUserQuestion + routing).
 
+## `fleet-needs` vs `needs` — which skill?
+
+> **This skill (`fleet-needs`) is the workflow-backed "Jarvis" cockpit.** It
+> runs the deterministic `hangar` workflow (verb=needs) for the batched
+> discover→enrich→prioritize chain, and adds **key-route ASK answering**
+> (presses the target's picker keys via tmux for an already-open
+> AskUserQuestion). It **requires the workflow gate `CLAUDE_CODE_WORKFLOWS=1`**.
+>
+> **[`/ainb-fleet:needs`](../needs/SKILL.md) is the plain control panel** —
+> prompt-driven, no gate, works everywhere. It is the canonical fallback: if the
+> gate is off, this skill **stops and hands off to `needs`** (see Step 0).
+>
+> Both read the same underlying `ainb fleet needs` data — same panel content,
+> same materialized `current_state` source (below). The difference is purely the
+> machinery: workflow-batched cockpit (here) vs plain prompt panel (`needs`).
+
 ```
 SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs'}})──▶ brain
    render HUD ◀──{banner,cards,asks}──────────────────────────────────────────┘
@@ -36,9 +52,21 @@ SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs
 
 | Direction | Channel | Why |
 |-----------|---------|-----|
-| **Reads** | JSONL (source of truth) — `ainb fleet needs/standup` tails JSONL + pane | content already committed; replayable; ground truth |
+| **Reads** | materialized `current_state` (hooks → `events.jsonl` → notifyd → SQLite) FIRST; live tmux pane + JSONL transcript scan as the **fallback** for non-Claude agents (Codex/Gemini) and un-materialized sessions | event-sourced latest stage; replayable; ground truth |
 | **Writes** | **tmux send-keys** — direct keystrokes to the target pane (verify with capture-pane) | deterministic, no broker latency or delivery gap |
 | Fallback writes | peers/broker via `ainb fleet broadcast` | only when no tmux_session known; broker has a known delivery gap |
+
+Reads are **hooks-primary**: a Claude session's ASK/ERR/WAIT/IDLE is learned
+from the event-sourced `current_state` table (materialized per session, keyed by
+cwd), not by scraping panes. The pane/transcript scan is the fallback for
+sessions the hooks don't cover — chiefly non-Claude agents (Codex/Gemini fire no
+Claude hooks) and any session notifyd hasn't materialized (daemon down / hooks
+not installed). Each card carries a `source` (`"hook"` | `"tmux"`) telling you
+which path produced it.
+
+> **This skill does NOT install hooks.** It consumes the materialized state. The
+> global Claude Code hooks are installed by
+> [`ainb fleet atc setup`](../atc/SKILL.md) (into `~/.claude/settings.json`).
 
 All write routing below uses tmux first. Broker is a last resort, not the default.
 This matches the binary's default `AINB_FLEET_TRANSPORT=tmux-first`; set

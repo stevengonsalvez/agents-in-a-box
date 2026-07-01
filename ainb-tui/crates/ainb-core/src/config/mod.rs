@@ -256,6 +256,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub presets: PresetsConfig,
 
+    /// Fleet orchestration configuration (budget caps, etc.). See
+    /// [`FleetConfig`].
+    #[serde(default)]
+    pub fleet: FleetConfig,
+
     /// Shared MCP pool settings. See [`McpPoolConfig`].
     #[serde(default)]
     pub mcp_pool: McpPoolConfig,
@@ -435,6 +440,83 @@ pub struct PluginsConfig {
     /// deterministic across saves.
     #[serde(default, flatten)]
     pub values: BTreeMap<String, toml::Value>,
+}
+
+/// Fleet orchestration configuration.
+///
+/// Currently only carries cost budget caps; reserved as the home for
+/// future fleet-wide knobs so they share one `[fleet]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FleetConfig {
+    /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
+    #[serde(default)]
+    pub cost: CostBudgetConfig,
+}
+
+/// Spend ceilings consumed by `ainb fleet cost`.
+///
+/// A breach fires a notifyd alert (`Notification:budget_exceeded`) for the
+/// offending session or group. All thresholds are lifetime USD totals over
+/// the reporting window. The blanket `session_usd` / `group_usd` apply to
+/// every session / group; the per-key override maps pin a tighter (or
+/// looser) ceiling for a named session id or group, taking precedence over
+/// the blanket value.
+///
+/// Example `config.toml`:
+/// ```toml
+/// [fleet.cost]
+/// session_usd = 5.0     # warn when any single session crosses $5
+/// group_usd = 25.0      # warn when any workspace group crosses $25
+///
+/// [fleet.cost.session_overrides]
+/// "abc123" = 50.0       # this long-running session gets a $50 ceiling
+///
+/// [fleet.cost.group_overrides]
+/// "infra" = 100.0       # the infra workspace gets a $100 ceiling
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CostBudgetConfig {
+    /// Blanket per-session USD ceiling. `None` disables session caps
+    /// (except where a `session_overrides` entry sets one explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_usd: Option<f64>,
+    /// Blanket per-group USD ceiling. `None` disables group caps (except
+    /// where a `group_overrides` entry sets one explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_usd: Option<f64>,
+    /// Per-session USD ceilings keyed by session id. Overrides
+    /// `session_usd` for the named session.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_overrides: HashMap<String, f64>,
+    /// Per-group USD ceilings keyed by group name. Overrides `group_usd`
+    /// for the named group.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub group_overrides: HashMap<String, f64>,
+}
+
+impl CostBudgetConfig {
+    /// True when no cap of any kind is configured. The default value is
+    /// empty; an empty project layer must not clobber a populated user
+    /// layer (see `merge_loaded`).
+    pub fn is_empty(&self) -> bool {
+        self.session_usd.is_none()
+            && self.group_usd.is_none()
+            && self.session_overrides.is_empty()
+            && self.group_overrides.is_empty()
+    }
+
+    /// Resolve the effective USD ceiling for a session id: the override
+    /// map wins over the blanket `session_usd`.
+    pub fn session_limit(&self, session_id: &str) -> Option<f64> {
+        self.session_overrides.get(session_id).copied().or(self.session_usd)
+    }
+
+    /// Resolve the effective USD ceiling for a group name: the override
+    /// map wins over the blanket `group_usd`.
+    pub fn group_limit(&self, group: &str) -> Option<f64> {
+        self.group_overrides.get(group).copied().or(self.group_usd)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -946,6 +1028,16 @@ impl AppConfig {
             self.usage = other.usage;
         }
 
+        // Fleet cost budgets layer like the plugin tables: a higher layer
+        // (project) that declares any cap replaces the lower layer's caps,
+        // so a project can pin a tighter spend ceiling without the user
+        // default leaking through. An all-empty `[fleet.cost]` (the
+        // default) is treated as "not set" and leaves the lower layer
+        // intact.
+        if !other.fleet.cost.is_empty() {
+            self.fleet.cost = other.fleet.cost;
+        }
+
         // Pool settings: trust the loaded layer whenever it differs from the
         // defaults. `enabled = false` must survive (it IS the default-diverging
         // case); a layer that omits [mcp_pool] deserializes to defaults and
@@ -1020,6 +1112,7 @@ impl Default for AppConfig {
             usage: UsageConfig::default(),
             plugins: PluginsConfig::default(),
             presets: PresetsConfig::default(),
+            fleet: FleetConfig::default(),
             mcp_pool: McpPoolConfig::default(),
         };
 
@@ -1462,6 +1555,59 @@ qmd_collection = "learnings"
         // Absent `[plugins.<x>]` → empty map via serde default.
         let bare: AppConfig = toml::from_str("[plugins]\n").expect("bare plugins");
         assert!(bare.plugins.values.is_empty(), "absent table → empty map");
+    }
+
+    #[test]
+    fn test_fleet_cost_budget_roundtrip_and_resolution() {
+        let toml_src = r#"
+[fleet.cost]
+session_usd = 5.0
+group_usd = 25.0
+
+[fleet.cost.session_overrides]
+"abc123" = 50.0
+
+[fleet.cost.group_overrides]
+"infra" = 100.0
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).expect("parse fleet.cost");
+        let cost = &cfg.fleet.cost;
+        assert_eq!(cost.session_usd, Some(5.0));
+        assert_eq!(cost.group_usd, Some(25.0));
+
+        // Overrides win over the blanket caps; everything else falls back.
+        assert_eq!(cost.session_limit("abc123"), Some(50.0));
+        assert_eq!(cost.session_limit("other"), Some(5.0));
+        assert_eq!(cost.group_limit("infra"), Some(100.0));
+        assert_eq!(cost.group_limit("other"), Some(25.0));
+
+        // save()→reload identity.
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let reloaded: AppConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reloaded.fleet.cost, cfg.fleet.cost);
+
+        // Absent `[fleet.cost]` → empty (no caps).
+        let bare: AppConfig = toml::from_str("[fleet]\n").expect("bare fleet");
+        assert!(bare.fleet.cost.is_empty());
+        assert_eq!(bare.fleet.cost.session_limit("x"), None);
+    }
+
+    #[test]
+    fn test_fleet_cost_project_layer_overrides_user_layer() {
+        // User layer sets a $5 session cap; an empty project `[fleet.cost]`
+        // must NOT clobber it, but a populated one must replace it.
+        let mut user: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 5.0\n").unwrap();
+
+        // Empty project fleet config → user cap preserved.
+        let empty_project: AppConfig = toml::from_str("[fleet]\n").unwrap();
+        let mut merged = user.clone();
+        merged.merge(empty_project);
+        assert_eq!(merged.fleet.cost.session_usd, Some(5.0));
+
+        // Populated project config → replaces the user cap.
+        let project: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 2.0\n").unwrap();
+        user.merge(project);
+        assert_eq!(user.fleet.cost.session_usd, Some(2.0));
     }
 
     #[test]

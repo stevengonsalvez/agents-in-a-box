@@ -4,10 +4,10 @@ use ratatui::{Frame, layout::Rect};
 
 use super::{EventOutcome, Screen, ids};
 use crate::app::AppState;
-use crate::components::{ AttachedTerminalComponent, AuthProviderPopupComponent,
-    AuthSetupComponent, ChangelogComponent, ConfigPopupComponent, ConfigScreenComponent,
-    GitViewComponent, HomeScreenV2Component, LogHistoryViewerComponent, OnboardingComponent,
-    SessionRecovery, SetupMenuComponent,
+use crate::components::{
+    AttachedTerminalComponent, AuthProviderPopupComponent, AuthSetupComponent, ChangelogComponent,
+    ConfigPopupComponent, ConfigScreenComponent, GitViewComponent, HomeScreenV2Component,
+    LogHistoryViewerComponent, OnboardingComponent, SessionRecovery, SetupMenuComponent,
 };
 
 /// Centred sub-rect helper, mirroring `components::layout::centered_rect`.
@@ -632,6 +632,40 @@ impl Screen for InboxScreen {
     }
 }
 
+/// Daemons screen — read-only runtime health of every long-running ainb daemon
+/// (phone bridge / notifyd / ATC / fleet daemon). Renders from
+/// `fleet::daemons::collect` via the shared component, refreshing live on the
+/// render tick. State lives on `AppState::daemons_state` so the cached snapshot
+/// survives cross-screen navigation.
+#[derive(Default)]
+pub struct DaemonsScreen;
+
+impl Screen for DaemonsScreen {
+    fn id(&self) -> &str {
+        ids::DAEMONS
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+    }
+}
+
+/// Fleet control panel — the interactive "who-needs-you" looking-glass. Reads
+/// the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session) via the
+/// shared component, refreshing on the render tick, and acts (answer
+/// interviews / broadcast) through the existing fleet send path. State lives on
+/// `AppState::fleet_panel_state` so selection survives cross-screen navigation.
+#[derive(Default)]
+pub struct FleetPanelScreen;
+
+impl Screen for FleetPanelScreen {
+    fn id(&self) -> &str {
+        ids::FLEET_PANEL
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::fleet_panel::render(frame, area, &mut state.fleet_panel_state);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stateful screens — own their component instance
 // ---------------------------------------------------------------------------
@@ -894,6 +928,8 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
     registry.register(Box::new(InboxScreen));
+    registry.register(Box::new(DaemonsScreen));
+    registry.register(Box::new(FleetPanelScreen));
 }
 
 #[cfg(test)]
@@ -956,6 +992,9 @@ mod tests {
             ids::SETUP_MENU,
             ids::AUTH_SETUP,
             ids::ATTACHED_TERMINAL,
+            ids::INBOX,
+            ids::DAEMONS,
+            ids::FLEET_PANEL,
         ] {
             assert!(r.contains(id), "registry missing built-in screen {id}");
         }

@@ -92,8 +92,14 @@ fn deps_installer_cursor_docs_and_install_affordance() {
     .unwrap_or_else(|| capture(&session));
 
     // The new keymap footer must advertise the install + cursor affordances.
-    assert!(loaded.contains("i install"), "footer missing 'i install':\n{loaded}");
-    assert!(loaded.contains("t tmux"), "footer missing 't tmux':\n{loaded}");
+    assert!(
+        loaded.contains("i install"),
+        "footer missing 'i install':\n{loaded}"
+    );
+    assert!(
+        loaded.contains("t tmux"),
+        "footer missing 't tmux':\n{loaded}"
+    );
     assert!(
         loaded.contains("focus"),
         "footer missing the up/down focus hint:\n{loaded}"

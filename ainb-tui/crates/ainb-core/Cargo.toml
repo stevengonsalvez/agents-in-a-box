@@ -52,6 +52,8 @@ toml_edit = { workspace = true }
 # Claude API integration
 reqwest = { workspace = true }
 tokio-stream = { workspace = true }
+# Slack socket-mode WebSocket transport for `ainb fleet bridge`.
+tokio-tungstenite = { workspace = true }
 
 # Utils
 shell-escape = { workspace = true }
@@ -65,7 +67,12 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tempfile = { workspace = true }
+# Durable orchestration plumbing: advisory file locks (inbox).
+# (blake3, for exactly-once turn fingerprints, is already a dependency below.)
+fs2 = { workspace = true }
 nix = { workspace = true }
+# Process-identity cross-check in the Daemons liveness probe (see workspace dep).
+sysinfo = { workspace = true }
 arboard = { workspace = true }
 keyring = { workspace = true }
 regex = { workspace = true }
@@ -101,6 +108,8 @@ ainb-cli = { path = "../ainb-cli", version = "0.1.0" }
 ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0" }
 # Notification daemon — used in-process for the Inbox screen reader.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
+# Read-only web dashboard — backs the `ainb web` subcommand.
+ainb-web = { path = "../ainb-web", version = "1.7.0" }
 # CSPRNG for `ainb hangar auth token create` (the OsRng passed to the store's
 # `mint_pat` / `mint_daemon_token`). All hashing/encoding lives in the store +
 # core; the CLI only supplies the random source.

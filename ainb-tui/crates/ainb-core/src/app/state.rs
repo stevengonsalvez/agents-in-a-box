@@ -1430,7 +1430,6 @@ impl AgentProvider {
     }
 }
 
-
 // ============================================================================
 // Configuration Screen State
 // ============================================================================
@@ -2937,6 +2936,13 @@ pub struct AppState {
     /// filters, in-process SQLite store handle).
     pub inbox_state: crate::components::inbox::InboxState,
 
+    /// Daemons screen state (cached runtime-health snapshot + poll tick).
+    pub daemons_state: crate::components::daemons::DaemonsState,
+
+    /// Fleet control-panel state (cached `current_state` rows + selection +
+    /// shared action-feedback cell).
+    pub fleet_panel_state: crate::components::fleet_panel::FleetPanelState,
+
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -3360,7 +3366,7 @@ pub enum AsyncAction {
     // Editor action
     OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
-    OnboardingCheckDeps, // Run dependency check during onboarding
+    OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
 }
 
@@ -3474,6 +3480,12 @@ impl Default for AppState {
 
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
             inbox_state: crate::components::inbox::InboxState::default(),
+
+            // Daemons observability (collects health on first/periodic render)
+            daemons_state: crate::components::daemons::DaemonsState::default(),
+
+            // Fleet control panel (reads current_state on entry/tick)
+            fleet_panel_state: crate::components::fleet_panel::FleetPanelState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),
@@ -9183,10 +9195,7 @@ impl AppState {
                     use crate::setup::{catalog, install_dep_capture};
                     info!("Installing dependency '{dep_id}' from onboarding");
                     // Own the catalog dep so it can move into spawn_blocking.
-                    let dep = catalog()
-                        .into_iter()
-                        .flat_map(|t| t.deps)
-                        .find(|d| d.id == dep_id);
+                    let dep = catalog().into_iter().flat_map(|t| t.deps).find(|d| d.id == dep_id);
                     let result = match dep {
                         Some(dep) => tokio::task::spawn_blocking(move || install_dep_capture(&dep))
                             .await

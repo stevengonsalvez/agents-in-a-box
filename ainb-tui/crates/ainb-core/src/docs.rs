@@ -12,8 +12,7 @@ pub const WITR: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugin
 /// abtop agent-process monitor plugin.
 pub const ABTOP: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/";
 /// burndown usage/cost analytics plugin.
-pub const BURNDOWN: &str =
-    "https://stevengonsalvez.github.io/agents-in-a-box/plugins/burndown/";
+pub const BURNDOWN: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/burndown/";
 /// Token-optimization tools (rtk + headroom).
 pub const TOKEN_OPT: &str =
     "https://stevengonsalvez.github.io/agents-in-a-box/tui/token-optimization/";

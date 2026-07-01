@@ -30,6 +30,34 @@ use tracing::{info, warn};
 
 use crate::paths::Paths;
 
+/// Atomically write `contents` to `path` via a sibling temp file + rename
+/// (LOW-8). A bare `std::fs::write` truncates-then-writes in place, so a crash
+/// mid-write leaves a TORN file — half-written `hooks.json` / `install.json`
+/// is durable state that uninstall and re-install must parse. Writing to a temp
+/// file in the SAME directory and `rename`-ing it over the target makes the
+/// swap atomic on POSIX: a reader sees either the old file or the complete new
+/// one, never a partial. Self-contained (no core `plumbing::atomic` dependency)
+/// so the notifyd crate stays independent.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    // Unique-ish sibling temp name keyed by pid so concurrent writers don't
+    // collide on the temp file before each renames over the target.
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    let tmp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?; // durability: the bytes hit disk before the rename swap.
+    }
+    // Atomic same-dir swap; clean up the temp on rename failure.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// The bash hook script, baked into the binary.
 const HOOK_SCRIPT: &str = include_str!("../../../../plugins/ainb-hooks/hooks/notify.sh");
 
@@ -143,7 +171,9 @@ impl InstallRecord {
             std::fs::create_dir_all(parent).ok();
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, text).with_context(|| format!("writing {}", p.display()))?;
+        // Atomic write (LOW-8): a torn install.json would break uninstall's
+        // reversibility, so swap it in via temp + rename.
+        write_atomic(&p, &text).with_context(|| format!("writing {}", p.display()))?;
         Ok(())
     }
 }
@@ -488,7 +518,9 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
     merged.insert("hooks".to_string(), serde_json::Value::Object(merged_hooks));
 
     let text = serde_json::to_string_pretty(&serde_json::Value::Object(merged))?;
-    std::fs::write(&hooks_json, text)
+    // Atomic write (LOW-8): hooks.json is durable state Codex reads on every
+    // invocation; a torn file would break hook dispatch. Swap via temp + rename.
+    write_atomic(&hooks_json, &text)
         .with_context(|| format!("writing {}", hooks_json.display()))?;
     info!(hooks_json = %hooks_json.display(), "installed codex hooks");
     Ok(hooks_json)
@@ -638,7 +670,9 @@ fn strip_codex_managed_entries(hooks_json: &Path) -> Result<()> {
         hooks_obj.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false));
     }
     let out = serde_json::to_string_pretty(&value)?;
-    std::fs::write(hooks_json, out)?;
+    // Atomic write (LOW-8): same durability concern as install_codex — a torn
+    // hooks.json after a strip would leave Codex with an unparseable file.
+    write_atomic(hooks_json, &out)?;
     Ok(())
 }
 
@@ -702,6 +736,37 @@ mod tests {
 
     fn paths_under_home(home: &Path) -> Paths {
         Paths::under(home.join(".agents-in-a-box"))
+    }
+
+    #[test]
+    fn write_atomic_replaces_existing_file_completely() {
+        // LOW-8: a second atomic write fully replaces prior content (no torn
+        // overlay), and the destination ends up with exactly the new bytes.
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("hooks.json");
+        write_atomic(&target, "{\"v\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"v\":1}");
+        write_atomic(&target, "{\"v\":2,\"longer\":true}").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"v\":2,\"longer\":true}"
+        );
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_temp_file_behind() {
+        // The temp sibling must be renamed away (or cleaned up), never left as
+        // litter next to the target.
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("install.json");
+        write_atomic(&target, "payload").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
     }
 
     #[test]

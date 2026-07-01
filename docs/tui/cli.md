@@ -1119,7 +1119,7 @@ Arguments:
 
 Options:
       --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
-      --monthly-usd <MONTHLY_USD>  
+      --monthly-usd <MONTHLY_USD>
       --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor]
       --reset-day <RESET_DAY>      [default: 1]
   -h, --help                       Print help
@@ -1782,7 +1782,7 @@ Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)
 Usage: ainb plugin update [OPTIONS] <plugin>
 
 Arguments:
-  <plugin>  
+  <plugin>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1801,7 +1801,7 @@ Remove an installed plugin (NOT YET IMPLEMENTED)
 Usage: ainb plugin remove [OPTIONS] <plugin>
 
 Arguments:
-  <plugin>  
+  <plugin>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1835,7 +1835,7 @@ Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)
 Usage: ainb plugin search [OPTIONS] <query>
 
 Arguments:
-  <query>  
+  <query>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1874,7 +1874,7 @@ Register a marketplace by URL or local path (NOT YET IMPLEMENTED)
 Usage: ainb plugin marketplace add [OPTIONS] <url>
 
 Arguments:
-  <url>  
+  <url>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1892,7 +1892,7 @@ Unregister a marketplace by name (NOT YET IMPLEMENTED)
 Usage: ainb plugin marketplace remove [OPTIONS] <name>
 
 Arguments:
-  <name>  
+  <name>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -2030,7 +2030,7 @@ Send one prompt to selected sessions (peers-first, tmux fallback)
 Usage: ainb fleet broadcast [OPTIONS] <prompt>
 
 Arguments:
-  <prompt>  
+  <prompt>
 
 Options:
       --all              Fan out to every running session
@@ -2051,10 +2051,10 @@ Ordered prompts with ack between steps
 Usage: ainb fleet sequence [OPTIONS] <steps>...
 
 Arguments:
-  <steps>...  
+  <steps>...
 
 Options:
-      --all                
+      --all
       --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
       --timeout <timeout>  Per-step timeout (seconds) [default: 300]
   -h, --help               Print help
@@ -2089,7 +2089,7 @@ Usage: ainb fleet daemon [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -v, --verbose          
+  -v, --verbose
   -h, --help             Print help
 ```
 
@@ -2125,8 +2125,8 @@ Usage: ainb fleet enrich-cache put [OPTIONS] --key <key> --suggestion <suggestio
 
 Options:
       --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
-      --key <key>                
-      --suggestion <suggestion>  
+      --key <key>
+      --suggestion <suggestion>
   -h, --help                     Print help
 ```
 
@@ -2142,7 +2142,7 @@ Usage: ainb fleet enrich-cache get [OPTIONS] --key <key>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-      --key <key>        
+      --key <key>
   -h, --help             Print help
 ```
 
@@ -2249,7 +2249,7 @@ Usage: ainb mcp daemon [OPTIONS]
 Options:
       --format <format>
           Output format
-          
+
           [default: text]
           [possible values: text, json, csv, markdown]
 
@@ -2413,7 +2413,7 @@ Usage: ainb hangar issue create [OPTIONS] --title <TITLE>
 Options:
       --format <format>
           Output format
-          
+
           [default: text]
           [possible values: text, json, csv, markdown]
 
@@ -2425,12 +2425,12 @@ Options:
 
       --state <STATE>
           Initial lifecycle state
-          
+
           [default: open]
 
       --assign <ASSIGN>
           Assign the issue to an agent (`agent.id`) and enqueue a task for it.
-          
+
           When set, the issue's assignee is the agent and a `queued` task is enqueued for the agent's runtime, so the daemon's claim loop picks it up, materialises the agent's attached skills (P6.4), and dispatches the provider. The created task id is printed alongside the issue id.
 
   -h, --help

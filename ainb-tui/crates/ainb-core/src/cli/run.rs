@@ -87,8 +87,31 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Step 6: Build Claude command
     let claude_cmd = build_agent_command(&args, Some(model));
 
+    // Step 6b: Parent linkage (event-driven plumbing). When spawned with
+    // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
+    // We seed `AINB_PARENT_SESSION` into the tmux session's environment (via
+    // `tmux new-session -e`), so the child's Stop hook routes completions to the
+    // parent's durable inbox. We also record a durable child→parent map as a
+    // restart-safe fallback.
+    let mut session_env: Vec<(String, String)> = Vec::new();
+    if let Some(parent_id) = args.parent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Seed the live, in-band linkage: the child's Stop hook reads
+        // AINB_PARENT_SESSION first and routes its completion to the parent's
+        // inbox with no disk lookup. The durable child→parent map is NOT written
+        // here: claude mints its own session id (we don't pass --session-id), so
+        // a map keyed by ainb's Uuid would never match the id the hook reports.
+        // Instead the hook self-registers the durable fallback under the
+        // hook-observed id (see `fleet atc hook`), keying the map by the id any
+        // later lookup actually sees.
+        session_env.push((
+            crate::fleet::plumbing::PARENT_ENV.to_string(),
+            parent_id.to_string(),
+        ));
+        info!("Linked session to parent {parent_id} (event-driven inbox routing)");
+    }
+
     // Step 7: Create tmux session
-    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone());
+    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone()).with_env(session_env);
     tmux.start(&work_dir).await.context("Failed to start tmux session")?;
 
     let tmux_name = tmux.name().to_string();
@@ -479,6 +502,7 @@ mod tests {
             dangerously_skip_permissions: true,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
@@ -505,6 +529,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Opus));
@@ -527,6 +552,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::SystemDefault));
@@ -552,6 +578,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, None);
@@ -576,6 +603,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
@@ -607,6 +635,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, None);
@@ -631,6 +660,7 @@ mod tests {
             dangerously_skip_permissions: true,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
@@ -664,6 +694,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
@@ -692,6 +723,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
@@ -716,6 +748,7 @@ mod tests {
             dangerously_skip_permissions: false,
             name: None,
             interactive: false,
+            parent: None,
         };
 
         let cmd = build_agent_command(&args, None);

@@ -14,7 +14,7 @@ impl HelpComponent {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let popup_area = self.centered_rect(60, 80, area);
+        let popup_area = self.centered_rect(60, 96, area);
 
         frame.render_widget(Clear, popup_area);
 
@@ -37,8 +37,14 @@ impl HelpComponent {
             ListItem::new(""),
             head("Session Actions:"),
             row("n", "New session (local or remote)"),
-            row("a", "Attach — full-screen takeover (Ctrl+B then D to leave)"),
-            row("→", "Attach in a split pane (keeps the session list visible)"),
+            row(
+                "a",
+                "Attach — full-screen takeover (Ctrl+B then D to leave)",
+            ),
+            row(
+                "→",
+                "Attach in a split pane (keeps the session list visible)",
+            ),
             row("1-9", "Quick-attach to numbered session"),
             row("Enter", "Resume (stopped) / attach (running)"),
             row("r", "Resume stopped session (tmux)"),
@@ -62,9 +68,12 @@ impl HelpComponent {
             ListItem::new(""),
             head("Panels (closing returns here):"),
             row("b", "Inbox (Esc closes)"),
+            row("d", "System daemon overlay (Esc closes)"),
+            row("h", "Agent Deck daemon health (Esc closes)"),
+            row("f", "Fleet control panel (Esc closes)"),
             row("i", "Stats / usage analytics (Esc closes)"),
             row("w", "Witr process browser (quit witr to return)"),
-            row("k", "Skills catalogue (Esc closes)"),
+            row("c / k", "Skills catalogue (Esc closes)"),
             row("m", "Memory / learnings browser (Esc closes)"),
             row("t", "Abtop agent monitor (quit abtop to return)"),
             ListItem::new(""),
@@ -77,7 +86,10 @@ impl HelpComponent {
             row("? / Shift+H", "Toggle this help"),
             row("q / Esc", "Quit / home"),
             row("Ctrl+C", "Force quit"),
-            row("Shift+drag", "Select text to copy (Opt+drag in some terminals)"),
+            row(
+                "Shift+drag",
+                "Select text to copy (Opt+drag in some terminals)",
+            ),
         ];
 
         let help_list = List::new(help_items).block(

@@ -223,4 +223,36 @@ if ! ainb_send; then
   fi
 fi
 
+# ----- 6. ATC plumbing (status files · durable inbox · Stop-drain) ------------
+# Only active when this hook was installed under ATC management
+# (AINB_MANAGED=atc, set by the settings.json managed block). Leaf sessions and
+# the plain notifyd-only install skip every line below, so they pay nothing.
+#
+# `ainb fleet atc hook` does the real work in Rust (atomic status file, durable
+# parent inbox commit, and — on Stop — the synchronous drain that prints
+# {"decision":"block",...}). The shell only forwards what it already parsed and
+# relays the command's stdout verbatim so Claude Code sees the block JSON.
+if [ "${AINB_MANAGED:-}" = "atc" ] && command -v ainb >/dev/null 2>&1; then
+  AINB_HOOK_EVENT="${AINB_HOOK_EVENT:-${AINB_RAW_EVENT}}"
+  # Resolve the matcher to forward: the managed command sets AINB_HOOK_MATCHER
+  # (e.g. AskUserQuestion for the PreToolUse hook); otherwise fall back to the
+  # discriminator the payload-parse already pulled out (AINB_MATCHER:
+  # notification_type / hook_matcher). The Rust side stamps it into the
+  # appended events.jsonl line so PreToolUse/Notification/StopFailure carry
+  # their kind without re-parsing the payload downstream.
+  AINB_HOOK_MATCHER_FWD="${AINB_HOOK_MATCHER:-${AINB_MATCHER:-}}"
+  # Forward the original payload on stdin so the Rust side can extract a
+  # done_summary (last assistant line) + transcript_path without re-reading the
+  # transcript.
+  AINB_HOOK_OUT="$(printf '%s' "${AINB_INPUT}" | ainb fleet atc hook \
+    --event "${AINB_HOOK_EVENT}" \
+    --session-id "${AINB_SESSION_ID}" \
+    --cwd "${AINB_CWD}" \
+    --matcher "${AINB_HOOK_MATCHER_FWD}" 2>/dev/null)"
+  # Relay any decision JSON (the Stop-drain block) to Claude Code on stdout.
+  if [ -n "${AINB_HOOK_OUT}" ]; then
+    printf '%s\n' "${AINB_HOOK_OUT}"
+  fi
+fi
+
 exit 0

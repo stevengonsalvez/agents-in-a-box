@@ -6,12 +6,7 @@
 // agents-in-a-box-887; quarantine keeps scoped cargo test green.
 #![cfg(any())]
 
-use ainb::app::events::AppEvent;
-use ainb::app::screens::ids as screen_ids;
 use ainb::app::{AppState, EventHandler};
-// UsagePeriod / UsageProviderFilter no longer used in this file —
-// the test that referenced them has moved into the burndown plugin.
-use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -62,7 +57,7 @@ fn test_navigation_key_events() {
 
 #[tokio::test]
 async fn test_n_key_triggers_new_session() {
-    use ainb::app::state::AsyncAction;
+    use ainb::app::state::NewSessionStep;
 
     let mut state = AppState::default();
 
@@ -72,45 +67,30 @@ async fn test_n_key_triggers_new_session() {
     // Handle the key event
     let app_event = EventHandler::handle_key_event(key_event, &mut state);
 
-    // Should return NewSession event
+    // Should return a NewSession event
     assert!(app_event.is_some());
 
-    // Process the event
+    // Process the event. Post-Phase-6 the new-session flow is synchronous:
+    // `AppEvent::NewSession` opens the unified PickRepo screen directly rather
+    // than queueing a `pending_async_action`. (It still spawns a background
+    // repo rescan via `spawn_blocking`, hence `#[tokio::test]`.)
     if let Some(event) = app_event {
         EventHandler::process_event(event, &mut state);
     }
 
-    // Should have set pending async action
-    assert!(state.pending_async_action.is_some());
-
-    // Should be NewSessionNormal
-    if state.pending_async_action == Some(AsyncAction::NewSessionNormal) {
-        // Test passed
-    } else {
-        panic!(
-            "Expected AsyncAction::NewSessionNormal, got: {:?}",
-            state.pending_async_action
-        );
-    }
-
-    // Process the async action to complete the flow
-    if let Err(e) = state.process_async_action().await {
-        panic!("Failed to process async action: {e}");
-    }
-
-    // After processing, the behavior depends on whether current dir is a git repo
-    // If it is, we should be in NewSession view with current dir
-    // If it's not, we should be in SearchWorkspace view
-    // Or we might still be in SessionList if auth setup is required
+    // Should have navigated to the NEW_SESSION screen at the PickRepo step.
+    assert_eq!(state.current_screen, screen_ids::NEW_SESSION);
+    let ns = state
+        .new_session_state
+        .as_ref()
+        .expect("new_session_state should be primed after pressing 'n'");
+    assert_eq!(ns.step, NewSessionStep::PickRepo);
     assert!(
-        state.current_screen == screen_ids::NEW_SESSION
-            || state.current_screen == screen_ids::SEARCH_WORKSPACE
-            || state.current_screen == screen_ids::SESSION_LIST
-            || state.current_screen == screen_ids::AUTH_SETUP,
-        "Unexpected screen: {:?}",
-        state.current_screen
+        ns.pick_repo_state.is_some(),
+        "PickRepo state should be initialised"
     );
-    // The new session state might not be set if auth setup is required
+
+    // The legacy async-action queue is not used by this flow.
     assert!(state.pending_async_action.is_none());
 }
 

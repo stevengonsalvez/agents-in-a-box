@@ -108,6 +108,7 @@ impl CommandRegistry {
         r.register(OtelCommand);
         r.register(CompletionCommand);
         r.register(AbtopCommand);
+        r.register(WebCommand); // read-only web dashboard (ainb-web crate)
         r.register(WitrCommand); // headless process-trace via the witr plugin
         r.register(LearningsCommand); // headless KB search via the learnings plugin
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
@@ -836,75 +837,7 @@ async fn dispatch_inner(
         }
     }
 
-    // Retry contract: burndown reports `exit_code = 1` + empty stdout +
-    // a stderr containing this exact byte sequence when `self.data` is
-    // None. Any *other* exit/stdout/stderr shape (including a real
-    // error from clap, a runtime fault, or a successful report with
-    // exit 0) breaks out of the retry loop immediately so we don't
-    // mask a genuine failure as "still waiting".
-    let install_hint_marker = b"install session-reader";
-    let wait_budget = plugin_data_wait();
-    let deadline = std::time::Instant::now() + wait_budget;
-    let started = std::time::Instant::now();
-    let mut last_trace = started;
-    let mut attempt: u32 = 0;
-    let mut outcome;
-    loop {
-        attempt = attempt.wrapping_add(1);
-        if trace && last_trace.elapsed() >= std::time::Duration::from_secs(2) {
-            // Periodic heartbeat: include plugin lifecycle state so a
-            // user running `AINB_USAGE_TRACE=1` can distinguish "scan
-            // in progress" from "plugin crashed". Mirrors
-            // `ainb plugin watch` semantics.
-            for p in &registered {
-                let state = handle.lifecycle_state(&p.id);
-                eprintln!(
-                    "[usage-cli] @{:.1}s attempt {attempt} plugin {} lifecycle={:?}",
-                    started.elapsed().as_secs_f32(),
-                    p.id,
-                    state
-                );
-            }
-            last_trace = std::time::Instant::now();
-        }
-        outcome = handle.dispatch_cli(&burndown, "usage", argv.clone()).await.map_err(|e| {
-            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
-        })?;
-        let should_retry = matches!(
-            &outcome,
-            CliOutcome::Ok(r)
-                if r.exit_code == 1
-                    && r.stdout.is_empty()
-                    && r.stderr
-                        .windows(install_hint_marker.len())
-                        .any(|w| w == install_hint_marker)
-        );
-        if !should_retry {
-            if trace {
-                eprintln!(
-                    "[usage-cli] dispatch returned in {:.1}s (attempt {attempt})",
-                    started.elapsed().as_secs_f32()
-                );
-            }
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "error: session-reader plugin didn't publish usage data within {}s \
-                 — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
-                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
-                wait_budget.as_secs()
-            );
-        }
-        if trace {
-            eprintln!(
-                "[usage-cli] attempt {attempt} returned 'install session-reader' \
-                 (snapshot not yet finalised); retrying in {}ms",
-                PLUGIN_DATA_POLL.as_millis()
-            );
-        }
-        tokio::time::sleep(PLUGIN_DATA_POLL).await;
-    }
+    let outcome = poll_burndown(handle, &burndown, &registered, argv, trace).await?;
 
     let exit = match outcome {
         CliOutcome::Ok(result) => {
@@ -925,6 +858,148 @@ async fn dispatch_inner(
         }
     };
     Ok(exit)
+}
+
+/// Dispatch `usage <argv>` to the burndown plugin, retrying while the
+/// plugin reports the "install session-reader" sentinel (snapshot not yet
+/// finalised). Shared by [`dispatch_inner`] (the `ainb usage` exit path)
+/// and [`capture_usage_via_plugin`] (the in-process consumer used by
+/// `ainb fleet cost`). The caller owns interpreting the returned
+/// [`CliOutcome`].
+///
+/// Retry contract: burndown reports `exit_code = 1` + empty stdout + a
+/// stderr containing the `install session-reader` marker when `self.data`
+/// is None. Any *other* exit/stdout/stderr shape (a real clap error, a
+/// runtime fault, or a successful report with exit 0) breaks out of the
+/// retry loop immediately so we don't mask a genuine failure as "still
+/// waiting".
+async fn poll_burndown(
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    burndown: &ainb_plugin_runtime::PluginId,
+    registered: &[std::sync::Arc<ainb_plugin_runtime::RegisteredPlugin>],
+    argv: Vec<String>,
+    trace: bool,
+) -> anyhow::Result<ainb_plugin_runtime::CliOutcome> {
+    use ainb_plugin_runtime::CliOutcome;
+
+    let install_hint_marker = b"install session-reader";
+    let wait_budget = plugin_data_wait();
+    let deadline = std::time::Instant::now() + wait_budget;
+    let started = std::time::Instant::now();
+    let mut last_trace = started;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt = attempt.wrapping_add(1);
+        if trace && last_trace.elapsed() >= std::time::Duration::from_secs(2) {
+            // Periodic heartbeat: include plugin lifecycle state so a
+            // user running `AINB_USAGE_TRACE=1` can distinguish "scan
+            // in progress" from "plugin crashed". Mirrors
+            // `ainb plugin watch` semantics.
+            for p in registered {
+                let state = handle.lifecycle_state(&p.id);
+                eprintln!(
+                    "[usage-cli] @{:.1}s attempt {attempt} plugin {} lifecycle={:?}",
+                    started.elapsed().as_secs_f32(),
+                    p.id,
+                    state
+                );
+            }
+            last_trace = std::time::Instant::now();
+        }
+        let outcome = handle.dispatch_cli(burndown, "usage", argv.clone()).await.map_err(|e| {
+            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+        })?;
+        let should_retry = matches!(
+            &outcome,
+            CliOutcome::Ok(r)
+                if r.exit_code == 1
+                    && r.stdout.is_empty()
+                    && r.stderr
+                        .windows(install_hint_marker.len())
+                        .any(|w| w == install_hint_marker)
+        );
+        if !should_retry {
+            if trace {
+                eprintln!(
+                    "[usage-cli] dispatch returned in {:.1}s (attempt {attempt})",
+                    started.elapsed().as_secs_f32()
+                );
+            }
+            return Ok(outcome);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "error: session-reader plugin didn't publish usage data within {}s \
+                 — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
+                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
+                wait_budget.as_secs()
+            );
+        }
+        if trace {
+            eprintln!(
+                "[usage-cli] attempt {attempt} returned 'install session-reader' \
+                 (snapshot not yet finalised); retrying in {}ms",
+                PLUGIN_DATA_POLL.as_millis()
+            );
+        }
+        tokio::time::sleep(PLUGIN_DATA_POLL).await;
+    }
+}
+
+/// Run `ainb usage <argv>` against the burndown plugin and return its
+/// captured stdout, instead of streaming it to the process stdout and
+/// exiting like [`dispatch_usage_via_plugin`] does.
+///
+/// This is the in-process entry point for `ainb fleet cost`, which needs
+/// burndown's `usage report --format json` payload as a string to build
+/// its own fleet-shaped rollups. It owns the same runtime init +
+/// spawn_blocking drop dance as [`run_usage_via_plugin`] so the tokio
+/// "Cannot drop a runtime in a context where blocking is not allowed"
+/// panic doesn't bite on shutdown.
+///
+/// `argv` must already carry the leading `--format <token>` pair (the
+/// plugin reads format from argv via its own `extract_format`).
+pub async fn capture_usage_via_plugin(argv: Vec<String>) -> anyhow::Result<String> {
+    let (runtime, handle, _outcome) = crate::plugins::init_plugin_runtime()
+        .map_err(|e| anyhow::anyhow!("plugin runtime init failed: {e}"))?;
+    let result = capture_inner(&handle, argv).await;
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
+    result
+}
+
+async fn capture_inner(
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    argv: Vec<String>,
+) -> anyhow::Result<String> {
+    use ainb_plugin_runtime::{CliOutcome, PluginId};
+
+    let trace = std::env::var("AINB_USAGE_TRACE").is_ok();
+    let burndown = PluginId::from("burndown");
+    let registered = handle.registered_plugins();
+    if !registered.iter().any(|p| p.id == burndown) {
+        anyhow::bail!(
+            "error: fleet cost analytics requires the burndown plugin \
+             (install via 'ainb plugin install burndown')"
+        );
+    }
+
+    match poll_burndown(handle, &burndown, &registered, argv, trace).await? {
+        CliOutcome::Ok(result) => {
+            if result.exit_code != 0 {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                anyhow::bail!(
+                    "burndown plugin exited {} while fetching usage data: {}",
+                    result.exit_code,
+                    stderr.trim()
+                );
+            }
+            Ok(String::from_utf8_lossy(&result.stdout).into_owned())
+        }
+        CliOutcome::PluginError { code, message } => {
+            anyhow::bail!("burndown plugin error {code}: {message}")
+        }
+        CliOutcome::RuntimeError(msg) => anyhow::bail!("plugin runtime: {msg}"),
+    }
 }
 
 /// Legacy top-level `ainb statusline`. Kept (hidden) so existing
@@ -1498,6 +1573,106 @@ impl CliCommand for AbtopCommand {
     }
 }
 
+/// `ainb web [--listen <addr>] [--token <secret>] [--insecure-bind]` — serve
+/// the read-only fleet dashboard (sessions + fleet needs + cost) with live
+/// SSE updates, from the embedded vanilla-JS frontend (`ainb-web` crate).
+///
+/// Security: binds to loopback by default. A non-loopback bind is REFUSED
+/// unless `--token` is supplied (every `/api/*` route then requires the bearer
+/// token) or `--insecure-bind` is set explicitly. The dashboard never mutates
+/// fleet state. Data is proxied from the existing `ainb --format json`
+/// commands so the browser view never drifts from the CLI/TUI.
+pub struct WebCommand;
+impl CliCommand for WebCommand {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about("Serve an SSE-live web dashboard (live terminal + web-push) for the fleet")
+                .arg(
+                    clap::Arg::new("listen")
+                        .long("listen")
+                        .value_name("ADDR")
+                        .default_value("127.0.0.1:8420")
+                        .help("Address to bind (default loopback; non-loopback needs --token)"),
+                )
+                .arg(
+                    clap::Arg::new("token").long("token").value_name("SECRET").help(
+                        "Bearer token required on every /api/* route (enables non-loopback bind)",
+                    ),
+                )
+                .arg(
+                    clap::Arg::new("insecure-bind")
+                        .long("insecure-bind")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Allow a non-loopback bind with no token. DANGEROUS: an \
+                             unauthenticated bind exposes a control surface — the live WS \
+                             terminal is interactive shell access to every fleet session. \
+                             Only honored with --read-only (terminal disabled); otherwise \
+                             refused. Use --token instead to expose the write surface safely",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("read-only")
+                        .long("read-only")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Viewer-only: disable the live terminal write surface \
+                             (the WS terminal is refused with 403)",
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        // Extract owned values synchronously so only owned data crosses into
+        // the 'static future.
+        let listen_raw = matches
+            .get_one::<String>("listen")
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8420".to_string());
+        let token = matches.get_one::<String>("token").cloned();
+        let insecure_bind = matches.get_flag("insecure-bind");
+        let read_only = matches.get_flag("read-only");
+
+        Box::pin(async move {
+            use std::net::ToSocketAddrs;
+            let listen = listen_raw
+                .to_socket_addrs()
+                .with_context(|| format!("invalid --listen address: {listen_raw}"))?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--listen resolved to no address: {listen_raw}"))?;
+
+            let config = ainb_web::WebConfig {
+                listen,
+                token,
+                insecure_bind,
+                read_only,
+            };
+
+            // Validate the bind policy before any socket is opened so the
+            // refusal is clear and nothing ever listens on an unsafe address.
+            if let Err(e) = config.check_bind_security() {
+                anyhow::bail!("{e}");
+            }
+
+            let data = std::sync::Arc::new(ainb_web::AinbCliSource::new());
+            eprintln!("ainb web dashboard → http://{listen}");
+            if config.read_only {
+                eprintln!("  read-only: live terminal disabled");
+            } else {
+                eprintln!("  live terminal enabled at /ws/session/{{id}}");
+            }
+            if config.token.is_some() {
+                eprintln!("  bearer token required on /api/* routes");
+            }
+            ainb_web::serve(config, data).await.map_err(|e| anyhow::anyhow!("{e}"))
+        })
+    }
+}
+
 /// `ainb witr <target>` — headless process-causality trace.
 ///
 /// Forwards its argv verbatim to the witr plugin's `cli_dispatch` (namespace
@@ -1883,6 +2058,15 @@ impl CliCommand for FleetCommand {
                     .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
                     .arg(clap::Arg::new("key").long("key").required(true)),
             );
+        let cost = Command::new("cost")
+            .about("Per-session / model / day / group spend rollups + budget caps")
+            .arg(
+                clap::Arg::new("period")
+                    .long("period")
+                    .value_parser(["today", "week", "30days", "month", "all"])
+                    .default_value("month")
+                    .help("Reporting window passed to the burndown plugin"),
+            );
         let daemon = Command::new("daemon")
             .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
             .arg(
@@ -1891,16 +2075,41 @@ impl CliCommand for FleetCommand {
                     .short('v')
                     .action(clap::ArgAction::SetTrue),
             );
+        let daemons = Command::new("daemons").about(
+            "Unified runtime health of every long-running daemon \
+             (phone bridge / notifyd / ATC / fleet daemon)",
+        );
+        let atc = build_atc_command();
+        let bridge = Command::new("bridge")
+            .about(
+                "Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions",
+            )
+            .subcommand_required(false)
+            .subcommand(
+                Command::new("run")
+                    .about("Run the bridge daemon in the foreground (default; reads config.toml)"),
+            )
+            .subcommand(Command::new("install").about(
+                "Install as a launchd/systemd service (tokens read from config, never argv)",
+            ))
+            .subcommand(Command::new("uninstall").about("Remove the bridge service"))
+            .subcommand(Command::new("status").about("Report bridge service install status"));
         app.subcommand(
             Command::new(self.name())
-                .about("Fleet orchestration: standup / broadcast / sequence / needs / daemon")
+                .about(
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge",
+                )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(sequence)
                 .subcommand(needs)
+                .subcommand(cost)
                 .subcommand(daemon)
+                .subcommand(daemons)
+                .subcommand(atc)
+                .subcommand(bridge)
                 .subcommand(enrich_cache)
                 .after_help(
                     "EXAMPLES:\n  \
@@ -1915,6 +2124,129 @@ impl CliCommand for FleetCommand {
         let matches = matches.clone();
         Box::pin(async move { crate::cli::fleet::execute(&matches, ctx.format).await })
     }
+}
+
+/// Build the `ainb fleet atc` subcommand tree: the persistent ATC brain's
+/// provisioning + management verbs. `heartbeat` is the internal timer-driven
+/// verb (hidden from `--help`).
+fn build_atc_command() -> Command {
+    let interval = clap::Arg::new("interval")
+        .long("interval")
+        .value_parser(clap::value_parser!(u32))
+        .help("Heartbeat cadence in minutes (default 15)");
+    let idle_pause = clap::Arg::new("idle-pause")
+        .long("idle-pause")
+        .value_parser(clap::value_parser!(u32))
+        .help(
+            "Minutes of fleet quiet before the heartbeat downgrades to an idle ping (default 60)",
+        );
+
+    Command::new("atc")
+        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("setup")
+                .about("Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session")
+                .arg(clap::Arg::new("name").required(true).help("Instance name (also the session name)"))
+                .arg(interval.clone())
+                .arg(idle_pause.clone())
+                .arg(
+                    clap::Arg::new("no-heartbeat")
+                        .long("no-heartbeat")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Provision without installing the OS heartbeat timer"),
+                )
+                .arg(
+                    clap::Arg::new("no-spawn")
+                        .long("no-spawn")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Provision files + timer but do not spawn the ainb session"),
+                )
+                .arg(
+                    clap::Arg::new("no-hooks")
+                        .long("no-hooks")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)",
+                        ),
+                ),
+        )
+        .subcommand(
+            Command::new("teardown")
+                .about("Remove an ATC instance's heartbeat timer + session")
+                .arg(clap::Arg::new("name").required(true))
+                .arg(
+                    clap::Arg::new("purge")
+                        .long("purge")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Also delete the instance dir (state.json + task-log.md)"),
+                ),
+        )
+        .subcommand(
+            Command::new("status")
+                .about("Report one ATC instance (meta + timer + session liveness)")
+                .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List all provisioned ATC instances"))
+        .subcommand(
+            Command::new("heartbeat")
+                .hide(true)
+                .about("Internal: build + send one [HEARTBEAT] nudge (called by the OS timer)")
+                .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(
+            Command::new("hook")
+                .hide(true)
+                .about("Internal: lifecycle-hook side-effects (event append + inbox + Stop-drain)")
+                .arg(clap::Arg::new("event").long("event").required(true).help("Raw hook event name"))
+                .arg(
+                    clap::Arg::new("session-id")
+                        .long("session-id")
+                        .default_value("")
+                        .help("Session that fired the hook"),
+                )
+                .arg(clap::Arg::new("cwd").long("cwd").default_value("").help("Session cwd"))
+                .arg(
+                    clap::Arg::new("matcher")
+                        .long("matcher")
+                        .default_value("")
+                        .help("Hook matcher (PreToolUse tool_name / Notification type / StopFailure error_type)"),
+                ),
+        )
+        .subcommand(
+            Command::new("inbox")
+                .about("Inspect / drain / commit a parent's durable completion inbox")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("peek")
+                        .about("Show undrained completions without consuming them")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id")),
+                )
+                .subcommand(
+                    Command::new("drain")
+                        .about("Drain completions exactly-once and print the Stop-drain decision")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id")),
+                )
+                .subcommand(
+                    Command::new("commit")
+                        .about("Commit a child completion to a parent's inbox (testing/integration)")
+                        .arg(clap::Arg::new("parent").required(true).help("Parent session id"))
+                        .arg(
+                            clap::Arg::new("child")
+                                .long("child")
+                                .required(true)
+                                .help("Child session id that finished"),
+                        )
+                        .arg(
+                            clap::Arg::new("summary")
+                                .long("summary")
+                                .default_value("")
+                                .help("One-line completion summary"),
+                        ),
+                ),
+        )
 }
 
 /// `ainb headroom {status,stop}` — inspect and control the ainb-managed
@@ -2151,10 +2483,10 @@ mod tests {
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
         // otel + abtop + witr + learnings + plugin stub + fleet + mcp + hidden
-        // notifyd + hangar) + the headroom namespace + the rtk namespace = 32.
+        // notifyd + hangar) + headroom + rtk + the web dashboard = 33.
         // The TUI is NOT in the registry — main.rs handles `tui` /
         // no-subcommand inline.
-        assert_eq!(names.len(), 32, "expected 32 entries, got {names:?}");
+        assert_eq!(names.len(), 33, "expected 33 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -2179,6 +2511,7 @@ mod tests {
             "otel",
             "completion",
             "abtop",
+            "web",
             "witr",
             "learnings",
             "plugin",
@@ -2194,6 +2527,57 @@ mod tests {
                 "missing required command: {required}"
             );
         }
+    }
+
+    #[test]
+    fn fleet_exposes_ten_subcommands_including_daemons() {
+        // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
+        // update this count + list — it is the registry guard the daemons-
+        // observability feature wired through. `daemon` (the watcher) and
+        // `daemons` (the health view) are deliberately distinct.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let fleet = app
+            .get_subcommands()
+            .find(|c| c.get_name() == "fleet")
+            .expect("fleet command registered");
+        let mut names: Vec<&str> = fleet.get_subcommands().map(clap::Command::get_name).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "atc",
+                "bridge",
+                "broadcast",
+                "cost",
+                "daemon",
+                "daemons",
+                "enrich-cache",
+                "needs",
+                "sequence",
+                "standup",
+            ],
+            "fleet subcommand surface changed — update this guard"
+        );
+        assert_eq!(
+            names.len(),
+            10,
+            "expected 10 fleet subcommands, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_daemons_subcommand_parses() {
+        // Surface check: `ainb fleet daemons` parses to the daemons subcommand.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "fleet", "daemons"])
+            .expect("fleet daemons parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "fleet");
+        let (name, _) = sub.subcommand().expect("fleet subcommand");
+        assert_eq!(name, "daemons");
     }
 
     #[test]

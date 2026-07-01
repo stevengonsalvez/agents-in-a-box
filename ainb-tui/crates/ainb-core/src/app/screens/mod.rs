@@ -54,6 +54,14 @@ pub mod ids {
     /// Hangar managed-agents control plane — a plugin-owned screen rendered by
     /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
     pub const HANGAR: &str = "hangar";
+    /// Daemons observability screen — read-only runtime health of the phone
+    /// bridge / notifyd / ATC / fleet daemon. Reached from home with `d`.
+    pub const DAEMONS: &str = "daemons";
+    /// Fleet control panel — the interactive "who-needs-you" looking-glass.
+    /// Reads the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session)
+    /// and lets the human answer interviews + broadcast. Reached from home with
+    /// `f`.
+    pub const FLEET_PANEL: &str = "fleet_panel";
 }
 
 /// Outcome of a screen-handled event.

@@ -2,8 +2,8 @@
 name: ainb-fleet
 description: |
   Fleet orchestration overview — the `ainb fleet ...` Rust subcommand
-  namespace for driving every claude session on the host. Routes to one of
-  five sub-skills (standup / broadcast / sequence / needs / daemon).
+  namespace for driving every claude session on the host. Routes to the
+  sub-skills (standup / broadcast / sequence / needs / daemon / atc).
   Invoke this for an at-a-glance map of what fleet can do; reach for the
   specific sub-skill for the verb you want.
 version: "0.1.0"
@@ -20,7 +20,7 @@ allowed-tools:
 
 # ainb fleet — overview
 
-Single Rust binary (`ainb`) provides 5 orchestration verbs across every
+Single Rust binary (`ainb`) provides orchestration verbs across every
 claude session running on this host. Each verb has its own colon-namespaced
 sub-skill with focused docs.
 
@@ -32,7 +32,13 @@ sub-skill with focused docs.
 | [`/ainb-fleet:broadcast`](../broadcast/SKILL.md) | Send one prompt to selected sessions |
 | [`/ainb-fleet:sequence`](../sequence/SKILL.md) | Ordered multi-step prompts, ack-gated between steps |
 | [`/ainb-fleet:needs`](../needs/SKILL.md) | Show sessions blocked on input / errors / waiting |
-| [`/ainb-fleet:daemon`](../daemon/SKILL.md) | Background watcher that auto-continues API errors |
+| [`/ainb-fleet:atc`](../atc/SKILL.md) | **Air Traffic Control** — the persistent brain: watches the fleet on a heartbeat, auto-clears safe sessions, escalates the rest to your phone |
+| [`/ainb-fleet:daemon`](../daemon/SKILL.md) | Background auto-continue watcher (**superseded by ATC** for managed fleets) |
+
+ATC is the orchestrating brain that drives the other verbs on a schedule. The
+verbs are its hands/eyes; the [phone bridge](../../bridge/README.md) is its voice
+to you. Reach for ATC when you want unattended, policy-driven fleet supervision;
+reach for the individual verbs for one-off actions.
 
 ## Architecture (1-line)
 

@@ -197,9 +197,7 @@ pub fn install_dep_capture(dep: &Dep) -> std::result::Result<(), String> {
     let Some(argv) = p.argv else {
         return Err(format!("no automatic installer — run: {}", p.display));
     };
-    let (head, rest) = argv
-        .split_first()
-        .ok_or_else(|| "empty install command".to_string())?;
+    let (head, rest) = argv.split_first().ok_or_else(|| "empty install command".to_string())?;
     let out = Command::new(program(head))
         .args(rest)
         .output()
@@ -209,14 +207,7 @@ pub fn install_dep_capture(dep: &Dep) -> std::result::Result<(), String> {
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
-    let msg = tail
-        .iter()
-        .rev()
-        .take(2)
-        .rev()
-        .copied()
-        .collect::<Vec<_>>()
-        .join("; ");
+    let msg = tail.iter().rev().take(2).rev().copied().collect::<Vec<_>>().join("; ");
     Err(if msg.is_empty() {
         format!("{head} exited with {}", out.status)
     } else {

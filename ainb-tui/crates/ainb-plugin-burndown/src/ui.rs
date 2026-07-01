@@ -4851,6 +4851,7 @@ mod cross_filter_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: "alpha".into(),
+                    project_path: "/work/alpha".into(),
                     session_id: "sess-A".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -4859,6 +4860,7 @@ mod cross_filter_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: "beta".into(),
+                    project_path: "/work/beta".into(),
                     session_id: "sess-B".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -4960,6 +4962,7 @@ mod cross_filter_tests {
         let session_alpha = SessionUsage {
             provider: "claude".into(),
             project: "alpha".into(),
+            project_path: "/work/alpha".into(),
             session_id: "s1".into(),
             first_timestamp: now,
             last_timestamp: now,
@@ -4968,6 +4971,7 @@ mod cross_filter_tests {
         let session_beta = SessionUsage {
             provider: "claude".into(),
             project: "beta".into(),
+            project_path: "/work/beta".into(),
             session_id: "s1".into(),
             first_timestamp: now,
             last_timestamp: now,
@@ -6005,6 +6009,7 @@ mod zoom_table_tests {
                 SessionUsage {
                     provider: "claude".into(),
                     project: LONG_PATH.into(),
+                    project_path: LONG_PATH.into(),
                     session_id: "01HXYZABCDEFGHJKMNPQRSTVWX".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -6013,6 +6018,7 @@ mod zoom_table_tests {
                 SessionUsage {
                     provider: "codex".into(),
                     project: "beta".into(),
+                    project_path: "/work/beta".into(),
                     session_id: "sess-B".into(),
                     first_timestamp: now,
                     last_timestamp: now,
@@ -6033,6 +6039,7 @@ mod zoom_table_tests {
             data.sessions.push(SessionUsage {
                 provider: "claude".into(),
                 project: format!("proj-{i}"),
+                project_path: format!("/work/proj-{i}"),
                 session_id: format!("sid-{i}"),
                 first_timestamp: now,
                 last_timestamp: now,
