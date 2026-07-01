@@ -283,41 +283,101 @@ pub struct OnboardingState {
     pub auth_statuses: Vec<AgentAuthStatus>,
 }
 
-/// Agents whose auth is configurable on the onboarding Authentication step.
-/// Each can run in `Login` (native OAuth/subscription) or `ApiKey` mode.
+/// Harnesses whose auth is configurable on the onboarding Authentication step.
+/// Each runs in one of two modes: `Login` (native/system-wide sign-in, ainb
+/// injects nothing) or `ApiKey` (a key ainb stores in the keychain and injects
+/// as the harness's env var when a session starts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthAgent {
     Claude,
     Codex,
+    Gemini,
+    Copilot,
 }
 
 impl AuthAgent {
-    /// The configurable agents, in row order.
+    /// The configurable harnesses, in row order.
     pub fn all() -> &'static [AuthAgent] {
-        &[Self::Claude, Self::Codex]
+        &[Self::Claude, Self::Codex, Self::Gemini, Self::Copilot]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
+            Self::Copilot => "Copilot",
         }
     }
 
-    /// What the user runs inside the tool to complete native OAuth/subscription
-    /// login — shown after choosing the Login method.
+    /// Label for the non-key method in the picker. Claude's is "system-wide"
+    /// because you configure it entirely outside ainb; the others are a native
+    /// sign-in inside the tool.
+    pub fn login_label(&self) -> &'static str {
+        match self {
+            Self::Claude => "System-wide auth",
+            Self::Codex => "Sign in with ChatGPT",
+            Self::Gemini => "Sign in with Google",
+            Self::Copilot => "Sign in with GitHub",
+        }
+    }
+
+    /// One-line explanation of what the login/system-wide method actually does.
     pub fn login_hint(&self) -> &'static str {
         match self {
-            Self::Claude => "run `claude` then /login (subscription / OAuth)",
-            Self::Codex => "run `codex login` (OAuth)",
+            Self::Claude => {
+                "Use whatever you set up for Claude at the system level — `claude` /login, a \
+                 Pro/Max subscription, or a cloud provider. ainb injects no key."
+            }
+            Self::Codex => "Run `codex login` and sign in with your ChatGPT account (OAuth).",
+            Self::Gemini => {
+                "Run `gemini` and sign in with Google, or use application-default credentials."
+            }
+            Self::Copilot => {
+                "Run `copilot login` (GitHub device flow), or reuse your `gh` CLI login."
+            }
         }
     }
 
-    /// Expected key prefix, used to seed the inline API-key entry buffer.
+    /// Official vendor auth-guide URL (terminals linkify plain URLs).
+    pub fn doc_url(&self) -> &'static str {
+        match self {
+            Self::Claude => crate::docs::AUTH_CLAUDE,
+            Self::Codex => crate::docs::AUTH_CODEX,
+            Self::Gemini => crate::docs::AUTH_GEMINI,
+            Self::Copilot => crate::docs::AUTH_COPILOT,
+        }
+    }
+
+    /// Keychain slot this harness's API key is stored under.
+    pub fn credential_key(&self) -> crate::credentials::CredentialKey {
+        use crate::credentials::CredentialKey;
+        match self {
+            Self::Claude => CredentialKey::AnthropicApiKey,
+            Self::Codex => CredentialKey::OpenAiApiKey,
+            Self::Gemini => CredentialKey::GeminiApiKey,
+            Self::Copilot => CredentialKey::GithubPat,
+        }
+    }
+
+    /// Env var the stored key is injected as when a session starts.
+    pub fn env_var(&self) -> &'static str {
+        match self {
+            Self::Claude => "ANTHROPIC_API_KEY",
+            Self::Codex => "OPENAI_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+            Self::Copilot => "GITHUB_TOKEN",
+        }
+    }
+
+    /// Prefix used to seed the inline API-key entry buffer (empty when the
+    /// harness's tokens have no single stable prefix, e.g. GitHub PATs).
     pub fn key_seed(&self) -> &'static str {
         match self {
             Self::Claude => "sk-ant-",
             Self::Codex => "sk-",
+            Self::Gemini => "AIza",
+            Self::Copilot => "",
         }
     }
 
@@ -325,24 +385,28 @@ impl AuthAgent {
         match self {
             Self::Claude => "Anthropic API key",
             Self::Codex => "OpenAI API key",
+            Self::Gemini => "Gemini API key",
+            Self::Copilot => "GitHub token (PAT)",
         }
     }
 }
 
-/// Auth method an agent is currently using (detected) or being switched to.
+/// Auth method a harness is currently using (detected) or being switched to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethodKind {
-    /// Native OAuth / subscription login, handled inside the tool.
+    /// Native / system-wide sign-in; ainb injects nothing.
     Login,
-    /// API key stored in the system keychain.
+    /// API key stored in the system keychain, injected on session start.
     ApiKey,
 }
 
 impl AuthMethodKind {
+    /// Generic label. The agent list uses this for the API-key row; the method
+    /// picker prefers `AuthAgent::login_label()` for the login row.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Login => "Login (subscription / OAuth)",
-            Self::ApiKey => "API key (pay-per-use)",
+            Self::Login => "Sign-in / system-wide",
+            Self::ApiKey => "API key",
         }
     }
 }
@@ -438,42 +502,32 @@ impl OnboardingState {
         use crate::config::{AppConfig, ClaudeAuthProvider};
         use crate::credentials;
 
-        // Claude: driven by config `claude_provider` (+ keychain for the mask).
-        let claude_method = match AppConfig::load() {
-            Ok(c) => match c.authentication.claude_provider {
-                ClaudeAuthProvider::ApiKey => AuthMethodKind::ApiKey,
-                _ => AuthMethodKind::Login,
-            },
-            Err(_) => AuthMethodKind::Login,
-        };
-        let claude_key = if claude_method == AuthMethodKind::ApiKey
-            && credentials::has_anthropic_api_key()
-        {
-            Some(credentials::get_anthropic_api_key_masked())
-        } else {
-            None
-        };
+        // Claude's mode is gated by config: a stored Anthropic key with
+        // system-wide auth selected must NOT read as API-key mode (the key
+        // isn't injected in that case). Every other harness is "key present?".
+        let claude_api = matches!(
+            AppConfig::load().map(|c| c.authentication.claude_provider),
+            Ok(ClaudeAuthProvider::ApiKey)
+        );
 
-        // Codex: no config flag — a stored OpenAI key means API-key mode,
-        // otherwise the user logs in via `codex login`.
-        let (codex_method, codex_key) = if credentials::has_openai_api_key() {
-            (AuthMethodKind::ApiKey, Some(credentials::get_openai_api_key_masked()))
-        } else {
-            (AuthMethodKind::Login, None)
-        };
+        self.auth_statuses = AuthAgent::all()
+            .iter()
+            .map(|&agent| {
+                let key = agent.credential_key();
+                let is_api = if agent == AuthAgent::Claude {
+                    claude_api
+                } else {
+                    credentials::has_credential(key)
+                };
+                let (method, key_masked) = if is_api {
+                    (AuthMethodKind::ApiKey, Some(credentials::get_credential_masked(key)))
+                } else {
+                    (AuthMethodKind::Login, None)
+                };
+                AgentAuthStatus { agent, method, key_masked }
+            })
+            .collect();
 
-        self.auth_statuses = vec![
-            AgentAuthStatus {
-                agent: AuthAgent::Claude,
-                method: claude_method,
-                key_masked: claude_key,
-            },
-            AgentAuthStatus {
-                agent: AuthAgent::Codex,
-                method: codex_method,
-                key_masked: codex_key,
-            },
-        ];
         // Auth is always in *some* state now — reflect that for the Summary step.
         self.auth_completed = true;
         self.auth_method = Some(self.auth_summary());
@@ -813,6 +867,24 @@ mod tests {
         assert_eq!(s.auth_agent_at_cursor(), Some(AuthAgent::Codex));
         s.move_auth_agent_cursor(100); // clamp at the last agent
         assert_eq!(s.auth_agent_cursor, s.auth_statuses.len() - 1);
+    }
+
+    #[test]
+    fn auth_agents_cover_four_harnesses_with_correct_env_vars() {
+        // The env var each harness's stored key is injected as — must match what
+        // session_manager::build_env_setup_for_provider actually exports.
+        let expected = [
+            (AuthAgent::Claude, "ANTHROPIC_API_KEY"),
+            (AuthAgent::Codex, "OPENAI_API_KEY"),
+            (AuthAgent::Gemini, "GEMINI_API_KEY"),
+            (AuthAgent::Copilot, "GITHUB_TOKEN"),
+        ];
+        assert_eq!(AuthAgent::all().len(), 4);
+        for (agent, env) in expected {
+            assert_eq!(agent.env_var(), env, "{} env var drift", agent.label());
+            assert!(agent.doc_url().starts_with("https://"), "{} missing doc url", agent.label());
+            assert!(!agent.login_label().is_empty());
+        }
     }
 
     #[test]

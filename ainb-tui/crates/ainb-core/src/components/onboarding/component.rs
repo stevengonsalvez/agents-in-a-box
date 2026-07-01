@@ -555,7 +555,10 @@ impl OnboardingComponent {
                         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::styled(
-                        "Stored in the system keychain; switches this agent to API-key mode.",
+                        format!(
+                            "Stored in the system keychain; injected as {} when a session starts.",
+                            agent.env_var()
+                        ),
                         Style::default().fg(MUTED_GRAY),
                     )),
                     Line::from(""),
@@ -582,11 +585,7 @@ impl OnboardingComponent {
                     )),
                     Line::from(""),
                 ];
-                let rows = [
-                    AuthMethodKind::Login.label(),
-                    AuthMethodKind::ApiKey.label(),
-                    "Back",
-                ];
+                let rows = [agent.login_label(), "API key", "Back"];
                 for (i, label) in rows.iter().enumerate() {
                     let selected = i == *cursor;
                     let marker = if selected { "\u{25b6} " } else { "  " };
@@ -601,9 +600,21 @@ impl OnboardingComponent {
                     ]));
                 }
                 lines.push(Line::from(""));
+                // What each method actually does + the vendor auth guide.
                 lines.push(Line::from(Span::styled(
-                    format!("Login: {}", agent.login_hint()),
+                    format!("{}: {}", agent.login_label(), agent.login_hint()),
                     Style::default().fg(MUTED_GRAY),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "API key: stored in your keychain, injected as {} when a session starts.",
+                        agent.env_var()
+                    ),
+                    Style::default().fg(MUTED_GRAY),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("Guide: {}", agent.doc_url()),
+                    Style::default().fg(CORNFLOWER_BLUE),
                 )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
@@ -634,10 +645,16 @@ impl OnboardingComponent {
                     } else {
                         Style::default().fg(GOLD)
                     };
+                    // Login rows show the harness-specific label ("System-wide
+                    // auth", "Sign in with GitHub", …); key rows just say "API key".
+                    let method_label = match st.method {
+                        AuthMethodKind::Login => st.agent.login_label(),
+                        AuthMethodKind::ApiKey => "API key",
+                    };
                     let mut spans = vec![
                         Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
-                        Span::styled(format!("{:<8}", st.agent.label()), agent_style),
-                        Span::styled(st.method.label(), Style::default().fg(SOFT_WHITE)),
+                        Span::styled(format!("{:<9}", st.agent.label()), agent_style),
+                        Span::styled(method_label, Style::default().fg(SOFT_WHITE)),
                     ];
                     if let Some(ref masked) = st.key_masked {
                         spans.push(Span::styled(
@@ -649,7 +666,8 @@ impl OnboardingComponent {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Gemini uses GEMINI_API_KEY; Copilot uses `copilot login`.",
+                    "System-wide auth = you set it up outside ainb. API key = ainb stores it \
+                     in your keychain and injects it when a session starts.",
                     Style::default().fg(MUTED_GRAY),
                 )));
                 lines.push(Line::from(""));
@@ -667,7 +685,9 @@ impl OnboardingComponent {
             }
         };
 
-        let text = Paragraph::new(content).alignment(Alignment::Center);
+        let text = Paragraph::new(content)
+            .alignment(Alignment::Center)
+            .wrap(ratatui::widgets::Wrap { trim: true });
         frame.render_widget(text, inner);
     }
 

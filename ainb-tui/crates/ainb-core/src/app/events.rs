@@ -6539,22 +6539,27 @@ impl EventHandler {
                     }
                     // Choose a method for the agent. Stays on the step (no advance).
                     Some(AuthPane::MethodPicker { agent, cursor }) => match cursor {
-                        // Login / OAuth
+                        // Login / system-wide
                         0 => {
                             match agent {
                                 AuthAgent::Claude => {
+                                    // System-wide: config gates injection, so the
+                                    // key (if any) simply stops being injected.
                                     set_claude_provider(ClaudeAuthProvider::SystemAuth);
                                 }
-                                AuthAgent::Codex => {
-                                    // No config flag for Codex — a stored key would
-                                    // force API-key mode, so drop it to honour Login.
-                                    let had = credentials::has_openai_api_key();
-                                    let _ = credentials::delete_openai_api_key();
+                                other => {
+                                    // No config flag for these — a stored key would
+                                    // force API-key mode, so drop it to honour the
+                                    // sign-in choice (else it'd still be injected).
+                                    let key = other.credential_key();
+                                    let had = credentials::has_credential(key);
+                                    let _ = credentials::delete_credential(key);
                                     if had {
-                                        state.add_info_notification(
-                                            "Removed stored OpenAI key; Codex will use `codex login`"
-                                                .to_string(),
-                                        );
+                                        state.add_info_notification(format!(
+                                            "Removed stored {}; {} will use sign-in",
+                                            other.key_label(),
+                                            other.label()
+                                        ));
                                     }
                                 }
                             }
@@ -6564,7 +6569,7 @@ impl EventHandler {
                             }
                             state.add_info_notification(format!(
                                 "{}: {}",
-                                agent.label(),
+                                agent.login_label(),
                                 agent.login_hint()
                             ));
                         }
@@ -6592,10 +6597,8 @@ impl EventHandler {
                                 "Enter an API key first (or Esc to cancel)".to_string(),
                             );
                         } else {
-                            let stored = match agent {
-                                AuthAgent::Claude => credentials::store_anthropic_api_key(&key),
-                                AuthAgent::Codex => credentials::store_openai_api_key(&key),
-                            };
+                            let stored =
+                                credentials::store_credential(agent.credential_key(), &key);
                             match stored {
                                 Ok(()) => {
                                     if agent == AuthAgent::Claude {
@@ -6606,8 +6609,9 @@ impl EventHandler {
                                         o.refresh_auth_statuses();
                                     }
                                     state.add_success_notification(format!(
-                                        "{} saved to keychain",
-                                        agent.key_label()
+                                        "{} saved to keychain; injected as {}",
+                                        agent.key_label(),
+                                        agent.env_var()
                                     ));
                                 }
                                 Err(e) => {

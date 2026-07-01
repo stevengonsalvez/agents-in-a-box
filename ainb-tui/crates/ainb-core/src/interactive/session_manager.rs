@@ -1506,7 +1506,17 @@ impl InteractiveSessionManager {
                     String::new()
                 }
             }
-            SessionAgentType::Copilot => String::new(),
+            SessionAgentType::Copilot => {
+                // Copilot authenticates via `gh`/device flow by default; if the
+                // user stored a PAT in onboarding, inject it as GITHUB_TOKEN.
+                if let Ok(Some(pat)) = credentials::get_credential(credentials::CredentialKey::GithubPat)
+                {
+                    info!("Injecting GITHUB_TOKEN for Copilot CLI");
+                    format!("export GITHUB_TOKEN='{}' && ", pat)
+                } else {
+                    String::new()
+                }
+            }
             _ => String::new(),
         };
 

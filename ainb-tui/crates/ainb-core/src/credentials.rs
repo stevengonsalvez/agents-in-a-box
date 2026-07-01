@@ -131,6 +131,12 @@ fn store_api_key(key: CredentialKey, api_key: &str) -> Result<()> {
     store_credential(key, api_key)
 }
 
+/// Get masked display of any credential by key (for UI). Public wrapper over
+/// the internal helper so callers can render a key without a per-key function.
+pub fn get_credential_masked(key: CredentialKey) -> String {
+    get_api_key_masked(key)
+}
+
 /// Get masked display of an API key (for UI)
 fn get_api_key_masked(key: CredentialKey) -> String {
     match get_credential(key) {
