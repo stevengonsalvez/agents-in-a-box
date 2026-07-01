@@ -43,19 +43,41 @@ impl OnboardingComponent {
         let container = Block::default().style(Style::default().bg(DARK_BG));
         frame.render_widget(container, area);
 
-        // Main layout: header, content, footer
+        // Main layout: header, hint band, content, footer
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(5), // Header with progress
-                Constraint::Min(15),   // Main content
+                Constraint::Length(3), // Per-step hint ("what this does")
+                Constraint::Min(12),   // Main content
                 Constraint::Length(3), // Navigation footer
             ])
             .split(area);
 
         self.render_header(frame, layout[0], state);
-        self.render_step_content(frame, layout[1], state);
-        self.render_navigation(frame, layout[2], state);
+        self.render_hint(frame, layout[1], state);
+        self.render_step_content(frame, layout[2], state);
+        self.render_navigation(frame, layout[3], state);
+    }
+
+    /// Render the per-step hint band — a one-liner explaining what the current
+    /// step actually does (fed by `OnboardingStep::hint()`).
+    fn render_hint(&self, frame: &mut Frame, area: Rect, state: &OnboardingState) {
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .style(Style::default().bg(DARK_BG));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("💡 ", Style::default().fg(GOLD)),
+            Span::styled(state.current_step.hint(), Style::default().fg(MUTED_GRAY)),
+        ]))
+        .wrap(ratatui::widgets::Wrap { trim: true })
+        .alignment(Alignment::Center);
+        frame.render_widget(hint, inner);
     }
 
     /// Render the header with step progress
@@ -1370,7 +1392,8 @@ mod tests {
         let comp = OnboardingComponent::new();
         let mut state = OnboardingState::new();
         state.current_step = OnboardingStep::OtelSetup;
-        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        // Height accounts for the header + per-step hint band + footer chrome.
+        let mut terminal = Terminal::new(TestBackend::new(width, 34)).unwrap();
         terminal.draw(|f| comp.render(f, f.size(), &state)).unwrap();
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
@@ -1428,7 +1451,8 @@ mod tests {
 
     fn deps_step_text(state: &OnboardingState, width: u16) -> String {
         let comp = OnboardingComponent::new();
-        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        // Height accounts for the header + per-step hint band + footer chrome.
+        let mut terminal = Terminal::new(TestBackend::new(width, 34)).unwrap();
         terminal.draw(|f| comp.render(f, f.size(), state)).unwrap();
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }

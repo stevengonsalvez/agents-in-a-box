@@ -86,6 +86,41 @@ impl OnboardingStep {
         }
     }
 
+    /// A one-line "what this step actually does" hint, shown in the hint band
+    /// above every step's content.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            Self::Welcome => {
+                "First-time setup — dependencies, project folders, agent auth, telemetry, \
+                 and editor. Change any of it later from the Setup menu."
+            }
+            Self::DependencyCheck => {
+                "Checks the CLI tools ainb needs (claude, tmux, git, …). Press i to install a \
+                 missing one; required tools must pass before you can continue."
+            }
+            Self::GitDirectories => {
+                "Parent folders that hold your git repos. ainb scans these recursively — every \
+                 repo it finds becomes a session you can start. Comma-separate multiple."
+            }
+            Self::Authentication => {
+                "How each agent signs in: subscription/OAuth via its native login, or an API key \
+                 stored in your system keychain. Set per agent, changeable anytime."
+            }
+            Self::OtelSetup => {
+                "Optional: ship ainb usage metrics to your Grafana Cloud over OpenTelemetry. \
+                 Fill all three fields or skip — you can run `ainb otel setup` later."
+            }
+            Self::EditorSelection => {
+                "The editor ainb opens files and worktrees in. Detected from your PATH — pick \
+                 one, or skip to fall back to $EDITOR."
+            }
+            Self::Summary => {
+                "Review your choices and finish. Writes them to ~/.agents-in-a-box/config; \
+                 re-run this wizard anytime from the Setup menu."
+            }
+        }
+    }
+
     /// Can we go to the next step?
     pub fn can_advance(&self, state: &OnboardingState) -> bool {
         match self {
