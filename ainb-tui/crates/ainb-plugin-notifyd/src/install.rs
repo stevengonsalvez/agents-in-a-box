@@ -677,7 +677,7 @@ fn strip_codex_managed_entries(hooks_json: &Path) -> Result<()> {
 }
 
 /// One row in `ainb-notifyd status` output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusRow {
     /// Agent name (`claude` / `codex`).
     pub agent: String,

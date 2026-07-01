@@ -1320,12 +1320,10 @@ impl CliCommand for NotifydCommand {
                     Command::new("reap")
                         .about("Kill orphan / wedged notifyd processes, sparing the live owner"),
                 )
-                .subcommand(
-                    Command::new("restart").about(
-                        "Stop, reap, and respawn the daemon — the single resume/repair \
+                .subcommand(Command::new("restart").about(
+                    "Stop, reap, and respawn the daemon — the single resume/repair \
                          command for a dead or wedged approve socket",
-                    ),
-                )
+                ))
                 .subcommand(agent_flags(
                     Command::new("install").about("Install the ainb-hooks hook"),
                 ))
@@ -1382,7 +1380,9 @@ impl CliCommand for NotifydCommand {
             },
             Install(Vec<ainb_plugin_notifyd::Agent>),
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
-            Status,
+            Status {
+                json: bool,
+            },
             List {
                 dismissed: bool,
                 agent: Option<String>,
@@ -1412,7 +1412,9 @@ impl CliCommand for NotifydCommand {
             },
             Some(("install", m)) => Verb::Install(agents(m)),
             Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
-            Some(("status", _)) => Verb::Status,
+            Some(("status", _)) => Verb::Status {
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some(("list", m)) => Verb::List {
                 dismissed: m.get_flag("dismissed"),
                 agent: m.get_one::<String>("agent").cloned(),
@@ -1435,7 +1437,7 @@ impl CliCommand for NotifydCommand {
                 Verb::Restart { json } => cli::cmd_restart(json),
                 Verb::Install(a) => cli::cmd_install(&a),
                 Verb::Uninstall(a) => cli::cmd_uninstall(&a),
-                Verb::Status => cli::cmd_status(),
+                Verb::Status { json } => cli::cmd_status(json),
                 Verb::List {
                     dismissed,
                     agent,

@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use ainb_plugin_notifyd::cli;
 
@@ -20,8 +20,18 @@ use ainb_plugin_notifyd::cli;
 #[derive(Debug, Parser)]
 #[command(name = "ainb-notifyd", version)]
 struct Cli {
+    /// Output format for machine-readable verbs (status/reap/restart).
+    #[arg(long, global = true, value_enum, default_value_t = Format::Text)]
+    format: Format,
     #[command(subcommand)]
     cmd: Option<Cmd>,
+}
+
+/// Output rendering for the daemon-control verbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -70,18 +80,19 @@ async fn main() -> ExitCode {
         .try_init();
 
     let cli = Cli::parse();
+    let json = cli.format == Format::Json;
     let result: Result<()> = match cli.cmd.unwrap_or(Cmd::Run) {
         Cmd::Run => cli::cmd_run().await,
         Cmd::Stop => cli::cmd_stop(),
-        Cmd::Reap => cli::cmd_reap(false),
-        Cmd::Restart => cli::cmd_restart(false),
+        Cmd::Reap => cli::cmd_reap(json),
+        Cmd::Restart => cli::cmd_restart(json),
         Cmd::Install(a) => {
             cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
         }
         Cmd::Uninstall(a) => {
             cli::cmd_uninstall(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
         }
-        Cmd::Status => cli::cmd_status(),
+        Cmd::Status => cli::cmd_status(json),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

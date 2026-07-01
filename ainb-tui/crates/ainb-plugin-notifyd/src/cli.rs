@@ -173,9 +173,21 @@ pub fn cmd_uninstall(agents: &[Agent]) -> Result<()> {
 
 /// `status` — per-agent install/hook/socket state + the most recent
 /// event + daemon PID liveness.
-pub fn cmd_status() -> Result<()> {
+pub fn cmd_status(json: bool) -> Result<()> {
     let paths = Paths::from_home()?;
     let rows = status(&paths)?;
+    let pid = crate::pid::read(&paths.pid)?;
+    let running = pid.is_some_and(crate::pid::is_running);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "agents": rows,
+                "daemon": { "pid": pid, "running": running },
+            }))?
+        );
+        return Ok(());
+    }
     println!(
         "{:<8} {:<10} {:<10} {:<10} {}",
         "agent", "installed", "hook_ok", "socket_ok", "last_event"
@@ -195,14 +207,10 @@ pub fn cmd_status() -> Result<()> {
         );
     }
     // Daemon PID liveness, for at-a-glance debugging.
-    if let Some(pid) = crate::pid::read(&paths.pid)? {
-        if crate::pid::is_running(pid) {
-            println!("\ndaemon: pid {pid} (running)");
-        } else {
-            println!("\ndaemon: stale pid {pid} (not running)");
-        }
-    } else {
-        println!("\ndaemon: not running");
+    match pid {
+        Some(pid) if running => println!("\ndaemon: pid {pid} (running)"),
+        Some(pid) => println!("\ndaemon: stale pid {pid} (not running)"),
+        None => println!("\ndaemon: not running"),
     }
     Ok(())
 }
