@@ -373,10 +373,12 @@ fn parse_ask(context_json: Option<&str>) -> Option<AskUserQuestionData> {
 fn kind_badge(kind: &str) -> (&'static str, Color) {
     match kind {
         "ASK" => ("ASK ", GOLD),
+        "APPROVE" => ("APRV", GOLD),
         "ERR" => ("ERR ", ALERT_RED),
         "WAIT" => ("WAIT", WAIT_AMBER),
         "IDLE" => ("IDLE", MUTED_GRAY),
         "RUNNING" => ("RUN ", SELECTION_GREEN),
+        "STARTING" => ("STRT", CORNFLOWER_BLUE),
         "DONE" => ("DONE", CORNFLOWER_BLUE),
         _ => ("????", MUTED_GRAY),
     }
@@ -405,6 +407,8 @@ fn short_context(row: &StateRow) -> String {
         "ASK" => parse_ask(row.context.as_deref())
             .map(|a| truncate_chars(&a.question, 40))
             .unwrap_or_default(),
+        "APPROVE" => "needs approval".to_string(),
+        "STARTING" => "starting".to_string(),
         "ERR" => row
             .context
             .as_deref()
@@ -480,7 +484,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
     let needs = state
         .rows
         .iter()
-        .filter(|r| matches!(r.kind.as_str(), "ASK" | "ERR" | "WAIT" | "IDLE"))
+        .filter(|r| matches!(r.kind.as_str(), "ASK" | "ERR" | "WAIT" | "IDLE" | "APPROVE"))
         .count();
     let title = Line::from(vec![
         Span::styled(
@@ -600,6 +604,27 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
 
     match row.kind.as_str() {
         "ASK" => render_ask_detail(&mut lines, row, state.option_cursor),
+        "APPROVE" => {
+            let v = row
+                .context
+                .as_deref()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+            let tool = v
+                .as_ref()
+                .and_then(|v| v.get("tool").and_then(|t| t.as_str()))
+                .unwrap_or("(unknown)");
+            let input = v
+                .as_ref()
+                .and_then(|v| v.get("tool_input"))
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            lines.push(Line::from(Span::styled(
+                "needs approval:",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(label("tool:", tool.to_string()));
+            lines.push(label("input:", input));
+        }
         "ERR" => {
             let et = row
                 .context
@@ -658,6 +683,10 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
         "RUNNING" => lines.push(Line::from(Span::styled(
             "actively working — no action needed",
             Style::default().fg(SELECTION_GREEN),
+        ))),
+        "STARTING" => lines.push(Line::from(Span::styled(
+            "starting — session is booting",
+            Style::default().fg(CORNFLOWER_BLUE),
         ))),
         "DONE" => lines.push(Line::from(Span::styled(
             "finished — completion delivered via the inbox",
@@ -851,6 +880,34 @@ mod tests {
         );
         assert!(out.contains("staging"), "ASK option 'staging' missing");
         assert!(out.contains("prod"), "ASK option 'prod' missing");
+    }
+
+    #[test]
+    fn renders_approve_and_starting_badges() {
+        let mut state = state_with(vec![
+            row(
+                "sess-approve",
+                "/work/deploy",
+                "APPROVE",
+                Some(r#"{"tool":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#),
+                "hook",
+            ),
+            row("sess-starting", "/work/boot", "STARTING", None, "hook"),
+        ]);
+        let out = render_to_string(&mut state, 130, 24);
+        assert!(out.contains("APRV"), "APPROVE badge missing: {out}");
+        assert!(out.contains("STRT"), "STARTING badge missing: {out}");
+        // APPROVE needs attention; the counter reflects it.
+        assert!(
+            out.contains("1 need attention"),
+            "needs counter wrong: {out}"
+        );
+        // The selected (first) row is APPROVE → detail shows the tool.
+        assert!(
+            out.contains("needs approval"),
+            "APPROVE detail missing: {out}"
+        );
+        assert!(out.contains("Bash"), "APPROVE tool missing: {out}");
     }
 
     #[test]
