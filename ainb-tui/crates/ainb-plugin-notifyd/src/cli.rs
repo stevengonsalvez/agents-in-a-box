@@ -101,6 +101,40 @@ pub fn cmd_reap(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `restart` — the single resume/repair command. Stop the current owner,
+/// reap stragglers, spawn a fresh daemon, and wait for the approve socket
+/// to rebind. Because [`crate::broker::client_await`] re-dials until its
+/// own deadline, every still-blocked permission waiter re-registers the
+/// moment the socket is back — so this one command both repairs a dead
+/// socket and resumes pending prompts, without losing a waiting hook.
+pub fn cmd_restart(json: bool) -> Result<()> {
+    let outcome = crate::procs::restart(std::time::Duration::from_secs(3))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+    match outcome.stopped {
+        Some(p) => println!("stopped previous daemon (pid {p})"),
+        None => println!("no previous daemon was running"),
+    }
+    if !outcome.reaped.is_empty() {
+        println!("reaped {} straggler(s)", outcome.reaped.len());
+    }
+    match outcome.spawned {
+        Some(p) => println!("spawned fresh daemon (pid {p})"),
+        None => println!("failed to spawn daemon"),
+    }
+    if outcome.socket_bound {
+        println!("approve socket is live — pending permission prompts will resume");
+    } else {
+        println!(
+            "approve socket did not rebind in time; still-waiting hooks keep re-dialling \
+             until it does or they time out"
+        );
+    }
+    Ok(())
+}
+
 /// `install` — wire the ainb-hooks hook into the chosen agents and
 /// print the resolved on-disk paths.
 pub fn cmd_install(agents: &[Agent]) -> Result<()> {

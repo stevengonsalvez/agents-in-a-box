@@ -503,6 +503,23 @@ mod tests {
         (sock, state, handle)
     }
 
+    /// Poll `client_list` until an await for `session_id` is registered,
+    /// or panic after ~4s. Runs the blocking client call off-thread so it
+    /// never starves the server task that must answer it.
+    async fn wait_for_pending(sock: &Path, session_id: &str) {
+        for _ in 0..200 {
+            let s = sock.to_path_buf();
+            let pending = tokio::task::spawn_blocking(move || client_list(&s).unwrap_or_default())
+                .await
+                .unwrap();
+            if pending.iter().any(|p| p.session_id == session_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("await for {session_id} never registered");
+    }
+
     /// Send one request line, read one response line.
     async fn round_trip(sock: &Path, request: &str) -> String {
         let mut stream = UnixStream::connect(sock).await.unwrap();
@@ -727,5 +744,82 @@ mod tests {
             DecisionKind::Deny,
             "dead socket must fall back to deny, never approve"
         );
+    }
+
+    /// The single-resume guarantee, proven end-to-end: a permission waiter
+    /// parked on the broker survives a full daemon restart. We kill broker
+    /// one outright (drop its runtime → every connection closes, exactly like
+    /// the process exiting), rebind a *fresh* broker on the same socket path
+    /// with new state that has no memory of the waiter, and the waiter's own
+    /// re-dial ladder re-registers itself — then a human approve round-trips
+    /// back to it. Restarting notifyd is all it takes to resume a pending
+    /// prompt; no waiting hook is lost. Sync test so dropping the runtimes is
+    /// safe (dropping a Runtime inside async panics).
+    #[test]
+    fn waiter_resumes_after_socket_restart() {
+        let sock = std::env::temp_dir()
+            .join(format!("ainb-broker-restart-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+
+        // Poll client_list on this thread until `session_id` is registered on
+        // whatever broker currently owns the socket, or panic after ~6s.
+        let wait_registered = |session_id: &str| {
+            for _ in 0..300 {
+                if client_list(&sock)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|p| p.session_id == session_id)
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("await for {session_id} never registered");
+        };
+
+        let spawn_broker_rt = |sock: std::path::PathBuf| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.spawn(async move {
+                let listener = UnixListener::bind(&sock).unwrap();
+                serve(listener, BrokerState::with_timeout(Duration::from_secs(30))).await;
+            });
+            rt
+        };
+
+        // Broker one comes up; a hook parks on AWAIT and registers.
+        let rt1 = spawn_broker_rt(sock.clone());
+        let sock_w = sock.clone();
+        let waiter = std::thread::spawn(move || {
+            client_await(&sock_w, "resume-A", "Bash", "rm -rf /tmp/x", Duration::from_secs(20))
+        });
+        wait_registered("resume-A");
+
+        // Daemon dies: dropping the runtime aborts the accept loop AND every
+        // detached connection task, closing the waiter's socket — the true
+        // "process exited" signal, not a soft abort. Unlink the stale path.
+        rt1.shutdown_background();
+        let _ = std::fs::remove_file(&sock);
+
+        // Restart: a fresh daemon binds the same path with brand-new state.
+        let rt2 = spawn_broker_rt(sock.clone());
+
+        // The waiter's re-dial ladder must find the new broker and re-register
+        // there, all on its own — this is the resume with no lost hook.
+        wait_registered("resume-A");
+
+        // Human approves against the fresh daemon; the resumed waiter answers.
+        let matched = client_decide(&sock, "resume-A", DecisionKind::Approve, "ok").unwrap();
+        assert!(matched, "fresh broker should match the re-registered waiter");
+
+        let decision = waiter.join().unwrap();
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Approve,
+            "waiter must round-trip approve after the restart"
+        );
+        assert_eq!(decision.reason, "ok");
+
+        rt2.shutdown_background();
+        let _ = std::fs::remove_file(&sock);
     }
 }

@@ -32,6 +32,9 @@ enum Cmd {
     Stop,
     /// Kill orphan / wedged notifyd processes, sparing the live owner.
     Reap,
+    /// Stop, reap, and respawn the daemon — the single resume/repair
+    /// command for a dead or wedged approve socket.
+    Restart,
     /// Install the ainb-hooks plugin for one or more agents.
     Install(AgentArgs),
     /// Uninstall the ainb-hooks plugin for one or more agents.
@@ -71,6 +74,7 @@ async fn main() -> ExitCode {
         Cmd::Run => cli::cmd_run().await,
         Cmd::Stop => cli::cmd_stop(),
         Cmd::Reap => cli::cmd_reap(false),
+        Cmd::Restart => cli::cmd_restart(false),
         Cmd::Install(a) => {
             cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
         }

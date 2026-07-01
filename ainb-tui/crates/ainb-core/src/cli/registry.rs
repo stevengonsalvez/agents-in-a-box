@@ -1320,6 +1320,12 @@ impl CliCommand for NotifydCommand {
                     Command::new("reap")
                         .about("Kill orphan / wedged notifyd processes, sparing the live owner"),
                 )
+                .subcommand(
+                    Command::new("restart").about(
+                        "Stop, reap, and respawn the daemon — the single resume/repair \
+                         command for a dead or wedged approve socket",
+                    ),
+                )
                 .subcommand(agent_flags(
                     Command::new("install").about("Install the ainb-hooks hook"),
                 ))
@@ -1371,6 +1377,9 @@ impl CliCommand for NotifydCommand {
             Reap {
                 json: bool,
             },
+            Restart {
+                json: bool,
+            },
             Install(Vec<ainb_plugin_notifyd::Agent>),
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
             Status,
@@ -1398,6 +1407,9 @@ impl CliCommand for NotifydCommand {
             Some(("reap", _)) => Verb::Reap {
                 json: matches!(ctx.format, crate::cli::OutputFormat::Json),
             },
+            Some(("restart", _)) => Verb::Restart {
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some(("install", m)) => Verb::Install(agents(m)),
             Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
             Some(("status", _)) => Verb::Status,
@@ -1420,6 +1432,7 @@ impl CliCommand for NotifydCommand {
                 Verb::Run => cli::cmd_run().await,
                 Verb::Stop => cli::cmd_stop(),
                 Verb::Reap { json } => cli::cmd_reap(json),
+                Verb::Restart { json } => cli::cmd_restart(json),
                 Verb::Install(a) => cli::cmd_install(&a),
                 Verb::Uninstall(a) => cli::cmd_uninstall(&a),
                 Verb::Status => cli::cmd_status(),
