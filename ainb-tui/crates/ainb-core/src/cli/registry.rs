@@ -2094,6 +2094,29 @@ impl CliCommand for FleetCommand {
             "Unified runtime health of every long-running daemon \
              (phone bridge / notifyd / ATC / fleet daemon)",
         );
+        // approve/deny share one arg shape: with a session-id they deliver the
+        // decision to the waiting PermissionRequest hook via the approve
+        // broker; without one they list the sessions currently blocked.
+        let decision_args = |c: Command| {
+            c.arg(
+                clap::Arg::new("session-id")
+                    .help("Session blocked on a permission decision (omit to list waiters)"),
+            )
+            .arg(
+                clap::Arg::new("reason")
+                    .long("reason")
+                    .default_value("")
+                    .help("Optional reason relayed to the agent with the decision"),
+            )
+        };
+        let approve = decision_args(
+            Command::new("approve")
+                .about("Approve a session's pending permission request (no arg: list waiters)"),
+        );
+        let deny = decision_args(
+            Command::new("deny")
+                .about("Deny a session's pending permission request (no arg: list waiters)"),
+        );
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2116,6 +2139,8 @@ impl CliCommand for FleetCommand {
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(approve)
+                .subcommand(deny)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(sequence)
@@ -2131,7 +2156,10 @@ impl CliCommand for FleetCommand {
                      ainb fleet standup               Live status of all sessions\n  \
                      ainb fleet needs                 Sessions blocked on input / errors\n  \
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
-                     ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps",
+                     ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
+                     ainb fleet approve               List sessions waiting on a permission decision\n  \
+                     ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
+                     ainb fleet deny <session-id> --reason \"not now\"   Deny it, with a reason",
                 ),
         )
     }
