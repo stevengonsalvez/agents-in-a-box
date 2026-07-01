@@ -369,6 +369,8 @@ pub enum AppEvent {
     FleetPanelOptionPrev, // Fleet panel: move ASK option cursor back (Shift+Tab)
     FleetPanelAnswer,     // Fleet panel: answer selected ASK with the option (Enter/a)
     FleetPanelBroadcast,  // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove,    // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,       // Fleet panel: deny the selected APPROVE permission request (n)
     FleetPanelRefresh,    // Fleet panel: force-refresh from current_state (r)
     PanelBack,            // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,           // Navigate to the Hangar control plane (plugin screen)
@@ -2730,6 +2732,8 @@ impl EventHandler {
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
             KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
+            KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
+            KeyCode::Char('n') => Some(AppEvent::FleetPanelDeny),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
             _ => None,
         }
@@ -5247,6 +5251,22 @@ impl EventHandler {
                         .fleet_panel_state
                         .set_feedback("no session selected to broadcast to".to_string());
                 }
+            }
+            AppEvent::FleetPanelApprove => {
+                // Approve the selected APPROVE row: deliver a first-class
+                // permission decision to the notifyd approve broker, which
+                // unblocks the parked PermissionRequest hook (it flows back to
+                // Claude as `permissionDecision: allow`). NOT a tmux send.
+                state
+                    .fleet_panel_state
+                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Approve, "approved");
+            }
+            AppEvent::FleetPanelDeny => {
+                // Deny the selected APPROVE row (broker relays `deny` back to the
+                // blocked hook). Same guard as approve/send.
+                state
+                    .fleet_panel_state
+                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Deny, "denied");
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");

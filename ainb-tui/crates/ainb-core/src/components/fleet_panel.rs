@@ -23,6 +23,7 @@
 //   - Tab / Shift+Tab    move the ASK option cursor (when the row is an ASK)
 //   - Enter / a          answer the selected ASK with the highlighted option
 //   - B                  broadcast a ping prompt to the selected session
+//   - y / n              approve / deny the selected APPROVE permission request
 //   - r                  force-refresh from the store
 //   - q / Esc            back to the previous screen
 //
@@ -319,6 +320,47 @@ impl FleetPanelState {
             text,
             kind_label,
             is_answer,
+        );
+        true
+    }
+
+    /// Guarded approve/deny for the selected APPROVE row: refuses while another
+    /// action is in flight (shares the send guard) and only fires when the
+    /// selected row is actually a waiting permission request (`APPROVE`).
+    /// Returns `true` if a decision was dispatched.
+    ///
+    /// Unlike [`guarded_dispatch`], this delivers a first-class permission
+    /// decision to the notifyd approve broker (`dispatch_decide`), which unblocks
+    /// the parked `PermissionRequest` hook — it does NOT route text via tmux.
+    pub fn guarded_decide(
+        &mut self,
+        kind: ainb_plugin_notifyd::broker::DecisionKind,
+        kind_label: &'static str,
+    ) -> bool {
+        if self.is_sending() {
+            self.set_feedback("action already in flight — wait for it to finish".to_string());
+            return false;
+        }
+        let Some(row) = self.selected_row() else {
+            return false;
+        };
+        if row.kind != "APPROVE" {
+            self.set_feedback("no permission request selected".to_string());
+            return false;
+        }
+        let session_id = row.session_id.clone();
+        if session_id.is_empty() {
+            self.set_feedback("cannot decide: row has no session id".to_string());
+            return false;
+        }
+        self.set_feedback(format!("{kind_label} → {session_id}: delivering…"));
+        crate::fleet::control::dispatch_decide(
+            Arc::clone(&self.feedback),
+            Arc::clone(&self.in_flight),
+            session_id,
+            kind,
+            String::new(),
+            kind_label,
         );
         true
     }
@@ -624,6 +666,13 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
             )));
             lines.push(label("tool:", tool.to_string()));
             lines.push(label("input:", input));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("y", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" approve   ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("n", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" deny", Style::default().fg(MUTED_GRAY)),
+            ]));
         }
         "ERR" => {
             let et = row
@@ -987,6 +1036,29 @@ mod tests {
         let (target, answer) = state.pending_answer().expect("ask row has an answer");
         assert_eq!(target.session_id, "s");
         assert_eq!(answer, "no");
+    }
+
+    #[test]
+    fn guarded_decide_refuses_non_approve_row() {
+        use ainb_plugin_notifyd::broker::DecisionKind;
+        let mut state = state_with(vec![row(
+            "s",
+            "/p",
+            "ASK",
+            Some(r#"{"question":"q?","options":[{"label":"a"}]}"#),
+            "hook",
+        )]);
+        // Selected row is ASK, not APPROVE → decide refused, no dispatch.
+        assert!(!state.guarded_decide(DecisionKind::Approve, "approved"));
+        assert!(!state.is_sending(), "no worker claimed for non-APPROVE row");
+    }
+
+    #[test]
+    fn guarded_decide_refuses_empty_session_id() {
+        use ainb_plugin_notifyd::broker::DecisionKind;
+        let mut state = state_with(vec![row("", "/p", "APPROVE", None, "hook")]);
+        assert!(!state.guarded_decide(DecisionKind::Deny, "denied"));
+        assert!(!state.is_sending(), "empty session id must not claim a worker");
     }
 
     #[test]
