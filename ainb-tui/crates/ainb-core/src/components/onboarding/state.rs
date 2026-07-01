@@ -273,7 +273,24 @@ pub struct OnboardingState {
     pub dep_cursor: usize,
     /// Per-dep install state, keyed by dep id (idle deps absent).
     pub install_states: std::collections::HashMap<String, DepInstall>,
+    /// Authentication step: cursor over the selectable auth option rows.
+    pub auth_selected_index: usize,
+    /// Authentication step: `Some(buffer)` while typing a Claude API key
+    /// inline (the "Claude - API key" row was chosen); `None` in normal
+    /// list-navigation mode.
+    pub auth_api_key_input: Option<String>,
 }
+
+/// Selectable rows on the onboarding Authentication step. `(agent, method)`.
+/// Index order is load-bearing - the `OnboardingAuthSelect` handler matches on
+/// it. Real auth still happens in each tool (`/login`); only the API-key row
+/// persists anything (keychain + `claude_provider = ApiKey`).
+pub const AUTH_OPTIONS: [(&str, &str); 4] = [
+    ("Claude", "Login - subscription / OAuth"),
+    ("Claude", "API key - pay-per-use"),
+    ("Codex", "Login - OAuth"),
+    ("Skip", "Configure later"),
+];
 
 /// Background-install state for a single dependency on the deps screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,7 +330,19 @@ impl OnboardingState {
             otel_field: 0,
             dep_cursor: 0,
             install_states: std::collections::HashMap::new(),
+            auth_selected_index: 0,
+            auth_api_key_input: None,
         }
+    }
+
+    /// Move the auth-option cursor by `delta`, clamped to `AUTH_OPTIONS`.
+    /// No-op while an API key is being typed.
+    pub fn move_auth_cursor(&mut self, delta: isize) {
+        if self.auth_api_key_input.is_some() {
+            return;
+        }
+        let max = (AUTH_OPTIONS.len() - 1) as isize;
+        self.auth_selected_index = (self.auth_selected_index as isize + delta).clamp(0, max) as usize;
     }
 
     /// Deps flattened in topic order — the cursor indexes into this. Empty until
@@ -605,6 +634,23 @@ mod tests {
         let step = OnboardingStep::OtelSetup;
         assert_eq!(step.next(), Some(OnboardingStep::EditorSelection));
         assert_eq!(step.previous(), Some(OnboardingStep::Authentication));
+    }
+
+    #[test]
+    fn auth_cursor_navigates_and_clamps() {
+        let mut s = OnboardingState::new();
+        assert_eq!(s.auth_selected_index, 0);
+        s.move_auth_cursor(-1); // clamp at 0
+        assert_eq!(s.auth_selected_index, 0);
+        s.move_auth_cursor(1);
+        assert_eq!(s.auth_selected_index, 1);
+        s.move_auth_cursor(100); // clamp at the last option
+        assert_eq!(s.auth_selected_index, AUTH_OPTIONS.len() - 1);
+        // While typing an API key the cursor is frozen.
+        s.auth_api_key_input = Some("sk-ant-".to_string());
+        let before = s.auth_selected_index;
+        s.move_auth_cursor(-1);
+        assert_eq!(s.auth_selected_index, before);
     }
 
     #[test]

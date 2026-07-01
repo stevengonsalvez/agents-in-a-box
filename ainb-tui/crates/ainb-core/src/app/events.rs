@@ -446,6 +446,12 @@ pub enum AppEvent {
     OnboardingCursorEnd,          // Move cursor to end of input
     OnboardingCheckDeps,          // Run dependency check
     OnboardingSkipAuth,           // Skip authentication step
+    OnboardingAuthUp,             // Auth step: move option cursor up
+    OnboardingAuthDown,           // Auth step: move option cursor down
+    OnboardingAuthSelect,         // Auth step: choose focused option / save key
+    OnboardingAuthKeyChar(char),  // Auth step: type into the API-key field
+    OnboardingAuthKeyBackspace,   // Auth step: backspace the API-key field
+    OnboardingAuthKeyCancel,      // Auth step: leave API-key entry (Esc)
     OnboardingEditorUp,           // Move editor selection up
     OnboardingEditorDown,         // Move editor selection down
     OnboardingFinish,             // Complete onboarding
@@ -2289,15 +2295,34 @@ impl EventHandler {
                         }
                     }
                 }
-                OnboardingStep::Authentication => match key_event.code {
-                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                    KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                        Some(AppEvent::OnboardingBack)
+                OnboardingStep::Authentication => {
+                    let typing_key = state
+                        .onboarding_state
+                        .as_ref()
+                        .map(|o| o.auth_api_key_input.is_some())
+                        .unwrap_or(false);
+                    if typing_key {
+                        match key_event.code {
+                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc => Some(AppEvent::OnboardingAuthKeyCancel),
+                            KeyCode::Backspace => Some(AppEvent::OnboardingAuthKeyBackspace),
+                            KeyCode::Char(c) => Some(AppEvent::OnboardingAuthKeyChar(c)),
+                            _ => None,
+                        }
+                    } else {
+                        match key_event.code {
+                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
+                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
+                            KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                            KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                Some(AppEvent::OnboardingSkipAuth)
+                            }
+                            _ => None,
+                        }
                     }
-                    KeyCode::Char('s') | KeyCode::Char('S') => Some(AppEvent::OnboardingSkipAuth),
-                    _ => None,
-                },
+                }
                 OnboardingStep::OtelSetup => match key_event.code {
                     // Enter advances; if all 3 creds are filled, finish-time
                     // setup runs, otherwise the step is effectively skipped.
@@ -6235,6 +6260,132 @@ impl EventHandler {
                     onboarding_state.auth_completed = true;
                     onboarding_state.auth_method = Some("skipped".to_string());
                     onboarding_state.advance();
+                }
+            }
+            AppEvent::OnboardingAuthUp => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.move_auth_cursor(-1);
+                }
+            }
+            AppEvent::OnboardingAuthDown => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.move_auth_cursor(1);
+                }
+            }
+            AppEvent::OnboardingAuthKeyChar(ch) => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                        buf.push(ch);
+                    }
+                }
+            }
+            AppEvent::OnboardingAuthKeyBackspace => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                        buf.pop();
+                    }
+                }
+            }
+            AppEvent::OnboardingAuthKeyCancel => {
+                if let Some(o) = state.onboarding_state.as_mut() {
+                    o.auth_api_key_input = None;
+                }
+            }
+            AppEvent::OnboardingAuthSelect => {
+                use crate::config::{AppConfig, ClaudeAuthProvider};
+                // Decide from an immutable read, then mutate/notify without a
+                // held borrow. Rows: 0=Claude OAuth, 1=Claude API key,
+                // 2=Codex OAuth, 3=Skip. While typing a key, Enter = save.
+                let (typing_key, key_buf, idx) = state
+                    .onboarding_state
+                    .as_ref()
+                    .map(|o| {
+                        (
+                            o.auth_api_key_input.is_some(),
+                            o.auth_api_key_input.clone().unwrap_or_default(),
+                            o.auth_selected_index,
+                        )
+                    })
+                    .unwrap_or((false, String::new(), 0));
+
+                // Persist the Claude auth provider so build_env_setup() honours it.
+                let set_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
+                    Ok(mut c) => {
+                        c.authentication.claude_provider = p;
+                        if let Err(e) = c.save() {
+                            tracing::error!("Failed to save auth provider: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to load config for auth provider: {}", e),
+                };
+
+                if typing_key {
+                    let key = key_buf.trim().to_string();
+                    if key.is_empty() || key == "sk-ant-" {
+                        state.add_warning_notification(
+                            "Enter an API key first (or Esc to cancel)".to_string(),
+                        );
+                    } else {
+                        match credentials::store_anthropic_api_key(&key) {
+                            Ok(()) => {
+                                set_provider(ClaudeAuthProvider::ApiKey);
+                                if let Some(o) = state.onboarding_state.as_mut() {
+                                    o.auth_api_key_input = None;
+                                    o.auth_completed = true;
+                                    o.auth_method = Some("claude-api-key".to_string());
+                                    o.advance();
+                                }
+                                state.add_success_notification(
+                                    "API key saved to keychain; sessions will use ANTHROPIC_API_KEY"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                state.add_error_notification(format!(
+                                    "Failed to save API key: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    match idx {
+                        0 => {
+                            set_provider(ClaudeAuthProvider::SystemAuth);
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("claude-oauth".to_string());
+                                o.advance();
+                            }
+                            state.add_info_notification(
+                                "Claude: subscription/OAuth - run /login inside Claude on first launch"
+                                    .to_string(),
+                            );
+                        }
+                        1 => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_api_key_input = Some("sk-ant-".to_string());
+                            }
+                        }
+                        2 => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("codex-oauth".to_string());
+                                o.advance();
+                            }
+                            state.add_info_notification(
+                                "Codex: run `codex login` (or /login in Codex) before first use"
+                                    .to_string(),
+                            );
+                        }
+                        _ => {
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_completed = true;
+                                o.auth_method = Some("skipped".to_string());
+                                o.advance();
+                            }
+                        }
+                    }
                 }
             }
             AppEvent::OnboardingEditorUp => {

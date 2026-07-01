@@ -554,45 +554,71 @@ impl OnboardingComponent {
                 )),
             ]
         } else {
-            vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "AI agent authentication",
+            let mut lines: Vec<Line> = vec![Line::from("")];
+            if let Some(ref key) = state.auth_api_key_input {
+                // Inline Claude API-key entry.
+                lines.push(Line::from(Span::styled(
+                    "Enter your Anthropic API key",
                     Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Each agent uses its own auth method:",
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Stored in the system keychain; switches Claude to API-key mode.",
                     Style::default().fg(MUTED_GRAY),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Claude  ", Style::default().fg(GOLD)),
-                    Span::styled("claude auth  ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("Codex  ", Style::default().fg(GOLD)),
-                    Span::styled("OPENAI_API_KEY", Style::default().fg(MUTED_GRAY)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  Gemini  ", Style::default().fg(GOLD)),
-                    Span::styled("GEMINI_API_KEY  ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("Copilot  ", Style::default().fg(GOLD)),
-                    Span::styled("copilot login", Style::default().fg(MUTED_GRAY)),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Configure auth per-agent before first use.",
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}_", key),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Enter ", Style::default().fg(GOLD)),
+                    Span::styled("save   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("Esc ", Style::default().fg(GOLD)),
+                    Span::styled("cancel", Style::default().fg(MUTED_GRAY)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Configure auth before first use",
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                for (i, (agent, method)) in
+                    crate::components::onboarding::state::AUTH_OPTIONS.iter().enumerate()
+                {
+                    let selected = i == state.auth_selected_index;
+                    let marker = if selected { "\u{25b6} " } else { "  " };
+                    let agent_style = if selected {
+                        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GOLD)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
+                        Span::styled(format!("{:<8}", agent), agent_style),
+                        Span::styled(*method, Style::default().fg(MUTED_GRAY)),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "OAuth happens inside the tool - just run /login in Claude or Codex.",
                     Style::default().fg(MUTED_GRAY),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("Press ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("S", Style::default().fg(GOLD)),
-                    Span::styled(
-                        " to skip (configure later)",
-                        Style::default().fg(MUTED_GRAY),
-                    ),
-                ]),
-            ]
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Gemini uses GEMINI_API_KEY; Copilot uses `copilot login`.",
+                    Style::default().fg(MUTED_GRAY),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("\u{2191}\u{2193} ", Style::default().fg(GOLD)),
+                    Span::styled("select   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("Enter ", Style::default().fg(GOLD)),
+                    Span::styled("choose   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("S ", Style::default().fg(GOLD)),
+                    Span::styled("skip", Style::default().fg(MUTED_GRAY)),
+                ]));
+            }
+            lines
         };
 
         let text = Paragraph::new(content).alignment(Alignment::Center);
