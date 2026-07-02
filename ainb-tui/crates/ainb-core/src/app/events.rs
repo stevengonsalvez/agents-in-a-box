@@ -896,6 +896,14 @@ impl EventHandler {
 
                 // Check if we're in the main view (not in overlays)
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    // Click on the bottom keymap legend (or its collapsed hint
+                    // row) toggles it — the mouse twin of ⇧M.
+                    if let Some(area) = state.menu_bar_area {
+                        if Self::point_in_rect(x, y, area) {
+                            return Some(AppEvent::ToggleSessionMenuBar);
+                        }
+                    }
+
                     if state.sessions_pane_state.is_on_toggle(x, y) {
                         state.sessions_pane_state.toggle_collapsed();
                         Self::persist_sessions_pane_preferences(state);
@@ -7373,6 +7381,24 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::SESSION_LIST);
+    }
+
+    /// A click anywhere on the published menu-bar rect toggles the legend
+    /// (the mouse twin of ⇧M); a click above it does not.
+    #[test]
+    fn click_on_menu_bar_toggles_the_legend() {
+        use ratatui::layout::Rect;
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
+
+        let inside =
+            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 22 }, &mut state);
+        assert!(matches!(inside, Some(AppEvent::ToggleSessionMenuBar)));
+
+        let outside =
+            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 5 }, &mut state);
+        assert!(!matches!(outside, Some(AppEvent::ToggleSessionMenuBar)));
     }
 
     /// `[r]` in the Skill Manager must arm a confirm on the first press

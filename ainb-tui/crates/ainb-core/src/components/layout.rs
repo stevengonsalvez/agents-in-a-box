@@ -198,7 +198,9 @@ impl LayoutComponent {
         // Render bottom logs area (traditional logs viewer)
         self.logs_viewer.render(frame, main_layout[2], state);
 
-        // Render bottom menu bar
+        // Render bottom menu bar. Publish its rect so a mouse click on the
+        // legend (or its collapsed hint row) can toggle visibility.
+        state.menu_bar_area = Some(main_layout[3]);
         self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
