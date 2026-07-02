@@ -37,7 +37,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.10.1"
+version = "1.11.1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"

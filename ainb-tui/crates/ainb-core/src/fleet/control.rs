@@ -135,6 +135,67 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Create a new ATC-managed session by shelling out to `ainb fleet atc setup
+/// <name>`, off the UI thread. This is the panel's "bootstrap a fleet member"
+/// action: an ordinary session is gated out of the event log (`is_fleet_member`
+/// in `cli/fleet/atc.rs`), so a cold fleet stays empty until an ATC session
+/// exists to fire hooks. Running the exact CLI verb keeps one code path for
+/// setup (hooks + heartbeat timer + spawn) whether invoked from the shell or
+/// the TUI.
+///
+/// Shares the panel's `in_flight` guard with `dispatch_send` so only one action
+/// runs at a time (a create in flight refuses a second create / a send, and vice
+/// versa). The detached worker publishes progress + outcome into the same
+/// [`ActionFeedback`] cell the status line renders.
+pub fn dispatch_new_atc(
+    feedback: Arc<Mutex<ActionFeedback>>,
+    in_flight: Arc<AtomicBool>,
+    name: String,
+) {
+    if in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        publish(
+            &feedback,
+            "action already in flight — wait for it to finish".to_string(),
+        );
+        return;
+    }
+
+    let spawn_err_feedback = Arc::clone(&feedback);
+    let spawn_err_flag = Arc::clone(&in_flight);
+    let spawn_result =
+        std::thread::Builder::new().name("ainb-fleet-new-atc".into()).spawn(move || {
+            let _guard = InFlightGuard(in_flight);
+            publish(&feedback, format!("creating ATC '{name}'…"));
+            let bin = crate::cli::fleet::atc::atc_bin();
+            let output =
+                std::process::Command::new(bin).args(["fleet", "atc", "setup", &name]).output();
+            let msg = match output {
+                Ok(o) if o.status.success() => {
+                    format!("created ATC '{name}' — press r once it fires a hook")
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    let line =
+                        err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("see logs");
+                    format!("create failed: {line}")
+                }
+                Err(e) => format!("create failed: {e}"),
+            };
+            publish(&feedback, msg);
+        });
+    if let Err(e) = spawn_result {
+        tracing::warn!(error = %e, "fleet panel: new-atc worker thread spawn failed");
+        spawn_err_flag.store(false, Ordering::Release);
+        publish(
+            &spawn_err_feedback,
+            format!("create failed: thread spawn error: {e}"),
+        );
+    }
+}
+
 /// Resolve a `current_state` row to a live `Session` and send `text` to it,
 /// returning a human-readable outcome string.
 ///

@@ -29,7 +29,7 @@
 // Style follows the ainb-tui guide (rounded borders, gold titles,
 // cornflower-blue panels, selection-green indicator), matching Inbox/Daemons.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -112,6 +112,10 @@ pub struct FleetPanelState {
     /// timestamp distinguishes later prompts with the same label, and the time
     /// window prevents a stale memo from rejecting legitimate future sends.
     pub last_dispatch: Option<DispatchMemo>,
+    /// When `Some`, the "new ATC" name prompt is active and captures keystrokes
+    /// (the buffer being typed). `None` = normal browse mode. Submitting shells
+    /// out to `ainb fleet atc setup <name>` to bootstrap a fleet member.
+    pub new_atc_input: Option<String>,
 }
 
 impl Default for FleetPanelState {
@@ -139,6 +143,7 @@ impl Default for FleetPanelState {
             feedback: Arc::new(Mutex::new(ActionFeedback::default())),
             in_flight: Arc::new(AtomicBool::new(false)),
             last_dispatch: None,
+            new_atc_input: None,
         }
     }
 }
@@ -274,6 +279,66 @@ impl FleetPanelState {
     #[must_use]
     pub fn feedback_line(&self) -> String {
         self.feedback.lock().map(|g| g.message.clone()).unwrap_or_default()
+    }
+
+    /// True while the "new ATC" name prompt is capturing keystrokes.
+    #[must_use]
+    pub fn is_naming_atc(&self) -> bool {
+        self.new_atc_input.is_some()
+    }
+
+    /// Open the new-ATC name prompt (bound to `n`). Refused while an action is
+    /// in flight so the create can't race a pending send.
+    pub fn open_new_atc(&mut self) {
+        if self.in_flight.load(Ordering::Acquire) {
+            self.set_feedback("action already in flight — wait for it to finish");
+            return;
+        }
+        self.new_atc_input = Some(String::new());
+    }
+
+    /// Append a typed char to the name buffer (ignored outside prompt mode).
+    /// Accepts exactly the chars the CLI keeps unchanged (`sanitize_instance_name`
+    /// in `fleet/atc/paths.rs`: ASCII alnum, `-`, `_`) so the visible buffer is
+    /// byte-for-byte what the created instance name will be — no silent rewrite.
+    pub fn new_atc_type(&mut self, c: char) {
+        if let Some(buf) = self.new_atc_input.as_mut() {
+            if (c.is_ascii_alphanumeric() || c == '-' || c == '_') && buf.len() < 40 {
+                buf.push(c);
+            }
+        }
+    }
+
+    /// Delete the last char of the name buffer.
+    pub fn new_atc_backspace(&mut self) {
+        if let Some(buf) = self.new_atc_input.as_mut() {
+            buf.pop();
+        }
+    }
+
+    /// Cancel the name prompt without creating anything.
+    pub fn new_atc_cancel(&mut self) {
+        self.new_atc_input = None;
+    }
+
+    /// Submit the name prompt: validate non-empty, then dispatch the CLI setup
+    /// off the UI thread. Keeps the prompt open on an empty/invalid name so the
+    /// user can correct it.
+    pub fn new_atc_submit(&mut self) {
+        let Some(raw) = self.new_atc_input.clone() else {
+            return;
+        };
+        let name = raw.trim().to_string();
+        if name.is_empty() {
+            self.set_feedback("name required — type a name, Enter to create, Esc to cancel");
+            return;
+        }
+        self.new_atc_input = None;
+        crate::fleet::control::dispatch_new_atc(
+            Arc::clone(&self.feedback),
+            Arc::clone(&self.in_flight),
+            name,
+        );
     }
 
     /// True when a send is currently in flight (a worker is running).
@@ -472,7 +537,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
     render_list(frame, panes[0], state);
     render_detail(frame, panes[1], state);
     render_status(frame, chunks[2], state);
-    render_help(frame, chunks[3]);
+    render_help(frame, chunks[3], state);
 }
 
 fn render_title(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
@@ -509,7 +574,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
 
     if state.rows.is_empty() {
         let msg = if state.store.is_some() {
-            "(no fleet state yet — start a session under ATC, or fire a hook)"
+            "(no fleet state yet — press n to create an ATC session, or fire a hook)"
         } else if state.db_path.exists() {
             "(could not open notifications.db — check daemon logs)"
         } else {
@@ -723,6 +788,19 @@ fn render_ask_detail(lines: &mut Vec<Line<'static>>, row: &StateRow, option_curs
 }
 
 fn render_status(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
+    // The name prompt takes over the status line while active, so the user sees
+    // what they're typing (this screen has no separate input widget).
+    if let Some(buf) = &state.new_atc_input {
+        let prompt = Line::from(vec![
+            Span::styled("new ATC name: ", Style::default().fg(GOLD)),
+            Span::styled(format!("{buf}_"), Style::default().fg(SOFT_WHITE)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(prompt).style(Style::default().bg(PANEL_BG)),
+            area,
+        );
+        return;
+    }
     let line = state.feedback_line();
     let span = if line.is_empty() {
         Span::styled(
@@ -738,21 +816,36 @@ fn render_status(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
     );
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
-    let spans = vec![
-        Span::styled("↑↓", Style::default().fg(GOLD)),
-        Span::styled(" move  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Tab", Style::default().fg(GOLD)),
-        Span::styled(" option  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Enter/a", Style::default().fg(GOLD)),
-        Span::styled(" answer  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("B", Style::default().fg(GOLD)),
-        Span::styled(" broadcast  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("r", Style::default().fg(GOLD)),
-        Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("q/Esc", Style::default().fg(GOLD)),
-        Span::styled(" back", Style::default().fg(MUTED_GRAY)),
-    ];
+fn render_help(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
+    // While naming a new ATC the only valid keys are Enter/Esc — show those
+    // instead of the browse legend so the help bar never lies about the mode.
+    let spans = if state.new_atc_input.is_some() {
+        vec![
+            Span::styled("type", Style::default().fg(GOLD)),
+            Span::styled(" name  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Enter", Style::default().fg(GOLD)),
+            Span::styled(" create  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Esc", Style::default().fg(GOLD)),
+            Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
+        ]
+    } else {
+        vec![
+            Span::styled("↑↓", Style::default().fg(GOLD)),
+            Span::styled(" move  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Tab", Style::default().fg(GOLD)),
+            Span::styled(" option  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Enter/a", Style::default().fg(GOLD)),
+            Span::styled(" answer  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("B", Style::default().fg(GOLD)),
+            Span::styled(" broadcast  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("n", Style::default().fg(GOLD)),
+            Span::styled(" new-atc  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("r", Style::default().fg(GOLD)),
+            Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("q/Esc", Style::default().fg(GOLD)),
+            Span::styled(" back", Style::default().fg(MUTED_GRAY)),
+        ]
+    };
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -961,6 +1054,35 @@ mod tests {
         state.move_down(99);
         assert_eq!(state.selected, 1, "selection caps at last row");
         assert_eq!(state.option_cursor, 0, "option cursor resets on row move");
+    }
+
+    #[test]
+    fn new_atc_prompt_captures_and_sanitizes_input() {
+        let mut s = FleetPanelState::default();
+        assert!(!s.is_naming_atc());
+        s.open_new_atc();
+        assert!(s.is_naming_atc(), "n should open the prompt");
+        for c in "my atc!/9".chars() {
+            s.new_atc_type(c);
+        }
+        // Spaces + punctuation are rejected; alnum/-/_ kept.
+        assert_eq!(s.new_atc_input.as_deref(), Some("myatc9"));
+        s.new_atc_backspace();
+        assert_eq!(s.new_atc_input.as_deref(), Some("myatc"));
+        s.new_atc_cancel();
+        assert!(!s.is_naming_atc(), "Esc should close the prompt");
+    }
+
+    #[test]
+    fn new_atc_submit_on_empty_keeps_prompt_open() {
+        let mut s = FleetPanelState::default();
+        s.open_new_atc();
+        s.new_atc_submit(); // empty buffer → must not dispatch, must stay open
+        assert!(
+            s.is_naming_atc(),
+            "empty submit should keep the prompt open"
+        );
+        assert!(s.feedback_line().contains("name required"));
     }
 
     #[test]
