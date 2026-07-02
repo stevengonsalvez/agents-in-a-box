@@ -1103,6 +1103,10 @@ fn resolve_matcher(
     let v = payload?;
     let key = match base_event {
         "PreToolUse" => "tool_name",
+        // The managed hook registers PermissionRequest with matcher "", so the
+        // tool shown in `ainb fleet approve` / the TUI detail must come from
+        // the payload — without this arm the TOOL column is empty on real fires.
+        "PermissionRequest" => "tool_name",
         "Notification" => "notification_type",
         "StopFailure" => "error_type",
         _ => return None,
