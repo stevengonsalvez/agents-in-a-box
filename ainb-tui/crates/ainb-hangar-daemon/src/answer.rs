@@ -29,7 +29,7 @@ use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
-use ainb_hangar_store::repo::attention::AttentionRepo;
+use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
 use sqlx::SqlitePool;
 
 use crate::events::EventSink;
@@ -98,9 +98,13 @@ pub async fn answer(
                 return Ok(AnswerResult::AlreadyAnswered { by });
             }
 
-            // We won: deliver via the one verified send path. On a delivery fault
-            // the row STAYS answered (the winner is recorded); the send can be
-            // retried out-of-band.
+            // We won: deliver via the one verified send path. Only a CONFIRMED
+            // delivery (`Tmux` / `Broker`) keeps the row answered + emits the
+            // `AttentionAnswered` nudge. On a delivery fault (`Failed`, or an
+            // `Err`) the claim is COMPENSATED — the row is reverted to `open` so
+            // the still-blocked agent's request stays in the inbox and remains
+            // answerable, rather than leaving the feed forever on a transient
+            // tmux/broker miss.
             match send(&session, &params.answer).await {
                 Ok(SendOutcome::Tmux { tmux_session }) => {
                     emit_answered(events, params);
@@ -114,10 +118,16 @@ pub async fn answer(
                         via: format!("broker ({peer_id})"),
                     })
                 }
-                Ok(SendOutcome::Failed { reason }) => Ok(AnswerResult::DeliveryFailed { reason }),
-                Err(e) => Ok(AnswerResult::DeliveryFailed {
-                    reason: e.to_string(),
-                }),
+                Ok(SendOutcome::Failed { reason }) => {
+                    reopen_on_failed_delivery(pool, events, &row, params, now_ms).await?;
+                    Ok(AnswerResult::DeliveryFailed { reason })
+                }
+                Err(e) => {
+                    reopen_on_failed_delivery(pool, events, &row, params, now_ms).await?;
+                    Ok(AnswerResult::DeliveryFailed {
+                        reason: e.to_string(),
+                    })
+                }
             }
         }
     }
@@ -129,6 +139,34 @@ fn emit_answered(events: &EventSink, params: &AnswerParams) {
         attention_id: params.attention_id.clone(),
         by: params.answered_by.clone(),
     });
+}
+
+/// Undo a claim whose last-mile delivery failed: revert the row to `open` and
+/// re-raise it on the attention stream so every surface shows it as answerable
+/// again. Scoped to this caller's own claim ([`AttentionRepo::reopen`]), so a
+/// concurrent winner is never clobbered.
+async fn reopen_on_failed_delivery(
+    pool: &SqlitePool,
+    events: &EventSink,
+    row: &AttentionRow,
+    params: &AnswerParams,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    let reverted =
+        AttentionRepo::reopen(pool, &params.attention_id, &params.answered_by, now_ms).await?;
+    if reverted > 0 {
+        // Re-nudge so live surfaces re-show the card without waiting for the
+        // next snapshot pull. Best-effort (dropped when there are no subscribers).
+        events.emit_attention(HangarEvent::AttentionRaised {
+            attention_id: row.id.clone(),
+            session_id: row.session_id.clone(),
+            workspace_id: row.workspace_id.clone(),
+            kind: row.kind.as_str().to_string(),
+            degraded: row.degraded,
+            created_at: row.created_at,
+        });
+    }
+    Ok(())
 }
 
 /// Resolve a `(session_id, cwd)` to a single live [`Session`] to deliver into, or
@@ -363,6 +401,45 @@ mod tests {
             AnswerResult::AlreadyAnswered { by } => assert_eq!(by, "web"),
             other => panic!("expected AlreadyAnswered, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_delivery_reopens_the_claimed_row() {
+        // Simulate the winning-flip-then-failed-send sequence: claim the row,
+        // then run the compensation the send-failure arms. The row must return to
+        // the open feed so the still-blocked agent's request stays answerable.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_ws_and_open_row(store.pool(), "a1", "sid", "/work/x").await;
+        let (_b, sink) = broker_sink();
+        let params = AnswerParams {
+            attention_id: "a1".into(),
+            answer: "option 2".into(),
+            answered_by: "tui".into(),
+            is_answer: true,
+        };
+
+        // Win the flip (as answer() does before the last-mile send).
+        assert_eq!(
+            AttentionRepo::mark_answered_if_open(store.pool(), "a1", "tui", "option 2", 5000)
+                .await
+                .unwrap(),
+            1
+        );
+        let row = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
+
+        // The send failed → compensate.
+        reopen_on_failed_delivery(store.pool(), &sink, &row, &params, 5000).await.unwrap();
+
+        let after = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
+        assert_eq!(after.state, "open", "a failed delivery must not strand the row");
+        assert!(after.answered_by.is_none());
+        // A later, live re-answer is therefore possible (row is open again).
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1,
+            "the reopened request is back on the fleet feed"
+        );
     }
 
     #[tokio::test]

@@ -289,6 +289,44 @@ impl AttentionRepo {
         .await?;
         Ok(res.rows_affected())
     }
+
+    /// Revert a row `answered` → `open`, undoing a claim whose last-mile delivery
+    /// failed, but ONLY the claim this caller made.
+    ///
+    /// The answer router flips a row `open` → `answered` (first-answer-wins) and
+    /// only THEN attempts the last-mile send. A transient send miss must not
+    /// strand the request in `answered` — the row would leave the open feed
+    /// forever while the raising agent is still blocked, and a re-answer would
+    /// report "already answered" without ever delivering. This compensating
+    /// update puts the row back to `open` (clearing `answered_by` / `answer` /
+    /// `answered_at`) so it stays answerable.
+    ///
+    /// The `answered_by = ? AND answered_at = ?` predicate scopes the revert to
+    /// the exact claim the caller just won, so it can never clobber a different
+    /// winner. Returns the number of rows reverted (`1` when the caller's claim
+    /// was undone, `0` when the row had already moved on).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn reopen(
+        pool: &SqlitePool,
+        id: &str,
+        answered_by: &str,
+        answered_at: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE attention \
+             SET state = 'open', answered_by = NULL, answer = NULL, answered_at = NULL \
+             WHERE id = ? AND state = 'answered' AND answered_by = ? AND answered_at = ?",
+        )
+        .bind(id)
+        .bind(answered_by)
+        .bind(answered_at)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 /// Map one raw `attention` row into an [`AttentionRow`].
@@ -399,6 +437,52 @@ mod tests {
         assert_eq!(row.answered_by.as_deref(), Some("tui"));
         assert_eq!(row.answer.as_deref(), Some("option 2"));
         assert_eq!(row.answered_at, Some(5000));
+    }
+
+    #[tokio::test]
+    async fn reopen_undoes_only_the_matching_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_workspace(store.pool(), "ws-a").await;
+        AttentionRepo::insert(store.pool(), &ask("a1", "sess", Some("ws-a"), 1000))
+            .await
+            .unwrap();
+
+        // Claim the row (first-answer-wins), then a failed send reopens it.
+        assert_eq!(
+            AttentionRepo::mark_answered_if_open(store.pool(), "a1", "tui", "option 2", 5000)
+                .await
+                .unwrap(),
+            1
+        );
+
+        // A revert for a DIFFERENT claimant / timestamp changes nothing.
+        assert_eq!(
+            AttentionRepo::reopen(store.pool(), "a1", "web", 5000).await.unwrap(),
+            0,
+            "reopen only undoes the exact claim it was asked to"
+        );
+        assert_eq!(
+            AttentionRepo::reopen(store.pool(), "a1", "tui", 4999).await.unwrap(),
+            0,
+            "a mismatched answered_at does not revert"
+        );
+
+        // The matching claim reverts the row back to open + clears the answer.
+        assert_eq!(
+            AttentionRepo::reopen(store.pool(), "a1", "tui", 5000).await.unwrap(),
+            1
+        );
+        let row = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
+        assert_eq!(row.state, "open", "a failed delivery leaves the row answerable");
+        assert!(row.answered_by.is_none());
+        assert!(row.answer.is_none());
+        assert!(row.answered_at.is_none());
+        assert_eq!(
+            AttentionRepo::list_open(store.pool(), Some("ws-a")).await.unwrap().len(),
+            1,
+            "the reopened row is back in the open feed"
+        );
     }
 
     #[tokio::test]
