@@ -15,6 +15,12 @@ use anyhow::{Context, Result};
 use crate::cli::OutputFormat;
 use ainb_plugin_notifyd::broker::{DecisionKind, client_decide, client_list};
 
+/// Replace control characters (terminal-escape injection vector — these
+/// strings are registered by whoever dialled the socket) with spaces.
+fn sanitize(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
 pub async fn execute(
     matches: &clap::ArgMatches,
     format: OutputFormat,
@@ -22,9 +28,11 @@ pub async fn execute(
 ) -> Result<()> {
     let session_id = matches.get_one::<String>("session-id").cloned();
     let reason = matches.get_one::<String>("reason").cloned().unwrap_or_default();
-    let verb = match kind {
-        DecisionKind::Approve => "approved",
-        _ => "denied",
+    // Keep the JSON `decision` vocabulary identical to the broker wire enum
+    // (`approve`/`deny`) so scripts see one vocabulary end to end.
+    let (verb, wire) = match kind {
+        DecisionKind::Approve => ("approved", "approve"),
+        _ => ("denied", "deny"),
     };
 
     // Broker clients are blocking unix I/O — keep them off the async reactor.
@@ -47,12 +55,14 @@ pub async fn execute(
                     "{}",
                     serde_json::json!({
                         "session_id": session_id,
-                        "decision": verb,
+                        "decision": wire,
                         "matched": matched,
                     })
                 );
             } else if matched {
-                println!("{verb} → {session_id}: delivered");
+                // "matched" not "delivered": the broker handed the decision to a
+                // parked waiter, but the hook-side write isn't acknowledged.
+                println!("{verb} → {session_id}: matched the waiting hook");
             } else {
                 println!("{verb} → {session_id}: no waiter (already resolved or timed out)");
             }
@@ -78,17 +88,17 @@ pub async fn execute(
             } else if pending.is_empty() {
                 println!("no sessions waiting on a permission decision");
             } else {
-                println!(
-                    "{:<38} {:<18} {:<8} {}",
-                    "SESSION", "TOOL", "WAITING", "CONTEXT"
-                );
+                println!("{:<38} {:<18} {:<8} CONTEXT", "SESSION", "TOOL", "WAITING");
                 for p in pending {
+                    // AWAIT fields come from whatever dialled the socket — strip
+                    // control chars so a hostile registration can't inject
+                    // terminal escapes into the operator's shell.
                     println!(
                         "{:<38} {:<18} {:<8} {}",
-                        p.session_id,
-                        p.tool,
+                        sanitize(&p.session_id),
+                        sanitize(&p.tool),
                         format!("{}s", p.waiting_ms / 1000),
-                        p.context,
+                        sanitize(&p.context),
                     );
                 }
             }
