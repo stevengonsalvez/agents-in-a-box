@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod agent_runtime;
+pub mod attention;
 pub mod autopilot;
 pub mod autopilot_run;
 pub mod autopilot_webhook;

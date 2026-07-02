@@ -888,7 +888,7 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_twenty_five_tables() {
+async fn all_migrations_create_exactly_twenty_six_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -907,6 +907,7 @@ async fn all_migrations_create_exactly_twenty_five_tables() {
         "agent_runtime",
         "agent_skill",
         "agent_task_queue",
+        "attention",
         "autopilot",
         "autopilot_run",
         "autopilot_webhook_delivery",
@@ -929,7 +930,7 @@ async fn all_migrations_create_exactly_twenty_five_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 25, "expected 25 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 26, "expected 26 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
@@ -966,6 +967,69 @@ async fn migration_0020_adds_workspace_config_columns() {
     assert!(
         ws.contains("issue_prefix TEXT"),
         "workspace.issue_prefix nullable TEXT: {ws}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0025_creates_attention_with_kind_state_checks_and_open_index() {
+    // The control-plane inbox (architecture §4.3, spec P2): every input request
+    // from every session lands in `attention`, answered exactly once via the
+    // first-answer-wins conditional flip. The columns the answer router and the
+    // surfaces depend on must exist with their CHECK guards, and the hot "open"
+    // read must be served by a partial index.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let att = table_sql(&pool, "attention").await;
+    assert!(att.contains("id TEXT PRIMARY KEY"), "attention.id PK: {att}");
+    assert!(
+        att.contains("session_id TEXT NOT NULL"),
+        "attention.session_id NOT NULL: {att}"
+    );
+    // cwd carries the raising session's dir so the answer router runs the C1
+    // guard without re-discovery.
+    assert!(
+        att.contains("cwd TEXT NOT NULL DEFAULT ''"),
+        "attention.cwd NOT NULL default empty: {att}"
+    );
+    // workspace_id is a NULLABLE FK — fleet (no-workspace) sessions insert freely.
+    assert!(
+        att.contains("workspace_id TEXT REFERENCES workspace(id)"),
+        "attention.workspace_id nullable FK: {att}"
+    );
+    // kind is CHECK-constrained to the six spec families.
+    for k in [
+        "ask_user_question",
+        "approval",
+        "codex_request_user",
+        "error",
+        "waiting",
+        "escalation",
+    ] {
+        assert!(att.contains(k), "attention.kind CHECK includes {k}: {att}");
+    }
+    // state defaults to open + CHECK-guards the two-value set.
+    assert!(
+        att.contains("state        TEXT NOT NULL DEFAULT 'open'")
+            || att.contains("state TEXT NOT NULL DEFAULT 'open'"),
+        "attention.state defaults open: {att}"
+    );
+    assert!(
+        att.contains("state IN ('open', 'answered')"),
+        "attention.state CHECK: {att}"
+    );
+    assert!(
+        att.contains("degraded"),
+        "attention.degraded pane-fallback flag: {att}"
+    );
+
+    // The hot read is exclusively open rows — a PARTIAL index over just that set.
+    let open_idx = index_sql(&pool, "idx_attention_open").await;
+    assert!(
+        open_idx.contains("WHERE") && open_idx.contains("state = 'open'"),
+        "idx_attention_open is partial over open rows: {open_idx}"
     );
 
     pool.close().await;
