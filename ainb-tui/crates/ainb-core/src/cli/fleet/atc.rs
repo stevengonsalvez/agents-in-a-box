@@ -731,9 +731,11 @@ fn permission_emit_json(decision: &ainb_plugin_notifyd::broker::Decision) -> Str
 /// from the hook payload (e.g. the Bash command), compacted to one line. Empty
 /// when the payload has none.
 fn extract_permission_context(payload: &str) -> String {
+    // `input` tolerated as an alias, mirroring `approve_context` in the
+    // notifyd transition fold — the two surfaces must read the same payloads.
     serde_json::from_str::<serde_json::Value>(payload)
         .ok()
-        .and_then(|v| v.get("tool_input").cloned())
+        .and_then(|v| v.get("tool_input").or_else(|| v.get("input")).cloned())
         .map(|ti| ti.to_string())
         .unwrap_or_default()
 }
