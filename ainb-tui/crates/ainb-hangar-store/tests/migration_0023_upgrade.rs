@@ -140,13 +140,19 @@ async fn migration_0023_remaps_legacy_states_on_a_populated_database() {
     // applies exactly 0023.
     apply_migrations(&pool).await.expect("upgrade applies 0023");
 
-    // Head-count AFTER (assert #1): the recorded head is now 0023 — the ACTUAL
-    // value read from the embedded migration set, not a guess.
+    // Head-count AFTER (assert #1): the upgrade advanced the head to AT LEAST
+    // 0023. `apply_migrations` applies the whole embedded chain, so any migration
+    // added after 0023 (e.g. 0024 event_log) legitimately pushes the head higher;
+    // this test asserts 0023 applied (assert #2 pins its row exactly), not that it
+    // is terminal — so a later migration never re-breaks it.
     let head_after: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("read head after");
-    assert_eq!(head_after, NEW_MIGRATION_VERSION, "head is migration 0023");
+    assert!(
+        head_after >= NEW_MIGRATION_VERSION,
+        "head advanced to at least migration 0023 (got {head_after})"
+    );
 
     // Head-count AFTER (assert #2): 0023 is recorded exactly once.
     let recorded: i64 =
@@ -214,7 +220,7 @@ async fn migration_0023_remaps_legacy_states_on_a_populated_database() {
         .await
         .expect("read head after re-apply");
     assert_eq!(
-        head_again, NEW_MIGRATION_VERSION,
+        head_again, head_after,
         "double-apply records no new version"
     );
 
