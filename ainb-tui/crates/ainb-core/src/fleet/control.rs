@@ -156,7 +156,10 @@ pub fn dispatch_new_atc(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        publish(&feedback, "action already in flight — wait for it to finish".to_string());
+        publish(
+            &feedback,
+            "action already in flight — wait for it to finish".to_string(),
+        );
         return;
     }
 
@@ -167,16 +170,16 @@ pub fn dispatch_new_atc(
             let _guard = InFlightGuard(in_flight);
             publish(&feedback, format!("creating ATC '{name}'…"));
             let bin = crate::cli::fleet::atc::atc_bin();
-            let output = std::process::Command::new(bin)
-                .args(["fleet", "atc", "setup", &name])
-                .output();
+            let output =
+                std::process::Command::new(bin).args(["fleet", "atc", "setup", &name]).output();
             let msg = match output {
                 Ok(o) if o.status.success() => {
                     format!("created ATC '{name}' — press r once it fires a hook")
                 }
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
-                    let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("see logs");
+                    let line =
+                        err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("see logs");
                     format!("create failed: {line}")
                 }
                 Err(e) => format!("create failed: {e}"),
@@ -186,7 +189,10 @@ pub fn dispatch_new_atc(
     if let Err(e) = spawn_result {
         tracing::warn!(error = %e, "fleet panel: new-atc worker thread spawn failed");
         spawn_err_flag.store(false, Ordering::Release);
-        publish(&spawn_err_feedback, format!("create failed: thread spawn error: {e}"));
+        publish(
+            &spawn_err_feedback,
+            format!("create failed: thread spawn error: {e}"),
+        );
     }
 }
 

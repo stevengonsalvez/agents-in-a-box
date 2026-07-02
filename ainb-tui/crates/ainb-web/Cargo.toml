@@ -15,7 +15,6 @@ path = "src/lib.rs"
 # `ws` adds the WebSocket extractor for the live terminal bridge.
 axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
-tower-http = { workspace = true }
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 subtle = { workspace = true }
@@ -24,7 +23,6 @@ dirs = { workspace = true }
 tokio = { workspace = true }
 # `sync` brings in BroadcastStream for the SSE fan-out.
 tokio-stream = { workspace = true, features = ["sync"] }
-async-stream = { workspace = true }
 futures-util = { workspace = true }
 
 serde = { workspace = true }
