@@ -361,31 +361,36 @@ pub enum AppEvent {
     SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
-    GoToRecovery,         // Navigate to session recovery view
-    GoToInbox,            // Navigate to ainb-hooks notification inbox
-    GoToDaemons,          // Navigate to the daemon runtime-health view
-    GoToFleetPanel,       // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,     // Fleet panel: move row selection up
-    FleetPanelMoveDown,   // Fleet panel: move row selection down
-    FleetPanelOptionNext, // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev, // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,     // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,  // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelApprove,    // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,       // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh,    // Fleet panel: force-refresh from current_state (r)
-    PanelBack,            // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,           // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,          // Inbox: move selection up one row
-    InboxMoveDown,        // Inbox: move selection down one row
-    InboxPageUp,          // Inbox: jump 10 rows up
-    InboxPageDown,        // Inbox: jump 10 rows down
-    InboxOpenSelected,    // Inbox: mark selected row read (Enter)
-    InboxDismissSelected, // Inbox: dismiss selected row (d)
-    InboxDismissVisible,  // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,  // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,      // Inbox: cycle agent filter (p)
-    InboxRefresh,         // Inbox: force-refresh from store (r)
+    GoToRecovery,               // Navigate to session recovery view
+    GoToInbox,                  // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                // Navigate to the daemon runtime-health view
+    GoToFleetPanel,             // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,           // Fleet panel: move row selection up
+    FleetPanelMoveDown,         // Fleet panel: move row selection down
+    FleetPanelOptionNext,       // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,       // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer,           // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast,        // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove,          // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,             // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelRefresh,          // Fleet panel: force-refresh from current_state (r)
+    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
+    FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
+    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
+    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,                // Inbox: move selection up one row
+    InboxMoveDown,              // Inbox: move selection down one row
+    InboxPageUp,                // Inbox: jump 10 rows up
+    InboxPageDown,              // Inbox: jump 10 rows down
+    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
+    InboxDismissSelected,       // Inbox: dismiss selected row (d)
+    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,            // Inbox: cycle agent filter (p)
+    InboxRefresh,               // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -2727,7 +2732,19 @@ impl EventHandler {
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
     /// `GoToFleetPanel` saved, instead of hardcoding home (mirrors Daemons L2).
-    fn handle_fleet_panel_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+    fn handle_fleet_panel_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        // Name-prompt mode captures every key: chars build the name, Enter
+        // creates, Esc cancels. Nothing else (move/answer/back) fires while a
+        // create is being named.
+        if state.fleet_panel_state.is_naming_atc() {
+            return match key_event.code {
+                KeyCode::Esc => Some(AppEvent::FleetPanelNewAtcCancel),
+                KeyCode::Enter => Some(AppEvent::FleetPanelNewAtcSubmit),
+                KeyCode::Backspace => Some(AppEvent::FleetPanelNewAtcBackspace),
+                KeyCode::Char(c) => Some(AppEvent::FleetPanelNewAtcType(c)),
+                _ => None,
+            };
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
@@ -2737,7 +2754,16 @@ impl EventHandler {
             KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
             KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
-            KeyCode::Char('n') => Some(AppEvent::FleetPanelDeny),
+            // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
+            // advertises) and new-ATC. Context decides: on an APPROVE row `n`
+            // denies; anywhere else it opens the new-ATC name prompt.
+            KeyCode::Char('n') => {
+                if state.fleet_panel_state.selected_kind() == Some("APPROVE") {
+                    Some(AppEvent::FleetPanelDeny)
+                } else {
+                    Some(AppEvent::FleetPanelNewAtcOpen)
+                }
+            }
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
             _ => None,
         }
@@ -5208,6 +5234,11 @@ impl EventHandler {
             AppEvent::FleetPanelOptionNext => state.fleet_panel_state.option_next(),
             AppEvent::FleetPanelOptionPrev => state.fleet_panel_state.option_prev(),
             AppEvent::FleetPanelRefresh => state.fleet_panel_state.refresh(),
+            AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
+            AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
+            AppEvent::FleetPanelNewAtcBackspace => state.fleet_panel_state.new_atc_backspace(),
+            AppEvent::FleetPanelNewAtcCancel => state.fleet_panel_state.new_atc_cancel(),
+            AppEvent::FleetPanelNewAtcSubmit => state.fleet_panel_state.new_atc_submit(),
             AppEvent::FleetPanelAnswer => {
                 // Answer the selected ASK by sending the highlighted option's
                 // label to the target session via the EXISTING fleet send path
@@ -7537,6 +7568,50 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// The overloaded `n` key resolves by selection context: deny on an
+    /// APPROVE row (pairing with the detail pane's y/n hint), the new-ATC
+    /// name prompt everywhere else. `y` approves only-and-always.
+    #[test]
+    fn fleet_panel_n_is_deny_on_approve_row_new_atc_elsewhere() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        let row = |kind: &str| ainb_plugin_notifyd::StateRow {
+            session_id: "s-1".to_string(),
+            cwd: "/p".to_string(),
+            kind: kind.to_string(),
+            context: None,
+            parent: None,
+            last_event_ts: 1,
+            source: "hook".to_string(),
+        };
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        state.fleet_panel_state.rows = vec![row("APPROVE")];
+        state.fleet_panel_state.selected = 0;
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelDeny)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('y')),
+            Some(AppEvent::FleetPanelApprove)
+        ));
+
+        state.fleet_panel_state.rows = vec![row("ASK")];
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
+        // Empty panel: nothing to deny → n still opens the prompt.
+        state.fleet_panel_state.rows.clear();
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
     }
 
     /// Fleet control panel: navigating in saves the origin, and Esc/q route

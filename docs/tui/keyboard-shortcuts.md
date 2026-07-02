@@ -61,6 +61,7 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | `Tab` / `Shift+Tab` | Move the ASK option cursor (on an ASK row) |
 | `Enter` / `a` | Answer the selected ASK with the highlighted option |
 | `y` / `n` | Approve / deny the selected APPROVE permission request |
+| `n` (non-APPROVE row) | Open the new-ATC name prompt |
 | `B` | Broadcast a ping prompt to the selected session |
 | `r` | Force refresh |
 | `q` / `Esc` | Back |
