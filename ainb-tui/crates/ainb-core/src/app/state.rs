@@ -4000,6 +4000,37 @@ impl AppState {
         self.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
+    /// Persist the onboarding git directories immediately — called when leaving
+    /// the Git Directories step in any direction (Next / Back / to menu) so the
+    /// user's edit is saved without having to finish the whole wizard.
+    ///
+    /// Only writes when at least one path is VALID, so invalid/empty input never
+    /// clobbers previously-saved config.
+    pub fn persist_onboarding_git_dirs(&mut self) {
+        use crate::config::OnboardingConfig;
+
+        let Some(state) = self.onboarding_state.as_ref() else {
+            return;
+        };
+        let valid = state.get_valid_directories();
+        if valid.is_empty() {
+            return;
+        }
+
+        // Onboarding record — load first so we preserve completed/version/etc.
+        let mut cfg = OnboardingConfig::load().unwrap_or_default();
+        cfg.git_directories = valid.clone();
+        if let Err(e) = cfg.save() {
+            warn!("Failed to persist onboarding git directories: {}", e);
+        }
+
+        // App-config scan paths (what session creation actually reads).
+        self.app_config.workspace_defaults.workspace_scan_paths = valid;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist workspace scan paths: {}", e);
+        }
+    }
+
     /// Complete the onboarding process
     pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use crate::config::OnboardingConfig;
