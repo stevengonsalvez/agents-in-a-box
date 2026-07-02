@@ -538,21 +538,14 @@ pub fn collect_in(ainb_home: &Path, notifyd_base: &Path, now_ms: i64) -> Vec<Dae
 }
 
 /// Aggregate every daemon from the real on-disk layout. Resolves the ainb
-/// home (honouring `$AINB_HOME`) for bridge/fleet/ATC, and notifyd's own base
-/// (`~/.agents-in-a-box`, which it does NOT key off `$AINB_HOME`).
+/// home (honouring `$AINB_HOME`) for bridge/fleet/ATC; notifyd's base comes
+/// from `Paths::from_home()`, which honours the same `$AINB_HOME` override,
+/// so the probe reads exactly the files the daemon writes.
 pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
     let ainb_home = crate::fleet::plumbing::paths::ainb_home()?;
-    // notifyd resolves its base via `dirs::home_dir()/.agents-in-a-box` and does
-    // NOT honour `$AINB_HOME`; mirror that exactly so the probe reads the same
-    // files the daemon writes. When `$AINB_HOME` is set (tests / unusual setups)
-    // we still point notifyd at the ainb home so an isolated run is coherent.
-    let notifyd_base = if std::env::var("AINB_HOME").map(|h| !h.is_empty()).unwrap_or(false) {
-        ainb_home.clone()
-    } else {
-        dirs::home_dir()
-            .map(|h| h.join(".agents-in-a-box"))
-            .unwrap_or_else(|| ainb_home.clone())
-    };
+    let notifyd_base = ainb_plugin_notifyd::Paths::from_home()
+        .map(|p| p.base)
+        .unwrap_or_else(|_| ainb_home.clone());
     Ok(collect_in(
         &ainb_home,
         &notifyd_base,

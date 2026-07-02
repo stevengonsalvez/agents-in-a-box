@@ -45,10 +45,17 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve paths under the user's home directory
-    /// (`~/.agents-in-a-box/`). Fails if the home directory cannot be
-    /// determined.
+    /// Resolve paths under the ainb base directory: `$AINB_HOME` when set
+    /// (the same override the fleet plumbing honours — the hook, the daemon,
+    /// and the TUI/CLI deciders MUST all resolve the approve socket to the
+    /// same base or a waiting hook parks on a socket nothing serves),
+    /// otherwise `~/.agents-in-a-box/`. Fails if neither can be determined.
     pub fn from_home() -> anyhow::Result<Self> {
+        if let Ok(h) = std::env::var("AINB_HOME") {
+            if !h.is_empty() {
+                return Ok(Self::under(PathBuf::from(h)));
+            }
+        }
         let home =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
         Ok(Self::under(home.join(".agents-in-a-box")))
