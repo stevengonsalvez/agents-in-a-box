@@ -1651,6 +1651,31 @@ impl HangarPlugin {
             return;
         }
 
+        // The other two text-capture surfaces are just as key-hungry: the
+        // task-detail comment-compose modal (e38.5) and the settings key-entry
+        // (API-key) modal each treat every printable key as typed text. Without
+        // this guard the routing layer would swallow the global tab-switch chars
+        // (`C`/`U`/`I`/`K`/`D`/`L`/`,`) first — so typing an uppercase `C` in an
+        // API key or a comment draft would switch tabs and drop the character
+        // instead of inserting it. Route straight to the screen reducer (which
+        // owns Esc-to-close for both), mirroring the issue-list capture guard.
+        if matches!(app.screen, Screen::TaskDetail(_))
+            && self.screens.task_detail.as_ref().is_some_and(|td| td.compose_buffer().is_some())
+        {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
+        if matches!(app.screen, Screen::Settings)
+            && self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open())
+        {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
+
         // e38.13: `Ctrl+P` opens the global command palette from any non-modal
         // screen. It is a modifier chord, so it never shadows a per-screen `p`
         // (bare `p` still reaches the active reducer). When the palette is already
@@ -3855,6 +3880,106 @@ mod tests {
             matches!(p.app_state().screen, Screen::TaskDetail(_)),
             "clicking Open opens the card's task detail, got {:?}",
             p.app_state().screen
+        );
+    }
+
+    /// REGRESSION (P2 tab hotkeys): while the task-detail comment-compose modal
+    /// is open, an uppercase `C` (common in prose / identifiers) must be TYPED
+    /// into the draft, not routed to the control-center tab-switch. Before the
+    /// text-capture guard the routing layer swallowed `C`/`U`/`I` first,
+    /// navigating away and abandoning the compose draft.
+    #[test]
+    fn uppercase_c_types_into_task_detail_compose_not_tab_switch() {
+        use ainb_hangar_proto::events::IssueRow;
+        let mut p = connected_plugin_with_issue();
+
+        // Open the task detail for a fresh issue.
+        let issue = IssueRow {
+            id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
+            display_id: None,
+            workspace_id: "default".into(),
+            title: "Refactor API".into(),
+            description: None,
+            state: "open".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+        };
+        let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
+        p.screens.open_task_detail(tid.clone(), issue);
+        let mut app = p.app_state().clone();
+        app.screen = Screen::TaskDetail(tid);
+        p.app = Some(app);
+
+        // `c` (not a routing key) opens an empty compose modal.
+        p.on_key(&char_press('c'));
+        assert_eq!(
+            p.screens.task_detail.as_ref().and_then(|td| td.compose_buffer()),
+            Some(""),
+            "`c` opens an empty compose modal"
+        );
+
+        // The regression key: uppercase `C` must insert, not navigate.
+        p.on_key(&char_press('C'));
+        assert!(
+            matches!(p.app_state().screen, Screen::TaskDetail(_)),
+            "typing `C` in the compose draft must NOT switch to the control center, got {:?}",
+            p.app_state().screen
+        );
+        assert_eq!(
+            p.screens.task_detail.as_ref().and_then(|td| td.compose_buffer()),
+            Some("C"),
+            "`C` must land in the draft, not be swallowed as a tab switch"
+        );
+    }
+
+    /// REGRESSION (P2 tab hotkeys): while the settings key-entry (API-key) modal
+    /// is open, an uppercase `C` (common in API keys / tokens) must extend the
+    /// in-flight key value, not switch tabs — the same swallow the compose modal
+    /// hit, on the second existing text-capture surface.
+    #[test]
+    fn uppercase_c_stays_in_settings_key_entry_not_tab_switch() {
+        use ainb_hangar_proto::settings::HealthSnapshot;
+        use crate::screen::settings::SettingsState;
+        let mut p = connected_plugin_with_issue();
+
+        // Seed a connected settings screen and land on it.
+        let health = HealthSnapshot {
+            socket_path: "/tmp/x.sock".into(),
+            pid: 1,
+            uptime_secs: 0,
+            version: "test".into(),
+            connected: true,
+        };
+        p.screens.settings =
+            Some(SettingsState::new(health, Vec::new(), Vec::new(), Vec::new()));
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Settings;
+        p.app = Some(app);
+
+        // Navigate Daemon → Providers → Keys, then open the key-entry modal (`n`).
+        p.on_key(&char_press('j'));
+        p.on_key(&char_press('j'));
+        p.on_key(&char_press('n'));
+        assert!(
+            p.screens.settings.as_ref().is_some_and(|s| s.key_entry_open()),
+            "`n` on the Keys section opens the key-entry modal"
+        );
+
+        // The regression key: uppercase `C` must stay in the modal, not navigate.
+        p.on_key(&char_press('C'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings),
+            "typing `C` in the key-entry modal must NOT switch to the control center, got {:?}",
+            p.app_state().screen
+        );
+        assert!(
+            p.screens.settings.as_ref().is_some_and(|s| s.key_entry_open()),
+            "the key-entry modal stays open while typing the key"
         );
     }
 }
