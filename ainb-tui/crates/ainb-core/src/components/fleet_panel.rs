@@ -1078,7 +1078,10 @@ mod tests {
         let mut s = FleetPanelState::default();
         s.open_new_atc();
         s.new_atc_submit(); // empty buffer → must not dispatch, must stay open
-        assert!(s.is_naming_atc(), "empty submit should keep the prompt open");
+        assert!(
+            s.is_naming_atc(),
+            "empty submit should keep the prompt open"
+        );
         assert!(s.feedback_line().contains("name required"));
     }
 
