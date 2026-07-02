@@ -20,14 +20,26 @@
 //!
 //! ## Idempotency
 //!
-//! The attention id is content-addressed: `att:<session>:<enrich_key>`, where
-//! `enrich_key` is the classifier's blake3 of the request context. The same
-//! stuck state therefore maps to the SAME id, so a re-read after a crash (or a
-//! second `Notification` for one unanswered question) is an insert the producer
-//! skips (the row already exists) — never a duplicate card. When the session
-//! ADVANCES, the context changes, `enrich_key` changes, and a fresh row is raised.
-//! This makes the byte-offset cursor a pure efficiency optimisation, not a
-//! correctness dependency: even re-reading from 0 raises each request exactly once.
+//! The attention id is keyed on the hook line's ABSOLUTE byte offset in the
+//! append-only `events.jsonl`: `att:<session>:<offset>`. The offset is a stable
+//! per-occurrence identity — a given hook line lives at one offset for the life
+//! of the file, so:
+//!
+//!   - A re-read of the SAME line (a crash between insert and the cursor write, a
+//!     best-effort cursor-write failure, or a corrupt/missing cursor that resets
+//!     the read to 0) hashes to the SAME id → the insert is skipped → no
+//!     duplicate card. Re-reading from 0 raises each request exactly once, so the
+//!     cursor is a pure efficiency optimisation, not a correctness dependency.
+//!   - A genuinely NEW occurrence (a fresh hook line — the same question asked
+//!     again after the first was answered, or a recurring error) is appended at a
+//!     NEW offset → a NEW id → a fresh row, even when its request context is
+//!     byte-for-byte identical to a prior one.
+//!
+//! Keying on the offset — rather than a blake3 of the request context — is
+//! deliberate: the context can carry TIME-DERIVED fields (e.g. `idle_minutes`),
+//! so a context hash changes when the same line is re-classified at a later
+//! wall-clock, which would mint spurious duplicate rows on any delayed re-read.
+//! The offset is invariant to when the line is read.
 //!
 //! ## Delivery semantics
 //!
@@ -150,12 +162,18 @@ impl AttentionIngest {
         let end = last_nl + 1;
 
         let mut raised = 0;
+        // Track each line's absolute byte offset in the file (the stable
+        // per-occurrence identity the attention id is keyed on). `split` drops the
+        // '\n' delimiter, so advance by the line length plus one for it.
+        let mut line_start = 0usize;
         for line_bytes in buf[..end].split(|&b| b == b'\n') {
+            let offset = start + line_start as u64;
+            line_start += line_bytes.len() + 1;
             if line_bytes.is_empty() {
                 continue;
             }
             if let Ok(line) = std::str::from_utf8(line_bytes) {
-                if self.process_line(line, now_ms).await {
+                if self.process_line(line, offset, now_ms).await {
                     raised += 1;
                 }
             }
@@ -165,8 +183,9 @@ impl AttentionIngest {
     }
 
     /// Process one hook line: gate, classify, raise. Returns `true` when a NEW
-    /// attention row was raised.
-    async fn process_line(&self, raw: &str, now_ms: i64) -> bool {
+    /// attention row was raised. `offset` is the line's absolute byte position in
+    /// `events.jsonl` — the stable per-occurrence key the attention id uses.
+    async fn process_line(&self, raw: &str, offset: u64, now_ms: i64) -> bool {
         let Ok(line) = serde_json::from_str::<HookEventLine>(raw) else {
             return false;
         };
@@ -187,10 +206,12 @@ impl AttentionIngest {
         };
 
         let kind = kind_of(&row.context);
-        // Content-addressed id: same (session, request-context) → same id → the
-        // insert is skipped (idempotent). A changed context → a new id → a fresh
-        // row (the request advanced).
-        let id = format!("att:{}:{}", line.session_id, row.enrich_key);
+        // Offset-keyed id: the SAME hook line (a replay / re-read) → same offset →
+        // same id → the insert is skipped (idempotent). A NEW hook line → a new
+        // offset → a fresh row, even if its request context is identical. Keying
+        // on the offset (not a hash of the possibly time-derived context) keeps a
+        // delayed re-read from minting spurious duplicates.
+        let id = format!("att:{}:{}", line.session_id, offset);
 
         match AttentionRepo::get(&self.pool, &id).await {
             Ok(Some(_)) => return false, // already raised (open or answered)
@@ -341,6 +362,34 @@ mod tests {
         TranscriptFixture { cwd, dir }
     }
 
+    /// Plant an IDLE transcript (a finished `end_turn` assistant text row stamped
+    /// at `ts_ms`) under a UNIQUE cwd, so `classify` returns IDLE with a
+    /// TIME-DERIVED `idle_minutes` that depends on the `now_ms` it is read at.
+    fn plant_idle_transcript(tag: &str, ts_ms: i64) -> TranscriptFixture {
+        let cwd = format!(
+            "/ainb-test-att-ingest/{tag}/{}/{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut dir = dirs::home_dir().expect("home dir");
+        dir.push(".claude");
+        dir.push("projects");
+        let slug = ainb_fleet_core::read::jsonl_tail::cwd_to_project_slug(&cwd);
+        dir.push(&slug);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let iso = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().to_rfc3339();
+        let mut f = std::fs::File::create(dir.join("session.jsonl")).expect("create transcript");
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"All done."}}]}},"timestamp":"{iso}"}}"#
+        )
+        .unwrap();
+        TranscriptFixture { cwd, dir }
+    }
+
     fn hook_line(session: &str, cwd: &str, event_type: &str) -> String {
         format!(
             r#"{{"ts":1700000000000,"session_id":"{session}","cwd":"{cwd}","transcript_path":"","agent":"claude","event_type":"{event_type}"}}"#
@@ -383,10 +432,49 @@ mod tests {
         assert!(!open[0].degraded, "hook-sourced rows are full fidelity");
 
         // A second pass over the same (already-consumed) log raises nothing — the
-        // cursor advanced AND the content-addressed id dedups.
+        // cursor advanced AND the offset-keyed id dedups.
         let again = ingest.ingest_once(6000).await;
         assert_eq!(again, 0, "no duplicate row on a re-tail");
         assert_eq!(AttentionRepo::list_fleet(store.pool()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reread_from_zero_at_a_later_clock_does_not_duplicate_a_time_derived_row() {
+        // A corrupt/missing cursor (or a crash before the cursor write) re-reads
+        // the whole file. An IDLE row's context carries a TIME-DERIVED
+        // `idle_minutes`, so a context-hash id would change between the two reads
+        // and mint a spurious duplicate. The offset-keyed id is invariant to the
+        // read clock, so the re-read dedups.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        let fx = plant_idle_transcript("idle", base_ms);
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!("{}\n", hook_line("sid-idle", &fx.cwd, "Stop")),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        // First read, 10 min after the turn ended → IDLE(idle_minutes=10).
+        let raised = ingest.ingest_once(base_ms + 10 * 60_000).await;
+        assert_eq!(raised, 1, "the Stop line classifies to one IDLE row");
+        assert_eq!(AttentionRepo::list_fleet(store.pool()).await.unwrap().len(), 1);
+
+        // Simulate a lost cursor: re-read from 0, now 20 min after the turn end →
+        // IDLE(idle_minutes=20). A time-varying context hash would differ; the
+        // offset key does not, so no duplicate row is raised.
+        std::fs::remove_file(&cursor).ok();
+        let again = ingest.ingest_once(base_ms + 20 * 60_000).await;
+        assert_eq!(again, 0, "a later-clock re-read of the same line raises no duplicate");
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1,
+            "still exactly one IDLE row after the re-read"
+        );
     }
 
     #[tokio::test]
