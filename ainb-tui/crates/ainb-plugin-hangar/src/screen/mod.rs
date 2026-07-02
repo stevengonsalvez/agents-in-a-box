@@ -33,9 +33,9 @@ pub mod task_detail;
 pub mod usage_dashboard;
 
 pub use app_screens::{
-    render_body, route_key, AutopilotAction, IssueAssignAction, IssueCommentAction,
-    IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates, SkillAction,
-    WorkspaceAction,
+    render_body, route_key, AttentionAnswerAction, AutopilotAction, IssueAssignAction,
+    IssueCommentAction, IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates,
+    SkillAction, WorkspaceAction,
 };
 pub use router::reduce;
 

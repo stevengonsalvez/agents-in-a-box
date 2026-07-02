@@ -151,6 +151,13 @@ const USAGE_ROLLUP_REQ_ID: i64 = 32;
 /// JSON-RPC id for the `hangar/pr_status_refresh` request raised when a
 /// task-detail screen with a bound PR opens (e38.34).
 const PR_STATUS_REFRESH_REQ_ID: i64 = 33;
+/// JSON-RPC id for the fleet-wide `attention/subscribe` request that registers
+/// the control-center's live attention stream and seeds + refreshes the board
+/// (P2). Rides the snapshot fetch; its ack carries the current open snapshot.
+const ATTENTION_SUBSCRIBE_REQ_ID: i64 = 34;
+/// JSON-RPC id for an `attention/answer` request raised by the control-center's
+/// inline ASK answering (P2).
+const ATTENTION_ANSWER_REQ_ID: i64 = 35;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -633,6 +640,9 @@ impl HangarPlugin {
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
+            // The attention/subscribe ack carries the open-attention snapshot that
+            // seeds the control-center board.
+            RpcId::Number(ATTENTION_SUBSCRIBE_REQ_ID) => self.apply_attention(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition, issue assign, inbox mark-read) answer with
@@ -648,7 +658,8 @@ impl HangarPlugin {
                 | TASK_TRANSITION_REQ_ID
                 | ISSUE_UPDATE_REQ_ID
                 | ISSUE_CREATE_REQ_ID
-                | INBOX_MARK_READ_REQ_ID,
+                | INBOX_MARK_READ_REQ_ID
+                | ATTENTION_ANSWER_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -700,6 +711,21 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_inbox(r.entries, r.unread);
+            }
+        }
+    }
+
+    /// Populate the control-center board from an `attention/subscribe` ack (P2):
+    /// the open [`AttentionRow`]s the board renders. `set_attention` preserves the
+    /// human's focus + option cursor across the auto-shuffle, so a fresh push
+    /// never yanks the selection off the card they were reading.
+    fn apply_attention(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::AttentionSubscribeResult,
+            >(result.clone())
+            {
+                self.screens.set_attention(&r.attention);
             }
         }
     }
@@ -811,6 +837,39 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: inbox mark-read send failed: {e}")).await;
+        }
+    }
+
+    /// Fire a deferred `attention/answer` raised by the control-center screen
+    /// (P2): deliver the picked option label to the raising session of
+    /// `attention_id`, framed over the socket cap. `answered_by = "tui"` tags the
+    /// surface; `is_answer = true` marks it a safety-critical interview answer so
+    /// the daemon refuses (rather than mis-routes) on an ambiguous target (C1). The
+    /// mutating reply re-fetches the fleet-wide attention list so the answered card
+    /// drops off the board. A send failure is logged but non-fatal.
+    async fn answer_attention(
+        &self,
+        host: &HostClient,
+        action: crate::screen::AttentionAnswerAction,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let params = serde_json::json!({
+            "attention_id": action.attention_id,
+            "answer": action.answer,
+            "answered_by": "tui",
+            "is_answer": true,
+        });
+        let Ok(body) = encode_request(
+            ATTENTION_ANSWER_REQ_ID,
+            daemon_methods::ATTENTION_ANSWER,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: attention answer send failed: {e}")).await;
         }
     }
 
@@ -951,6 +1010,20 @@ impl HangarPlugin {
                 INBOX_LIST_REQ_ID,
                 daemon_methods::HANGAR_INBOX_LIST,
                 scoped.clone(),
+            ),
+            // The control-center board is FLEET-WIDE (every workspace + the
+            // no-workspace host sessions), so its feed is unscoped by design.
+            // `attention/subscribe` (no workspace_id) does double duty: it (re)arms
+            // the connection's live AttentionRaised / AttentionAnswered forwarder
+            // AND its ack carries the current open snapshot the board renders. It
+            // rides the snapshot fetch rather than the connect handshake so the
+            // handshake ack sequence — and the tests that pin it — stay unchanged;
+            // a re-fetch simply re-registers the forwarder (last-subscribe-wins)
+            // and reconciles from the fresh ack snapshot.
+            (
+                ATTENTION_SUBSCRIBE_REQ_ID,
+                daemon_methods::ATTENTION_SUBSCRIBE,
+                serde_json::json!({}),
             ),
             (
                 HEALTH_REQ_ID,
@@ -1588,6 +1661,28 @@ impl HangarPlugin {
             self.screens.open_palette();
             self.app = Some(reduction.state);
             return;
+        }
+
+        // P2: on the control center, the digit keys answer the selected ASK's
+        // options inline (①②③) and MUST NOT be swallowed by the numbered
+        // tab-switch (`1`..`4`). They only intercept when the selected card is an
+        // answerable ASK; on an idle board a digit still falls through to the tab
+        // router, so number-key tab navigation off the control center keeps working
+        // (mirrors the issue-list free-text-capture guard above).
+        if matches!(app.screen, Screen::ControlCenter) {
+            if let KeyCode::Char { ch } = key.code {
+                if ch.is_ascii_digit()
+                    && ch != '0'
+                    && self
+                        .screens
+                        .control_center
+                        .selected_card()
+                        .is_some_and(|c| c.kind.is_answerable())
+                {
+                    let _ = route_key(&app, &mut self.screens, key);
+                    return;
+                }
+            }
         }
 
         // Routing-layer keys: tab switches, `?` help, Esc-close-modal, `q` quit.
@@ -2605,6 +2700,14 @@ impl Plugin for HangarPlugin {
         // re-fetches the snapshots, so the unread badge drops to zero next render.
         if self.screens.take_pending_inbox_mark_read() {
             self.mark_inbox_read(host).await;
+        }
+        // P2: drain a deferred `attention/answer` (Enter / a number key on an ASK
+        // in the control center) and fire it over the daemon socket. The daemon
+        // runs the first-answer-wins + C1 guards and delivers the pick into the
+        // raising session; its reply re-fetches the fleet-wide attention list so
+        // the answered card drops off the board.
+        if let Some(action) = self.screens.take_pending_answer_action() {
+            self.answer_attention(host, action).await;
         }
         // e38.36: drain a deferred offline `[s]` daemon-start (armed in
         // `handle_key`). `render` runs on a spawned task, so the host-shell start
