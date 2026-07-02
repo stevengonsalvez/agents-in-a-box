@@ -476,8 +476,12 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
             // Prepend the event-driven completions so ATC handles the freshly
             // finished children before the polled roster. (Summaries are fenced
             // as untrusted DATA inside `format_completions` — see M3.)
+            // Whitespace-collapsed to keep the delivered body a SINGLE line:
+            // any embedded newline turns the send into a bracketed paste that
+            // can sit unsubmitted in a busy composer (see heartbeat.rs).
             let header = plumbing::format_completions(&completions);
-            b = format!("[HEARTBEAT {now_ms}] event-driven completions:\n{header}\n\n{b}");
+            let header = header.split_whitespace().collect::<Vec<_>>().join(" ");
+            b = format!("[HEARTBEAT {now_ms}] event-driven completions: {header} {b}");
         }
         b
     };
@@ -487,16 +491,33 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     let session_live = tmux_session_exists(&tmux).await;
     let should_deliver = !effective_paused;
     let mut delivered = false;
+    let mut skipped_pending = false;
     if session_live && should_deliver {
-        // C-A2: send BEFORE drain. The send result decides whether we drain.
-        let send_result = tmux_send(&tmux, &body).await;
-        delivered = send_result.is_ok();
-        // Encapsulated decision (unit-tested): drain exactly-once ONLY on a
-        // confirmed send; on send failure leave the completions for a later
-        // firing rather than consuming + losing them.
-        commit_delivery_on_send(&inbox, &completions, &send_result);
-        if let Err(e) = send_result {
-            tracing::warn!("atc heartbeat: tmux send failed, completions retained: {e}");
+        // COALESCE, never stack: if the previous nudge is still sitting
+        // unsubmitted in the composer (busy/stalled session), injecting
+        // another would pile pastes on top — the exact failure that stacked 8
+        // heartbeats in one composer. Heartbeats are idempotent fleet
+        // snapshots, so skip this tick after one flush attempt (a lone Enter,
+        // which submits the parked nudge if the session recovered). The next
+        // tick delivers a FRESHER body anyway. Completions stay in the inbox
+        // (never drained on a skip) per C-A1.
+        if crate::fleet::send::pane_has_unsubmitted_input(&tmux).await {
+            let _ = crate::fleet::send::tmux_press_enter(&tmux).await;
+            skipped_pending = true;
+            tracing::warn!(
+                "atc heartbeat: prior nudge unsubmitted in {tmux} — flushed Enter, skipped this tick"
+            );
+        } else {
+            // C-A2: send BEFORE drain. The send result decides whether we drain.
+            let send_result = tmux_send(&tmux, &body).await;
+            delivered = send_result.is_ok();
+            // Encapsulated decision (unit-tested): drain exactly-once ONLY on a
+            // confirmed send; on send failure leave the completions for a later
+            // firing rather than consuming + losing them.
+            commit_delivery_on_send(&inbox, &completions, &send_result);
+            if let Err(e) = send_result {
+                tracing::warn!("atc heartbeat: tmux send failed, completions retained: {e}");
+            }
         }
     }
     // If not live / not deliverable: we never drained — the completions stay in
@@ -522,12 +543,17 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
         "session_live": session_live,
         "idle_paused": effective_paused,
         "delivered": delivered,
+        "skipped_pending": skipped_pending,
         "now_ms": now_ms,
     });
 
     if matches!(format, OutputFormat::Text) {
         if effective_paused {
             println!("[atc/{name}] fleet idle-paused — heartbeat downgraded to standby");
+        } else if skipped_pending {
+            println!(
+                "[atc/{name}] prior nudge still unsubmitted — flushed Enter, heartbeat skipped"
+            );
         } else if delivered {
             println!(
                 "[atc/{name}] heartbeat delivered — {} need(s), {} event-driven completion(s)",
