@@ -26,6 +26,52 @@ pub struct WorkspaceScopedParams {
     pub workspace_id: String,
 }
 
+/// Params for [`crate::methods::WORKSPACE_SUBSCRIBE`] — the workspace to stream,
+/// plus an optional resume cursor (T1 event-bus catch-up).
+///
+/// `since_seq` is the client's last-seen event-log [`seq`]: when present, the
+/// daemon replays every event with `seq > since_seq` as `hangar/event`
+/// notifications immediately after the subscribe ack (the "deltas" half of
+/// "snapshot then deltas") before the live stream continues. Omitted (the
+/// default) means a fresh subscription with no backlog — today's behaviour, so a
+/// pre-cursor client wire-compatibly decodes/encodes without the field.
+///
+/// [`seq`]: SubscribeSnapshot::cursor
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSubscribeParams {
+    /// The workspace to subscribe to (slug or resolved id).
+    pub workspace_id: String,
+    /// The client's resume cursor: replay events strictly after this `seq`.
+    /// `None` (omitted) subscribes without a backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_seq: Option<i64>,
+}
+
+/// The real snapshot [`crate::methods::WORKSPACE_SUBSCRIBE`] acks with — the
+/// current head of the workspace's durable event log.
+///
+/// A client records [`cursor`](Self::cursor) as its resume point: a later
+/// reconnect passes it back as [`WorkspaceSubscribeParams::since_seq`] to catch
+/// up on exactly the events logged while it was away. `0` means the workspace has
+/// no events yet (nothing to resume from).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SubscribeSnapshot {
+    /// The workspace's current head event-log sequence (the resume cursor).
+    pub cursor: i64,
+}
+
+/// Result envelope of [`crate::methods::WORKSPACE_SUBSCRIBE`]: `{ snapshot }`.
+///
+/// The envelope shape (`{ "snapshot": { … } }`) is preserved from the pre-cursor
+/// empty ack so a plugin that only checks for a non-error response still reaches
+/// `Connected`; the snapshot now carries a real [`cursor`](SubscribeSnapshot::cursor)
+/// instead of an empty object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SubscribeResult {
+    /// The real snapshot (the event-log head cursor).
+    pub snapshot: SubscribeSnapshot,
+}
+
 /// Result of [`crate::methods::HANGAR_ISSUES_LIST`].
 ///
 /// Every issue row in the workspace, in daemon order (`created_at` ascending).
@@ -790,6 +836,36 @@ mod tests {
             serde_json::from_str::<WorkspaceScopedParams>(&s).unwrap(),
             p
         );
+
+        // A pre-cursor subscribe (no `since_seq`) omits the field entirely, so a
+        // legacy `{ workspace_id }` frame decodes and the field defaults to None.
+        let bare: WorkspaceSubscribeParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1"}"#).unwrap();
+        assert_eq!(bare.since_seq, None);
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"workspace_id":"ws-1"}"#,
+            "an absent cursor is omitted from the wire"
+        );
+
+        // A resume subscribe carries the cursor round-trip.
+        let resume = WorkspaceSubscribeParams {
+            workspace_id: "ws-1".into(),
+            since_seq: Some(42),
+        };
+        let s = serde_json::to_string(&resume).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WorkspaceSubscribeParams>(&s).unwrap(),
+            resume
+        );
+
+        // The subscribe ack carries the real head cursor under `snapshot`.
+        let ack = SubscribeResult {
+            snapshot: SubscribeSnapshot { cursor: 7 },
+        };
+        let s = serde_json::to_string(&ack).unwrap();
+        assert_eq!(s, r#"{"snapshot":{"cursor":7}}"#);
+        assert_eq!(serde_json::from_str::<SubscribeResult>(&s).unwrap(), ack);
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
