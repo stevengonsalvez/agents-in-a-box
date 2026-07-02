@@ -176,6 +176,103 @@ pub fn prepare_pipeline_with_autopilot() -> Pipeline {
     prepare_pipeline_seeded(&[("HANGAR_DAEMON_DISABLE_CLAIM", "1")], seed_autopilot)
 }
 
+/// Like [`prepare_pipeline`], plus two open `attention` rows (P2 control-center
+/// tripwire): a NEWER `waiting` row and an OLDER `ask_user_question` row. Seeded
+/// through the same pre-daemon connection [`prepare_pipeline_with_autopilot`]
+/// uses, so the daemon's first `attention/subscribe` snapshot already carries
+/// both — no live-push race.
+///
+/// The ASK row's `created_at` is deliberately EARLIER than the WAIT row's, so a
+/// pane assertion that the ASK card renders above the WAIT card actually proves
+/// the D9 urgency-rank shuffle ([`sort_cards`] in `control_center.rs`), not a
+/// recency coincidence — a purely-recency sort would put the newer WAIT row
+/// first.
+pub fn prepare_pipeline_with_attention() -> Pipeline {
+    prepare_pipeline_seeded(&[("HANGAR_DAEMON_DISABLE_CLAIM", "1")], seed_attention_pair)
+}
+
+/// The seeded ASK row's id — the tripwire answers this one.
+pub const ATTENTION_ASK_ID: &str = "att-ask-1";
+/// The seeded WAIT row's id.
+pub const ATTENTION_WAIT_ID: &str = "att-wait-1";
+/// The seeded ASK row's question text (rendered in the detail pane).
+pub const ATTENTION_ASK_QUESTION: &str = "Ship to which env?";
+/// The seeded ASK row's first option label (rendered next to the ① glyph).
+pub const ATTENTION_ASK_OPTION_1: &str = "staging";
+/// The seeded ASK row's second option label (rendered next to the ② glyph).
+pub const ATTENTION_ASK_OPTION_2: &str = "prod";
+
+/// Seed one NEWER `waiting` row + one OLDER `ask_user_question` row into an
+/// about-to-be-opened `hangar.db`, both scoped to no workspace (a hand-started
+/// fleet session) so the fleet-wide `attention/subscribe` snapshot returns them
+/// regardless of the seeded P4 fixture's workspace.
+fn seed_attention_pair(home: &Path) {
+    use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("attention-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open attention-seed store");
+        let pool = store.pool();
+
+        // Newer WAIT row (idle-at-prompt marker).
+        AttentionRepo::insert(
+            pool,
+            &NewAttention {
+                id: ATTENTION_WAIT_ID.to_string(),
+                session_id: "s-idle".to_string(),
+                cwd: "/work/idle".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::Waiting,
+                payload: serde_json::json!({
+                    "kind": "WAIT",
+                    "context": { "marker": "WAITING: still idle" }
+                })
+                .to_string(),
+                degraded: false,
+                created_at: 1_700_000_000_000,
+                raise_transcript: None,
+            },
+        )
+        .await
+        .expect("seed waiting attention row");
+
+        // Older ASK row (earlier `created_at` than the WAIT row above) — proves
+        // the urgency rank (not recency) puts it on top.
+        AttentionRepo::insert(
+            pool,
+            &NewAttention {
+                id: ATTENTION_ASK_ID.to_string(),
+                session_id: "s-deploy".to_string(),
+                cwd: "/work/deploy".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::AskUserQuestion,
+                payload: serde_json::json!({
+                    "kind": "ASK",
+                    "context": {
+                        "question": ATTENTION_ASK_QUESTION,
+                        "options": [
+                            { "label": ATTENTION_ASK_OPTION_1 },
+                            { "label": ATTENTION_ASK_OPTION_2 },
+                        ]
+                    }
+                })
+                .to_string(),
+                degraded: false,
+                created_at: 1_699_999_000_000,
+                raise_transcript: None,
+            },
+        )
+        .await
+        .expect("seed ask attention row");
+    });
+}
+
 /// Shared body of [`prepare_pipeline_with`] and its variants: seed the isolated
 /// `$HOME` fixture, run `pre_spawn_seed(home)` while no daemon is attached to the
 /// database, then spawn the daemon. Splitting the pre-spawn seed out lets a
