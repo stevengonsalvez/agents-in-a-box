@@ -173,6 +173,7 @@ fn ask(id: &str, session: &str, ws: Option<&str>, ts: i64) -> NewAttention {
         payload: format!("{{\"kind\":\"ASK\",\"id\":\"{id}\"}}"),
         degraded: false,
         created_at: ts,
+        raise_transcript: None,
     }
 }
 

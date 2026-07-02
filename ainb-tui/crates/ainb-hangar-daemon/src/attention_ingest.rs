@@ -236,6 +236,10 @@ impl AttentionIngest {
             // unhooked pane-classifier fallback, a separate producer).
             degraded: false,
             created_at: now_ms,
+            // The exact transcript this session was writing — the session-stable
+            // token the answer router's C1 guard binds cwd-fallback delivery to.
+            raise_transcript: (!line.transcript_path.is_empty())
+                .then(|| line.transcript_path.clone()),
         };
         if let Err(e) = AttentionRepo::insert(&self.pool, &new).await {
             tracing::warn!(error = %e, "attention ingest: insert failed");

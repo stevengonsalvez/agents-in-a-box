@@ -16,7 +16,12 @@
 //!    cwd, so an ambiguous cwd would risk sending the answer to the WRONG agent.
 //!    The router REFUSES on ambiguity (more than one discovered session in the
 //!    cwd, or a merged session that aggregated 2+ sources) rather than guess —
-//!    the guard lifted verbatim from the TUI fleet panel's `control::resolve_and_send`.
+//!    the guard lifted from the TUI fleet panel's `control::resolve_and_send`.
+//!    Attention rows are also DURABLE and outlive the raising agent, so the
+//!    router additionally binds the cwd fallback to the transcript captured at
+//!    raise time: if the original session has exited and a DIFFERENT agent now
+//!    occupies the cwd (its transcript is newer), the router refuses rather than
+//!    answer an agent that never asked.
 //!
 //! Ordering matters: the C1 target resolution runs BEFORE the flip, so an
 //! ambiguous or dead target leaves the row OPEN and answerable later (a session
@@ -25,6 +30,7 @@
 //! send path ([`send`], the multi-line-submit-verified tmux path).
 
 use ainb_fleet_core::discover::{discover_from_ainb, discover_from_peers, merge_sessions};
+use ainb_fleet_core::read::jsonl_tail::latest_transcript_for_cwd;
 use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
 use ainb_hangar_proto::events::HangarEvent;
@@ -76,7 +82,14 @@ pub async fn answer(
 
     // C1: resolve the delivery target BEFORE claiming, so an ambiguous / dead
     // target leaves the row open and answerable later.
-    match resolve_target(&row.session_id, &row.cwd, params.is_answer).await {
+    match resolve_target(
+        &row.session_id,
+        &row.cwd,
+        row.raise_transcript.as_deref(),
+        params.is_answer,
+    )
+    .await
+    {
         Target::Ambiguous(reason) => Ok(AnswerResult::Ambiguous { reason }),
         Target::NoTarget(reason) => Ok(AnswerResult::NoTarget { reason }),
         Target::Send(session) => {
@@ -177,10 +190,18 @@ async fn reopen_on_failed_delivery(
 /// `discover_from_peers` is a blocking SQLite read run on a blocking thread).
 /// Resolution priority + guard:
 ///   1. EXACT session-id match → always safe (unambiguously the named agent).
-///   2. No exact match → correlate by cwd, but ONLY when that cwd is unambiguous.
-///      Ambiguous = more than one discovered session shares the cwd, OR the merged
-///      session aggregated 2+ sources. On ambiguity → refuse.
-async fn resolve_target(session_id: &str, cwd: &str, is_answer: bool) -> Target {
+///   2. No exact match → correlate by cwd, but ONLY when that cwd is unambiguous
+///      AND the raising session still OWNS it. Ambiguous = more than one
+///      discovered session shares the cwd, OR the merged session aggregated 2+
+///      sources. Stale = the raising session's captured transcript is no longer
+///      the newest in the cwd (a different agent took over the durable row's cwd
+///      after the original exited). On ambiguity or staleness → refuse.
+async fn resolve_target(
+    session_id: &str,
+    cwd: &str,
+    raise_transcript: Option<&str>,
+    is_answer: bool,
+) -> Target {
     let ainb_fut = discover_from_ainb();
     let peers_fut = tokio::task::spawn_blocking(discover_from_peers);
     let (ainb, peers_join) = tokio::join!(ainb_fut, peers_fut);
@@ -221,7 +242,38 @@ async fn resolve_target(session_id: &str, cwd: &str, is_answer: bool) -> Target 
         ));
     }
 
+    // C1 temporal guard: attention rows are durable and outlive the raising
+    // agent, so a purely-cwd fallback can misroute the answer to a DIFFERENT
+    // agent that later occupied the same cwd. Bind delivery to the transcript
+    // captured at raise time — if it is no longer the newest transcript in the
+    // cwd, the occupant changed; refuse rather than answer an agent that never
+    // asked. (A row with no captured transcript keeps the prior behaviour.)
+    if let Some(raise_tx) = raise_transcript.filter(|t| !t.is_empty()) {
+        if !transcript_still_owns_cwd(cwd, raise_tx) {
+            let label = if is_answer {
+                "cannot safely answer"
+            } else {
+                "refusing to send"
+            };
+            return Target::Ambiguous(format!(
+                "stale target — {label} (the raising session no longer owns this cwd)"
+            ));
+        }
+    }
+
     Target::Send(by_cwd.clone())
+}
+
+/// Does the session that raised the request still OWN `cwd`? True when the newest
+/// transcript in the cwd's project dir is still the one captured at raise time.
+///
+/// Compared by file NAME — the session-unique transcript id — so the hook's
+/// absolute path and the discovered path never disagree over formatting. A
+/// missing current transcript (dir gone) is treated as NOT owning (refuse).
+fn transcript_still_owns_cwd(cwd: &str, raise_transcript: &str) -> bool {
+    let raise_name = std::path::Path::new(raise_transcript).file_name();
+    raise_name.is_some()
+        && latest_transcript_for_cwd(cwd).is_some_and(|current| current.file_name() == raise_name)
 }
 
 #[cfg(test)]
@@ -318,6 +370,60 @@ mod tests {
         assert_eq!(resolve_decision(&raw, "hook-sid", "/work/x"), Decision::Refuse);
     }
 
+    /// Plant a transcript `<name>` under a UNIQUE cwd's `~/.claude/projects`
+    /// slug dir. Returns the cwd, the planted file path, and a cleanup guard.
+    struct TxFixture {
+        cwd: String,
+        dir: std::path::PathBuf,
+    }
+    impl Drop for TxFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    fn plant_transcript(name: &str) -> (TxFixture, std::path::PathBuf) {
+        use std::io::Write;
+        let cwd = format!(
+            "/ainb-test-answer-c1/{}/{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let mut dir = dirs::home_dir().expect("home dir");
+        dir.push(".claude");
+        dir.push("projects");
+        dir.push(ainb_fleet_core::read::jsonl_tail::cwd_to_project_slug(&cwd));
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let file = dir.join(name);
+        writeln!(std::fs::File::create(&file).unwrap(), "{{}}").unwrap();
+        (TxFixture { cwd, dir }, file)
+    }
+
+    #[test]
+    fn transcript_owns_cwd_when_it_is_the_newest() {
+        let (fx, file) = plant_transcript("session-a.jsonl");
+        // The captured transcript IS the newest in the cwd → the raiser owns it.
+        assert!(transcript_still_owns_cwd(&fx.cwd, file.to_str().unwrap()));
+        // A stale/never-there transcript name → not owning.
+        assert!(!transcript_still_owns_cwd(&fx.cwd, "/anywhere/session-gone.jsonl"));
+    }
+
+    #[test]
+    fn transcript_does_not_own_cwd_after_a_newer_session_takes_over() {
+        let (fx, original) = plant_transcript("session-original.jsonl");
+        // A DIFFERENT agent starts in the same cwd, writing a newer transcript.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let newcomer = fx.dir.join("session-newcomer.jsonl");
+        std::fs::write(&newcomer, "{}\n").unwrap();
+
+        // The original raiser's transcript is no longer the newest → refuse.
+        assert!(
+            !transcript_still_owns_cwd(&fx.cwd, original.to_str().unwrap()),
+            "a newer session in the cwd means the original no longer owns it"
+        );
+        // The newcomer (had it been the raiser) would own it.
+        assert!(transcript_still_owns_cwd(&fx.cwd, newcomer.to_str().unwrap()));
+    }
+
     #[test]
     fn no_session_in_cwd_is_no_match_not_refuse() {
         let raw = vec![session("a", "/other", SessionSource::Ainb)];
@@ -352,6 +458,7 @@ mod tests {
                 payload: "{}".to_string(),
                 degraded: false,
                 created_at: 1_000,
+                raise_transcript: None,
             },
         )
         .await

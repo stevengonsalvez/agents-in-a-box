@@ -95,6 +95,11 @@ pub struct NewAttention {
     pub degraded: bool,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The transcript the raising session was writing when the request was raised
+    /// (the hook line's `transcript_path`), or `None`. The answer router uses it
+    /// as a session-stable identity token: a cwd-fallback delivery is only made
+    /// while this transcript still owns the cwd (see [`AttentionRepo`]).
+    pub raise_transcript: Option<String>,
 }
 
 /// A fully-materialised `attention` row read back from the database.
@@ -124,6 +129,9 @@ pub struct AttentionRow {
     pub answer: Option<String>,
     /// When the answer landed (epoch milliseconds), or `None` while open.
     pub answered_at: Option<i64>,
+    /// The transcript the raising session was writing when the request was raised,
+    /// or `None`. The C1 answer guard binds cwd-fallback delivery to it.
+    pub raise_transcript: Option<String>,
 }
 
 /// Stateless typed wrapper over the `attention` table.
@@ -144,8 +152,9 @@ impl AttentionRepo {
     pub async fn insert(pool: &SqlitePool, row: &NewAttention) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO attention \
-             (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+             (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at, \
+              raise_transcript) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.session_id)
@@ -155,6 +164,7 @@ impl AttentionRepo {
         .bind(&row.payload)
         .bind(i64::from(row.degraded))
         .bind(row.created_at)
+        .bind(&row.raise_transcript)
         .execute(pool)
         .await?;
         Ok(())
@@ -183,7 +193,7 @@ impl AttentionRepo {
             Some(ws) => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at \
+                            created_at, answered_by, answer, answered_at, raise_transcript \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id = ? \
                      ORDER BY created_at ASC, id ASC",
@@ -195,7 +205,7 @@ impl AttentionRepo {
             None => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at \
+                            created_at, answered_by, answer, answered_at, raise_transcript \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id IS NULL \
                      ORDER BY created_at ASC, id ASC",
@@ -219,7 +229,7 @@ impl AttentionRepo {
     pub async fn list_fleet(pool: &SqlitePool) -> Result<Vec<AttentionRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at \
+                    created_at, answered_by, answer, answered_at, raise_transcript \
              FROM attention \
              WHERE state = 'open' \
              ORDER BY created_at ASC, id ASC",
@@ -244,7 +254,7 @@ impl AttentionRepo {
     ) -> Result<Option<AttentionRow>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at \
+                    created_at, answered_by, answer, answered_at, raise_transcript \
              FROM attention WHERE id = ?",
         )
         .bind(id)
@@ -350,6 +360,7 @@ fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<AttentionRow, sqlx::
         answered_by: row.try_get("answered_by")?,
         answer: row.try_get("answer")?,
         answered_at: row.try_get("answered_at")?,
+        raise_transcript: row.try_get("raise_transcript")?,
     })
 }
 
@@ -380,6 +391,7 @@ mod tests {
             payload: format!("{{\"kind\":\"ASK\",\"id\":\"{id}\"}}"),
             degraded: false,
             created_at: ts,
+            raise_transcript: None,
         }
     }
 
@@ -567,5 +579,25 @@ mod tests {
         AttentionRepo::insert(store.pool(), &row).await.unwrap();
         let got = AttentionRepo::get(store.pool(), "d1").await.unwrap().unwrap();
         assert!(got.degraded, "the pane-fallback degraded flag round-trips");
+    }
+
+    #[tokio::test]
+    async fn raise_transcript_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let mut row = ask("t1", "sess", None, 1000);
+        row.raise_transcript = Some("/home/u/.claude/projects/slug/abc.jsonl".to_string());
+        AttentionRepo::insert(store.pool(), &row).await.unwrap();
+        let got = AttentionRepo::get(store.pool(), "t1").await.unwrap().unwrap();
+        assert_eq!(
+            got.raise_transcript.as_deref(),
+            Some("/home/u/.claude/projects/slug/abc.jsonl"),
+            "the raising session's transcript token round-trips"
+        );
+
+        // A row inserted without a transcript reads back NULL.
+        AttentionRepo::insert(store.pool(), &ask("t2", "sess", None, 2000)).await.unwrap();
+        let none = AttentionRepo::get(store.pool(), "t2").await.unwrap().unwrap();
+        assert!(none.raise_transcript.is_none());
     }
 }
