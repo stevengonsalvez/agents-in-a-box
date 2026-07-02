@@ -74,6 +74,10 @@ pub enum Screen {
     /// Notification inbox (hotkey `I`) — the aggregated issue/comment/task
     /// events with an unread badge, backed by `hangar/inbox_list` (e38.14).
     Inbox,
+    /// Control center (hotkey `C`) — the fleet-wide agentpeek "who-needs-you"
+    /// board, backed by the P2 attention feed (`attention/list` +
+    /// `attention/subscribe`) with inline answering via `attention/answer`.
+    ControlCenter,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -100,6 +104,7 @@ impl Screen {
             Self::Usage => "Usage",
             Self::Logs => "Logs",
             Self::Inbox => "Inbox",
+            Self::ControlCenter => "Control",
             Self::Settings => "Settings",
             Self::Help => "Help",
             Self::CommandPalette => "Search",

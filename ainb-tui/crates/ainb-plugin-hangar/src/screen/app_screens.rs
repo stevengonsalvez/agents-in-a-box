@@ -27,6 +27,9 @@ use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, Au
 use super::command_palette::{
     reduce_command_palette, CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState,
 };
+use super::control_center::{
+    reduce_control_center, ControlCenterEvent, ControlCenterIntent, ControlCenterState,
+};
 use super::daemon_health::DaemonHealthState;
 use super::inbox::InboxState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
@@ -164,6 +167,21 @@ pub enum IssueCreateAction {
     },
 }
 
+/// A deferred `attention/answer` RPC raised by the control-center screen (P2).
+///
+/// Like the other deferred actions, the sync key router can't `await`; the
+/// control center stashes the answer on [`ScreenStates::pending_answer_action`]
+/// and the plugin's `render` pass drains it and fires `attention/answer` over the
+/// daemon socket. The daemon runs the first-answer-wins + C1 misroute guards and
+/// delivers the pick into the raising session via the one verified send path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionAnswerAction {
+    /// The attention row to answer.
+    pub attention_id: String,
+    /// The picked option label delivered into the session.
+    pub answer: String,
+}
+
 /// A deferred daemon RPC raised by the command-palette modal (e38.13).
 ///
 /// Like [`IssueCreateAction`], the sync key router can't `await`; the palette
@@ -203,6 +221,9 @@ pub struct ScreenStates {
     /// Inbox screen cache (e38.14), filled from the `hangar/inbox_list` snapshot
     /// (the aggregated issue/comment/task entries + the unread count).
     pub inbox: InboxState,
+    /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
+    /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
+    pub control_center: ControlCenterState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -262,6 +283,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire `hangar/inbox_mark_read` over the daemon
     /// socket. Drained by the `render` pass. `false` when idle.
     pub pending_inbox_mark_read: bool,
+    /// An `attention/answer` raised by the control-center screen (Enter / a number
+    /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
+    /// (P2). `None` when idle.
+    pub pending_answer_action: Option<AttentionAnswerAction>,
 }
 
 impl Default for SkillManagerState {
@@ -337,6 +362,18 @@ impl ScreenStates {
         let pending = self.pending_inbox_mark_read;
         self.pending_inbox_mark_read = false;
         pending
+    }
+
+    /// Rebuild the control-center board from an `attention/list` /
+    /// `attention/subscribe` snapshot (P2), preserving the human's focus + option
+    /// cursor across the auto-shuffle.
+    pub fn set_attention(&mut self, rows: &[ainb_hangar_proto::events::AttentionRow]) {
+        self.control_center.set_attention(rows);
+    }
+
+    /// Take the pending `attention/answer` raised by the control center, if any (P2).
+    pub const fn take_pending_answer_action(&mut self) -> Option<AttentionAnswerAction> {
+        self.pending_answer_action.take()
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -547,6 +584,16 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::Inbox => {
             super::inbox::render_inbox(buf, w, top, bottom, &states.inbox);
+        }
+        Screen::ControlCenter => {
+            super::control_center::render_control_center(
+                buf,
+                w,
+                top,
+                bottom,
+                &states.control_center,
+                now_ms(),
+            );
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -765,6 +812,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             }
             None
         }
+        Screen::ControlCenter => {
+            route_control_center(states, key);
+            None
+        }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
         // pane (P8.5), the usage dashboard (e38.35), and the help overlay (the
         // `D`/`U`/`?` tab-switch + global keys are handled by the router before
@@ -876,6 +927,39 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
     states.kanban = out.state;
     if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
         states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
+    }
+}
+
+/// Control-center key routing (P2): map the navigation keys into the board
+/// reducer, lifting an [`ControlCenterIntent::Answer`] into a deferred
+/// `attention/answer` RPC (the sync key router can't `await`; the `render` pass
+/// drains [`ScreenStates::pending_answer_action`] and fires it).
+///
+/// `↓`/`↑` (and `j`/`k`) move the card selection; `→`/`←` (and `l`/`h`) move the
+/// ASK option cursor; `Enter` answers the highlighted option and `1`..`9` answer
+/// directly. An unmapped key folds as a no-op.
+fn route_control_center(states: &mut ScreenStates, key: &KeyEvent) {
+    let c = match &key.code {
+        KeyCode::Down => 'j',
+        KeyCode::Up => 'k',
+        KeyCode::Right => 'l',
+        KeyCode::Left => 'h',
+        _ => match key_char(key) {
+            Some(c) => c,
+            None => return,
+        },
+    };
+    let out = reduce_control_center(&states.control_center, ControlCenterEvent::Key(c));
+    states.control_center = out.state;
+    if let Some(ControlCenterIntent::Answer {
+        attention_id,
+        answer,
+    }) = out.intent
+    {
+        states.pending_answer_action = Some(AttentionAnswerAction {
+            attention_id,
+            answer,
+        });
     }
 }
 

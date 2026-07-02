@@ -58,6 +58,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'L' => switch_tab(state, Screen::Logs),
         // `I` (capital) opens the notification inbox from anywhere (e38.14).
         'I' => switch_tab(state, Screen::Inbox),
+        // `C` (capital) opens the fleet-wide control center from anywhere (P2).
+        'C' => switch_tab(state, Screen::ControlCenter),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.
