@@ -446,28 +446,19 @@ pub fn client_decide(
             "reason": reason,
         }),
     )?;
-    Ok(resp
-        .get("matched")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false))
+    Ok(resp.get("matched").and_then(serde_json::Value::as_bool).unwrap_or(false))
 }
 
 /// List sessions currently blocked on a human decision (Daemons overlay / CLI
 /// status).
 pub fn client_list(sock: &Path) -> std::io::Result<Vec<PendingInfo>> {
     let resp = client_round_trip(sock, &serde_json::json!({ "op": "list" }))?;
-    let pending = resp
-        .get("pending")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let pending = resp.get("pending").cloned().unwrap_or(serde_json::Value::Null);
     Ok(serde_json::from_value(pending).unwrap_or_default())
 }
 
 /// Shared one-shot request/response for decide + list.
-fn client_round_trip(
-    sock: &Path,
-    req: &serde_json::Value,
-) -> std::io::Result<serde_json::Value> {
+fn client_round_trip(sock: &Path, req: &serde_json::Value) -> std::io::Result<serde_json::Value> {
     let mut stream = StdUnixStream::connect(sock)?;
     stream.set_read_timeout(Some(CLIENT_RPC_TIMEOUT))?;
     let mut line = serde_json::to_string(req).unwrap_or_default();
@@ -488,7 +479,9 @@ mod tests {
 
     /// Bind a broker on a short-path socket (AF_UNIX has a ~104-char
     /// limit, so tempdirs under long worktree paths overflow — use /tmp).
-    async fn spawn_broker(timeout: Duration) -> (std::path::PathBuf, BrokerState, tokio::task::JoinHandle<()>) {
+    async fn spawn_broker(
+        timeout: Duration,
+    ) -> (std::path::PathBuf, BrokerState, tokio::task::JoinHandle<()>) {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let sock = std::env::temp_dir().join(format!(
             "ainb-broker-test-{}-{}.sock",
@@ -708,11 +701,12 @@ mod tests {
         assert_eq!(pending[0].tool, "Bash");
 
         let s = sock.clone();
-        let matched =
-            tokio::task::spawn_blocking(move || client_decide(&s, "cli-A", DecisionKind::Approve, "ok"))
-                .await
-                .unwrap()
-                .unwrap();
+        let matched = tokio::task::spawn_blocking(move || {
+            client_decide(&s, "cli-A", DecisionKind::Approve, "ok")
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert!(matched, "decide should match the waiting session");
 
         let decision = waiter.await.unwrap();
@@ -728,10 +722,8 @@ mod tests {
         // Fault tolerance: no broker listening at all → the waiter never hangs
         // forever and never auto-approves; it re-dials until the deadline and
         // falls back to deny. The waiting hook is never lost.
-        let sock = std::env::temp_dir().join(format!(
-            "ainb-broker-dead-{}.sock",
-            std::process::id()
-        ));
+        let sock =
+            std::env::temp_dir().join(format!("ainb-broker-dead-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let sock_w = sock.clone();
         let decision = tokio::task::spawn_blocking(move || {
@@ -757,8 +749,8 @@ mod tests {
     /// safe (dropping a Runtime inside async panics).
     #[test]
     fn waiter_resumes_after_socket_restart() {
-        let sock = std::env::temp_dir()
-            .join(format!("ainb-broker-restart-{}.sock", std::process::id()));
+        let sock =
+            std::env::temp_dir().join(format!("ainb-broker-restart-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
 
         // Poll client_list on this thread until `session_id` is registered on
@@ -790,7 +782,13 @@ mod tests {
         let rt1 = spawn_broker_rt(sock.clone());
         let sock_w = sock.clone();
         let waiter = std::thread::spawn(move || {
-            client_await(&sock_w, "resume-A", "Bash", "rm -rf /tmp/x", Duration::from_secs(20))
+            client_await(
+                &sock_w,
+                "resume-A",
+                "Bash",
+                "rm -rf /tmp/x",
+                Duration::from_secs(20),
+            )
         });
         wait_registered("resume-A");
 
@@ -809,7 +807,10 @@ mod tests {
 
         // Human approves against the fresh daemon; the resumed waiter answers.
         let matched = client_decide(&sock, "resume-A", DecisionKind::Approve, "ok").unwrap();
-        assert!(matched, "fresh broker should match the re-registered waiter");
+        assert!(
+            matched,
+            "fresh broker should match the re-registered waiter"
+        );
 
         let decision = waiter.join().unwrap();
         assert_eq!(

@@ -830,7 +830,11 @@ mod tests {
         let s = probe_approve_broker(base.path(), super::super::heartbeat::now_ms());
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(!s.connected);
-        assert!(s.reason.contains("stale approve.sock"), "reason: {}", s.reason);
+        assert!(
+            s.reason.contains("stale approve.sock"),
+            "reason: {}",
+            s.reason
+        );
     }
 
     #[test]
