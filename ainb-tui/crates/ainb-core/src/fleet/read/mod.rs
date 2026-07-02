@@ -1,11 +1,14 @@
 // ABOUTME: Read-side fleet primitives — tmux capture, errors regex, state merge, JSONL tail.
 
 pub mod current_state;
-pub mod errors;
-pub mod jsonl_tail;
-pub mod needs;
 pub mod state;
-pub mod tmux_pane;
+
+// `errors`, `jsonl_tail`, `needs`, and `tmux_pane` were extracted into
+// `ainb-fleet-core`; re-export the modules so
+// `crate::fleet::read::{errors,jsonl_tail,needs,tmux_pane}::…` still resolve
+// for `current_state`, `state`, the bridge transport, and the fleet panel.
+// `current_state` + `state` stay local (TUI/notifyd-facing, daemon-irrelevant).
+pub use ainb_fleet_core::fleet::read::{errors, jsonl_tail, needs, tmux_pane};
 
 pub use current_state::{CurrentStateIndex, Resolution};
 pub use errors::{API_ERROR_PATTERNS, detect_error_signals};

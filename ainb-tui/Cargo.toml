@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
+    "crates/ainb-fleet-core",
     "crates/ainb-web",
     "crates/ainb-plugin-burndown",
     "crates/ainb-plugin-learnings",

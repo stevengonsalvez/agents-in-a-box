@@ -77,7 +77,7 @@ pub fn latest_transcript_for_cwd(cwd: &str) -> Option<PathBuf> {
 ///     `age_min >= idle_threshold_min` (default 5) window, so a 5-min-old
 ///     assistant row is realistically finished.
 #[must_use]
-pub(crate) fn is_turn_end_stop_reason(stop_reason: Option<&str>) -> bool {
+pub fn is_turn_end_stop_reason(stop_reason: Option<&str>) -> bool {
     matches!(stop_reason, None | Some("end_turn"))
 }
 

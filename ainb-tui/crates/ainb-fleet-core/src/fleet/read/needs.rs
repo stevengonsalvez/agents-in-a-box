@@ -214,7 +214,7 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
 /// Build a `NeedsRow`, stamping the content `enrich_key` from the serialized
 /// context. `enriched` / `need_enrich` are filled later by the orchestrator
 /// (it owns the cache lookup and the enable flag).
-pub(crate) fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> NeedsRow {
+pub fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) -> NeedsRow {
     let enrich_key = enrich_cache::ctx_key(&serde_json::to_string(&context).unwrap_or_default());
     NeedsRow {
         session,

@@ -114,6 +114,11 @@ ainb-web = { path = "../ainb-web", version = "1.7.0" }
 # `mint_pat` / `mint_daemon_token`). All hashing/encoding lives in the store +
 # core; the CLI only supplies the random source.
 rand = "0.8"
+# Fleet orchestration core — the discovery / needs-classifier / verified-send
+# libs the `ainb fleet …` CLI + fleet panel drive. Extracted below both this
+# crate and the hangar daemon (which `ainb` depends on, so the daemon can't
+# depend back here) and re-exported through `crate::fleet::*`.
+ainb-fleet-core = { path = "../ainb-fleet-core", version = "0.1.0" }
 # Hangar control plane — backs the `ainb hangar <verb>` CLI namespace.
 ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
 ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
