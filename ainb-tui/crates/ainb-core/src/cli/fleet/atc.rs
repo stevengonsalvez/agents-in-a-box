@@ -667,15 +667,26 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
     Ok(())
 }
 
+/// What the lifecycle hook emits on stdout. Two distinct JSON shapes flow to the
+/// same stdout: a `Stop`-block decision (`{"decision":"block",...}`) and the
+/// `PermissionRequest` `hookSpecificOutput` decision. The permission line is
+/// pre-serialized (built by [`permission_emit_json`]) and emitted verbatim.
+enum HookEmit {
+    /// A Stop-drain block decision, serialized on emit.
+    Stop(plumbing::StopDecision),
+    /// A pre-serialized `hookSpecificOutput` permission-decision JSON line.
+    Permission(String),
+}
+
 /// Convert a [`hook_inner`]/[`hook_core`] result into the hook's exit behaviour:
 /// `(exit_ok, emitted_stdout)`. This is the H-A1 swallow contract in one place —
 /// it NEVER yields a non-zero exit. A block decision serializes to the stdout
-/// JSON; a `None` decision emits nothing; an Err is logged and swallowed (no
-/// stdout). `exit_ok` is always `true` (the tuple keeps the intent explicit +
-/// unit-testable).
-fn swallow_hook_result(result: Result<Option<plumbing::StopDecision>>) -> (bool, Option<String>) {
+/// JSON; a permission decision is emitted verbatim; a `None` decision emits
+/// nothing; an Err is logged and swallowed (no stdout). `exit_ok` is always
+/// `true` (the tuple keeps the intent explicit + unit-testable).
+fn swallow_hook_result(result: Result<Option<HookEmit>>) -> (bool, Option<String>) {
     match result {
-        Ok(Some(decision)) => match serde_json::to_string(&decision) {
+        Ok(Some(HookEmit::Stop(decision))) => match serde_json::to_string(&decision) {
             Ok(s) => (true, Some(s)),
             Err(e) => {
                 // Serialization of a StopDecision cannot realistically fail, but
@@ -685,6 +696,8 @@ fn swallow_hook_result(result: Result<Option<plumbing::StopDecision>>) -> (bool,
                 (true, None)
             }
         },
+        // Already a complete JSON line — emit as-is.
+        Ok(Some(HookEmit::Permission(json))) => (true, Some(json)),
         Ok(None) => (true, None),
         Err(e) => {
             // Log-and-swallow: a drain/serialize/IO failure must NOT wedge Stop
@@ -695,12 +708,44 @@ fn swallow_hook_result(result: Result<Option<plumbing::StopDecision>>) -> (bool,
     }
 }
 
+/// Build the Claude `PermissionRequest` hook output from a broker decision.
+/// `approve` → `allow`; anything else (deny / timeout / superseded / dead
+/// socket) → `deny`. Never auto-approves on a fallback.
+fn permission_emit_json(decision: &ainb_plugin_notifyd::broker::Decision) -> String {
+    use ainb_plugin_notifyd::broker::DecisionKind;
+    let verdict = match decision.decision {
+        DecisionKind::Approve => "allow",
+        DecisionKind::Deny => "deny",
+    };
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "permissionDecision": verdict,
+            "permissionDecisionReason": decision.reason,
+        }
+    })
+    .to_string()
+}
+
+/// Best-effort short context for the permission prompt: the `tool_input` JSON
+/// from the hook payload (e.g. the Bash command), compacted to one line. Empty
+/// when the payload has none.
+fn extract_permission_context(payload: &str) -> String {
+    // `input` tolerated as an alias, mirroring `approve_context` in the
+    // notifyd transition fold — the two surfaces must read the same payloads.
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("tool_input").or_else(|| v.get("input")).cloned())
+        .map(|ti| ti.to_string())
+        .unwrap_or_default()
+}
+
 /// The fallible body of [`hook`]: resolves the process env (`AINB_HOME`,
 /// `AINB_PARENT_SESSION`) + stdin payload, then delegates the I/O-on-an-explicit-
 /// home work to [`hook_core`] (which is env-free so it unit-tests against a
 /// tempdir without mutating process-global env — the crate forbids `unsafe`, so
-/// tests can't call `set_var`). Returns the optional Stop-block decision to emit.
-fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<plumbing::StopDecision>> {
+/// tests can't call `set_var`). Returns the optional stdout emit ([`HookEmit`]).
+fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<HookEmit>> {
     let event = matches.get_one::<String>("event").cloned().unwrap_or_default();
     let session_id = matches.get_one::<String>("session-id").cloned().unwrap_or_default();
     let cwd = matches.get_one::<String>("cwd").cloned().unwrap_or_default();
@@ -752,7 +797,7 @@ fn hook_core(
     now_ms: i64,
     payload: &str,
     matcher: Option<&str>,
-) -> Result<Option<plumbing::StopDecision>> {
+) -> Result<Option<HookEmit>> {
     let base_event = event.split(':').next().unwrap_or(event);
     let inbox_dir = plumbing::paths::inbox_dir_in(home);
 
@@ -863,8 +908,30 @@ fn hook_core(
         if !inbox.is_empty() {
             let (_completions, decision) =
                 inbox.drain_with_budget(plumbing::DEFAULT_BLOCK_BUDGET)?;
-            return Ok(decision);
+            return Ok(decision.map(HookEmit::Stop));
         }
+    }
+
+    // 4. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
+    //    Claude hook BLOCKS here on the approve broker socket until a human
+    //    answers from the fleet UI (or `ainb fleet ... approve/deny`), then
+    //    relays the verdict straight back as a `hookSpecificOutput` permission
+    //    decision. Fleet members only — an unrelated host session must NOT wedge
+    //    on our socket. `client_await` re-dials to its deadline, so a notifyd
+    //    restart mid-wait is survived; a dead socket / no answer deny-falls-back
+    //    (never auto-approves).
+    if base_event == "PermissionRequest" && !session_id.is_empty() && is_fleet_member {
+        let sock = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
+        let tool = matcher.unwrap_or_default();
+        let context = extract_permission_context(payload);
+        let decision = ainb_plugin_notifyd::broker::client_await(
+            &sock,
+            session_id,
+            tool,
+            &context,
+            ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
+        );
+        return Ok(Some(HookEmit::Permission(permission_emit_json(&decision))));
     }
 
     Ok(None)
@@ -1038,6 +1105,10 @@ fn resolve_matcher(
     let v = payload?;
     let key = match base_event {
         "PreToolUse" => "tool_name",
+        // The managed hook registers PermissionRequest with matcher "", so the
+        // tool shown in `ainb fleet approve` / the TUI detail must come from
+        // the payload — without this arm the TOOL column is empty on real fires.
+        "PermissionRequest" => "tool_name",
         "Notification" => "notification_type",
         "StopFailure" => "error_type",
         _ => return None,
@@ -1336,7 +1407,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let d = decision.expect("Stop-hook must block on the child completion");
+        let HookEmit::Stop(d) = decision.expect("Stop-hook must block on the child completion")
+        else {
+            panic!("Stop hook must emit a Stop decision, not a permission decision");
+        };
         assert_eq!(d.decision, "block");
         assert!(
             d.reason.contains("child-1"),
@@ -1637,5 +1711,48 @@ mod tests {
         let (exit_ok, emitted) = swallow_hook_result(result);
         assert!(exit_ok, "a forced drain error must still yield exit 0");
         assert!(emitted.is_none(), "an error must emit no decision JSON");
+    }
+
+    // The broker round-trip (live approve + dead-socket deny fallback) is proven
+    // in `ainb-plugin-notifyd::broker::tests`; here we only pin the thin glue that
+    // maps a broker `Decision` onto the exact Claude `PermissionRequest` output.
+    #[test]
+    fn permission_emit_maps_approve_and_deny() {
+        use ainb_plugin_notifyd::broker::{Decision, DecisionKind};
+
+        let allow = permission_emit_json(&Decision {
+            decision: DecisionKind::Approve,
+            reason: "human approved".into(),
+        });
+        let v: serde_json::Value = serde_json::from_str(&allow).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "human approved"
+        );
+
+        let deny = permission_emit_json(&Decision {
+            decision: DecisionKind::Deny,
+            reason: "timed out".into(),
+        });
+        let v: serde_json::Value = serde_json::from_str(&deny).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "timed out"
+        );
+    }
+
+    #[test]
+    fn extract_permission_context_pulls_tool_input() {
+        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#;
+        let ctx = extract_permission_context(payload);
+        assert!(ctx.contains("rm -rf /tmp/x"), "context was: {ctx}");
+        assert!(extract_permission_context("not json").is_empty());
+        assert!(extract_permission_context("{}").is_empty());
     }
 }

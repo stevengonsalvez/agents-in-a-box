@@ -41,6 +41,10 @@ pub enum DaemonKind {
     Bridge,
     /// Unix-socket notification daemon (`ainb-notifyd`).
     Notifyd,
+    /// Synchronous permission approve/deny broker (`approve.sock`, served on
+    /// notifyd's runtime). A distinct socket, tracked as its own row so every
+    /// socket ainb serves is visible in the Daemons view.
+    ApproveBroker,
     /// Air Traffic Control fleet brain.
     Atc,
     /// Auto-continue API-error watcher (`ainb fleet daemon`).
@@ -54,6 +58,7 @@ impl DaemonKind {
         match self {
             Self::Bridge => "bridge",
             Self::Notifyd => "notifyd",
+            Self::ApproveBroker => "approve-broker",
             Self::Atc => "atc",
             Self::FleetDaemon => "fleet-daemon",
         }
@@ -65,6 +70,7 @@ impl DaemonKind {
         match self {
             Self::Bridge => "phone bridge",
             Self::Notifyd => "notifyd",
+            Self::ApproveBroker => "approve broker",
             Self::Atc => "ATC",
             Self::FleetDaemon => "fleet daemon",
         }
@@ -310,6 +316,53 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
     .with_now(now_ms)
 }
 
+/// Probe the permission approve/deny broker from its socket. The broker is
+/// served on notifyd's runtime, so its liveness is `approve.sock` accepting a
+/// connection — not a separate pid. A listening socket means the synchronous
+/// round-trip is available; the pending-request count (cheap `client_list` over
+/// the same socket) goes in the reason so the operator can see waiting hooks.
+#[must_use]
+pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
+    let kind = DaemonKind::ApproveBroker;
+    let socket_path = base.join("approve.sock");
+
+    // L1: a bound listener, not merely a socket file on disk. A crashed notifyd
+    // can leave a stale `approve.sock`; a non-blocking connect proves a server.
+    if !socket_is_listening(&socket_path) {
+        let reason = if socket_path.exists() {
+            "stale approve.sock — broker not accepting (notifyd down?)".to_string()
+        } else {
+            "no approve.sock — broker not running".to_string()
+        };
+        return DaemonStatus::stopped(kind, reason);
+    }
+
+    // Socket is serving. Fold in the pending-waiter count when the list RPC
+    // answers; a transient RPC error must not flip the row to Stopped (the
+    // listener is provably up), so degrade to a countless "serving" reason.
+    let reason = match ainb_plugin_notifyd::broker::client_list(&socket_path) {
+        Ok(pending) => match pending.len() {
+            0 => "serving — no pending requests".to_string(),
+            1 => "serving — 1 pending request".to_string(),
+            n => format!("serving — {n} pending requests"),
+        },
+        Err(_) => "serving (pending count unavailable)".to_string(),
+    };
+    DaemonStatus {
+        kind,
+        state: DaemonState::Running,
+        pid: None, // rides notifyd's process; no pid of its own
+        uptime_ms: None,
+        connected: true,
+        channel: Some("approve socket".to_string()),
+        last_activity_at: None,
+        error_count: 0,
+        last_error: None,
+        reason,
+    }
+    .with_now(now_ms)
+}
+
 /// Probe ATC from its existing per-instance `heartbeat-state.json` files. ATC is
 /// timer-driven (no foreground daemon), so "running" here means: at least one
 /// provisioned instance with `heartbeat_enabled` whose last heartbeat is within
@@ -469,7 +522,7 @@ fn db_mtime_ms(path: &Path) -> Option<i64> {
     i64::try_from(dur.as_millis()).ok()
 }
 
-/// Aggregate all four daemons under an explicit ainb home + notifyd base. The
+/// Aggregate every daemon under an explicit ainb home + notifyd base. The
 /// test seam — every path is injected so a test isolates to a tempdir.
 ///
 /// `now_ms` is the single clock the staleness checks measure against.
@@ -478,27 +531,21 @@ pub fn collect_in(ainb_home: &Path, notifyd_base: &Path, now_ms: i64) -> Vec<Dae
     vec![
         probe_heartbeat_daemon(ainb_home, DaemonKind::Bridge, now_ms),
         probe_notifyd(notifyd_base, now_ms),
+        probe_approve_broker(notifyd_base, now_ms),
         probe_atc(ainb_home, now_ms),
         probe_heartbeat_daemon(ainb_home, DaemonKind::FleetDaemon, now_ms),
     ]
 }
 
-/// Aggregate all four daemons from the real on-disk layout. Resolves the ainb
-/// home (honouring `$AINB_HOME`) for bridge/fleet/ATC, and notifyd's own base
-/// (`~/.agents-in-a-box`, which it does NOT key off `$AINB_HOME`).
+/// Aggregate every daemon from the real on-disk layout. Resolves the ainb
+/// home (honouring `$AINB_HOME`) for bridge/fleet/ATC; notifyd's base comes
+/// from `Paths::from_home()`, which honours the same `$AINB_HOME` override,
+/// so the probe reads exactly the files the daemon writes.
 pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
     let ainb_home = crate::fleet::plumbing::paths::ainb_home()?;
-    // notifyd resolves its base via `dirs::home_dir()/.agents-in-a-box` and does
-    // NOT honour `$AINB_HOME`; mirror that exactly so the probe reads the same
-    // files the daemon writes. When `$AINB_HOME` is set (tests / unusual setups)
-    // we still point notifyd at the ainb home so an isolated run is coherent.
-    let notifyd_base = if std::env::var("AINB_HOME").map(|h| !h.is_empty()).unwrap_or(false) {
-        ainb_home.clone()
-    } else {
-        dirs::home_dir()
-            .map(|h| h.join(".agents-in-a-box"))
-            .unwrap_or_else(|| ainb_home.clone())
-    };
+    let notifyd_base = ainb_plugin_notifyd::Paths::from_home()
+        .map(|p| p.base)
+        .unwrap_or_else(|_| ainb_home.clone());
     Ok(collect_in(
         &ainb_home,
         &notifyd_base,
@@ -759,6 +806,63 @@ mod tests {
     }
 
     #[test]
+    fn probe_approve_broker_no_socket_is_stopped() {
+        let base = TempDir::new().unwrap();
+        let s = probe_approve_broker(base.path(), super::super::heartbeat::now_ms());
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert!(!s.connected);
+        assert!(s.reason.contains("no approve.sock"), "reason: {}", s.reason);
+    }
+
+    #[test]
+    fn probe_approve_broker_stale_socket_file_is_stopped() {
+        // A crashed notifyd left an `approve.sock` FILE with no listener. `exists()`
+        // alone would falsely report it up; connect() refuses, so → Stopped.
+        let base = TempDir::new().unwrap();
+        std::fs::write(base.path().join("approve.sock"), b"").unwrap();
+        let s = probe_approve_broker(base.path(), super::super::heartbeat::now_ms());
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert!(!s.connected);
+        assert!(
+            s.reason.contains("stale approve.sock"),
+            "reason: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn probe_approve_broker_bound_listener_is_running_connected() {
+        use std::io::{BufRead, BufReader, Write};
+        let base = TempDir::new().unwrap();
+        let listener =
+            std::os::unix::net::UnixListener::bind(base.path().join("approve.sock")).unwrap();
+        // Minimal broker stand-in: answer each `list` RPC with an empty pending
+        // array so `client_list` returns fast (else it waits out the RPC timeout).
+        // Detached — it blocks on accept and dies at process exit; the probe makes
+        // only a couple of connects, so joining would hang on the next accept.
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let mut w = conn;
+                    let _ = w.write_all(b"{\"pending\":[]}\n");
+                    let _ = w.flush();
+                }
+            }
+        });
+        let s = probe_approve_broker(base.path(), super::super::heartbeat::now_ms());
+        assert_eq!(s.state, DaemonState::Running);
+        assert!(s.connected, "a bound listener must report connected");
+        assert_eq!(s.channel.as_deref(), Some("approve socket"));
+        assert!(
+            s.reason.contains("no pending requests"),
+            "empty pending list should read as no pending: {}",
+            s.reason
+        );
+    }
+
+    #[test]
     fn probe_notifyd_live_pid_without_socket_is_running_not_connected() {
         let base = TempDir::new().unwrap();
         std::fs::write(
@@ -904,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_in_returns_all_four_in_stable_order() {
+    fn collect_in_returns_all_daemons_in_stable_order() {
         let home = TempDir::new().unwrap();
         let notifyd = TempDir::new().unwrap();
         let rows = collect_in(
@@ -912,11 +1016,12 @@ mod tests {
             notifyd.path(),
             super::super::heartbeat::now_ms(),
         );
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].kind, DaemonKind::Bridge);
         assert_eq!(rows[1].kind, DaemonKind::Notifyd);
-        assert_eq!(rows[2].kind, DaemonKind::Atc);
-        assert_eq!(rows[3].kind, DaemonKind::FleetDaemon);
+        assert_eq!(rows[2].kind, DaemonKind::ApproveBroker);
+        assert_eq!(rows[3].kind, DaemonKind::Atc);
+        assert_eq!(rows[4].kind, DaemonKind::FleetDaemon);
         // Empty homes → everything stopped, never a false running.
         assert!(rows.iter().all(|r| r.state == DaemonState::Stopped));
     }

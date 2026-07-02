@@ -23,6 +23,8 @@
 //   - Tab / Shift+Tab    move the ASK option cursor (when the row is an ASK)
 //   - Enter / a          answer the selected ASK with the highlighted option
 //   - B                  broadcast a ping prompt to the selected session
+//   - y                  approve the selected APPROVE permission request
+//   - n                  deny (on an APPROVE row) / open the new-ATC prompt (elsewhere)
 //   - r                  force-refresh from the store
 //   - q / Esc            back to the previous screen
 //
@@ -202,6 +204,13 @@ impl FleetPanelState {
     #[must_use]
     pub fn selected_row(&self) -> Option<&StateRow> {
         self.rows.get(self.selected)
+    }
+
+    /// Kind of the selected row (`"APPROVE"`, `"ASK"`, …). The key router uses
+    /// this to split the overloaded `n`: deny on an APPROVE row, new-ATC prompt
+    /// everywhere else.
+    pub fn selected_kind(&self) -> Option<&str> {
+        self.selected_row().map(|r| r.kind.as_str())
     }
 
     /// Move the row selection up by `n`, saturating at 0; resets the option
@@ -388,6 +397,47 @@ impl FleetPanelState {
         true
     }
 
+    /// Guarded approve/deny for the selected APPROVE row: refuses while another
+    /// action is in flight (shares the send guard) and only fires when the
+    /// selected row is actually a waiting permission request (`APPROVE`).
+    /// Returns `true` if a decision was dispatched.
+    ///
+    /// Unlike [`guarded_dispatch`], this delivers a first-class permission
+    /// decision to the notifyd approve broker (`dispatch_decide`), which unblocks
+    /// the parked `PermissionRequest` hook — it does NOT route text via tmux.
+    pub fn guarded_decide(
+        &mut self,
+        kind: ainb_plugin_notifyd::broker::DecisionKind,
+        kind_label: &'static str,
+    ) -> bool {
+        if self.is_sending() {
+            self.set_feedback("action already in flight — wait for it to finish".to_string());
+            return false;
+        }
+        let Some(row) = self.selected_row() else {
+            return false;
+        };
+        if row.kind != "APPROVE" {
+            self.set_feedback("no permission request selected".to_string());
+            return false;
+        }
+        let session_id = row.session_id.clone();
+        if session_id.is_empty() {
+            self.set_feedback("cannot decide: row has no session id".to_string());
+            return false;
+        }
+        self.set_feedback(format!("{kind_label} → {session_id}: delivering…"));
+        crate::fleet::control::dispatch_decide(
+            Arc::clone(&self.feedback),
+            Arc::clone(&self.in_flight),
+            session_id,
+            kind,
+            String::new(),
+            kind_label,
+        );
+        true
+    }
+
     fn is_duplicate_dispatch(
         &self,
         session_id: &str,
@@ -438,10 +488,12 @@ fn parse_ask(context_json: Option<&str>) -> Option<AskUserQuestionData> {
 fn kind_badge(kind: &str) -> (&'static str, Color) {
     match kind {
         "ASK" => ("ASK ", GOLD),
+        "APPROVE" => ("APRV", GOLD),
         "ERR" => ("ERR ", ALERT_RED),
         "WAIT" => ("WAIT", WAIT_AMBER),
         "IDLE" => ("IDLE", MUTED_GRAY),
         "RUNNING" => ("RUN ", SELECTION_GREEN),
+        "STARTING" => ("STRT", CORNFLOWER_BLUE),
         "DONE" => ("DONE", CORNFLOWER_BLUE),
         _ => ("????", MUTED_GRAY),
     }
@@ -470,6 +522,8 @@ fn short_context(row: &StateRow) -> String {
         "ASK" => parse_ask(row.context.as_deref())
             .map(|a| truncate_chars(&a.question, 40))
             .unwrap_or_default(),
+        "APPROVE" => "needs approval".to_string(),
+        "STARTING" => "starting".to_string(),
         "ERR" => row
             .context
             .as_deref()
@@ -545,7 +599,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
     let needs = state
         .rows
         .iter()
-        .filter(|r| matches!(r.kind.as_str(), "ASK" | "ERR" | "WAIT" | "IDLE"))
+        .filter(|r| matches!(r.kind.as_str(), "ASK" | "ERR" | "WAIT" | "IDLE" | "APPROVE"))
         .count();
     let title = Line::from(vec![
         Span::styled(
@@ -665,6 +719,34 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
 
     match row.kind.as_str() {
         "ASK" => render_ask_detail(&mut lines, row, state.option_cursor),
+        "APPROVE" => {
+            let v = row
+                .context
+                .as_deref()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+            let tool = v
+                .as_ref()
+                .and_then(|v| v.get("tool").and_then(|t| t.as_str()))
+                .unwrap_or("(unknown)");
+            let input = v
+                .as_ref()
+                .and_then(|v| v.get("tool_input"))
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            lines.push(Line::from(Span::styled(
+                "needs approval:",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(label("tool:", tool.to_string()));
+            lines.push(label("input:", input));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("y", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" approve   ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("n", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" deny", Style::default().fg(MUTED_GRAY)),
+            ]));
+        }
         "ERR" => {
             let et = row
                 .context
@@ -723,6 +805,10 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
         "RUNNING" => lines.push(Line::from(Span::styled(
             "actively working — no action needed",
             Style::default().fg(SELECTION_GREEN),
+        ))),
+        "STARTING" => lines.push(Line::from(Span::styled(
+            "starting — session is booting",
+            Style::default().fg(CORNFLOWER_BLUE),
         ))),
         "DONE" => lines.push(Line::from(Span::styled(
             "finished — completion delivered via the inbox",
@@ -839,7 +925,17 @@ fn render_help(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
             Span::styled("B", Style::default().fg(GOLD)),
             Span::styled(" broadcast  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("n", Style::default().fg(GOLD)),
-            Span::styled(" new-atc  ", Style::default().fg(MUTED_GRAY)),
+            // `n` is context-sensitive: deny on an APPROVE row (paired with the
+            // detail pane's y/n hint), the new-ATC prompt everywhere else. The
+            // help bar must say which one THIS selection gets.
+            Span::styled(
+                if state.selected_kind() == Some("APPROVE") {
+                    " deny  "
+                } else {
+                    " new-atc  "
+                },
+                Style::default().fg(MUTED_GRAY),
+            ),
             Span::styled("r", Style::default().fg(GOLD)),
             Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("q/Esc", Style::default().fg(GOLD)),
@@ -947,6 +1043,34 @@ mod tests {
     }
 
     #[test]
+    fn renders_approve_and_starting_badges() {
+        let mut state = state_with(vec![
+            row(
+                "sess-approve",
+                "/work/deploy",
+                "APPROVE",
+                Some(r#"{"tool":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#),
+                "hook",
+            ),
+            row("sess-starting", "/work/boot", "STARTING", None, "hook"),
+        ]);
+        let out = render_to_string(&mut state, 130, 24);
+        assert!(out.contains("APRV"), "APPROVE badge missing: {out}");
+        assert!(out.contains("STRT"), "STARTING badge missing: {out}");
+        // APPROVE needs attention; the counter reflects it.
+        assert!(
+            out.contains("1 need attention"),
+            "needs counter wrong: {out}"
+        );
+        // The selected (first) row is APPROVE → detail shows the tool.
+        assert!(
+            out.contains("needs approval"),
+            "APPROVE detail missing: {out}"
+        );
+        assert!(out.contains("Bash"), "APPROVE tool missing: {out}");
+    }
+
+    #[test]
     fn detail_shows_err_wait_and_idle_context_for_selected_row() {
         // Select the ERR row.
         let mut state = state_with(vec![
@@ -1023,6 +1147,32 @@ mod tests {
         let (target, answer) = state.pending_answer().expect("ask row has an answer");
         assert_eq!(target.session_id, "s");
         assert_eq!(answer, "no");
+    }
+
+    #[test]
+    fn guarded_decide_refuses_non_approve_row() {
+        use ainb_plugin_notifyd::broker::DecisionKind;
+        let mut state = state_with(vec![row(
+            "s",
+            "/p",
+            "ASK",
+            Some(r#"{"question":"q?","options":[{"label":"a"}]}"#),
+            "hook",
+        )]);
+        // Selected row is ASK, not APPROVE → decide refused, no dispatch.
+        assert!(!state.guarded_decide(DecisionKind::Approve, "approved"));
+        assert!(!state.is_sending(), "no worker claimed for non-APPROVE row");
+    }
+
+    #[test]
+    fn guarded_decide_refuses_empty_session_id() {
+        use ainb_plugin_notifyd::broker::DecisionKind;
+        let mut state = state_with(vec![row("", "/p", "APPROVE", None, "hook")]);
+        assert!(!state.guarded_decide(DecisionKind::Deny, "denied"));
+        assert!(
+            !state.is_sending(),
+            "empty session id must not claim a worker"
+        );
     }
 
     #[test]

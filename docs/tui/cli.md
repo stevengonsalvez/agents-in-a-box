@@ -2003,6 +2003,8 @@ Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / da
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
+  approve       Approve a session's pending permission request (no arg: list waiters)
+  deny          Deny a session's pending permission request (no arg: list waiters)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   sequence      Ordered prompts with ack between steps
@@ -2024,6 +2026,47 @@ EXAMPLES:
   ainb fleet needs                 Sessions blocked on input / errors
   ainb fleet broadcast "git pull" --all     Send a prompt to every session
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
+  ainb fleet approve               List sessions waiting on a permission decision
+  ainb fleet approve <session-id>  Approve that session's pending permission request
+  ainb fleet deny <session-id> --reason "not now"   Deny it, with a reason
+```
+
+### `ainb fleet approve`
+
+Approve a session's pending permission request (no arg: list waiters)
+
+```console
+$ ainb fleet approve --help
+Approve a session's pending permission request (no arg: list waiters)
+
+Usage: ainb fleet approve [OPTIONS] [session-id]
+
+Arguments:
+  [session-id]  Session blocked on a permission decision (omit to list waiters)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+  -h, --help             Print help
+```
+
+### `ainb fleet deny`
+
+Deny a session's pending permission request (no arg: list waiters)
+
+```console
+$ ainb fleet deny --help
+Deny a session's pending permission request (no arg: list waiters)
+
+Usage: ainb fleet deny [OPTIONS] [session-id]
+
+Arguments:
+  [session-id]  Session blocked on a permission decision (omit to list waiters)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet standup`
@@ -2599,6 +2642,164 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --copilot          Wire ~/.copilot/mcp-config.json
   -h, --help             Print help
+```
+
+## `ainb notifyd`
+
+ainb-hooks notification daemon: status, restart (the approve-socket resume/repair command), install/uninstall hooks
+
+```console
+$ ainb notifyd --help
+ainb-hooks notification daemon: status, restart (the approve-socket resume/repair command), install/uninstall hooks
+
+Usage: ainb notifyd [OPTIONS] [COMMAND]
+
+Commands:
+  run        Run the daemon in the foreground (default)
+  stop       Stop a running daemon via its PID file
+  reap       Kill orphan / wedged notifyd processes, sparing the live owner
+  restart    Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+  install    Install the ainb-hooks hook
+  uninstall  Uninstall the ainb-hooks hook
+  status     Report install + daemon status
+  list       List persisted notifications (most recent first)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd run`
+
+Run the daemon in the foreground (default)
+
+```console
+$ ainb notifyd run --help
+Run the daemon in the foreground (default)
+
+Usage: ainb notifyd run [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd stop`
+
+Stop a running daemon via its PID file
+
+```console
+$ ainb notifyd stop --help
+Stop a running daemon via its PID file
+
+Usage: ainb notifyd stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd reap`
+
+Kill orphan / wedged notifyd processes, sparing the live owner
+
+```console
+$ ainb notifyd reap --help
+Kill orphan / wedged notifyd processes, sparing the live owner
+
+Usage: ainb notifyd reap [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd restart`
+
+Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+
+```console
+$ ainb notifyd restart --help
+Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+
+Usage: ainb notifyd restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd install`
+
+Install the ainb-hooks hook
+
+```console
+$ ainb notifyd install --help
+Install the ainb-hooks hook
+
+Usage: ainb notifyd install [OPTIONS]
+
+Options:
+      --claude           Target Claude Code
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --codex            Target Codex CLI
+      --copilot          Target GitHub Copilot CLI
+      --all              Target every known agent
+  -h, --help             Print help
+```
+
+### `ainb notifyd uninstall`
+
+Uninstall the ainb-hooks hook
+
+```console
+$ ainb notifyd uninstall --help
+Uninstall the ainb-hooks hook
+
+Usage: ainb notifyd uninstall [OPTIONS]
+
+Options:
+      --claude           Target Claude Code
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --codex            Target Codex CLI
+      --copilot          Target GitHub Copilot CLI
+      --all              Target every known agent
+  -h, --help             Print help
+```
+
+### `ainb notifyd status`
+
+Report install + daemon status
+
+```console
+$ ainb notifyd status --help
+Report install + daemon status
+
+Usage: ainb notifyd status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd list`
+
+List persisted notifications (most recent first)
+
+```console
+$ ainb notifyd list --help
+List persisted notifications (most recent first)
+
+Usage: ainb notifyd list [OPTIONS]
+
+Options:
+      --dismissed          Include dismissed notifications
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --agent <agent>      Filter by agent (claude|codex|copilot)
+      --project <project>  Filter by project (basename of cwd)
+      --limit <limit>      Max rows to show [default: 50]
+  -h, --help               Print help
 ```
 
 ## `ainb hangar`

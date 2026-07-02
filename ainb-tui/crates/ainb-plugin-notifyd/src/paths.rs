@@ -17,6 +17,13 @@ pub struct Paths {
     /// The Unix domain socket used by the hook script to deliver
     /// envelopes.
     pub socket: PathBuf,
+    /// The Unix domain socket the approve/deny broker listens on. Unlike
+    /// [`Paths::socket`] (one-way fire-and-forget), this is a
+    /// request/response socket: a waiting Claude `PermissionRequest` hook
+    /// dials it and BLOCKS (`AWAIT`) until a human issues an approve/deny
+    /// (`DECIDE`) from the fleet TUI or CLI, or the broker times out
+    /// (fallback: deny). The `LIST` op enumerates pending approvals.
+    pub approve_socket: PathBuf,
     /// The PID file written by the daemon at startup.
     pub pid: PathBuf,
     /// The fallback JSONL file that the hook script writes to when
@@ -38,10 +45,17 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve paths under the user's home directory
-    /// (`~/.agents-in-a-box/`). Fails if the home directory cannot be
-    /// determined.
+    /// Resolve paths under the ainb base directory: `$AINB_HOME` when set
+    /// (the same override the fleet plumbing honours — the hook, the daemon,
+    /// and the TUI/CLI deciders MUST all resolve the approve socket to the
+    /// same base or a waiting hook parks on a socket nothing serves),
+    /// otherwise `~/.agents-in-a-box/`. Fails if neither can be determined.
     pub fn from_home() -> anyhow::Result<Self> {
+        if let Ok(h) = std::env::var("AINB_HOME") {
+            if !h.is_empty() {
+                return Ok(Self::under(PathBuf::from(h)));
+            }
+        }
         let home =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
         Ok(Self::under(home.join(".agents-in-a-box")))
@@ -54,6 +68,7 @@ impl Paths {
         Self {
             db: base.join("notifications.db"),
             socket: base.join("notify.sock"),
+            approve_socket: base.join("approve.sock"),
             pid: base.join("notify.pid"),
             fallback: base.join("notify.fallback.jsonl"),
             events_jsonl: base.join("events.jsonl"),
@@ -81,6 +96,8 @@ mod tests {
         assert_eq!(p.base, dir.path());
         assert!(p.db.starts_with(dir.path()));
         assert!(p.socket.starts_with(dir.path()));
+        assert!(p.approve_socket.starts_with(dir.path()));
+        assert!(p.approve_socket.ends_with("approve.sock"));
         assert!(p.pid.starts_with(dir.path()));
         assert!(p.fallback.starts_with(dir.path()));
         assert!(p.events_jsonl.starts_with(dir.path()));

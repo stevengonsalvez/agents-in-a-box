@@ -212,13 +212,18 @@ fn daemons_opens_and_renders_four_rows() {
     }
     let post = post_cap.unwrap();
 
-    // The four daemon rows are present.
+    // The daemon rows are present — including the approve broker, which is a
+    // socket (rides notifyd's process) yet still gets a first-class row.
     assert!(post.contains("phone bridge"), "bridge row missing:\n{post}");
     assert!(post.contains("notifyd"), "notifyd row missing:\n{post}");
     assert!(post.contains("ATC"), "ATC row missing:\n{post}");
     assert!(
         post.contains("fleet daemon"),
         "fleet daemon row missing:\n{post}"
+    );
+    assert!(
+        post.contains("approve broker"),
+        "approve broker row missing:\n{post}"
     );
 
     // The seeded live bridge heartbeat flips the bridge to running + connected,
@@ -230,6 +235,30 @@ fn daemons_opens_and_renders_four_rows() {
     assert!(
         post.contains("Telegram (@tripwire_bot)"),
         "bridge channel label missing — heartbeat not surfaced:\n{post}"
+    );
+
+    // Back home, then the `d` overlay: sockets are tracked there too — the
+    // approve.sock line must render with the notifyd section (goal invariant:
+    // every daemon AND socket shows in the d overlay).
+    send_key(&session, "Escape");
+    let overlay = poll_capture_resending(
+        &session,
+        "d",
+        Instant::now() + Duration::from_secs(30),
+        |c| c.contains("notifyd processes") && c.contains("approve.sock"),
+    );
+    if overlay.is_none() {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!(
+            "d overlay never rendered the approve.sock line; \
+             last capture:\n---\n{last}\n---"
+        );
+    }
+    let overlay = overlay.unwrap();
+    assert!(
+        overlay.contains("restart (resume/repair)"),
+        "overlay must advertise the R repair lever next to the socket row:\n{overlay}"
     );
 
     kill_session(&session);

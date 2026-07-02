@@ -52,6 +52,8 @@ pub enum AppEvent {
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
+    /// Restart the notifyd daemon (single resume/repair) from the overlay.
+    DaemonsOverlayRestartNotifyd,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -369,6 +371,8 @@ pub enum AppEvent {
     FleetPanelOptionPrev,       // Fleet panel: move ASK option cursor back (Shift+Tab)
     FleetPanelAnswer,           // Fleet panel: answer selected ASK with the option (Enter/a)
     FleetPanelBroadcast,        // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove,          // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,             // Fleet panel: deny the selected APPROVE permission request (n)
     FleetPanelRefresh,          // Fleet panel: force-refresh from current_state (r)
     FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
@@ -1261,13 +1265,15 @@ impl EventHandler {
             };
         }
 
-        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        // Daemons overlay captures all keys while open: r refresh, R restart
+        // notifyd (single resume/repair), esc/q/d close.
         if state.daemons_overlay.is_some() {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
                 }
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
                 _ => None,
             };
         }
@@ -2747,7 +2753,17 @@ impl EventHandler {
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
             KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
-            KeyCode::Char('n') => Some(AppEvent::FleetPanelNewAtcOpen),
+            KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
+            // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
+            // advertises) and new-ATC. Context decides: on an APPROVE row `n`
+            // denies; anywhere else it opens the new-ATC name prompt.
+            KeyCode::Char('n') => {
+                if state.fleet_panel_state.selected_kind() == Some("APPROVE") {
+                    Some(AppEvent::FleetPanelDeny)
+                } else {
+                    Some(AppEvent::FleetPanelNewAtcOpen)
+                }
+            }
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
             _ => None,
         }
@@ -3038,6 +3054,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
+            AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionsSidebar => {
@@ -5271,6 +5288,23 @@ impl EventHandler {
                         .set_feedback("no session selected to broadcast to".to_string());
                 }
             }
+            AppEvent::FleetPanelApprove => {
+                // Approve the selected APPROVE row: deliver a first-class
+                // permission decision to the notifyd approve broker, which
+                // unblocks the parked PermissionRequest hook (it flows back to
+                // Claude as `permissionDecision: allow`). NOT a tmux send.
+                state.fleet_panel_state.guarded_decide(
+                    ainb_plugin_notifyd::broker::DecisionKind::Approve,
+                    "approved",
+                );
+            }
+            AppEvent::FleetPanelDeny => {
+                // Deny the selected APPROVE row (broker relays `deny` back to the
+                // blocked hook). Same guard as approve/send.
+                state
+                    .fleet_panel_state
+                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Deny, "denied");
+            }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
                 // Plugin-owned screen: the `hangar-tui` subprocess renders it and
@@ -7498,6 +7532,34 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
+    /// While the Daemons `d` overlay is open, `R` maps to the notifyd restart
+    /// (single resume/repair) event, and `r` still maps to refresh — the two
+    /// case-paired verbs live on the same surface.
+    #[test]
+    fn daemons_overlay_restart_key_routing() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        // Opening the overlay fires the first lazy fetch (tokio::spawn), so the
+        // test needs a live reactor.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        state.toggle_daemons_overlay();
+        assert!(state.daemons_overlay.is_some(), "overlay must be open");
+
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('R')),
+            Some(AppEvent::DaemonsOverlayRestartNotifyd)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('r')),
+            Some(AppEvent::DaemonsOverlayRefresh)
+        ));
+    }
+
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
@@ -7506,6 +7568,50 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// The overloaded `n` key resolves by selection context: deny on an
+    /// APPROVE row (pairing with the detail pane's y/n hint), the new-ATC
+    /// name prompt everywhere else. `y` approves only-and-always.
+    #[test]
+    fn fleet_panel_n_is_deny_on_approve_row_new_atc_elsewhere() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        let row = |kind: &str| ainb_plugin_notifyd::StateRow {
+            session_id: "s-1".to_string(),
+            cwd: "/p".to_string(),
+            kind: kind.to_string(),
+            context: None,
+            parent: None,
+            last_event_ts: 1,
+            source: "hook".to_string(),
+        };
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        state.fleet_panel_state.rows = vec![row("APPROVE")];
+        state.fleet_panel_state.selected = 0;
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelDeny)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('y')),
+            Some(AppEvent::FleetPanelApprove)
+        ));
+
+        state.fleet_panel_state.rows = vec![row("ASK")];
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
+        // Empty panel: nothing to deny → n still opens the prompt.
+        state.fleet_panel_state.rows.clear();
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
     }
 
     /// Fleet control panel: navigating in saves the origin, and Esc/q route

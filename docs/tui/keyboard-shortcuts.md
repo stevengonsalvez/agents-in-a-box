@@ -16,6 +16,8 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | `w` | Witr (process causality) |
 | `t` | abtop (top-for-agents monitor) |
 | `b` | Inbox (notifications) |
+| `f` | Fleet control panel (statuses, answer ASK, approve/deny) |
+| `d` | Daemons overlay |
 | `c` | Catalog |
 | `C` | Config |
 | `v` | Changelog |
@@ -50,6 +52,27 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 | `f` | Refresh workspaces |
 | `Space` | Toggle multi-select |
 | `Shift`+`D` | Delete all selected sessions |
+
+## Fleet control panel (`f`)
+
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` or `k`/`j` | Move row selection |
+| `Tab` / `Shift+Tab` | Move the ASK option cursor (on an ASK row) |
+| `Enter` / `a` | Answer the selected ASK with the highlighted option |
+| `y` / `n` | Approve / deny the selected APPROVE permission request |
+| `n` (non-APPROVE row) | Open the new-ATC name prompt |
+| `B` | Broadcast a ping prompt to the selected session |
+| `r` | Force refresh |
+| `q` / `Esc` | Back |
+
+## Daemons overlay (`d`)
+
+| Key | Action |
+|-----|--------|
+| `r` | Refresh |
+| `R` | Restart notifyd — the single resume/repair command for a dead approve socket |
+| `Esc` / `q` / `d` | Close |
 
 ## Recovery screen
 

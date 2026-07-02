@@ -76,12 +76,6 @@ const CODEX_HOOKS_TEMPLATE: &str = include_str!("../../../../plugins/ainb-hooks/
 const COPILOT_HOOKS_TEMPLATE: &str =
     include_str!("../../../../plugins/ainb-hooks/copilot/hooks.json");
 
-/// Sentinels used to delimit our managed block inside the user's
-/// `~/.codex/hooks.json`. Stable strings — never change without a
-/// migration path because uninstall greps for them.
-const CODEX_BEGIN_MARKER: &str = "// >>> ainb-hooks managed block (do not edit) >>>";
-const CODEX_END_MARKER: &str = "// <<< ainb-hooks managed block <<<";
-
 /// The host CLI agent being installed for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -161,7 +155,7 @@ impl InstallRecord {
         }
         let text =
             std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-        Ok(serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?)
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
     }
 
     /// Persist to disk under the standard path.
@@ -677,7 +671,7 @@ fn strip_codex_managed_entries(hooks_json: &Path) -> Result<()> {
 }
 
 /// One row in `ainb-notifyd status` output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusRow {
     /// Agent name (`claude` / `codex`).
     pub agent: String,

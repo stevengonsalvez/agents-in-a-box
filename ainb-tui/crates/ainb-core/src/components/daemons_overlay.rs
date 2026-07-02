@@ -184,7 +184,12 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 /// This is the only daemon surface that enumerates *every* process rather
 /// than a single pid — orphans are invisible to a pid-file-only view.
 fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
-    let lines = build_notifyd_lines(&state.notifyd, area.height as usize);
+    let lines = build_notifyd_lines(
+        &state.notifyd,
+        (state.approve_running, &state.approve_reason),
+        state.notifyd_restart_status.as_deref(),
+        area.height as usize,
+    );
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -195,13 +200,15 @@ fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayS
 /// the last visible row becomes a "… +N more" pointer instead.
 fn build_notifyd_lines(
     notifyd: &[ainb_plugin_notifyd::ClassifiedDaemon],
+    approve: (bool, &str),
+    restart_status: Option<&str>,
     capacity: usize,
 ) -> Vec<Line<'static>> {
     let orphan_count = notifyd.iter().filter(|d| !d.class.is_healthy()).count();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: "notifyd processes (N)  · M to clean up".
+    // Header: "notifyd processes (N)  · M to clean up  · R restart".
     let mut header = vec![Span::styled(
         format!("  notifyd processes ({})", notifyd.len()),
         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
@@ -212,7 +219,46 @@ fn build_notifyd_lines(
             Style::default().fg(CLAY),
         ));
     }
+    // Restart affordance sits next to the notifyd control it acts on.
+    header.push(Span::styled("   · ", Style::default().fg(MUTED_GRAY)));
+    header.push(Span::styled(
+        "R",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
+    header.push(Span::styled(
+        " restart (resume/repair)",
+        Style::default().fg(MUTED_GRAY),
+    ));
     lines.push(Line::from(header));
+
+    // approve.sock — the permission broker socket notifyd serves. Sockets are
+    // first-class on this screen, not just processes: a dead socket here is
+    // exactly what `R` repairs.
+    let (approve_running, approve_reason) = approve;
+    let (glyph, color) = if approve_running {
+        ("●", SELECTION_GREEN)
+    } else {
+        ("○", CLAY)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("    {glyph} "), Style::default().fg(color)),
+        Span::styled(
+            "approve.sock",
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {approve_reason}"),
+            Style::default().fg(MUTED_GRAY),
+        ),
+    ]));
+
+    // Transient restart outcome, shown until the next refresh clears it.
+    if let Some(status) = restart_status {
+        lines.push(Line::from(Span::styled(
+            format!("    {status}"),
+            Style::default().fg(GOLD).add_modifier(Modifier::ITALIC),
+        )));
+    }
 
     if notifyd.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -222,9 +268,11 @@ fn build_notifyd_lines(
         return lines;
     }
 
-    // Header consumed one row; if the rest don't fit, reserve one row for the
-    // overflow pointer and fill the remainder with daemon rows.
-    let body_cap = capacity.saturating_sub(1);
+    // Header + approve.sock line (+ optional status) consumed the top rows; if
+    // the rest don't fit, reserve one row for the overflow pointer and fill
+    // with daemon rows.
+    let head_rows = 2 + restart_status.is_some() as usize;
+    let body_cap = capacity.saturating_sub(head_rows);
     let (shown, overflow) = if notifyd.len() <= body_cap {
         (notifyd.len(), 0)
     } else {
@@ -282,6 +330,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
     let spans = vec![
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("R", Style::default().fg(GOLD)),
+        Span::styled(" restart notifyd  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("esc", Style::default().fg(GOLD)),
         Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         Span::styled(
@@ -317,9 +367,13 @@ mod tests {
             },
             headroom_consumers: vec!["agents/worktree-abc".to_string()],
             notifyd: Vec::new(),
+            approve_running: true,
+            approve_reason: "serving — no pending requests".to_string(),
             loading: false,
             last_refreshed: Some(std::time::Instant::now()),
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         }
     }
 
@@ -377,9 +431,13 @@ mod tests {
             },
             headroom_consumers: Vec::new(),
             notifyd: Vec::new(),
+            approve_running: false,
+            approve_reason: "probing…".to_string(),
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         };
         let backend = TestBackend::new(120, 30);
         let mut term = Terminal::new(backend).unwrap();
@@ -458,20 +516,43 @@ mod tests {
                 binary_drift: false,
             })
             .collect();
-        // capacity 4 → header + 2 rows + "… +5 more"
-        let lines = build_notifyd_lines(&many, 4);
+        // capacity 4 → header + approve.sock + 1 row + "… +6 more"
+        let lines = build_notifyd_lines(&many, (true, "serving"), None, 4);
         assert!(lines.len() <= 4, "exceeded capacity: {}", lines.len());
         let last: String = lines.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
         assert!(last.contains("more"), "no overflow pointer in: {last}");
 
         // Ample capacity → all 7 rows, no overflow line.
-        let full = build_notifyd_lines(&many, 30);
-        assert_eq!(full.len(), 8); // header + 7
+        let full = build_notifyd_lines(&many, (true, "serving"), None, 30);
+        assert_eq!(full.len(), 9); // header + approve.sock + 7
         let full_last: String =
             full.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
         assert!(
             !full_last.contains("more"),
             "unexpected overflow: {full_last}"
+        );
+    }
+
+    /// The approve socket is a first-class row on this screen — sockets are
+    /// tracked alongside daemons, with the probe's pending-count reason.
+    #[test]
+    fn daemons_overlay_renders_approve_socket_row() {
+        let state = make_state(true, 8787, Some(1), Some(0));
+        let backend = TestBackend::new(120, 30);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let area = f.size();
+            render(f, area, &state);
+        })
+        .unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("approve.sock"),
+            "missing approve.sock row in:\n{text}"
+        );
+        assert!(
+            text.contains("serving — no pending requests"),
+            "missing approve reason in:\n{text}"
         );
     }
 

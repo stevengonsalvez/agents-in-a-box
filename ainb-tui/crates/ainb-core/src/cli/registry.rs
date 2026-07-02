@@ -115,7 +115,7 @@ impl CommandRegistry {
         r.register(FleetCommand);
         r.register(HeadroomCommand);
         r.register(McpCommand);
-        r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
+        r.register(NotifydCommand); // ainb-hooks daemon: status/restart/install
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r.register(RtkCommand); // RTK token-killer: install/uninstall/status
         r
@@ -1263,18 +1263,16 @@ impl CliCommand for TmuxCommand {
     }
 }
 
-/// `ainb notifyd {run,stop,install,uninstall,status}` — the ainb-hooks
-/// notification daemon, exposed as a hidden subcommand of the main
-/// binary.
+/// `ainb notifyd {run,stop,reap,restart,install,uninstall,status,list}`
+/// — the ainb-hooks notification daemon.
 ///
-/// The standalone `ainb-notifyd` binary remains the documented
-/// entrypoint, but `notify.sh`'s lazy-spawn fires `ainb notifyd` (the
-/// host binary is the one guaranteed to be on `PATH` after a normal
-/// install). This subcommand makes that path real: it delegates to the
-/// same `ainb_plugin_notifyd` functions the standalone binary uses, so
-/// both entrypoints share one implementation. Hidden from `--help`
-/// because end users should reach for `ainb-notifyd` or the TUI Inbox;
-/// this exists for the hook script's auto-start.
+/// `notify.sh`'s lazy-spawn fires `ainb notifyd` (the host binary is the
+/// one guaranteed to be on `PATH` after a normal install), and it
+/// delegates to the same `ainb_plugin_notifyd` functions the standalone
+/// `ainb-notifyd` binary uses, so both entrypoints share one
+/// implementation. Visible in `--help` because `restart` is the
+/// user-facing single resume/repair command for a dead approve socket —
+/// the very command `ainb fleet approve`'s dead-socket error points at.
 pub struct NotifydCommand;
 impl CliCommand for NotifydCommand {
     fn name(&self) -> &'static str {
@@ -1310,16 +1308,19 @@ impl CliCommand for NotifydCommand {
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "ainb-hooks notification daemon (alias of the ainb-notifyd \
-                     binary; used by notify.sh lazy-spawn).",
+                    "ainb-hooks notification daemon: status, restart (the approve-socket \
+                     resume/repair command), install/uninstall hooks",
                 )
-                .hide(true)
                 .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
                 .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
                 .subcommand(
                     Command::new("reap")
                         .about("Kill orphan / wedged notifyd processes, sparing the live owner"),
                 )
+                .subcommand(Command::new("restart").about(
+                    "Stop, reap, and respawn the daemon — the single resume/repair \
+                         command for a dead or wedged approve socket",
+                ))
                 .subcommand(agent_flags(
                     Command::new("install").about("Install the ainb-hooks hook"),
                 ))
@@ -1371,9 +1372,14 @@ impl CliCommand for NotifydCommand {
             Reap {
                 json: bool,
             },
+            Restart {
+                json: bool,
+            },
             Install(Vec<ainb_plugin_notifyd::Agent>),
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
-            Status,
+            Status {
+                json: bool,
+            },
             List {
                 dismissed: bool,
                 agent: Option<String>,
@@ -1398,9 +1404,14 @@ impl CliCommand for NotifydCommand {
             Some(("reap", _)) => Verb::Reap {
                 json: matches!(ctx.format, crate::cli::OutputFormat::Json),
             },
+            Some(("restart", _)) => Verb::Restart {
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some(("install", m)) => Verb::Install(agents(m)),
             Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
-            Some(("status", _)) => Verb::Status,
+            Some(("status", _)) => Verb::Status {
+                json: matches!(ctx.format, crate::cli::OutputFormat::Json),
+            },
             Some(("list", m)) => Verb::List {
                 dismissed: m.get_flag("dismissed"),
                 agent: m.get_one::<String>("agent").cloned(),
@@ -1420,9 +1431,10 @@ impl CliCommand for NotifydCommand {
                 Verb::Run => cli::cmd_run().await,
                 Verb::Stop => cli::cmd_stop(),
                 Verb::Reap { json } => cli::cmd_reap(json),
+                Verb::Restart { json } => cli::cmd_restart(json),
                 Verb::Install(a) => cli::cmd_install(&a),
                 Verb::Uninstall(a) => cli::cmd_uninstall(&a),
-                Verb::Status => cli::cmd_status(),
+                Verb::Status { json } => cli::cmd_status(json),
                 Verb::List {
                     dismissed,
                     agent,
@@ -2079,6 +2091,29 @@ impl CliCommand for FleetCommand {
             "Unified runtime health of every long-running daemon \
              (phone bridge / notifyd / ATC / fleet daemon)",
         );
+        // approve/deny share one arg shape: with a session-id they deliver the
+        // decision to the waiting PermissionRequest hook via the approve
+        // broker; without one they list the sessions currently blocked.
+        let decision_args = |c: Command| {
+            c.arg(
+                clap::Arg::new("session-id")
+                    .help("Session blocked on a permission decision (omit to list waiters)"),
+            )
+            .arg(
+                clap::Arg::new("reason")
+                    .long("reason")
+                    .default_value("")
+                    .help("Optional reason relayed to the agent with the decision"),
+            )
+        };
+        let approve = decision_args(
+            Command::new("approve")
+                .about("Approve a session's pending permission request (no arg: list waiters)"),
+        );
+        let deny = decision_args(
+            Command::new("deny")
+                .about("Deny a session's pending permission request (no arg: list waiters)"),
+        );
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2101,6 +2136,8 @@ impl CliCommand for FleetCommand {
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(approve)
+                .subcommand(deny)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(sequence)
@@ -2116,7 +2153,10 @@ impl CliCommand for FleetCommand {
                      ainb fleet standup               Live status of all sessions\n  \
                      ainb fleet needs                 Sessions blocked on input / errors\n  \
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
-                     ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps",
+                     ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
+                     ainb fleet approve               List sessions waiting on a permission decision\n  \
+                     ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
+                     ainb fleet deny <session-id> --reason \"not now\"   Deny it, with a reason",
                 ),
         )
     }
@@ -2482,7 +2522,7 @@ mod tests {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
-        // otel + abtop + witr + learnings + plugin stub + fleet + mcp + hidden
+        // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
         // notifyd + hangar) + headroom + rtk + the web dashboard = 33.
         // The TUI is NOT in the registry — main.rs handles `tui` /
         // no-subcommand inline.
@@ -2530,11 +2570,12 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_ten_subcommands_including_daemons() {
+    fn fleet_exposes_twelve_subcommands_including_approve_deny() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
-        // `daemons` (the health view) are deliberately distinct.
+        // `daemons` (the health view) are deliberately distinct; `approve` /
+        // `deny` are the permission round-trip levers.
         let r = CommandRegistry::built_ins();
         let app = r.build_clap(root());
         let fleet = app
@@ -2546,12 +2587,14 @@ mod tests {
         assert_eq!(
             names,
             [
+                "approve",
                 "atc",
                 "bridge",
                 "broadcast",
                 "cost",
                 "daemon",
                 "daemons",
+                "deny",
                 "enrich-cache",
                 "needs",
                 "sequence",
@@ -2561,8 +2604,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            10,
-            "expected 10 fleet subcommands, got {names:?}"
+            12,
+            "expected 12 fleet subcommands, got {names:?}"
         );
     }
 

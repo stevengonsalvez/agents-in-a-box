@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 #![allow(clippy::too_many_lines)]
 
+pub mod broker;
 pub mod cli;
 pub mod envelope;
 pub mod fallback;
@@ -37,6 +38,7 @@ pub mod transition;
 
 mod listener;
 
+pub use broker::{BrokerState, Decision, DecisionKind, PendingInfo};
 pub use envelope::{Envelope, EnvelopeError};
 pub use fallback::FallbackFile;
 pub use install::{

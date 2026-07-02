@@ -41,8 +41,28 @@ pub const ATC_EVENTS: &[(&str, &str)] = &[
     ("Notification", ""),
     ("SessionEnd", ""),
     ("PreToolUse", "AskUserQuestion"),
+    ("PermissionRequest", ""),
     ("StopFailure", ""),
 ];
+
+/// Default per-hook timeout (seconds) Claude allows before it kills the hook.
+/// Fast lifecycle events resolve in well under a second.
+const DEFAULT_HOOK_TIMEOUT: u64 = 10;
+
+/// `PermissionRequest` is the SYNCHRONOUS approve/deny gate: the hook blocks on
+/// the approve broker until a human decides. Its Claude-side timeout must exceed
+/// the broker's own AWAIT timeout (600s) so the broker's deny-fallback answers
+/// the hook cleanly before Claude ever hard-kills it.
+const PERMISSION_HOOK_TIMEOUT: u64 = 660;
+
+/// The Claude `timeout` (seconds) to register for `event`.
+#[must_use]
+fn timeout_for(event: &str) -> u64 {
+    match event {
+        "PermissionRequest" => PERMISSION_HOOK_TIMEOUT,
+        _ => DEFAULT_HOOK_TIMEOUT,
+    }
+}
 
 /// Single-quote a string for POSIX shell command interpolation.
 ///
@@ -75,7 +95,7 @@ pub fn managed_entry(event: &str, matcher: &str, hook_script: &str) -> Value {
         ATC_MANAGED_KEY: true,
         "matcher": matcher,
         "hooks": [
-            { "type": "command", "command": command, "timeout": 10 }
+            { "type": "command", "command": command, "timeout": timeout_for(event) }
         ]
     })
 }

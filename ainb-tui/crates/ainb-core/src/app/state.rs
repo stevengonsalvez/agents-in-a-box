@@ -999,6 +999,10 @@ pub struct DaemonsFetchResult {
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
     pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    /// approve.sock liveness: serving? + the probe's health reason (carries the
+    /// pending-waiter count). Sockets are tracked here too, not just daemons.
+    pub approve_running: bool,
+    pub approve_reason: String,
 }
 
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
@@ -1010,10 +1014,18 @@ pub struct DaemonsOverlayState {
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
     pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    /// approve.sock liveness + health reason (see [`DaemonsFetchResult`]).
+    pub approve_running: bool,
+    pub approve_reason: String,
     pub loading: bool,
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
     pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+    /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
+    /// Carries the one-line outcome to show under the notifyd section.
+    pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Last restart outcome line (transient, shown until the next refresh).
+    pub notifyd_restart_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -1023,6 +1035,7 @@ pub(crate) fn daemons_sync_probe() -> (
     bool,
     Vec<String>,
     Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    (bool, String),
 ) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
     let headroom_consumers = crate::interactive::SessionStore::load()
@@ -1032,7 +1045,22 @@ pub(crate) fn daemons_sync_probe() -> (
         .map(|m| m.tmux_session_name.clone())
         .collect::<Vec<_>>();
     let notifyd = ainb_plugin_notifyd::scan_daemons();
-    (mcp_alive, headroom_consumers, notifyd)
+    // approve.sock — same probe the `ainb fleet daemons` health view uses, so
+    // the two surfaces can't drift. Reason carries the pending-waiter count.
+    let approve = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => {
+            let s = crate::fleet::daemons::probe::probe_approve_broker(
+                &paths.base,
+                crate::fleet::daemons::heartbeat::now_ms(),
+            );
+            (
+                s.state == crate::fleet::daemons::DaemonState::Running,
+                s.reason,
+            )
+        }
+        Err(e) => (false, format!("home unresolved: {e}")),
+    };
+    (mcp_alive, headroom_consumers, notifyd, approve)
 }
 
 // ============================================================================
@@ -4835,9 +4863,13 @@ impl AppState {
             },
             headroom_consumers: Vec::new(),
             notifyd: Vec::new(),
+            approve_running: false,
+            approve_reason: "probing…".to_string(),
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -4862,11 +4894,13 @@ impl AppState {
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
             // blocking pool.
-            let (mcp_alive, headroom_consumers, notifyd) = tokio::task::spawn_blocking(
-                daemons_sync_probe,
-            )
-            .await
-            .unwrap_or((false, Vec::new(), Vec::new()));
+            let (mcp_alive, headroom_consumers, notifyd, approve) =
+                tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    (false, "probe failed".to_string()),
+                ));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
             let result = DaemonsFetchResult {
@@ -4874,8 +4908,50 @@ impl AppState {
                 headroom,
                 headroom_consumers,
                 notifyd,
+                approve_running: approve.0,
+                approve_reason: approve.1,
             };
             let _ = tx.send(result);
+        });
+    }
+
+    /// Restart the notifyd daemon from the Daemons overlay — the single
+    /// resume/repair lever. Runs [`ainb_plugin_notifyd::procs::restart`] off the
+    /// UI thread (it SIGTERMs the old owner, reaps stragglers, respawns, and
+    /// polls the approve socket, up to a few seconds). Once the socket rebinds,
+    /// every still-blocked permission waiter re-dials and resumes on its own —
+    /// so this one action both repairs a dead socket and resumes pending
+    /// prompts. One-outstanding guard mirrors the fetch path.
+    pub fn spawn_notifyd_restart(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.notifyd_restart_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.notifyd_restart_rx = Some(rx);
+        o.notifyd_restart_status = Some("restarting notifyd…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
+                    Ok(out) => {
+                        let spawned = out
+                            .spawned
+                            .map(|p| format!("pid {p}"))
+                            .unwrap_or_else(|| "spawn failed".to_string());
+                        if out.socket_bound {
+                            format!("restarted notifyd ({spawned}) — approve socket live, pending prompts resume")
+                        } else {
+                            format!("restarted notifyd ({spawned}) — socket not yet rebound; hooks keep re-dialling")
+                        }
+                    }
+                    Err(e) => format!("restart failed: {e:#}"),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| format!("restart task panicked: {e}"));
+            let _ = tx.send(line);
         });
     }
 
@@ -4892,7 +4968,18 @@ impl AppState {
                 o.headroom = result.headroom;
                 o.headroom_consumers = result.headroom_consumers;
                 o.notifyd = result.notifyd;
+                o.approve_running = result.approve_running;
+                o.approve_reason = result.approve_reason;
                 o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+        // A finished restart updates the status line and triggers a fresh scan
+        // so the new pid shows up in the notifyd section.
+        if let Some(rx) = o.notifyd_restart_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.notifyd_restart_rx = None;
+                o.notifyd_restart_status = Some(line);
+                self.spawn_daemons_fetch();
             }
         }
     }
