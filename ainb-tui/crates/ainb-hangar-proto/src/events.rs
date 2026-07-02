@@ -145,6 +145,44 @@ pub enum HangarEvent {
         /// The newly active workspace id.
         to: String,
     },
+    /// A session raised an input request — a fresh `open` [`AttentionRow`] now
+    /// exists in the control-plane inbox (spec P2, store migration 0025).
+    ///
+    /// This is the FLEET-WIDE nudge every surface (control centre / web / bridge
+    /// / ATC) reacts to by shuffling the raising session's card to the top and,
+    /// if needed, re-pulling `attention/list`. Unlike the workspace-domain events
+    /// this rides beside a `workspace_id` that is `None` for a hand-started host
+    /// session that belongs to no ainb workspace — so it is delivered on the
+    /// daemon's dedicated fleet-wide attention stream, not the workspace-scoped
+    /// forwarder. The attention TABLE (not the event-log outbox) is its durable
+    /// source: a reconnecting surface catches up via `attention/list`.
+    AttentionRaised {
+        /// The raised attention row's id (the answer RPC targets this).
+        attention_id: String,
+        /// The session that raised the request.
+        session_id: String,
+        /// The owning workspace, or `None` for a non-workspace host session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        /// The request family wire token (`ask_user_question` / `approval` / …).
+        kind: String,
+        /// `true` when sourced from the degraded pane-classifier fallback.
+        #[serde(default)]
+        degraded: bool,
+        /// Ingest timestamp (epoch milliseconds).
+        created_at: i64,
+    },
+    /// An open attention row was answered — the first-answer-wins winner flipped
+    /// it `answered` and the answer was delivered into the session (spec P2).
+    ///
+    /// Surfaces fold this to move the card to `answered(by=…)`; a surface that
+    /// was mid-answer on the same row learns it lost the race.
+    AttentionAnswered {
+        /// The answered attention row's id.
+        attention_id: String,
+        /// The surface/actor that won the answer race (`tui` / `web` / `atc` / …).
+        by: String,
+    },
 }
 
 /// The 5-colour transcript taxonomy (reference UX §7 verbatim).
@@ -409,6 +447,42 @@ pub struct InboxEntryRow {
     /// absent key, not a `"read_at": null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<i64>,
+}
+
+/// A wire-side attention row for the control-centre inbox
+/// (`attention/list` / `attention/subscribe`, spec P2).
+///
+/// One `attention` row (store migration 0025) flattened for the surfaces. The
+/// daemon's ingest producer folds every session's input request into a durable
+/// row; the surfaces render an answerable card and route the answer back through
+/// the one `answer` RPC. Carries no answered fields — the list/subscribe feeds
+/// are the OPEN set only; a row leaves the feed the instant it is answered. The
+/// plugin owns zero domain data — the daemon's `SQLite` store is the source of
+/// truth; this is only the render shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionRow {
+    /// The attention id (ULID string) — the answer RPC's target.
+    pub id: String,
+    /// The session that raised the request.
+    pub session_id: String,
+    /// The raising session's working directory (empty when unknown).
+    pub cwd: String,
+    /// The owning workspace, or `None` for a non-workspace host session. Omitted
+    /// from the wire when absent (additive) so a fleet row is just a missing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The request family wire token (`ask_user_question` / `approval` /
+    /// `codex_request_user` / `error` / `waiting` / `escalation`).
+    pub kind: String,
+    /// The full serialised request-context JSON the card renders.
+    pub payload: String,
+    /// `true` when sourced from the degraded pane-classifier fallback (unhooked
+    /// session) — the surfaces badge it so the human knows the source is a
+    /// heuristic. Omitted from the wire when `false` (additive).
+    #[serde(default)]
+    pub degraded: bool,
+    /// Ingest timestamp (epoch milliseconds) — drives ordering + card age.
+    pub created_at: i64,
 }
 
 /// A wire-side comment row.

@@ -15,9 +15,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AutopilotRow, AutopilotRunRow, InboxEntryRow, IssueRow, SkillFile, SkillRow,
-    TaskCardRow,
+    ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow, IssueRow, SkillFile,
+    SkillRow, TaskCardRow,
 };
+
+/// `serde(default)` helper — an absent `is_answer` defaults to `true`.
+const fn default_true() -> bool {
+    true
+}
 
 /// The `{ workspace_id }` params shared by every workspace-scoped snapshot RPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +370,122 @@ pub struct InboxMarkReadResult {
     pub marked: i64,
     /// The unread count after the sweep (`0` for a whole-workspace sweep).
     pub unread: i64,
+}
+
+/// Params for [`crate::methods::ATTENTION_LIST`] (spec P2) — the scope of the
+/// open-attention list to snapshot.
+///
+/// Three scopes, matching the store repo:
+/// - `fleet = true` → EVERY open row across every workspace (and the
+///   no-workspace host sessions). This is the converged control centre's
+///   host-wide feed; `workspace_id` is ignored.
+/// - `fleet = false`, `workspace_id = Some(ws)` → that workspace's open rows.
+/// - `fleet = false`, `workspace_id = None` → the open rows owned by NO
+///   workspace (hand-started host sessions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionListParams {
+    /// The workspace to scope to (ignored when `fleet`); `None` = the
+    /// no-workspace host rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// `true` = host-wide feed (every workspace + host); `false` = the
+    /// workspace-scoped list selected by `workspace_id`.
+    #[serde(default)]
+    pub fleet: bool,
+}
+
+/// Result of [`crate::methods::ATTENTION_LIST`] (spec P2): the open attention
+/// rows for the requested scope, oldest-first (the longest-waiting request is
+/// the most urgent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionListResult {
+    /// The open attention rows, oldest-first.
+    pub attention: Vec<AttentionRow>,
+}
+
+/// Params for [`crate::methods::ATTENTION_SUBSCRIBE`] (spec P2) — open the
+/// fleet-wide attention stream.
+///
+/// Unlike [`SubscribeParams`], attention is NOT workspace-partitioned: the
+/// control centre answers for the whole host. `workspace_id = None` (the
+/// default) subscribes to EVERY session's attention; a `Some(ws)` narrows the
+/// live deltas to one workspace for a scoped surface. There is no `since_seq`:
+/// the durable source is the `attention` table (not the event-log outbox), so a
+/// reconnecting surface catches up from the snapshot this subscribe returns, not
+/// a seq replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionSubscribeParams {
+    /// Narrow the live stream to one workspace, or `None` (default) for the
+    /// fleet-wide stream every session raises into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+/// Result of [`crate::methods::ATTENTION_SUBSCRIBE`] (spec P2): the initial open
+/// snapshot, after which the daemon pushes `AttentionRaised` / `AttentionAnswered`
+/// deltas live (the "snapshot then deltas" contract, mirroring
+/// [`SubscribeSnapshot`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionSubscribeResult {
+    /// The current open attention rows, oldest-first.
+    pub attention: Vec<AttentionRow>,
+}
+
+/// Params for [`crate::methods::ATTENTION_ANSWER`] (spec P2) — answer one open
+/// attention row from any surface.
+///
+/// The daemon runs the first-answer-wins guard (a conditional `open → answered`
+/// flip) and, on the win, the C1 cwd-ambiguity guard before delivering `answer`
+/// into the raising session via the one verified send path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerParams {
+    /// The attention row to answer.
+    pub attention_id: String,
+    /// The answer text delivered into the session's open picker / prompt.
+    pub answer: String,
+    /// The surface/actor answering (`tui` / `web` / `bridge` / `atc` / a handle)
+    /// — recorded as `answered_by` and carried on the `AttentionAnswered` event.
+    pub answered_by: String,
+    /// `true` (default) marks a safety-critical interview answer: on an ambiguous
+    /// target the send is REFUSED rather than routed by a cwd guess (C1). A
+    /// looser broadcast passes `false` but gets the same refusal — the safe call.
+    #[serde(default = "default_true")]
+    pub is_answer: bool,
+}
+
+/// Result of [`crate::methods::ATTENTION_ANSWER`] (spec P2): what happened to the
+/// answer, tagged so every surface renders the right feedback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum AnswerResult {
+    /// The answer won the race and was delivered into the session.
+    Delivered {
+        /// A short delivery description, e.g. `tmux (session-name)`.
+        via: String,
+    },
+    /// A prior answer already resolved this row (first-answer-wins loser). No
+    /// second delivery happened.
+    AlreadyAnswered {
+        /// The surface/actor that won the earlier answer.
+        by: String,
+    },
+    /// The target session was ambiguous (C1 guard) — the answer was REFUSED
+    /// rather than risk mis-routing to the wrong agent.
+    Ambiguous {
+        /// Why the target could not be resolved unambiguously.
+        reason: String,
+    },
+    /// No live session matched the row (the target may have exited).
+    NoTarget {
+        /// A human-readable explanation.
+        reason: String,
+    },
+    /// The row was flipped to answered but the last-mile send failed; the send
+    /// can be retried (the row stays answered — the winner is recorded).
+    DeliveryFailed {
+        /// Why the send did not land.
+        reason: String,
+    },
 }
 
 /// One per-agent usage row in the dashboard rollup

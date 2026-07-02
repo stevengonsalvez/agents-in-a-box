@@ -460,6 +460,40 @@ pub const HANGAR_INBOX_LIST: &str = "hangar/inbox_list";
 /// `hangar/task_transition`); a sibling tenant's inbox is never touched.
 pub const HANGAR_INBOX_MARK_READ: &str = "hangar/inbox_mark_read";
 
+/// `attention/list` — snapshot the OPEN control-plane inbox for a scope (spec P2).
+///
+/// Params: [`crate::snapshots::AttentionListParams`]
+/// (`{ workspace_id?, fleet }`). Result: [`crate::snapshots::AttentionListResult`]
+/// — the open [`crate::events::AttentionRow`]s, oldest-first. Three scopes:
+/// `fleet = true` is the host-wide feed (every workspace + the no-workspace host
+/// sessions), `fleet = false` with `workspace_id = Some(ws)` is one workspace,
+/// and `workspace_id = None` is the no-workspace host rows. A read, so an unknown
+/// workspace yields an empty list (no `INVALID_PARAMS`, mirroring `inbox_list`).
+pub const ATTENTION_LIST: &str = "attention/list";
+
+/// `attention/subscribe` — open the FLEET-WIDE attention event stream (spec P2).
+///
+/// Params: [`crate::snapshots::AttentionSubscribeParams`] (`{ workspace_id? }`).
+/// Result: [`crate::snapshots::AttentionSubscribeResult`] — the current open
+/// snapshot, after which the daemon pushes `AttentionRaised` / `AttentionAnswered`
+/// deltas live. Deliberately SEPARATE from [`WORKSPACE_SUBSCRIBE`]: attention is
+/// not workspace-partitioned (the control centre answers for the whole host), so
+/// this stream is unfiltered by default and carries the no-workspace host
+/// sessions the workspace forwarder would drop.
+pub const ATTENTION_SUBSCRIBE: &str = "attention/subscribe";
+
+/// `attention/answer` — answer one open attention row from any surface (spec P2).
+///
+/// Params: [`crate::snapshots::AnswerParams`]
+/// (`{ attention_id, answer, answered_by, is_answer }`). Result:
+/// [`crate::snapshots::AnswerResult`] — a tagged outcome. The daemon runs the
+/// first-answer-wins guard (a conditional `open → answered` flip: a second
+/// answer to the same row loses and gets `already_answered`) and then, on the
+/// win, the C1 cwd-ambiguity guard (`ambiguous` refusal rather than a mis-route)
+/// before delivering `answer` into the raising session via the one verified send
+/// path. Mutating: exactly one answer is ever delivered per row.
+pub const ATTENTION_ANSWER: &str = "attention/answer";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -516,6 +550,9 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_PR_STATUS_REFRESH,
     HANGAR_INBOX_LIST,
     HANGAR_INBOX_MARK_READ,
+    ATTENTION_LIST,
+    ATTENTION_SUBSCRIBE,
+    ATTENTION_ANSWER,
     AUTH_HELLO,
     PING,
 ];
@@ -551,6 +588,14 @@ mod tests {
     fn workspace_methods_namespaced() {
         assert!(WORKSPACE_SUBSCRIBE.starts_with("workspace/"));
         assert!(WORKSPACE_LIST.starts_with("workspace/"));
+    }
+
+    /// The control-plane attention methods live under the `attention/` namespace.
+    #[test]
+    fn attention_methods_namespaced() {
+        for m in [ATTENTION_LIST, ATTENTION_SUBSCRIBE, ATTENTION_ANSWER] {
+            assert!(m.starts_with("attention/"), "{m:?} not under attention/");
+        }
     }
 
     /// The P4 snapshot methods live under the `hangar/` namespace.
@@ -644,6 +689,9 @@ mod tests {
             HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
+            ATTENTION_LIST,
+            ATTENTION_SUBSCRIBE,
+            ATTENTION_ANSWER,
             AUTH_HELLO,
             PING,
         ];
