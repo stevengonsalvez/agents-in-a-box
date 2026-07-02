@@ -33,6 +33,15 @@ pub mod beads_sync;
 /// the claim loop uses before spawning a provider: ambient env is filtered by
 /// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
 pub mod dispatch;
+/// The durable event outbox drain (T1 / architecture §4.1–§4.2).
+///
+/// [`event_outbox::spawn`] drains the [`events::EventBroker`]'s lossless outbox
+/// channel and appends every emitted
+/// [`ainb_hangar_proto::events::HangarEvent`] to the `event_log` table
+/// (migration 0024) with a monotonic `seq`. This is the durability that lets a
+/// reconnecting or late-joining subscriber resume the bus from its last cursor —
+/// the raw, replayable log beneath the read/unread inbox digest.
+pub mod event_outbox;
 /// The daemon's in-process event broker (e38.2).
 ///
 /// [`events::EventBroker`] fans typed [`ainb_hangar_proto::events::HangarEvent`]s
@@ -254,13 +263,25 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // terminal outcome into the ring).
     let stats = std::sync::Arc::new(crate::health_stats::HealthStats::default());
 
-    // e38.2: the daemon-global event broker. Mutation paths (the claim loop's
-    // FSM steps, the RPC mutations, the autopilot scheduler) publish typed
-    // `HangarEvent`s through cloned sinks; the RPC server forwards them to
-    // authenticated, workspace-subscribed connections. With no subscriber the
-    // emissions are dropped silently, so the broker costs nothing when no TUI
-    // is attached.
-    let broker = crate::events::EventBroker::new();
+    // e38.2 + T1: the daemon-global event broker, built WITH a durable outbox.
+    // Mutation paths (the claim loop's FSM steps, the RPC mutations, the
+    // autopilot scheduler) publish typed `HangarEvent`s through cloned sinks;
+    // the RPC server forwards them to authenticated, workspace-subscribed
+    // connections (live, lossy) AND every event is queued on the lossless outbox
+    // channel returned here for the outbox drain to persist. With no subscriber
+    // the live broadcast is dropped silently, so the broker costs nothing when no
+    // TUI is attached — but the durable log still records every event for replay.
+    let (broker, outbox_rx) = crate::events::EventBroker::with_outbox();
+
+    // T1: spawn the event-outbox drain — the writer of the durable, replayable
+    // event log. It pulls every emitted event off the lossless outbox channel
+    // and appends it to `event_log` (migration 0024) with a monotonic `seq`, so a
+    // reconnecting or late-joining plugin resumes the bus from its last cursor.
+    // Wired BEFORE the RPC server and the claim loop so the first mutation's
+    // event is already persisted. The handle is dropped (process exit tears the
+    // task down, mirroring the sweepers); a failed append is logged inside the
+    // task, never fatal.
+    let _outbox = crate::event_outbox::spawn(store.pool().clone(), outbox_rx);
 
     // e38.14: spawn the inbox aggregator — the writer half of the durable
     // notification inbox. It subscribes to the broker (exactly like an RPC
