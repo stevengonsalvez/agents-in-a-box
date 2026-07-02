@@ -190,6 +190,23 @@ populated fixture DB (known blind spot).
 - P0 is a hard gate; nothing integrates before it.
 - Each phase independently shippable; additive to the TUI (no regression rule).
 
+## Validation Strategy (interview-locked 2026-07-02)
+
+| Pillar | Mechanism | Cadence |
+|--------|-----------|---------|
+| Journey e2e | Cumulative `verify-converged` suite; each phase adds its journey legs; **REAL claude/codex sessions in all validation legs** (no fake-claude); real-vs-mocked disclosed per report | Local, every phase close (not CI-required) |
+| Tripwires | Per user-visible behaviour, /tmux-ui-tripwire rules | Every phase; CI for non-dispatching legs |
+| Design gate a | New screens built per /tui-screen style guide | Every new/changed screen |
+| Design gate b | Opus /impeccable design review; findings fixed + re-reviewed before close | Every new/changed screen |
+| Design gate c | insta snapshots per screen state (empty/loaded/overflow/narrow) | Every new/changed screen; CI |
+| Design gate d | tmux-verify vhs recording per journey; frames model-READ asserting the exact visible outcome + style conformance | Every phase with UI change |
+| Web | Playwright behavioral suite (SSE render → click option → answered(by=web) → delivery verified) | P8 close + cumulative suite |
+| Human | Stevie's live look — vhs GIFs + report sent per phase; welcome but **non-blocking** | Per phase, optional |
+
+Coverage bar: by P11 the journey matrix J1–J5 × C1–C5 is fully legged (traceability
+table in verify-converged-goal.md). Phase-close checklist: tripwires · journey suite
+(real providers) · design gates a–d · full workspace test run · GIFs + report to Stevie.
+
 ## Risks & Mitigations
 
 | Risk | Impact | Likelihood | Mitigation |

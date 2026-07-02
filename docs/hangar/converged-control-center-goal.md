@@ -140,16 +140,51 @@ close. Never bulk-commit; atomic commits per concern via named paths.
 - Extend verify-hangar-goal.md → verify-converged-goal.md: existing F-legs + attention/
   answer legs + the blind spots: multi-workspace isolation (seeded cross-tenant leak
   assertion), daemon kill-9 restart recovery, concurrent-dispatch cap, populated-DB
-  migration.
-- Accept: full harness green on mac; CI wired.
+  migration. Journey legs on REAL providers per the Validation contract; the old
+  fake-claude legs survive only where CI needs a deterministic non-dispatching check.
+- Accept: full harness green on mac (real-provider journey matrix complete); CI wired
+  for the non-dispatching legs.
+
+## Validation contract (interview-locked 2026-07-02)
+
+How "done" is proven. Four pillars; ALL are phase-close gates.
+
+1. **Cumulative journey e2e — real providers.** One `verify-converged` suite that GROWS
+   per phase: each phase adds its journey legs (P2: raise-ASK→answer→deliver; P4:
+   card→run→green+auto-move; P7: squad fan-out; P8: phone push→"reply 2", web
+   click-②; P9: ATC auto-answer + escalation-to-phone; …). Journey legs dispatch REAL
+   `claude` / `codex` sessions — no fake-claude in validation legs. These run LOCALLY
+   at every phase close (not required in CI; CI keeps the non-dispatching unit +
+   acceptance + tripwire tests). Every report discloses which legs ran real vs mocked.
+   By P11 the suite covers the full journey matrix J1–J5 × C1–C5 (traceability table
+   maintained in verify-converged-goal.md).
+2. **Tripwires.** Per user-visible behaviour, per /tmux-ui-tripwire rules (isolated
+   HOME, poll_capture, positive+negative assertions, exact-name session kill).
+3. **Design gates — every NEW screen (control center, boards, profiles, squads):**
+   a. Built per the /tui-screen style guide (palette, spacing, component patterns).
+   b. An opus /impeccable design-review pass (hierarchy, spacing, color, empty/error/
+      overflow states); findings fixed before the phase closes, then re-reviewed.
+   c. insta snapshot tests per screen state (empty, loaded, overflow, narrow width) —
+      the permanent layout-regression net.
+   d. tmux-verify vhs gate: one vhs recording per journey; frames READ by the model
+      asserting the EXACT visible outcome (card actually green, shuffle actually
+      happened, style conforms) — never "screen shows something".
+   Stevie's live look is welcome but NOT a blocking gate — send him the vhs GIFs +
+   phase report; proceed unless he objects.
+4. **Web (P8): Playwright behavioral suite.** Real browser: ASK card renders via SSE →
+   click option ② → daemon delivers → card flips answered(by=web); push received.
+   Runs at P8 close and joins the cumulative suite.
+
+Phase-close checklist (every phase): tripwires green · cumulative journey suite green
+(REAL providers) · design gates a–d for any new/changed screen · `cargo test
+--workspace --no-fail-fast` green · vhs GIFs + report to Stevie.
 
 ## Working rules for the run
 
 - Branch off `feat/hangar-parity` (or its successor); PR per phase into the epic branch;
   merge commits, never squash. Merges to main are Stevie-only.
-- Tests: tripwire per user-visible behaviour (follow /tmux-ui-tripwire gotchas);
-  `cargo test --workspace --no-fail-fast` gate before every phase close; never trust a
-  subagent's "green" claim — re-run yourself.
+- Tests: per the Validation contract above; never trust a subagent's "green" claim —
+  re-run yourself.
 - No `cargo fmt` at crate/workspace level (rustfmt single files only); no
   `cargo clippy --workspace -- -D warnings`.
 - Commits human-authored style, conventional format, no AI mentions.
