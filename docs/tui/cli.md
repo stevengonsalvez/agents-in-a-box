@@ -94,6 +94,7 @@ Options:
       --dangerously-skip-permissions   Skip permission prompts (dangerous!)
       --name <NAME>                    Custom session name
   -i, --interactive                    Run in interactive mode (spawn tmux and attach)
+      --parent <PARENT>                Parent session id — links this session to an orchestrator (e.g. ATC) so its completions route to the parent's durable inbox (event-driven plumbing). Exported into the session as `AINB_PARENT_SESSION`
   -h, --help                           Print help
 
 EXAMPLES:
@@ -1119,7 +1120,7 @@ Arguments:
 
 Options:
       --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
-      --monthly-usd <MONTHLY_USD>
+      --monthly-usd <MONTHLY_USD>  
       --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor]
       --reset-day <RESET_DAY>      [default: 1]
   -h, --help                       Print help
@@ -1670,6 +1671,25 @@ EXAMPLES:
   ainb abtop --theme dracula       Forward flags to `abtop --once`
 ```
 
+## `ainb web`
+
+Serve an SSE-live web dashboard (live terminal + web-push) for the fleet
+
+```console
+$ ainb web --help
+Serve an SSE-live web dashboard (live terminal + web-push) for the fleet
+
+Usage: ainb web [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --listen <ADDR>    Address to bind (default loopback; non-loopback needs --token) [default: 127.0.0.1:8420]
+      --token <SECRET>   Bearer token required on every /api/* route (enables non-loopback bind)
+      --insecure-bind    Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
+      --read-only        Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
+  -h, --help             Print help
+```
+
 ## `ainb witr`
 
 Trace a running process's causality chain (via the witr plugin)
@@ -1782,7 +1802,7 @@ Update an installed plugin to the latest matching version (NOT YET IMPLEMENTED)
 Usage: ainb plugin update [OPTIONS] <plugin>
 
 Arguments:
-  <plugin>
+  <plugin>  
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1801,7 +1821,7 @@ Remove an installed plugin (NOT YET IMPLEMENTED)
 Usage: ainb plugin remove [OPTIONS] <plugin>
 
 Arguments:
-  <plugin>
+  <plugin>  
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1835,7 +1855,7 @@ Search registered marketplaces by plugin name (NOT YET IMPLEMENTED)
 Usage: ainb plugin search [OPTIONS] <query>
 
 Arguments:
-  <query>
+  <query>  
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1874,7 +1894,7 @@ Register a marketplace by URL or local path (NOT YET IMPLEMENTED)
 Usage: ainb plugin marketplace add [OPTIONS] <url>
 
 Arguments:
-  <url>
+  <url>  
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1892,7 +1912,7 @@ Unregister a marketplace by name (NOT YET IMPLEMENTED)
 Usage: ainb plugin marketplace remove [OPTIONS] <name>
 
 Arguments:
-  <name>
+  <name>  
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -1974,20 +1994,26 @@ Options:
 
 ## `ainb fleet`
 
-Fleet orchestration: standup / broadcast / sequence / needs / daemon
+Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge
 
 ```console
 $ ainb fleet --help
-Fleet orchestration: standup / broadcast / sequence / needs / daemon
+Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge
 
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
+  approve       Approve a session's pending permission request (no arg: list waiters)
+  deny          Deny a session's pending permission request (no arg: list waiters)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
+  cost          Per-session / model / day / group spend rollups + budget caps
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+  daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
+  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+  bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
   help          Print this message or the help of the given subcommand(s)
 
@@ -2000,6 +2026,47 @@ EXAMPLES:
   ainb fleet needs                 Sessions blocked on input / errors
   ainb fleet broadcast "git pull" --all     Send a prompt to every session
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
+  ainb fleet approve               List sessions waiting on a permission decision
+  ainb fleet approve <session-id>  Approve that session's pending permission request
+  ainb fleet deny <session-id> --reason "not now"   Deny it, with a reason
+```
+
+### `ainb fleet approve`
+
+Approve a session's pending permission request (no arg: list waiters)
+
+```console
+$ ainb fleet approve --help
+Approve a session's pending permission request (no arg: list waiters)
+
+Usage: ainb fleet approve [OPTIONS] [session-id]
+
+Arguments:
+  [session-id]  Session blocked on a permission decision (omit to list waiters)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+  -h, --help             Print help
+```
+
+### `ainb fleet deny`
+
+Deny a session's pending permission request (no arg: list waiters)
+
+```console
+$ ainb fleet deny --help
+Deny a session's pending permission request (no arg: list waiters)
+
+Usage: ainb fleet deny [OPTIONS] [session-id]
+
+Arguments:
+  [session-id]  Session blocked on a permission decision (omit to list waiters)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet standup`
@@ -2030,7 +2097,7 @@ Send one prompt to selected sessions (peers-first, tmux fallback)
 Usage: ainb fleet broadcast [OPTIONS] <prompt>
 
 Arguments:
-  <prompt>
+  <prompt>  
 
 Options:
       --all              Fan out to every running session
@@ -2051,10 +2118,10 @@ Ordered prompts with ack between steps
 Usage: ainb fleet sequence [OPTIONS] <steps>...
 
 Arguments:
-  <steps>...
+  <steps>...  
 
 Options:
-      --all
+      --all                
       --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
       --timeout <timeout>  Per-step timeout (seconds) [default: 300]
   -h, --help               Print help
@@ -2077,6 +2144,22 @@ Options:
   -h, --help                 Print help
 ```
 
+### `ainb fleet cost`
+
+Per-session / model / day / group spend rollups + budget caps
+
+```console
+$ ainb fleet cost --help
+Per-session / model / day / group spend rollups + budget caps
+
+Usage: ainb fleet cost [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --period <period>  Reporting window passed to the burndown plugin [default: month] [possible values: today, week, 30days, month, all]
+  -h, --help             Print help
+```
+
 ### `ainb fleet daemon`
 
 Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
@@ -2089,7 +2172,223 @@ Usage: ainb fleet daemon [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -v, --verbose
+  -v, --verbose          
+  -h, --help             Print help
+```
+
+### `ainb fleet daemons`
+
+Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
+
+```console
+$ ainb fleet daemons --help
+Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
+
+Usage: ainb fleet daemons [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet atc`
+
+Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+
+```console
+$ ainb fleet atc --help
+Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+
+Usage: ainb fleet atc [OPTIONS] <COMMAND>
+
+Commands:
+  setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
+  teardown  Remove an ATC instance's heartbeat timer + session
+  status    Report one ATC instance (meta + timer + session liveness)
+  list      List all provisioned ATC instances
+  inbox     Inspect / drain / commit a parent's durable completion inbox
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet atc setup`
+
+Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
+
+```console
+$ ainb fleet atc setup --help
+Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
+
+Usage: ainb fleet atc setup [OPTIONS] <name>
+
+Arguments:
+  <name>  Instance name (also the session name)
+
+Options:
+      --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
+      --interval <interval>      Heartbeat cadence in minutes (default 15)
+      --idle-pause <idle-pause>  Minutes of fleet quiet before the heartbeat downgrades to an idle ping (default 60)
+      --no-heartbeat             Provision without installing the OS heartbeat timer
+      --no-spawn                 Provision files + timer but do not spawn the ainb session
+      --no-hooks                 Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)
+  -h, --help                     Print help
+```
+
+#### `ainb fleet atc teardown`
+
+Remove an ATC instance's heartbeat timer + session
+
+```console
+$ ainb fleet atc teardown --help
+Remove an ATC instance's heartbeat timer + session
+
+Usage: ainb fleet atc teardown [OPTIONS] <name>
+
+Arguments:
+  <name>  
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --purge            Also delete the instance dir (state.json + task-log.md)
+  -h, --help             Print help
+```
+
+#### `ainb fleet atc status`
+
+Report one ATC instance (meta + timer + session liveness)
+
+```console
+$ ainb fleet atc status --help
+Report one ATC instance (meta + timer + session liveness)
+
+Usage: ainb fleet atc status [OPTIONS] <name>
+
+Arguments:
+  <name>  
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet atc list`
+
+List all provisioned ATC instances
+
+```console
+$ ainb fleet atc list --help
+List all provisioned ATC instances
+
+Usage: ainb fleet atc list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet atc inbox`
+
+Inspect / drain / commit a parent's durable completion inbox
+
+```console
+$ ainb fleet atc inbox --help
+Inspect / drain / commit a parent's durable completion inbox
+
+Usage: ainb fleet atc inbox [OPTIONS] <COMMAND>
+
+Commands:
+  peek    Show undrained completions without consuming them
+  drain   Drain completions exactly-once and print the Stop-drain decision
+  commit  Commit a child completion to a parent's inbox (testing/integration)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet bridge`
+
+Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
+
+```console
+$ ainb fleet bridge --help
+Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
+
+Usage: ainb fleet bridge [OPTIONS] [COMMAND]
+
+Commands:
+  run        Run the bridge daemon in the foreground (default; reads config.toml)
+  install    Install as a launchd/systemd service (tokens read from config, never argv)
+  uninstall  Remove the bridge service
+  status     Report bridge service install status
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet bridge run`
+
+Run the bridge daemon in the foreground (default; reads config.toml)
+
+```console
+$ ainb fleet bridge run --help
+Run the bridge daemon in the foreground (default; reads config.toml)
+
+Usage: ainb fleet bridge run [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet bridge install`
+
+Install as a launchd/systemd service (tokens read from config, never argv)
+
+```console
+$ ainb fleet bridge install --help
+Install as a launchd/systemd service (tokens read from config, never argv)
+
+Usage: ainb fleet bridge install [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet bridge uninstall`
+
+Remove the bridge service
+
+```console
+$ ainb fleet bridge uninstall --help
+Remove the bridge service
+
+Usage: ainb fleet bridge uninstall [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet bridge status`
+
+Report bridge service install status
+
+```console
+$ ainb fleet bridge status --help
+Report bridge service install status
+
+Usage: ainb fleet bridge status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
 ```
 
@@ -2125,8 +2424,8 @@ Usage: ainb fleet enrich-cache put [OPTIONS] --key <key> --suggestion <suggestio
 
 Options:
       --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
-      --key <key>
-      --suggestion <suggestion>
+      --key <key>                
+      --suggestion <suggestion>  
   -h, --help                     Print help
 ```
 
@@ -2142,7 +2441,7 @@ Usage: ainb fleet enrich-cache get [OPTIONS] --key <key>
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-      --key <key>
+      --key <key>        
   -h, --help             Print help
 ```
 
@@ -2249,7 +2548,7 @@ Usage: ainb mcp daemon [OPTIONS]
 Options:
       --format <format>
           Output format
-
+          
           [default: text]
           [possible values: text, json, csv, markdown]
 
@@ -2345,6 +2644,164 @@ Options:
   -h, --help             Print help
 ```
 
+## `ainb notifyd`
+
+ainb-hooks notification daemon: status, restart (the approve-socket resume/repair command), install/uninstall hooks
+
+```console
+$ ainb notifyd --help
+ainb-hooks notification daemon: status, restart (the approve-socket resume/repair command), install/uninstall hooks
+
+Usage: ainb notifyd [OPTIONS] [COMMAND]
+
+Commands:
+  run        Run the daemon in the foreground (default)
+  stop       Stop a running daemon via its PID file
+  reap       Kill orphan / wedged notifyd processes, sparing the live owner
+  restart    Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+  install    Install the ainb-hooks hook
+  uninstall  Uninstall the ainb-hooks hook
+  status     Report install + daemon status
+  list       List persisted notifications (most recent first)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd run`
+
+Run the daemon in the foreground (default)
+
+```console
+$ ainb notifyd run --help
+Run the daemon in the foreground (default)
+
+Usage: ainb notifyd run [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd stop`
+
+Stop a running daemon via its PID file
+
+```console
+$ ainb notifyd stop --help
+Stop a running daemon via its PID file
+
+Usage: ainb notifyd stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd reap`
+
+Kill orphan / wedged notifyd processes, sparing the live owner
+
+```console
+$ ainb notifyd reap --help
+Kill orphan / wedged notifyd processes, sparing the live owner
+
+Usage: ainb notifyd reap [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd restart`
+
+Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+
+```console
+$ ainb notifyd restart --help
+Stop, reap, and respawn the daemon — the single resume/repair command for a dead or wedged approve socket
+
+Usage: ainb notifyd restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd install`
+
+Install the ainb-hooks hook
+
+```console
+$ ainb notifyd install --help
+Install the ainb-hooks hook
+
+Usage: ainb notifyd install [OPTIONS]
+
+Options:
+      --claude           Target Claude Code
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --codex            Target Codex CLI
+      --copilot          Target GitHub Copilot CLI
+      --all              Target every known agent
+  -h, --help             Print help
+```
+
+### `ainb notifyd uninstall`
+
+Uninstall the ainb-hooks hook
+
+```console
+$ ainb notifyd uninstall --help
+Uninstall the ainb-hooks hook
+
+Usage: ainb notifyd uninstall [OPTIONS]
+
+Options:
+      --claude           Target Claude Code
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --codex            Target Codex CLI
+      --copilot          Target GitHub Copilot CLI
+      --all              Target every known agent
+  -h, --help             Print help
+```
+
+### `ainb notifyd status`
+
+Report install + daemon status
+
+```console
+$ ainb notifyd status --help
+Report install + daemon status
+
+Usage: ainb notifyd status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb notifyd list`
+
+List persisted notifications (most recent first)
+
+```console
+$ ainb notifyd list --help
+List persisted notifications (most recent first)
+
+Usage: ainb notifyd list [OPTIONS]
+
+Options:
+      --dismissed          Include dismissed notifications
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --agent <agent>      Filter by agent (claude|codex|copilot)
+      --project <project>  Filter by project (basename of cwd)
+      --limit <limit>      Max rows to show [default: 50]
+  -h, --help               Print help
+```
+
 ## `ainb hangar`
 
 Hangar managed-agents control plane (issue / task / beads / daemon)
@@ -2413,7 +2870,7 @@ Usage: ainb hangar issue create [OPTIONS] --title <TITLE>
 Options:
       --format <format>
           Output format
-
+          
           [default: text]
           [possible values: text, json, csv, markdown]
 
@@ -2425,12 +2882,12 @@ Options:
 
       --state <STATE>
           Initial lifecycle state
-
+          
           [default: open]
 
       --assign <ASSIGN>
           Assign the issue to an agent (`agent.id`) and enqueue a task for it.
-
+          
           When set, the issue's assignee is the agent and a `queued` task is enqueued for the agent's runtime, so the daemon's claim loop picks it up, materialises the agent's attached skills (P6.4), and dispatches the provider. The created task id is printed alongside the issue id.
 
   -h, --help
