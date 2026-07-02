@@ -189,8 +189,8 @@ pub fn cmd_status(json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<8} {:<10} {:<10} {:<10} {}",
-        "agent", "installed", "hook_ok", "socket_ok", "last_event"
+        "{:<8} {:<10} {:<10} {:<10} last_event",
+        "agent", "installed", "hook_ok", "socket_ok"
     );
     for r in rows {
         println!(
@@ -250,10 +250,7 @@ pub fn cmd_list(
     } else if rows.is_empty() {
         println!("no notifications");
     } else {
-        println!(
-            "{:<14} {:<8} {:<22} {}",
-            "ts(ms)", "agent", "project", "event"
-        );
+        println!("{:<14} {:<8} {:<22} event", "ts(ms)", "agent", "project");
         for r in &rows {
             println!(
                 "{:<14} {:<8} {:<22} {}",
