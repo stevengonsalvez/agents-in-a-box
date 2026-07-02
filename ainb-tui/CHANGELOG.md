@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-02
+### Added
+- **fleet**: verify multi-line tmux sends actually submit
+
+### Fixed
+- Merge pull request #379 from stevengonsalvez/f/atc-heartbeat-submit
+- **atc**: stop heartbeats stacking as unsubmitted pastes
+
+### Other
+- **docs**: regenerate CLI reference from the binary
+- **web**: drop unused async-stream + tower-http deps
+
+
 ## [1.11.0] - 2026-07-01
 ### Added
 - Merge pull request #372 from stevengonsalvez/o/debug-1
