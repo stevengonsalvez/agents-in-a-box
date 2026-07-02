@@ -652,7 +652,33 @@ pub fn render_control_center(
     }
 
     render_card_list(buf, list_w, body_top, bottom, state, now_ms);
+    render_divider(buf, list_w, body_top, bottom);
     render_detail(buf, detail_x, area_w, body_top, bottom, state, now_ms);
+}
+
+/// The first-visible card index for a viewport of `visible_rows` rows that must
+/// keep `selected` in view.
+///
+/// The control-center card list has no stored scroll cursor (the reducer is pure
+/// and viewport-blind), so the offset is derived here per render from the
+/// selected index: it is the smallest offset that keeps `selected` inside
+/// `[offset, offset + visible_rows)`. While the selection sits within the first
+/// `visible_rows` cards the list is top-anchored (offset `0`); once the human
+/// scrolls (`j`) past the fold the window follows so the `▶` cursor is always
+/// painted — never walking below the bottom row and vanishing.
+fn first_visible(selected: usize, visible_rows: usize) -> usize {
+    selected.saturating_sub(visible_rows.saturating_sub(1))
+}
+
+/// Paint the muted vertical rule in the gutter column (`x = list_w`) for every
+/// body row, framing the card list against the detail pane so a section label in
+/// the right column is never misread as belonging to the card on the same row.
+fn render_divider(buf: &mut WireBuffer, list_w: u16, top: u16, bottom: u16) {
+    let mut row = top;
+    while row <= bottom {
+        put_str(buf, list_w, row, "│", MUTED_GRAY, list_w + 1);
+        row += 1;
+    }
 }
 
 /// Render the title row: `Control · N sessions · M need you` + the hotkey hint.
@@ -690,9 +716,15 @@ fn render_card_list(
     now_ms: i64,
 ) {
     let selected = state.selected_id();
+    // Follow the selection: derive the first-visible offset so the `▶` cursor is
+    // always inside the viewport even when the board is taller than the pane (a
+    // board with more open rows than fit would otherwise paint from index 0 and
+    // hide the selection once it walked below the fold).
+    let visible_rows = usize::from(bottom.saturating_sub(top)) + 1;
+    let offset = first_visible(state.selected_index().unwrap_or(0), visible_rows);
     // Bounded zip: one card per row from `top` until `bottom`, so the list can
     // never overrun the pane and no manual counter is needed.
-    for (row, card) in (top..=bottom).zip(state.cards.iter()) {
+    for (row, card) in (top..=bottom).zip(state.cards.iter().skip(offset)) {
         let is_sel = Some(card.id.as_str()) == selected;
         let (badge, badge_color) = card.kind.badge();
         let marker = if is_sel { "▶" } else { " " };
@@ -723,6 +755,14 @@ fn render_detail(
         return;
     };
     let mut row = top;
+
+    // Pane header — names the selected card so the detail column is visibly
+    // anchored to the left-list selection (`proj-0 · ASK`), not an orphan pane.
+    // Reuses `short_label` (the same label the card list renders) + the kind
+    // badge; painted in gold above the status line.
+    let (badge, _) = card.kind.badge();
+    let header = format!("{} · {}", card.short_label(), badge.trim());
+    row = put_line(buf, x0, row, bottom, area_w, &header, GOLD);
 
     // Status line — coloured by kind (D9 "amber waiting / red error / …").
     let (status, status_color) = status_line(card);
@@ -991,7 +1031,18 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right:
         if cx >= right {
             break;
         }
-        let mut cell = Cell::new(ch.to_string());
+        // Harden against terminal escape / control-char injection: this screen
+        // renders fleet-wide, session-originated free text (assistant replies,
+        // error snippets, ASK labels, cwd-derived labels) char-by-char, and each
+        // char becomes a Cell symbol the host paints verbatim. A raw ESC/BEL/C1
+        // byte in a crafted attention payload would reassemble on flush into a
+        // live control sequence (OSC 52 clipboard write, title set, cursor moves)
+        // in the operator's terminal. Replace every control char (C0 + DEL + C1,
+        // all Unicode category Cc) with a visible middot so the text is surfaced,
+        // never executed. Applies to every field since put_str is the one choke
+        // point all rendered strings flow through.
+        let sym = if ch.is_control() { '·' } else { ch };
+        let mut cell = Cell::new(sym.to_string());
         cell.fg = Some(color);
         buf.push(Coord::new(cx, row), cell);
         cx = cx.saturating_add(1);
@@ -1306,5 +1357,80 @@ mod tests {
         assert_eq!(circled_digit(2), "②");
         assert_eq!(circled_digit(3), "③");
         assert_eq!(circled_digit(99), "(99)");
+    }
+
+    // --- rendering ---------------------------------------------------------
+
+    #[test]
+    fn first_visible_follows_the_selection_past_the_fold() {
+        // Selection within the first `visible` cards → top-anchored.
+        assert_eq!(first_visible(0, 9), 0);
+        assert_eq!(first_visible(8, 9), 0);
+        // Selection past the fold → window follows so the selection is the last
+        // visible row (never below it).
+        assert_eq!(first_visible(9, 9), 1);
+        assert_eq!(first_visible(29, 9), 21);
+    }
+
+    #[test]
+    fn selection_stays_painted_when_the_board_overflows_the_pane() {
+        // A board far taller than the pane: 30 answerable ASK rows.
+        let mut state = ControlCenterState::default();
+        let rows: Vec<AttentionRow> = (0..30)
+            .map(|i| {
+                row(
+                    &format!("ask-{i:02}"),
+                    "ask_user_question",
+                    i,
+                    &ask_payload("q", &["a"]),
+                )
+            })
+            .collect();
+        state.set_attention(&rows);
+        // Walk the selection to the very last card (like pressing `j` 29 times).
+        for _ in 0..40 {
+            state.select_next();
+        }
+        let last_id = state.cards().last().unwrap().id.clone();
+        assert_eq!(state.selected_id(), Some(last_id.as_str()));
+
+        // Render into a short pane: body rows are 1..=9 (nine visible), far fewer
+        // than the 30 cards.
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(100, 10);
+        render_control_center(&mut buf, 100, 0, 9, &state, 1_000);
+
+        // The `▶` selection marker MUST be painted — the whole point of the
+        // scroll-follow is that the cursor never walks below the fold and vanishes.
+        let marker_painted = buf.cells.iter().any(|(_, c)| c.symbol == "▶");
+        assert!(
+            marker_painted,
+            "the selection marker must stay on-screen when the board overflows"
+        );
+    }
+
+    #[test]
+    fn control_chars_in_session_text_are_sanitized_on_render() {
+        // A crafted IDLE payload carrying a raw ESC + BEL (an OSC 52 clipboard
+        // write in the wild) in the assistant text the detail pane renders.
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row(
+            "idle",
+            "waiting",
+            1,
+            "{\"kind\":\"IDLE\",\"context\":{\"last_assistant_text\":\"\u{1b}]52;c;AAAA\u{07}\"}}",
+        )]);
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(100, 20);
+        render_control_center(&mut buf, 100, 0, 19, &state, 1_000);
+
+        // No rendered cell may carry a control char — every one must have been
+        // replaced with the visible placeholder before reaching the buffer.
+        let has_control = buf
+            .cells
+            .iter()
+            .any(|(_, c)| c.symbol.chars().any(char::is_control));
+        assert!(
+            !has_control,
+            "no control char may survive into a rendered cell"
+        );
     }
 }
