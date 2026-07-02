@@ -174,21 +174,17 @@ impl BrokerState {
             .collect()
     }
 
-    /// Resolve a pending AWAIT. Returns `true` if a waiter was blocked on
-    /// this `session_id` and has now been handed the decision.
+    /// Resolve a pending AWAIT. Returns `true` only if a waiter was blocked on
+    /// this `session_id` AND actually received the decision — a send onto a
+    /// dropped receiver (the AWAIT raced into its timeout/supersede path)
+    /// reports `false`, so the TUI/CLI never claims a match that nobody heard.
     pub fn decide(&self, session_id: &str, decision: Decision) -> bool {
         let taken = {
             let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             map.remove(session_id)
         };
         match taken {
-            Some(p) => {
-                // Ok(_) is impossible to observe here beyond the send; if the
-                // waiter's receiver was already dropped the decision is simply
-                // discarded, which is fine (the waiter is gone).
-                let _ = p.tx.send(decision);
-                true
-            }
+            Some(p) => p.tx.send(decision).is_ok(),
             None => false,
         }
     }
