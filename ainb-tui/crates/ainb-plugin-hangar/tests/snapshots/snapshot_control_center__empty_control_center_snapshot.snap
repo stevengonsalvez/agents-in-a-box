@@ -1,0 +1,8 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_control_center.rs
+expression: full
+---
+Control  · 0 sessions · 0 need you                                                  C control-center
+
+no sessions need you right now
+every AskUserQuestion, error, and idle session lands here

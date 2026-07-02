@@ -1,0 +1,25 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_control_center.rs
+expression: full
+---
+Control  · 20 sessions · 8 need you                             C control-center
+▶ASK  proj-0       0s             waiting for your input
+ ASK  proj-1       1m             age 0s · tok — · tools — · Δ — · hook · host
+ ASK  proj-2       2m
+ ASK  proj-3       3m             LAST REPLY
+ ASK  proj-4       4m             Ship change 0?
+ ASK  proj-5       5m
+ ASK  proj-6       6m             TIMELINE
+ ASK  proj-7       7m             · raised 0s ago · ask_user_question
+ ERR  api-0        0s
+ ERR  api-1        2m             OPTIONS
+ ERR  api-2        4m             ① staging
+ ERR  api-3        6m             ② prod
+ ERR  api-4        8m             ③ hold
+ ERR  api-5        10m            h/l option · enter/1-9 answer
+ WAIT ui-0         0s
+ WAIT ui-1         5m
+ WAIT ui-2         10m
+ WAIT ui-3         15m
+ WAIT ui-4         20m
+ WAIT ui-5         25m
