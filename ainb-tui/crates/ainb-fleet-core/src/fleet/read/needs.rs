@@ -4,6 +4,8 @@
 // Priority: ASK > ERR > IDLE > WAIT. First matching kind wins; we don't
 // chase multiple signals per session because the UI shows one card.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::enrich_cache;
@@ -127,7 +129,19 @@ impl ClassifyInput {
 /// the supplied pane text + session summary. Returns None when nothing
 /// indicates the session needs attention.
 pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
-    let transcript_path = latest_transcript_for_cwd(&input.session.cwd);
+    // Prefer the EXACT transcript the session carries (the hook line plumbs it
+    // onto `Session.transcript_path`). Only when it is absent — the legacy
+    // live-`classify()` path, which has no hook line — fall back to the newest
+    // transcript in the cwd's project dir. Without this, two agents sharing one
+    // cwd would both classify from whichever transcript was touched last, so a
+    // request could be attributed to the WRONG session.
+    let transcript_path = input
+        .session
+        .transcript_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| latest_transcript_for_cwd(&input.session.cwd));
     let route_hint = derive_route_hint(&input.session);
 
     // 1. ASK — strongest signal, JSONL tool_use block.
@@ -391,6 +405,50 @@ mod tests {
 
     fn iso(ms: i64) -> String {
         chrono::DateTime::from_timestamp_millis(ms).unwrap().to_rfc3339()
+    }
+
+    #[test]
+    fn classify_prefers_the_sessions_exact_transcript_over_newest_in_cwd() {
+        // The cwd's project dir holds a NON-ask transcript (a bare user line):
+        // whatever `latest_transcript_for_cwd` returns for this cwd is NOT an ASK.
+        let fx = plant_transcript(
+            "exact-transcript-cwd",
+            &[r#"{"type":"user","message":{"content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#
+                .to_string()],
+        );
+
+        // The session's EXACT transcript lives under a DIFFERENT cwd slug and DOES
+        // carry an ASK. Pointing `Session.transcript_path` at it must win over the
+        // (non-ask) newest transcript in the session's own cwd.
+        let exact_fx = plant_transcript(
+            "exact-transcript-ask",
+            &[r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it?","options":[{"label":"yes"},{"label":"no"}]}]}}]},"timestamp":"2026-01-01T00:00:00Z"}"#
+                .to_string()],
+        );
+        let exact = exact_fx.dir.join("session.jsonl");
+
+        let mut s = mk_session(&fx.cwd);
+        s.transcript_path = Some(exact.to_string_lossy().into_owned());
+        let row = classify(ClassifyInput {
+            session: s,
+            pane_text: None,
+            idle_threshold_min: 5,
+            now_ms: 1_700_000_000_000,
+        })
+        .expect("the session's exact transcript classifies to ASK");
+        assert!(
+            matches!(row.context, NeedsContext::Ask(_)),
+            "classify must read Session.transcript_path, not the newest cwd transcript"
+        );
+
+        // Sanity: with NO exact transcript, it falls back to the cwd dir (no ASK).
+        let none = classify(ClassifyInput {
+            session: mk_session(&fx.cwd),
+            pane_text: None,
+            idle_threshold_min: 5,
+            now_ms: 1_700_000_000_000,
+        });
+        assert!(none.is_none(), "the fallback cwd transcript is not an ASK");
     }
 
     #[test]
