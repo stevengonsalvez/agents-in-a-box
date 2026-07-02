@@ -27,6 +27,17 @@
 //! window) the fallback is **deny** — never auto-approve. The
 //! correlation key across every surface is `session_id`, because Claude
 //! blocks on at most one permission request per session at a time.
+//!
+//! ## Trust boundary
+//!
+//! The socket is chmod `0600`, so other users are excluded — but every
+//! process running as the SAME uid can DECIDE, including the supervised
+//! agents themselves (an agent with any pre-approved shell access could
+//! self-approve by writing one JSON line). This is the same trust
+//! boundary as the pre-existing tmux `send-keys` surface: the broker
+//! gates *remote/UI* approval, it is not a sandbox against a hostile
+//! local process. Do not treat an `allow` from this broker as proof a
+//! HUMAN clicked it if same-uid code is untrusted.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -44,11 +55,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tracing::{debug, error, warn};
 
-/// Default AWAIT ceiling. Deliberately longer than the hook's own
-/// timeout (the `PermissionRequest` hook is registered with a ~300s
-/// budget) so that, in the normal case, Claude's hook timeout fires
-/// first and the broker's own timeout is only a backstop against a
-/// leaked pending entry. On expiry the fallback is deny.
+/// Default AWAIT ceiling — the BOTTOM of the timeout ladder, by design:
+/// broker AWAIT (600s) < client re-dial deadline
+/// ([`CLIENT_AWAIT_DEADLINE`], 640s) < Claude's registered
+/// `PermissionRequest` hook timeout (660s, see fleet plumbing's
+/// `PERMISSION_HOOK_TIMEOUT`). The broker answers first with a deny, the
+/// client relays it well inside its own deadline, and Claude's hard-kill
+/// never fires against a still-waiting hook. On expiry the fallback is
+/// deny — never approve.
 pub const DEFAULT_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A human's answer to a permission request.
