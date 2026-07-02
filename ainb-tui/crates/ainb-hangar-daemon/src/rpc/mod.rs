@@ -362,9 +362,9 @@ fn spawn_event_forwarder(
     })
 }
 
-/// Max events replayed in one subscribe catch-up batch. A resume cursor far in
-/// the past still bounds the burst; a client with more than this backlog
-/// re-subscribes from the last delivered cursor to drain the remainder.
+/// Max events read from the durable log in one catch-up query. A resume cursor
+/// far in the past still bounds each burst; a backlog larger than this is drained
+/// by paging in-loop (see [`replay_events`]), never truncated to a single batch.
 const REPLAY_BATCH: i64 = 1024;
 
 /// Extract the optional `since_seq` resume cursor from a `workspace/subscribe`
@@ -383,41 +383,67 @@ fn subscribe_since_seq(req: &RpcRequest) -> Option<i64> {
 ///
 /// Each stored payload is re-framed verbatim via [`encode_event_frame_payload`],
 /// so a replayed frame is byte-identical to the live one it mirrors — a resuming
-/// subscriber cannot tell catch-up from live. Best-effort: a read fault is
-/// logged and the connection stays live; a full / gone writer ends the push
-/// early (the forwarder keeps the live stream).
+/// subscriber cannot tell catch-up from live.
+///
+/// The backlog is **paged in-loop**, not read once: the durable log holds one
+/// row per emitted event (including high-frequency `TaskProgress`/`TaskMessage`
+/// heartbeats), so a single active task can exceed [`REPLAY_BATCH`] during a
+/// disconnect. A single capped read delivers the OLDEST `REPLAY_BATCH` events
+/// and would silently drop the newest `(since_seq + REPLAY_BATCH, head]` window
+/// — the live forwarder (registered before this call) only carries events
+/// emitted after subscribe, and the ack advances the client's cursor to the
+/// true head, so that window would be lost with no way for the client to detect
+/// or drain it. Paging until a short batch signals the head reconstructs a
+/// gapless stream; anything appended while we page is covered by the forwarder
+/// (at worst a boundary event delivered twice, reconciled by the next snapshot
+/// pull).
+///
+/// Best-effort: a read fault is logged and the connection stays live; a gone
+/// writer ends the push early (the forwarder keeps the live stream).
 async fn replay_events(
     pool: &SqlitePool,
     workspace_id: &str,
     since_seq: i64,
     out: &mpsc::Sender<Vec<u8>>,
 ) {
-    let rows = match ainb_hangar_store::repo::event_log::EventOutboxRepo::replay(
-        pool,
-        workspace_id,
-        since_seq,
-        REPLAY_BATCH,
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "event replay read failed");
-            return;
-        }
-    };
-    for row in rows {
-        // The stored payload IS the serialised `HangarEvent` that was the
-        // notification's `params`; parse-then-frame it verbatim.
-        let params: serde_json::Value = match serde_json::from_str(&row.payload) {
-            Ok(v) => v,
+    let mut cursor = since_seq;
+    loop {
+        let rows = match ainb_hangar_store::repo::event_log::EventOutboxRepo::replay(
+            pool,
+            workspace_id,
+            cursor,
+            REPLAY_BATCH,
+        )
+        .await
+        {
+            Ok(rows) => rows,
             Err(e) => {
-                tracing::warn!(error = %e, seq = row.seq, "skipping malformed replay payload");
-                continue;
+                tracing::warn!(error = %e, "event replay read failed");
+                return;
             }
         };
-        if out.send(encode_event_frame_payload(&params)).await.is_err() {
-            break; // writer gone — the live forwarder owns the rest
+        // A short batch means we have reached the workspace head at read time;
+        // record it before consuming `rows` (which moves the elements).
+        let drained = (rows.len() as i64) < REPLAY_BATCH;
+        for row in rows {
+            // Advance the cursor to every read seq — including a malformed one —
+            // so the next page starts strictly past it and the loop cannot spin.
+            cursor = row.seq;
+            // The stored payload IS the serialised `HangarEvent` that was the
+            // notification's `params`; parse-then-frame it verbatim.
+            let params: serde_json::Value = match serde_json::from_str(&row.payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, seq = row.seq, "skipping malformed replay payload");
+                    continue;
+                }
+            };
+            if out.send(encode_event_frame_payload(&params)).await.is_err() {
+                return; // writer gone — the live forwarder owns the rest
+            }
+        }
+        if drained {
+            return;
         }
     }
 }
@@ -2915,5 +2941,111 @@ mod tests {
         .await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["issues"].as_array().unwrap().len(), 0);
+    }
+
+    /// Resume replay must deliver the ENTIRE backlog after the cursor, not just
+    /// the first [`REPLAY_BATCH`] rows. A single capped read would drop the
+    /// newest `(since_seq + REPLAY_BATCH, head]` window while the ack advanced
+    /// the client past it — a permanent silent gap. Seed a backlog spanning
+    /// three pages and assert every event is replayed, in order.
+    #[tokio::test]
+    async fn replay_events_drains_backlog_larger_than_one_batch() {
+        use ainb_hangar_store::repo::event_log::{EventOutboxRepo, NewEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // Seed the owning workspace so the FK-scoped inserts resolve.
+        sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+            .bind("ws-a")
+            .bind("ws-a")
+            .bind("ws-a")
+            .bind(1_000_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // A backlog spanning three pages: 1024 + 1024 + 500.
+        let total: i64 = REPLAY_BATCH * 2 + 500;
+        for i in 0..total {
+            EventOutboxRepo::append(
+                pool,
+                &NewEvent {
+                    workspace_id: "ws-a".into(),
+                    event_type: "task_progress".into(),
+                    entity: Some(format!("t{i}")),
+                    payload: format!("{{\"n\":{i}}}"),
+                    ts: 1_000 + i,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        // Buffer wider than the backlog so replay never blocks on a full queue.
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>((total as usize) + 16);
+        replay_events(pool, "ws-a", 0, &tx).await;
+        drop(tx);
+
+        let mut delivered = 0i64;
+        while rx.recv().await.is_some() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, total,
+            "every backlog event after the cursor must be replayed (no truncation at REPLAY_BATCH)"
+        );
+    }
+
+    /// A mid-log cursor replays only the tail after it — still fully, across the
+    /// batch boundary — never the truncated oldest slice.
+    #[tokio::test]
+    async fn replay_events_from_midlog_cursor_delivers_full_tail() {
+        use ainb_hangar_store::repo::event_log::{EventOutboxRepo, NewEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+            .bind("ws-a")
+            .bind("ws-a")
+            .bind("ws-a")
+            .bind(1_000_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let total: i64 = REPLAY_BATCH + 300;
+        let mut seqs = Vec::new();
+        for i in 0..total {
+            let seq = EventOutboxRepo::append(
+                pool,
+                &NewEvent {
+                    workspace_id: "ws-a".into(),
+                    event_type: "task_progress".into(),
+                    entity: Some(format!("t{i}")),
+                    payload: format!("{{\"n\":{i}}}"),
+                    ts: 1_000 + i,
+                },
+            )
+            .await
+            .unwrap();
+            seqs.push(seq);
+        }
+
+        // Resume from the 10th event's seq: expect exactly `total - 10` frames,
+        // which still crosses the REPLAY_BATCH boundary.
+        let cursor = seqs[9];
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>((total as usize) + 16);
+        replay_events(pool, "ws-a", cursor, &tx).await;
+        drop(tx);
+
+        let mut delivered = 0i64;
+        while rx.recv().await.is_some() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, total - 10);
     }
 }
