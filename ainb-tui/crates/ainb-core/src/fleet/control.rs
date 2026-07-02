@@ -183,10 +183,13 @@ pub fn dispatch_decide(
                     return;
                 }
             };
+            // `matched` means a waiter WAS parked and the broker handed it the
+            // decision — the final write to the hook's socket is not itself
+            // acknowledged, so don't claim "delivered".
             let outcome =
                 match ainb_plugin_notifyd::broker::client_decide(&sock, &session_id, kind, &reason)
                 {
-                    Ok(true) => "delivered".to_string(),
+                    Ok(true) => "matched the waiting hook".to_string(),
                     Ok(false) => "no waiter (already resolved or timed out)".to_string(),
                     Err(e) => format!("broker unreachable: {e}"),
                 };

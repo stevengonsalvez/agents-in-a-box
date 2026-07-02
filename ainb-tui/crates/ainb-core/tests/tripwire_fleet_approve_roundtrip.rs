@@ -244,7 +244,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         panic!("approve feedback never rendered; last capture:\n---\n{last}\n---");
     };
     assert!(
-        feedback_cap.contains("delivered"),
+        feedback_cap.contains("matched the waiting hook"),
         "approve must report a matched waiter, not a miss:\n{feedback_cap}"
     );
 
