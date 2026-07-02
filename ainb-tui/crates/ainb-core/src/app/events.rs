@@ -195,6 +195,7 @@ pub enum AppEvent {
     ScrollPreviewUp,      // Scroll tmux preview up
     ScrollPreviewDown,    // Scroll tmux preview down
     ToggleExpandAll,      // Toggle expand/collapse all workspaces
+    ToggleSessionMenuBar, // Hide/show the Sessions bottom keymap legend (⇧M)
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -1920,6 +1921,8 @@ impl EventHandler {
             // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
             // 'B' is its keyboard twin. Hinted next to the glyph itself.
             KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
+            // Hide/show the bottom keymap legend to reclaim vertical space.
+            KeyCode::Char('M') => Some(AppEvent::ToggleSessionMenuBar),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
             // k skills, m memory, t abtop — same set
@@ -3057,6 +3060,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
             AppEvent::ToggleSessionsSidebar => {
                 // Same path the [-]/[+] mouse glyph takes: flip + persist the
                 // preference so the choice survives restarts.

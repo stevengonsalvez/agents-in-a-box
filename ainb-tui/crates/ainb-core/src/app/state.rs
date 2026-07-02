@@ -6365,6 +6365,20 @@ impl AppState {
         self.expand_all_workspaces = !self.expand_all_workspaces;
     }
 
+    /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
+    pub fn toggle_session_menu_bar(&mut self) {
+        let show = !self.app_config.ui_preferences.show_session_menu_bar;
+        self.app_config.ui_preferences.show_session_menu_bar = show;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist show_session_menu_bar: {}", e);
+        }
+        self.add_info_notification(if show {
+            "Keymap legend shown".to_string()
+        } else {
+            "Keymap legend hidden — ⇧M to show".to_string()
+        });
+    }
+
     /// Cycle the session-status filter (Shift+F): All → ActiveOnly → StoppedOnly → All.
     /// Resets the session selection so it doesn't point to a now-hidden row.
     pub fn cycle_session_filter(&mut self) {

@@ -681,6 +681,12 @@ pub struct UiPreferences {
     #[serde(default = "default_true")]
     pub show_git_status: bool,
 
+    /// Whether to show the Sessions-screen bottom keymap legend ("Session
+    /// actions" / "Panels & views"). When false it collapses to a single hint
+    /// row, reclaiming vertical space for the session list. Toggle with ⇧M.
+    #[serde(default = "default_true")]
+    pub show_session_menu_bar: bool,
+
     /// Preferred editor command (e.g., "code", "cursor", "nvim")
     /// If None, falls back to: code -> $EDITOR -> error
     #[serde(default)]
@@ -753,6 +759,7 @@ impl Default for UiPreferences {
             theme: default_theme(),
             show_container_status: true,
             show_git_status: true,
+            show_session_menu_bar: true,
             preferred_editor: None,
             home_sidebar_width: None,
             sessions_sidebar_width: None,
@@ -988,6 +995,8 @@ impl AppConfig {
             // New config: respect explicit settings
             self.ui_preferences.show_container_status = other.ui_preferences.show_container_status;
             self.ui_preferences.show_git_status = other.ui_preferences.show_git_status;
+            self.ui_preferences.show_session_menu_bar =
+                other.ui_preferences.show_session_menu_bar;
         }
         // Old configs keep the default (true) values
         if other.ui_preferences.preferred_editor.is_some() {
@@ -1678,6 +1687,7 @@ mod old_config_tests {
                 theme: "".to_string(), // Empty theme indicates old config
                 show_container_status: false,
                 show_git_status: false,
+                show_session_menu_bar: false,
                 preferred_editor: None,
                 home_sidebar_width: None,
                 sessions_sidebar_width: None,
@@ -1723,6 +1733,7 @@ mod old_config_tests {
                 theme: "light".to_string(), // Non-empty theme indicates new config
                 show_container_status: false,
                 show_git_status: false,
+                show_session_menu_bar: false,
                 preferred_editor: None,
                 home_sidebar_width: Some(38),
                 sessions_sidebar_width: Some(46),
