@@ -45,6 +45,12 @@ path = "src/lib.rs"
 [dependencies]
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Fleet orchestration libs (the ONE send path + the needs classifier + session
+# discovery), extracted below both this crate and ainb-core so the daemon can
+# drive the SAME verified tmux send and the SAME ASK>ERR>IDLE>WAIT classifier the
+# TUI/CLI use — without a crate cycle (ainb depends on this daemon). The P2
+# attention ingest producer classifies with it; the answer router delivers with it.
+ainb-fleet-core = { path = "../ainb-fleet-core" }
 # Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
 # serialises over the unix socket (P4.10). Pure data — no host deps leak in.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }

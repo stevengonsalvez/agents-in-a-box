@@ -74,6 +74,14 @@ pub struct ScopedEvent {
 pub struct EventBroker {
     tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
+    /// The FLEET-WIDE attention channel (spec P2). Attention events are NOT
+    /// workspace-partitioned — the control centre answers for the whole host, and
+    /// a hand-started session has no workspace to scope by — so `AttentionRaised`
+    /// / `AttentionAnswered` ride their own broadcast, unfiltered by the
+    /// workspace forwarder, with the `attention` table (not the event-log outbox)
+    /// as their durable source. Lossy like the workspace broadcast: a resuming
+    /// surface catches up via `attention/list`, so a dropped nudge self-heals.
+    attention_tx: broadcast::Sender<HangarEvent>,
 }
 
 impl Default for EventBroker {
@@ -89,9 +97,11 @@ impl EventBroker {
     #[must_use]
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
             outbox_tx: None,
+            attention_tx,
         }
     }
 
@@ -106,11 +116,13 @@ impl EventBroker {
     #[must_use]
     pub fn with_outbox() -> (Self, mpsc::UnboundedReceiver<ScopedEvent>) {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
         (
             Self {
                 tx,
                 outbox_tx: Some(outbox_tx),
+                attention_tx,
             },
             outbox_rx,
         )
@@ -122,6 +134,7 @@ impl EventBroker {
         EventSink {
             tx: self.tx.clone(),
             outbox_tx: self.outbox_tx.clone(),
+            attention_tx: self.attention_tx.clone(),
         }
     }
 
@@ -132,6 +145,17 @@ impl EventBroker {
     pub fn subscribe(&self) -> broadcast::Receiver<ScopedEvent> {
         self.tx.subscribe()
     }
+
+    /// A fresh receiver onto the FLEET-WIDE attention stream (spec P2). The RPC
+    /// server opens one per `attention/subscribe`; dropping it (connection close)
+    /// deregisters automatically. Unlike [`Self::subscribe`] this carries the bare
+    /// [`HangarEvent`] (attention is not workspace-scoped in the channel — the
+    /// forwarder applies any optional workspace narrowing from the event's own
+    /// `workspace_id` field).
+    #[must_use]
+    pub fn subscribe_attention(&self) -> broadcast::Receiver<HangarEvent> {
+        self.attention_tx.subscribe()
+    }
 }
 
 /// A publishing handle onto the broker, threaded through the daemon's mutation
@@ -140,6 +164,7 @@ impl EventBroker {
 pub struct EventSink {
     tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
+    attention_tx: broadcast::Sender<HangarEvent>,
 }
 
 impl EventSink {
@@ -161,6 +186,19 @@ impl EventSink {
         }
         // Live broadcast (lossy): the per-connection forwarders + inbox aggregator.
         let _ = self.tx.send(scoped);
+    }
+
+    /// Publish an attention `event` on the FLEET-WIDE attention stream (spec P2).
+    ///
+    /// Only `HangarEvent::AttentionRaised` / `AttentionAnswered` belong here. This
+    /// is deliberately separate from [`Self::emit`]: attention is not
+    /// workspace-scoped (no `workspace_id` beside the event, no event-log outbox
+    /// write — the `attention` table is the durable source), so it never hits the
+    /// workspace forwarder or the seq log. Best-effort and non-blocking: with no
+    /// `attention/subscribe` connection the broadcast is dropped silently, and the
+    /// durable row already landed in the store regardless.
+    pub fn emit_attention(&self, event: HangarEvent) {
+        let _ = self.attention_tx.send(event);
     }
 }
 
@@ -272,6 +310,48 @@ mod tests {
             received += 1;
         }
         assert_eq!(received, burst, "the durable channel delivers every event");
+    }
+
+    fn attention_raised(id: &str) -> HangarEvent {
+        HangarEvent::AttentionRaised {
+            attention_id: id.to_string(),
+            session_id: "sess".into(),
+            workspace_id: None,
+            kind: "ask_user_question".into(),
+            degraded: false,
+            created_at: 0,
+        }
+    }
+
+    /// An attention event reaches an `attention/subscribe` receiver but NOT the
+    /// workspace broadcast or the durable outbox — the two streams are isolated
+    /// (attention is fleet-wide + table-durable, not workspace-scoped/log-durable).
+    #[tokio::test]
+    async fn attention_stream_is_isolated_from_the_workspace_stream_and_outbox() {
+        let (broker, mut outbox_rx) = EventBroker::with_outbox();
+        let mut attention = broker.subscribe_attention();
+        let mut workspace = broker.subscribe();
+
+        broker.sink().emit_attention(attention_raised("att-1"));
+
+        // The attention subscriber sees it.
+        let got = attention.recv().await.expect("attention subscriber receives it");
+        assert!(matches!(got, HangarEvent::AttentionRaised { .. }));
+
+        // Neither the workspace broadcast nor the durable outbox does. Emit a
+        // sentinel workspace event so the workspace channels have SOMETHING to
+        // deliver — proving the attention event was absent, not merely pending.
+        broker.sink().emit("ws-a", finished("t1"));
+        let ws = workspace.recv().await.expect("workspace subscriber receives the ws event");
+        assert!(
+            matches!(ws.event, HangarEvent::TaskFinished { .. }),
+            "the first workspace event is the ws one, not the attention one"
+        );
+        let durable = outbox_rx.recv().await.expect("outbox receives the ws event");
+        assert!(
+            matches!(durable.event, HangarEvent::TaskFinished { .. }),
+            "the outbox never carries an attention event"
+        );
     }
 
     /// The encoded frame is a Content-Length envelope around a notification

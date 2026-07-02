@@ -20,11 +20,12 @@ use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow, PresenceState,
-    SkillFile, SkillRow, TaskCardRow,
+    ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow,
+    PresenceState, SkillFile, SkillRow, TaskCardRow,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
+use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
@@ -828,6 +829,50 @@ pub async fn inbox_list(
         })
         .collect();
     Ok((rows, unread))
+}
+
+/// Snapshot the OPEN control-plane attention rows for a scope
+/// (`attention/list` / `attention/subscribe`, spec P2).
+///
+/// Three scopes (matching the store repo):
+/// - `fleet = true` → EVERY open row across every workspace + the no-workspace
+///   host sessions (the converged control centre's host-wide feed);
+///   `workspace_id` is ignored.
+/// - `fleet = false`, `workspace_id = Some(ws)` → that workspace's open rows.
+/// - `fleet = false`, `workspace_id = None` → the open rows owned by NO
+///   workspace (hand-started host sessions).
+///
+/// Rows are oldest-first (the longest-waiting request is the most urgent). The
+/// caller has already resolved any wire workspace id to the real row id.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the list query fails.
+pub async fn attention_list(
+    pool: &SqlitePool,
+    workspace_id: Option<&str>,
+    fleet: bool,
+) -> Result<Vec<AttentionRow>, sqlx::Error> {
+    let rows = if fleet {
+        AttentionRepo::list_fleet(pool).await?
+    } else {
+        AttentionRepo::list_open(pool, workspace_id).await?
+    };
+    Ok(rows.into_iter().map(attention_row_to_wire).collect())
+}
+
+/// Flatten one store `attention` row into its wire render shape.
+fn attention_row_to_wire(row: ainb_hangar_store::repo::attention::AttentionRow) -> AttentionRow {
+    AttentionRow {
+        id: row.id,
+        session_id: row.session_id,
+        cwd: row.cwd,
+        workspace_id: row.workspace_id,
+        kind: row.kind.as_str().to_string(),
+        payload: row.payload,
+        degraded: row.degraded,
+        created_at: row.created_at,
+    }
 }
 
 /// Snapshot a workspace's token/cost usage rollup (`hangar/usage_rollup`,

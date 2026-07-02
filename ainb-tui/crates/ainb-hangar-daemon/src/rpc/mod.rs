@@ -247,6 +247,10 @@ async fn serve_conn(
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The connection's FLEET-WIDE attention subscription (spec P2), independent
+    // of the workspace forwarder: a connection may hold both (workspace events +
+    // attention nudges) or either. A re-subscribe replaces it.
+    let mut attention_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
     // this per-connection task (and its fd) forever. The RPC is request/response
@@ -310,6 +314,23 @@ async fn serve_conn(
                             replay_events(&pool, &ws, since, &out_tx).await;
                         }
                     }
+                } else if acked && req.method == methods::ATTENTION_SUBSCRIBE {
+                    // Register the FLEET-WIDE attention forwarder. The ack above
+                    // already carried the current open snapshot; from here the
+                    // connection receives live AttentionRaised / AttentionAnswered
+                    // deltas. Unlike the workspace forwarder this is NOT filtered
+                    // by workspace — it carries the no-workspace host sessions —
+                    // with an OPTIONAL narrowing when the client passed a
+                    // workspace_id.
+                    if let Some(old) = attention_forwarder.take() {
+                        old.abort();
+                    }
+                    let filter = attention_subscribe_filter(req);
+                    attention_forwarder = Some(spawn_attention_forwarder(
+                        broker.subscribe_attention(),
+                        filter,
+                        out_tx.clone(),
+                    ));
                 }
             }
         }
@@ -318,6 +339,9 @@ async fn serve_conn(
     .await;
 
     if let Some(f) = forwarder {
+        f.abort();
+    }
+    if let Some(f) = attention_forwarder {
         f.abort();
     }
     drop(out_tx);
@@ -355,6 +379,63 @@ fn spawn_event_forwarder(
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::debug!(missed, "hangar event stream lagged; events dropped");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Extract the optional workspace narrowing from an `attention/subscribe`
+/// request. Absent or malformed params → `None` (a fleet-wide subscription).
+fn attention_subscribe_filter(req: &RpcRequest) -> Option<String> {
+    serde_json::from_value::<ainb_hangar_proto::snapshots::AttentionSubscribeParams>(
+        req.params.clone(),
+    )
+    .ok()
+    .and_then(|p| p.workspace_id)
+}
+
+/// Spawn the per-connection FLEET-WIDE attention forwarder (spec P2): drain the
+/// broker's dedicated attention stream, frame each `AttentionRaised` /
+/// `AttentionAnswered` as a `hangar/event` notification, and queue it on the
+/// connection's writer.
+///
+/// Unlike [`spawn_event_forwarder`] this is NOT filtered by workspace — attention
+/// is host-wide, so it carries the no-workspace host sessions the workspace
+/// forwarder drops. An OPTIONAL `filter` narrows it to one workspace: only
+/// `AttentionRaised` carries a `workspace_id`, so the filter applies there;
+/// `AttentionAnswered` (a bare "row X answered" nudge) is always forwarded — a
+/// surface that does not hold the row simply ignores it. Ends when the broker
+/// closes or the writer is gone; a lagged receiver drops the missed nudges and
+/// keeps streaming (the next `attention/list` pull reconciles authoritatively).
+fn spawn_attention_forwarder(
+    mut rx: broadcast::Receiver<ainb_hangar_proto::events::HangarEvent>,
+    filter: Option<String>,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    use ainb_hangar_proto::events::HangarEvent;
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    // Optional workspace narrowing: applies only to the
+                    // workspace-bearing AttentionRaised. A `None`-workspace (host)
+                    // event never matches a filter, so a narrowed subscription
+                    // correctly excludes host sessions.
+                    if let Some(ws) = &filter {
+                        if let HangarEvent::AttentionRaised { workspace_id, .. } = &event {
+                            if workspace_id.as_deref() != Some(ws.as_str()) {
+                                continue;
+                            }
+                        }
+                    }
+                    if out.send(encode_event_frame(&event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::debug!(missed, "attention stream lagged; nudges dropped");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -589,6 +670,11 @@ async fn handle(
         methods::HANGAR_PR_STATUS_REFRESH => handle_pr_status_refresh(pool, req, events).await,
         methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
         methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
+        methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
+        // `attention/subscribe` acks with the current OPEN snapshot; the live
+        // fleet-wide forwarder is the stream side (see `serve_conn`).
+        methods::ATTENTION_SUBSCRIBE => handle_attention_subscribe(pool, req).await,
+        methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -1765,6 +1851,80 @@ async fn handle_inbox_mark_read(
         .await
         .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::InboxMarkReadResult { marked, unread })
+}
+
+/// Dispatch `attention/list` (spec P2): snapshot the OPEN attention rows for a
+/// scope. `fleet = true` is the host-wide feed; `fleet = false` selects the
+/// workspace list (`workspace_id = Some(ws)`) or the no-workspace host rows
+/// (`workspace_id = None`). A read, so an unknown workspace yields an empty list
+/// (no `INVALID_PARAMS`, mirroring [`handle_inbox_list`]).
+async fn handle_attention_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AttentionListParams =
+        parse_params(req, "{ workspace_id?, fleet }")?;
+    let attention = attention_snapshot(pool, params.fleet, params.workspace_id.as_deref()).await?;
+    to_value(&ainb_hangar_proto::snapshots::AttentionListResult { attention })
+}
+
+/// Dispatch `attention/subscribe` (spec P2): ack with the current OPEN snapshot.
+/// `workspace_id = None` (the default) is the FLEET-WIDE snapshot every session
+/// raises into; `Some(ws)` narrows to one workspace. The live delta stream is
+/// registered in [`serve_conn`] after this ack.
+async fn handle_attention_subscribe(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AttentionSubscribeParams =
+        parse_params(req, "{ workspace_id? }")?;
+    // No workspace filter → the fleet-wide snapshot (every workspace + host);
+    // a narrowing workspace → that workspace's open rows.
+    let fleet = params.workspace_id.is_none();
+    let attention = attention_snapshot(pool, fleet, params.workspace_id.as_deref()).await?;
+    to_value(&ainb_hangar_proto::snapshots::AttentionSubscribeResult { attention })
+}
+
+/// Shared open-attention snapshot for `attention/list` + `attention/subscribe`.
+///
+/// Resolves an optional wire workspace id to the real row id (an unknown one
+/// yields an empty list, a read). `fleet` overrides the workspace scope with the
+/// host-wide feed.
+async fn attention_snapshot(
+    pool: &SqlitePool,
+    fleet: bool,
+    workspace_wire: Option<&str>,
+) -> Result<Vec<ainb_hangar_proto::events::AttentionRow>, RpcError> {
+    if fleet {
+        return snapshots::attention_list(pool, None, true).await.map_err(|e| store_err(&e));
+    }
+    match workspace_wire {
+        Some(wire) => match resolve_workspace_id(pool, wire).await.map_err(|e| store_err(&e))? {
+            Some(real) => {
+                snapshots::attention_list(pool, Some(&real), false).await.map_err(|e| store_err(&e))
+            }
+            // Unknown workspace → empty list (a read, never an error).
+            None => Ok(Vec::new()),
+        },
+        // No workspace → the no-workspace host rows.
+        None => snapshots::attention_list(pool, None, false).await.map_err(|e| store_err(&e)),
+    }
+}
+
+/// Dispatch `attention/answer` (spec P2): route one answer through the answer
+/// router — first-answer-wins claim + C1 misroute guard + verified last-mile
+/// send — and return the tagged outcome. A store fault maps to an internal error.
+async fn handle_attention_answer(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AnswerParams =
+        parse_params(req, "{ attention_id, answer, answered_by, is_answer? }")?;
+    let result = crate::answer::answer(pool, events, &params, SystemClock.now_ms())
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&result)
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).

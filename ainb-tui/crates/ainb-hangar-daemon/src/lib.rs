@@ -15,6 +15,10 @@ use crate::run_loop::{DaemonConfig, run};
 
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
+/// The answer router (spec P2): deliver one attention answer from any surface,
+/// exactly once (first-answer-wins), into the right session (C1 misroute guard),
+/// via the one verified send path. Backs the `attention/answer` RPC.
+pub mod answer;
 /// [`beads_adapter::BdClient`] is the sync layer's gateway to Stevie's existing
 /// issue tracker: `create` / `close` / `list` / `show`, each passing `BEADS_DIR`
 /// explicitly and serialised by an O_EXCL pidfile lock.

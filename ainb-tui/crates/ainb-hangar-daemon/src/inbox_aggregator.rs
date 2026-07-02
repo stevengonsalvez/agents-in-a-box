@@ -123,6 +123,11 @@ pub fn entry_for_event(event: &HangarEvent) -> Option<InboxFields> {
         | HangarEvent::SkillUpdated { .. }
         | HangarEvent::AutopilotUpdated(_)
         | HangarEvent::AutopilotRunChanged { .. }
+        // Attention events (spec P2) have their own durable `attention` table and
+        // their own control-centre surfaces; they never land in the workspace
+        // notification digest.
+        | HangarEvent::AttentionRaised { .. }
+        | HangarEvent::AttentionAnswered { .. }
         | HangarEvent::WorkspaceChanged { .. } => None,
     }
 }
