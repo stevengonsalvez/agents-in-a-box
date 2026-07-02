@@ -19,6 +19,11 @@ use crate::run_loop::{DaemonConfig, run};
 /// exactly once (first-answer-wins), into the right session (C1 misroute guard),
 /// via the one verified send path. Backs the `attention/answer` RPC.
 pub mod answer;
+/// The attention ingest producer (spec P2, D10): the daemon's own tail of the
+/// shared hook `events.jsonl` into the `attention` table — classifies every
+/// qualifying session event and raises an answerable row + an `AttentionRaised`
+/// nudge. The producer half of the answerable-inbox pipeline.
+pub mod attention_ingest;
 /// [`beads_adapter::BdClient`] is the sync layer's gateway to Stevie's existing
 /// issue tracker: `create` / `close` / `list` / `show`, each passing `BEADS_DIR`
 /// explicitly and serialised by an O_EXCL pidfile lock.
@@ -296,6 +301,29 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // The handle is dropped (process exit tears the task down, mirroring the
     // sweepers); a failed write is logged inside the task, never fatal.
     let _inbox = crate::inbox_aggregator::spawn(store.pool().clone(), broker.subscribe());
+
+    // Spec P2 (D10): spawn the attention ingest producer — the daemon's own tail
+    // of the shared hook `events.jsonl` (`~/.agents-in-a-box/events.jsonl`, the
+    // SAME file notifyd reads) into the `attention` table. It classifies every
+    // qualifying session event (ASK > ERR > IDLE > WAIT) and raises an answerable
+    // row + a fleet-wide `AttentionRaised` nudge. Its byte cursor lives under the
+    // hangar home so the T2 store boundary holds (no cross-read of notifyd's
+    // rusqlite). The handle is dropped (process exit tears the task down,
+    // mirroring the inbox aggregator); a failed ingest is logged, never fatal.
+    // The event-log path is home-based (matching the hook appender) independent
+    // of `$AINB_HANGAR_HOME`; the cursor rides the resolved hangar dir.
+    if let Some(events_jsonl) =
+        dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("events.jsonl"))
+    {
+        let cursor = dir.join("hangar").join("attention_ingest.offset");
+        let _attention_ingest = crate::attention_ingest::AttentionIngest::new(
+            store.pool().clone(),
+            broker.sink(),
+            events_jsonl,
+            cursor,
+        )
+        .spawn();
+    }
 
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the
