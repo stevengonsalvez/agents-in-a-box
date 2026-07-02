@@ -50,7 +50,9 @@ use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 use sqlx::SqlitePool;
 
-use crate::events::{EventBroker, EventSink, ScopedEvent, encode_event_frame};
+use crate::events::{
+    EventBroker, EventSink, ScopedEvent, encode_event_frame, encode_event_frame_payload,
+};
 use crate::health_stats::HealthStats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -290,11 +292,23 @@ async fn serve_conn(
                         if let Some(old) = forwarder.take() {
                             old.abort();
                         }
+                        // Register the LIVE forwarder FIRST so no event emitted
+                        // from now on is missed, THEN replay the durable backlog.
+                        // This ordering guarantees no gap — at worst a boundary
+                        // event delivered twice (live + replayed), which the
+                        // plugin reconciles via the next snapshot pull.
                         forwarder = Some(spawn_event_forwarder(
                             broker.subscribe(),
-                            ws,
+                            ws.clone(),
                             out_tx.clone(),
                         ));
+                        // T1 resume: a client that carried a `since_seq` catches
+                        // up on every durable event after that cursor before it
+                        // goes live. Best-effort (a read fault is logged, the
+                        // connection stays live).
+                        if let Some(since) = subscribe_since_seq(req) {
+                            replay_events(&pool, &ws, since, &out_tx).await;
+                        }
                     }
                 }
             }
@@ -348,6 +362,66 @@ fn spawn_event_forwarder(
     })
 }
 
+/// Max events replayed in one subscribe catch-up batch. A resume cursor far in
+/// the past still bounds the burst; a client with more than this backlog
+/// re-subscribes from the last delivered cursor to drain the remainder.
+const REPLAY_BATCH: i64 = 1024;
+
+/// Extract the optional `since_seq` resume cursor from a `workspace/subscribe`
+/// request. Absent or malformed params → `None` (a plain subscribe with no
+/// backlog, the pre-cursor behaviour).
+fn subscribe_since_seq(req: &RpcRequest) -> Option<i64> {
+    serde_json::from_value::<ainb_hangar_proto::snapshots::WorkspaceSubscribeParams>(
+        req.params.clone(),
+    )
+    .ok()
+    .and_then(|p| p.since_seq)
+}
+
+/// Replay a workspace's durable events after `since_seq` onto the connection's
+/// writer as `hangar/event` notifications (T1 catch-up).
+///
+/// Each stored payload is re-framed verbatim via [`encode_event_frame_payload`],
+/// so a replayed frame is byte-identical to the live one it mirrors — a resuming
+/// subscriber cannot tell catch-up from live. Best-effort: a read fault is
+/// logged and the connection stays live; a full / gone writer ends the push
+/// early (the forwarder keeps the live stream).
+async fn replay_events(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    since_seq: i64,
+    out: &mpsc::Sender<Vec<u8>>,
+) {
+    let rows = match ainb_hangar_store::repo::event_log::EventOutboxRepo::replay(
+        pool,
+        workspace_id,
+        since_seq,
+        REPLAY_BATCH,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "event replay read failed");
+            return;
+        }
+    };
+    for row in rows {
+        // The stored payload IS the serialised `HangarEvent` that was the
+        // notification's `params`; parse-then-frame it verbatim.
+        let params: serde_json::Value = match serde_json::from_str(&row.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, seq = row.seq, "skipping malformed replay payload");
+                continue;
+            }
+        };
+        if out.send(encode_event_frame_payload(&params)).await.is_err() {
+            break; // writer gone — the live forwarder owns the rest
+        }
+    }
+}
+
 /// Dispatch one decoded request to its handler, returning the response envelope.
 ///
 /// Pure of socket IO (the caller owns the stream); only touches the store and —
@@ -382,14 +456,24 @@ async fn handle(
 ) -> Result<serde_json::Value, RpcError> {
     match req.method.as_str() {
         methods::PING => Ok(serde_json::json!({})),
-        // `workspace/subscribe` acks with an (empty) snapshot envelope; the
-        // event push side is the stream client's concern. The plugin only needs
-        // a non-error ack to reach `Connected`, then pulls the screen snapshots.
-        // We still resolve the wire id so an unknown workspace surfaces no error
-        // (the ack is unconditional; the screens pull real rows next).
+        // `workspace/subscribe` acks with the workspace's REAL snapshot: the
+        // current head of its durable event log (T1), so a client records where
+        // to resume from. The live push + backlog replay are the stream side
+        // (see `serve_conn`); the plugin only needs a non-error ack to reach
+        // `Connected`, then pulls the screen snapshots. The ack is unconditional —
+        // an unknown workspace has a zero cursor, never an error.
         methods::WORKSPACE_SUBSCRIBE => {
-            let _ = resolve(pool, req).await?;
-            Ok(serde_json::json!({ "snapshot": {} }))
+            let cursor = match resolve(pool, req).await? {
+                Some(ws) => {
+                    ainb_hangar_store::repo::event_log::EventOutboxRepo::head_seq(pool, &ws)
+                        .await
+                        .map_err(|e| store_err(&e))?
+                }
+                None => 0,
+            };
+            to_value(&ainb_hangar_proto::snapshots::SubscribeResult {
+                snapshot: ainb_hangar_proto::snapshots::SubscribeSnapshot { cursor },
+            })
         }
         methods::HANGAR_ISSUES_LIST => {
             let issues = match resolve(pool, req).await? {
