@@ -17,6 +17,7 @@ pub mod agent_picker;
 pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
+pub mod boards;
 pub mod command_palette;
 pub mod context_menu;
 pub mod control_center;

@@ -32,6 +32,10 @@ pub use screen::issue_list::{
     reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
     IssueListReduction, IssueListState,
 };
+pub use screen::boards::{
+    reduce_boards, render_boards, BoardView, BoardsEvent, BoardsIntent, BoardsReduction,
+    BoardsState, CardView, ColumnView,
+};
 pub use screen::kanban::{
     reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,
     KanbanState,
