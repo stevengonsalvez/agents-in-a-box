@@ -1623,6 +1623,13 @@ impl CliCommand for WebCommand {
                             "Viewer-only: disable the live terminal write surface \
                              (the WS terminal is refused with 403)",
                         ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb web                                       Serve on 127.0.0.1:8420 (loopback)\n  \
+                     ainb web --listen 0.0.0.0:8420 --token s3cr3t  Expose to the LAN behind a bearer token\n  \
+                     ainb web --read-only                           Viewer-only (live terminal disabled)\n  \
+                     ainb web --insecure-bind --read-only           Non-loopback viewer with no token (DANGEROUS)",
                 ),
         )
     }
