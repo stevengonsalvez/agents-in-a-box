@@ -640,7 +640,7 @@ mod tests {
     fn needs_detail_tracks_the_unloaded_selection() {
         let mut s = ProfilesState::default();
         assert_eq!(s.needs_detail(), None, "empty roster needs nothing");
-        s.set_roster(roster()); // selected = author, no detail
+        s.set_roster(roster3()); // selected = author, no detail
         assert_eq!(s.needs_detail(), Some("author".to_string()));
         s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
         assert_eq!(s.needs_detail(), None, "loaded selection needs nothing");
