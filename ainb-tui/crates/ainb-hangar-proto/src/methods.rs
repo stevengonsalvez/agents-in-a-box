@@ -494,6 +494,33 @@ pub const ATTENTION_SUBSCRIBE: &str = "attention/subscribe";
 /// path. Mutating: exactly one answer is ever delivered per row.
 pub const ATTENTION_ANSWER: &str = "attention/answer";
 
+/// `profile/list` — list the indexed agent profiles (spec P5, D14-D16).
+///
+/// Params: `{}`. Result: [`crate::snapshots::ProfileListResult`] — every indexed
+/// profile (`slug`, `tier`, `mtime`), slug-ordered. A read over the daemon's
+/// fs-watch-maintained index of the on-disk masters
+/// (`~/.agents-in-a-box/profiles/<slug>.md`). Host-scoped, not workspace-partitioned
+/// (a profile drives runs in any workspace).
+pub const PROFILE_LIST: &str = "profile/list";
+
+/// `profile/get` — fetch one profile master + its two compile previews (spec P5).
+///
+/// Params: [`crate::snapshots::ProfileGetParams`] (`{ slug }`). Result:
+/// [`crate::snapshots::ProfileGetResult`] — the parsed master fields plus the
+/// lossless Claude `.md` preview and the lossy Codex fragment/prompt preview with
+/// its dropped-field warnings (D14). An unknown slug yields
+/// [`crate::snapshots::ProfileGetResult::not_found`], not an error.
+pub const PROFILE_GET: &str = "profile/get";
+
+/// `profile/upsert` — create or replace a profile master on disk (spec P5).
+///
+/// Params: [`crate::snapshots::ProfileUpsertParams`] (`{ slug, description, tier,
+/// tools, color, body }`). Result: [`crate::snapshots::ProfileUpsertResult`]. The
+/// daemon writes the canonical master to `~/.agents-in-a-box/profiles/<slug>.md` and
+/// refreshes the DB index row; the fs-watch reconciler would also catch the write,
+/// so the RPC and the watch converge on the same index. Mutating.
+pub const PROFILE_UPSERT: &str = "profile/upsert";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -553,6 +580,9 @@ pub const ALL_METHODS: &[&str] = &[
     ATTENTION_LIST,
     ATTENTION_SUBSCRIBE,
     ATTENTION_ANSWER,
+    PROFILE_LIST,
+    PROFILE_GET,
+    PROFILE_UPSERT,
     AUTH_HELLO,
     PING,
 ];
@@ -595,6 +625,14 @@ mod tests {
     fn attention_methods_namespaced() {
         for m in [ATTENTION_LIST, ATTENTION_SUBSCRIBE, ATTENTION_ANSWER] {
             assert!(m.starts_with("attention/"), "{m:?} not under attention/");
+        }
+    }
+
+    /// The P5 agent-profile methods live under the `profile/` namespace.
+    #[test]
+    fn profile_methods_namespaced() {
+        for m in [PROFILE_LIST, PROFILE_GET, PROFILE_UPSERT] {
+            assert!(m.starts_with("profile/"), "{m:?} not under profile/");
         }
     }
 
@@ -692,6 +730,9 @@ mod tests {
             ATTENTION_LIST,
             ATTENTION_SUBSCRIBE,
             ATTENTION_ANSWER,
+            PROFILE_LIST,
+            PROFILE_GET,
+            PROFILE_UPSERT,
             AUTH_HELLO,
             PING,
         ];
