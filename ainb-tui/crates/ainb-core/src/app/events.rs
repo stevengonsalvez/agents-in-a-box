@@ -362,6 +362,17 @@ pub enum AppEvent {
     SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
+    // Source-preview picker (preview-first add flow): multi-select the
+    // units of a fetched source + target tools, then import.
+    SkillManagerPreviewUp,
+    SkillManagerPreviewDown,
+    SkillManagerPreviewToggle,      // Space — toggle the cursor unit
+    SkillManagerPreviewAll,         // a — select every unit
+    SkillManagerPreviewNone,        // n — clear the selection
+    SkillManagerPreviewTool(usize), // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
+    SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
+    SkillManagerPreviewClose,       // Esc — discard, nothing persisted
+    SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
     GoToRecovery,               // Navigate to session recovery view
     GoToInbox,                  // Navigate to ainb-hooks notification inbox
     GoToDaemons,                // Navigate to the daemon runtime-health view
@@ -778,6 +789,32 @@ impl EventHandler {
             && x < rect.x.saturating_add(rect.width)
             && y >= rect.y
             && y < rect.y.saturating_add(rect.height)
+    }
+
+    /// Fetch `uri` into the cache and open the source-preview picker.
+    /// Blocking (like the pre-existing add-source path — same clone cost);
+    /// nothing is persisted until the picker's import confirms.
+    fn open_source_preview(state: &mut AppState, uri: &str) {
+        let ainb_home = ainb_skill_core::default_ainb_home();
+        match ainb_cli::source::preview_source(&ainb_home, uri) {
+            Ok(preview) if preview.units.is_empty() => {
+                state.add_warning_notification(format!(
+                    "{uri}: fetched OK but no skills/agents/commands found"
+                ));
+            }
+            Ok(preview) => {
+                tracing::info!(
+                    uri = %uri, units = preview.units.len(),
+                    "SkillManager: source preview open"
+                );
+                state.skill_manager_state.preview = Some(
+                    crate::components::skill_manager_screen::SourcePreviewViewState::new(preview),
+                );
+            }
+            Err(e) => {
+                state.add_error_notification(format!("preview failed: {e:#}"));
+            }
+        }
     }
 
     /// Map a slash-command name (leading `/` already stripped by the
@@ -1589,6 +1626,26 @@ impl EventHandler {
                 };
             }
 
+            // Source-preview picker: multi-select units + target tools.
+            // Intercepts before browse/library/banner — it's the active
+            // modal whenever open.
+            if state.skill_manager_state.preview.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerPreviewUp),
+                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerPreviewDown),
+                    KeyCode::Char(' ') => Some(AppEvent::SkillManagerPreviewToggle),
+                    KeyCode::Char('a') => Some(AppEvent::SkillManagerPreviewAll),
+                    KeyCode::Char('n') => Some(AppEvent::SkillManagerPreviewNone),
+                    KeyCode::Char('1') => Some(AppEvent::SkillManagerPreviewTool(0)),
+                    KeyCode::Char('2') => Some(AppEvent::SkillManagerPreviewTool(1)),
+                    KeyCode::Char('3') => Some(AppEvent::SkillManagerPreviewTool(2)),
+                    KeyCode::Char('4') => Some(AppEvent::SkillManagerPreviewTool(3)),
+                    KeyCode::Enter => Some(AppEvent::SkillManagerPreviewConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerPreviewClose),
+                    _ => None,
+                };
+            }
+
             // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
             //   * Query mode — every char goes into the query buffer
             //     (so `/`, `:`, spaces all reach it); Enter searches.
@@ -1698,6 +1755,11 @@ impl EventHandler {
                     Some(AppEvent::SkillManagerSourceSelectNext)
                 }
                 KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
+                // `[p]` on a source row — reopen the import picker for it
+                // (preview its units, select, install more).
+                KeyCode::Char('p') if sources_focused => {
+                    Some(AppEvent::SkillManagerPreviewSource)
+                }
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -4927,24 +4989,14 @@ impl EventHandler {
                         let uri = crate::components::skill_manager_screen::normalize_source_input(
                             &input.buffer,
                         );
-                        tracing::info!(uri = %uri, "SkillManager: add-source submit");
+                        tracing::info!(uri = %uri, "SkillManager: add-source submit (preview-first)");
                         if uri.is_empty() {
                             return;
                         }
-                        let ainb_home = ainb_skill_core::default_ainb_home();
-                        let cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
-                            uri: uri.clone(),
-                            name: None,
-                            kind: None,
-                        });
-                        let (ok, msg) = run_source_cli(&ainb_home, cmd);
-                        tracing::info!(ok, msg = %msg, "SkillManager: add-source result");
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if ok {
-                            state.add_success_notification(format!("source added: {msg}"));
-                        } else {
-                            state.add_error_notification(format!("add source failed: {msg}"));
-                        }
+                        // Preview-first: fetch + list units WITHOUT persisting;
+                        // the picker that opens decides what (if anything) is
+                        // imported. Cancelling leaves no manifest trace.
+                        Self::open_source_preview(state, &uri);
                     }
                 }
             }
@@ -5219,6 +5271,99 @@ impl EventHandler {
             }
             AppEvent::SkillManagerBrowseClose => {
                 state.skill_manager_state.browse = None;
+            }
+            AppEvent::SkillManagerPreviewUp => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(-1);
+                }
+            }
+            AppEvent::SkillManagerPreviewDown => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(1);
+                }
+            }
+            AppEvent::SkillManagerPreviewToggle => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_current();
+                }
+            }
+            AppEvent::SkillManagerPreviewAll => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(true);
+                }
+            }
+            AppEvent::SkillManagerPreviewNone => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(false);
+                }
+            }
+            AppEvent::SkillManagerPreviewTool(i) => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_tool(i);
+                }
+            }
+            AppEvent::SkillManagerPreviewClose => {
+                // Discard — preview never persisted anything.
+                state.skill_manager_state.preview = None;
+            }
+            AppEvent::SkillManagerPreviewSource => {
+                // `[p]` on a source row — reopen the picker for that source.
+                let uri = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .map(|s| s.uri.clone());
+                if let Some(uri) = uri {
+                    Self::open_source_preview(state, &uri);
+                }
+            }
+            AppEvent::SkillManagerPreviewConfirm => {
+                let Some(view) = state.skill_manager_state.preview.clone() else {
+                    return;
+                };
+                let paths = view.checked_paths();
+                if paths.is_empty() {
+                    state.add_warning_notification(
+                        "Nothing selected — Space to pick, a for all".to_string(),
+                    );
+                    return;
+                }
+                let Some(targets) = view.targets_csv() else {
+                    state.add_warning_notification(
+                        "No target tool — 1/2/3 toggle claude/codex/copilot".to_string(),
+                    );
+                    return;
+                };
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                match ainb_cli::source::import_selected(
+                    &ainb_home,
+                    &view.preview,
+                    &paths,
+                    &targets,
+                    &mut buf,
+                ) {
+                    Ok((installed, failed)) => {
+                        state.skill_manager_state.preview = None;
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if failed == 0 {
+                            state.add_success_notification(format!(
+                                "imported {installed} unit(s) → {targets}"
+                            ));
+                        } else {
+                            state.add_warning_notification(format!(
+                                "imported {installed}, {failed} failed → {targets} (see logs)"
+                            ));
+                            tracing::warn!(
+                                output = %String::from_utf8_lossy(&buf),
+                                "SkillManager: import finished with failures"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("import failed: {e:#}"));
+                    }
+                }
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");

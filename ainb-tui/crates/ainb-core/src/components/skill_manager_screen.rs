@@ -172,6 +172,10 @@ pub struct SkillsScreenData {
     /// ephemeral search results (NO SQLite — discarded on close). Sourced
     /// from a `CatalogBackend`, not the manifest (bead ai-a20).
     pub browse: Option<BrowseViewState>,
+    /// Source-preview picker: `Some` after an add-source fetch (or `[p]`
+    /// on an existing source row). Multi-select units + target tools;
+    /// nothing is persisted until Enter confirms the import.
+    pub preview: Option<SourcePreviewViewState>,
     /// Width (terminal columns) of the left Sources panel. Resizable by
     /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
     /// `ui_preferences.skill_manager_sources_width` on resize-finish and
@@ -218,6 +222,7 @@ impl Default for SkillsScreenData {
             search: None,
             library: None,
             browse: None,
+            preview: None,
             sources_width: DEFAULT_SOURCES_WIDTH,
             focused_pane: FocusedSkillPane::default(),
             source_selected: 0,
@@ -374,6 +379,91 @@ impl BrowseViewState {
         self.status = Some(format!(
             "⚠ runs a shell command — Enter again to run: {cmd}"
         ));
+    }
+}
+
+/// Target tools offered as checkboxes in the source-preview picker, in
+/// key order (`1`/`2`/`3` toggle; `4` = all). Other adapters stay
+/// CLI-only (`ainb skill install --targets`).
+pub const PREVIEW_TOOLS: [&str; 3] = ["claude", "codex", "copilot"];
+
+/// Source-preview picker state: the fetched-but-not-persisted source, a
+/// checkbox per discovered unit, and the target-tool checkboxes.
+#[derive(Debug, Clone)]
+pub struct SourcePreviewViewState {
+    pub preview: ainb_cli::source::SourcePreview,
+    /// One checkbox per `preview.units` entry. Opt-in: all false on open.
+    pub checked: Vec<bool>,
+    pub cursor: usize,
+    /// claude / codex / copilot (see [`PREVIEW_TOOLS`]). Claude on by
+    /// default — the primary tool this manager fronts.
+    pub tools: [bool; 3],
+}
+
+impl SourcePreviewViewState {
+    pub fn new(preview: ainb_cli::source::SourcePreview) -> Self {
+        let n = preview.units.len();
+        Self {
+            preview,
+            checked: vec![false; n],
+            cursor: 0,
+            tools: [true, false, false],
+        }
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        let len = self.preview.units.len();
+        if len == 0 {
+            return;
+        }
+        let max = (len - 1) as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
+    }
+
+    pub fn toggle_current(&mut self) {
+        if let Some(c) = self.checked.get_mut(self.cursor) {
+            *c = !*c;
+        }
+    }
+
+    pub fn set_all(&mut self, on: bool) {
+        self.checked.iter_mut().for_each(|c| *c = on);
+    }
+
+    /// Toggle tool checkbox `i` (0..3). `3` = turn all three on.
+    pub fn toggle_tool(&mut self, i: usize) {
+        if i == 3 {
+            self.tools = [true, true, true];
+        } else if let Some(t) = self.tools.get_mut(i) {
+            *t = !*t;
+        }
+    }
+
+    pub fn checked_count(&self) -> usize {
+        self.checked.iter().filter(|c| **c).count()
+    }
+
+    /// Unit paths (relative to the source root) currently checked.
+    pub fn checked_paths(&self) -> Vec<String> {
+        self.preview
+            .units
+            .iter()
+            .zip(&self.checked)
+            .filter(|(_, c)| **c)
+            .map(|(u, _)| u.path.clone())
+            .collect()
+    }
+
+    /// Comma-separated targets for `import_selected`; `None` when no
+    /// tool is checked.
+    pub fn targets_csv(&self) -> Option<String> {
+        let picked: Vec<&str> = PREVIEW_TOOLS
+            .iter()
+            .zip(&self.tools)
+            .filter(|(_, on)| **on)
+            .map(|(t, _)| *t)
+            .collect();
+        if picked.is_empty() { None } else { Some(picked.join(",")) }
     }
 }
 
@@ -623,6 +713,12 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         render_browse_view(frame, area, browse);
     }
 
+    // Source-preview picker — drawn above the panels + banner (active
+    // modal after an add-source fetch or `[p]` on a source row).
+    if let Some(preview) = &data.preview {
+        render_source_preview(frame, area, preview);
+    }
+
     // Input prompt overlay (add-source / search) — drawn on top of
     // everything, including the banner, since it's the active modal.
     if let Some(input) = &data.input {
@@ -728,6 +824,157 @@ fn render_library_view(frame: &mut Frame, area: Rect, library: &LibraryViewState
 /// below. In Query mode the input is the active focus (type → Enter
 /// searches); in Results mode the list is focused (arrows → Enter
 /// installs the selected hit).
+/// Source-preview picker: left = unit list with checkboxes, right =
+/// frontmatter insight for the cursor row, bottom = target-tool
+/// checkboxes + key hints.
+fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewViewState) {
+    let width = area.width.saturating_sub(4).clamp(60, 130);
+    let height = area.height.saturating_sub(2).clamp(14, 40);
+    let rect = centered_rect(area, width, height);
+    frame.render_widget(Clear, rect);
+
+    let p = &view.preview;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            format!(
+                " Import from {} — {} unit(s), {} selected ",
+                p.stored_uri,
+                p.units.len(),
+                view.checked_count()
+            ),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),    // unit list | detail
+            Constraint::Length(1), // tool checkboxes
+            Constraint::Length(1), // key hints
+        ])
+        .split(inner);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(rows[0]);
+
+    // ── Left: scrolling unit list with checkboxes.
+    let visible = cols[0].height as usize;
+    let top = view.cursor.saturating_sub(visible.saturating_sub(1));
+    let mut list_lines: Vec<Line> = Vec::new();
+    for (i, unit) in p.units.iter().enumerate().skip(top).take(visible) {
+        let on_cursor = i == view.cursor;
+        let checked = view.checked.get(i).copied().unwrap_or(false);
+        let box_glyph = if checked { "[x] " } else { "[ ] " };
+        let marker = if on_cursor { "\u{25b6} " } else { "  " };
+        let name_style = if on_cursor {
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+        } else if checked {
+            Style::default().fg(SOFT_WHITE)
+        } else {
+            Style::default().fg(MUTED_GRAY)
+        };
+        list_lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
+            Span::styled(
+                box_glyph,
+                Style::default().fg(if checked { SELECTION_GREEN } else { MUTED_GRAY }),
+            ),
+            Span::styled(format!("{:<8}", unit.kind), Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(unit.name.clone(), name_style),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(list_lines), cols[0]);
+
+    // ── Right: frontmatter insight for the cursor row.
+    let mut detail: Vec<Line> = Vec::new();
+    if let Some(unit) = p.units.get(view.cursor) {
+        detail.push(Line::from(vec![
+            Span::styled("name  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                unit.name.clone(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        detail.push(Line::from(vec![
+            Span::styled("kind  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(unit.kind.clone(), Style::default().fg(CORNFLOWER_BLUE)),
+        ]));
+        detail.push(Line::from(vec![
+            Span::styled("path  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(unit.path.clone(), Style::default().fg(MUTED_GRAY)),
+        ]));
+        detail.push(Line::from(""));
+        detail.push(Line::from(Span::styled(
+            unit.description.clone().unwrap_or_else(|| "(no description)".to_string()),
+            Style::default().fg(SOFT_WHITE),
+        )));
+        if !unit.tags.is_empty() {
+            detail.push(Line::from(""));
+            detail.push(Line::from(Span::styled(
+                format!("tags: {}", unit.tags.join(", ")),
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+        if !unit.requires.is_empty() {
+            detail.push(Line::from(Span::styled(
+                format!("requires: {}", unit.requires.join(", ")),
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(detail).wrap(ratatui::widgets::Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(MUTED_GRAY)),
+        ),
+        cols[1],
+    );
+
+    // ── Tool checkboxes.
+    let mut tool_spans: Vec<Span> = vec![Span::styled(
+        " Install to  ",
+        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+    )];
+    for (i, (tool, on)) in PREVIEW_TOOLS.iter().zip(&view.tools).enumerate() {
+        tool_spans.push(Span::styled(
+            format!("{} ", i + 1),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        tool_spans.push(Span::styled(
+            format!("[{}] {tool}   ", if *on { "x" } else { " " }),
+            Style::default().fg(if *on { SELECTION_GREEN } else { MUTED_GRAY }),
+        ));
+    }
+    tool_spans.push(Span::styled("4 ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    tool_spans.push(Span::styled("all", Style::default().fg(MUTED_GRAY)));
+    frame.render_widget(Paragraph::new(Line::from(tool_spans)), rows[1]);
+
+    // ── Key hints.
+    let hints = Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", Style::default().fg(GOLD)),
+        Span::styled(" move  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Space", Style::default().fg(GOLD)),
+        Span::styled(" toggle  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("a", Style::default().fg(GOLD)),
+        Span::styled(" all  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("n", Style::default().fg(GOLD)),
+        Span::styled(" none  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Enter", Style::default().fg(GOLD)),
+        Span::styled(" import  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Esc", Style::default().fg(GOLD)),
+        Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
+    ]);
+    frame.render_widget(Paragraph::new(hints), rows[2]);
+}
+
 fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
     let width = area.width.saturating_sub(6).clamp(50, 110);
     let list_lines = (browse.results.len() as u16).max(1);
@@ -2156,6 +2403,68 @@ mod tests {
     use ainb_cli::discovery::class_a::{
         DiscoveredMarketplaceUnit, DiscoveredUnit, DiscoveredUnitKind,
     };
+
+    fn mk_preview(unit_names: &[&str]) -> SourcePreviewViewState {
+        SourcePreviewViewState::new(ainb_cli::source::SourcePreview {
+            name: "test-src".to_string(),
+            stored_uri: "gh:o/r".to_string(),
+            r#ref: "main".to_string(),
+            kind: "raw".to_string(),
+            fetched_path: PathBuf::from("/tmp/x"),
+            resolved_sha: "abc".to_string(),
+            fetched_at: "now".to_string(),
+            units: unit_names
+                .iter()
+                .map(|n| ainb_adapters_source_unit(n))
+                .collect(),
+            already_added: false,
+        })
+    }
+
+    fn ainb_adapters_source_unit(name: &str) -> ainb_cli::source::UnitDescriptor {
+        ainb_cli::source::UnitDescriptor {
+            name: name.to_string(),
+            kind: "skill".to_string(),
+            description: Some(format!("{name} desc")),
+            path: format!("skills/{name}"),
+            tags: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    /// Picker defaults: opt-in selection (nothing checked), claude the
+    /// only target; a/n + Space + tool keys drive the state; targets_csv
+    /// reflects the checkboxes and goes None when all are off.
+    #[test]
+    fn preview_picker_selection_and_targets() {
+        let mut v = mk_preview(&["one", "two", "three"]);
+        assert_eq!(v.checked_count(), 0, "opt-in default");
+        assert_eq!(v.targets_csv().as_deref(), Some("claude"));
+
+        v.toggle_current(); // check `one`
+        v.move_cursor(1);
+        v.toggle_current(); // check `two`
+        assert_eq!(v.checked_paths(), vec!["skills/one", "skills/two"]);
+
+        v.set_all(true);
+        assert_eq!(v.checked_count(), 3);
+        v.set_all(false);
+        assert_eq!(v.checked_count(), 0);
+
+        v.toggle_tool(1); // + codex
+        assert_eq!(v.targets_csv().as_deref(), Some("claude,codex"));
+        v.toggle_tool(0); // - claude
+        v.toggle_tool(1); // - codex
+        assert_eq!(v.targets_csv(), None, "no tools selected");
+        v.toggle_tool(3); // all on
+        assert_eq!(v.targets_csv().as_deref(), Some("claude,codex,copilot"));
+
+        // Cursor clamps at both ends.
+        v.move_cursor(-10);
+        assert_eq!(v.cursor, 0);
+        v.move_cursor(10);
+        assert_eq!(v.cursor, 2);
+    }
     use ainb_cli::discovery::class_c::DiscoveredOrphanUnit;
     use ainb_skill_core::UnitKind;
 
