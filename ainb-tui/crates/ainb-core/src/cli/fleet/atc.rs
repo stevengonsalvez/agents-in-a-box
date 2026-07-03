@@ -77,10 +77,35 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             .context("seeding task-log.md")?;
     }
 
-    // Install the heartbeat timer (idempotent).
+    // D12: provision the heartbeat as a DAEMON cron by registering the instance
+    // in the daemon store — the daemon-native replacement for the launchd/systemd
+    // timer. We register FIRST so the local timer can be a true FALLBACK, never a
+    // concurrent second scheduler: with the daemon up (the P9 world) two active
+    // schedulers would fire two nudges per interval into the same ATC session and
+    // keep two split-brain retry-cap ledgers (the CLI heartbeat's JSON cap vs the
+    // daemon cron's `atc_retry` cap) — the exact one-send-path / daemon-owns-state
+    // violation. Best-effort: a down daemon warns and returns false (external-dep
+    // rule — never hard-fail on a missing daemon). The UX is unchanged.
+    let daemon_registered = if meta.heartbeat_enabled {
+        register_heartbeat_with_daemon(&meta, &paths).await
+    } else {
+        false
+    };
+
+    // Install the launchd/systemd timer ONLY as the fallback the daemon cron
+    // supersedes: when the daemon owns the heartbeat we skip the local timer (and
+    // tear down any timer a prior daemon-down `setup` left behind) so exactly one
+    // mechanism fires. When the daemon is unreachable the local timer keeps the
+    // heartbeat alive. `timer::install` is idempotent.
     let mut timer_paths = Vec::new();
     if meta.heartbeat_enabled {
-        timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
+        if daemon_registered {
+            // A prior daemon-down run may have installed a local timer; remove it
+            // now that the daemon cron is the single active scheduler.
+            let _ = timer::teardown(&meta.name);
+        } else {
+            timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
+        }
     }
 
     // Install the event-driven lifecycle hooks into Claude's settings.json
@@ -122,6 +147,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         "timer_units": timer_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "session_spawned": spawned,
         "lifecycle_hooks_installed": hooks_installed,
+        "daemon_registered": daemon_registered,
     });
 
     if matches!(format, OutputFormat::Text) {
@@ -131,10 +157,14 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
         println!("  hooks:     lifecycle hooks installed: {hooks_installed}");
         if meta.heartbeat_enabled {
+            let via = if daemon_registered {
+                "daemon cron".to_string()
+            } else {
+                format!("{} local timer unit(s)", timer_paths.len())
+            };
             println!(
-                "  heartbeat: every {}m via {} unit(s)",
-                meta.heartbeat_interval_min,
-                timer_paths.len()
+                "  heartbeat: every {}m via {via}",
+                meta.heartbeat_interval_min
             );
         } else {
             println!("  heartbeat: disabled");
@@ -187,6 +217,93 @@ task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
     Ok(true)
 }
 
+/// Register the ATC instance's heartbeat as a daemon cron (D12), returning
+/// whether the daemon accepted the registration.
+///
+/// Best-effort by design: a missing / unreachable daemon (no token file, dial
+/// refused, timeout) is warned and returns `false`, and the caller keeps the
+/// local launchd/systemd timer as the fallback. This is the external-dep rule —
+/// `atc setup` must never hard-fail just because the daemon is not up.
+async fn register_heartbeat_with_daemon(meta: &AtcMeta, paths: &AtcPaths) -> bool {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcRegisterParams;
+
+    let client = match DaemonClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration skipped (daemon not reachable: {e}); \
+heartbeat falls back to the local timer"
+            );
+            return false;
+        }
+    };
+    let params = AtcRegisterParams {
+        name: meta.name.clone(),
+        cwd: paths.dir.display().to_string(),
+        tmux_session: Some(meta.tmux_session()),
+        heartbeat_cron: Some(heartbeat_cron_for_interval(meta.heartbeat_interval_min)),
+        err_retry_cap: None,
+        idle_pause_min: Some(i64::from(meta.idle_pause_min)),
+    };
+    match client.atc_register(params).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration failed ({e}); heartbeat falls back to the local timer"
+            );
+            false
+        }
+    }
+}
+
+/// Unregister the ATC instance's heartbeat from the daemon (D12), returning
+/// whether the daemon reported it disabled a registered instance.
+///
+/// Best-effort by design (mirrors [`register_heartbeat_with_daemon`]): a missing
+/// / unreachable daemon is warned and returns `false`. This clears `enabled` +
+/// `next_tick_at` in daemon-owned state so a torn-down instance's `atc_instance`
+/// row is no longer schedulable — the daemon-native counterpart to removing the
+/// local launchd/systemd timer.
+async fn unregister_heartbeat_with_daemon(name: &str) -> bool {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcUnregisterParams;
+
+    let client = match DaemonClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon unregister skipped (daemon not reachable: {e}); \
+the instance row is left as-is"
+            );
+            return false;
+        }
+    };
+    match client.atc_unregister(AtcUnregisterParams { name: name.to_string() }).await {
+        Ok(res) => res.disabled,
+        Err(e) => {
+            tracing::warn!("ATC daemon unregister failed ({e}); the instance row is left as-is");
+            false
+        }
+    }
+}
+
+/// Convert a heartbeat interval in minutes to a UTC 5-field cron expression the
+/// daemon heartbeat scheduler fires on.
+///
+/// An interval under an hour maps to `*/N * * * *` (every N minutes); an interval
+/// of 60+ minutes maps to hourly `0 * * * *` (a `*/N` minute field only spans
+/// 0–59). `0` is clamped to 1 so a degenerate config still yields a valid cron.
+#[must_use]
+fn heartbeat_cron_for_interval(interval_min: u32) -> String {
+    let n = interval_min.max(1);
+    if n >= 60 {
+        "0 * * * *".to_string()
+    } else {
+        format!("*/{n} * * * *")
+    }
+}
+
 // --- teardown ---------------------------------------------------------------
 
 async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
@@ -195,6 +312,12 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
 
     // Remove the timer first (idempotent, safe when absent).
     let removed = timer::teardown(&name).context("removing heartbeat timer")?;
+
+    // Unregister from the daemon so its heartbeat cron stops scheduling this
+    // instance (clears enabled + next_tick_at in daemon-owned state). Best-effort:
+    // a down daemon is warned, not fatal. Mirrors setup's register call — teardown
+    // must tear down BOTH schedulers, not just the local timer.
+    let daemon_unregistered = unregister_heartbeat_with_daemon(&name).await;
 
     // Best-effort kill the running session. Use the same sanitization the
     // spawner applies so we target the right session for unsafe names.
@@ -242,6 +365,7 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
         "action": "teardown",
         "name": name,
         "timer_units_removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "daemon_unregistered": daemon_unregistered,
         "session_killed": killed,
         "dir_purged": purged,
         "lifecycle_hooks_uninstalled": hooks_uninstalled,
@@ -250,6 +374,7 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{name}' torn down.");
         println!("  timer units removed: {}", removed.len());
+        println!("  daemon unregistered: {daemon_unregistered}");
         println!("  session killed:      {killed}");
         println!("  dir purged:          {purged}");
         if !purge {
@@ -1167,6 +1292,18 @@ This is ATC's durable, human-readable memory. Append one dated line per action\n
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn heartbeat_cron_maps_interval_to_a_valid_cron() {
+        // Sub-hour intervals map to an every-N-minute cron.
+        assert_eq!(heartbeat_cron_for_interval(2), "*/2 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(15), "*/15 * * * *");
+        // 0 is clamped to 1 (still a valid cron, never a panic / empty field).
+        assert_eq!(heartbeat_cron_for_interval(0), "*/1 * * * *");
+        // 60+ minutes maps to hourly (a `*/N` minute field only spans 0-59).
+        assert_eq!(heartbeat_cron_for_interval(60), "0 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(120), "0 * * * *");
+    }
 
     /// Provision a minimal ATC instance dir (just meta.json) under
     /// `<home>/atc/<name>` and return its path — the cwd an ATC session runs in.

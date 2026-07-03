@@ -488,6 +488,121 @@ pub enum AnswerResult {
     },
 }
 
+/// Params for [`crate::methods::ATC_REGISTER`] (spec P9, D12): register (or
+/// re-register) an ATC instance on the daemon.
+///
+/// Only `name` is required; the rest carry the daemon defaults when omitted
+/// (`*/2 * * * *` heartbeat, cap 3, idle-pause 60m), so `ainb fleet atc setup
+/// <name>` maps to a minimal call. Re-registering the same name refreshes the
+/// config + reschedules (idempotent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcRegisterParams {
+    /// The sanitized instance name (the registry key).
+    pub name: String,
+    /// The directory the ATC session drives from (empty when unset).
+    #[serde(default)]
+    pub cwd: String,
+    /// The ATC session's tmux target, or `None` when not spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
+    /// The heartbeat cron (UTC); `None` uses the daemon default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_cron: Option<String>,
+    /// The per-session auto-`continue` cap; `None` uses the daemon default (3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub err_retry_cap: Option<i64>,
+    /// The idle-pause threshold in minutes; `None` uses the daemon default (60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_pause_min: Option<i64>,
+}
+
+/// Result of [`crate::methods::ATC_REGISTER`]: the persisted instance name + its
+/// computed next heartbeat tick (epoch-ms, `None` when the cron has no future
+/// match).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcRegisterResult {
+    /// The registered instance name.
+    pub name: String,
+    /// The cached next heartbeat instant (epoch-ms), or `None`.
+    pub next_tick_at: Option<i64>,
+}
+
+/// One registered ATC instance in the [`crate::methods::ATC_LIST`] result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcInstanceWire {
+    /// The instance name.
+    pub name: String,
+    /// The directory the ATC session drives from.
+    pub cwd: String,
+    /// The ATC session's tmux target, or `None`.
+    pub tmux_session: Option<String>,
+    /// The heartbeat cron (UTC).
+    pub heartbeat_cron: String,
+    /// The per-session auto-`continue` cap.
+    pub err_retry_cap: i64,
+    /// The idle-pause threshold in minutes.
+    pub idle_pause_min: i64,
+    /// The cached next heartbeat instant (epoch-ms), or `None`.
+    pub next_tick_at: Option<i64>,
+    /// Whether the heartbeat cron considers this instance.
+    pub enabled: bool,
+    /// Epoch-ms of the last fired heartbeat, or `None`.
+    pub last_heartbeat_at: Option<i64>,
+}
+
+/// Result of [`crate::methods::ATC_LIST`]: every registered ATC instance,
+/// name-ordered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcListResult {
+    /// The registered instances.
+    pub instances: Vec<AtcInstanceWire>,
+}
+
+/// Params for [`crate::methods::ATC_ESCALATE`] (spec P9, D12): raise an ATC
+/// escalation as an `escalation` attention row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcEscalateParams {
+    /// The escalating ATC instance.
+    pub instance_name: String,
+    /// The monitored session the escalation is about.
+    pub session_id: String,
+    /// The session's working directory (empty when unknown) — carried so the
+    /// answer router can correlate it.
+    #[serde(default)]
+    pub cwd: String,
+    /// The owning workspace, or `None` for a host session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Why the session is being escalated (rendered on the attention card).
+    pub reason: String,
+}
+
+/// Result of [`crate::methods::ATC_ESCALATE`]: the raised attention id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcEscalateResult {
+    /// The id of the raised `escalation` attention row.
+    pub attention_id: String,
+}
+
+/// Params for [`crate::methods::ATC_UNREGISTER`] (spec P9, D12): disable a
+/// registered ATC instance's heartbeat cron by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcUnregisterParams {
+    /// The sanitized instance name to disable.
+    pub name: String,
+}
+
+/// Result of [`crate::methods::ATC_UNREGISTER`]: the instance name and whether it
+/// was a registered instance the daemon disabled (`false` = unknown name, a
+/// no-op).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcUnregisterResult {
+    /// The instance name that was targeted.
+    pub name: String,
+    /// `true` when a registered instance was disabled; `false` for an unknown name.
+    pub disabled: bool,
+}
+
 /// One per-agent usage row in the dashboard rollup
 /// ([`crate::methods::HANGAR_USAGE_ROLLUP`], e38.35): an agent's summed tokens +
 /// cost over the runs it executed in the workspace.

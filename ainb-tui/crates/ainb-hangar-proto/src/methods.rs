@@ -587,6 +587,36 @@ pub const ATTENTION_SUBSCRIBE: &str = "attention/subscribe";
 /// path. Mutating: exactly one answer is ever delivered per row.
 pub const ATTENTION_ANSWER: &str = "attention/answer";
 
+/// `atc/register` — register (or re-register) an ATC instance on the daemon
+/// (spec P9, D12). Params: [`crate::snapshots::AtcRegisterParams`]. Result:
+/// [`crate::snapshots::AtcRegisterResult`] (the persisted name + next heartbeat
+/// tick). This is the daemon-native replacement for `ainb fleet atc setup`'s old
+/// launchd/systemd timer install: the instance lands in `atc_instance` and the
+/// heartbeat becomes a daemon cron. Mutating + idempotent by name.
+pub const ATC_REGISTER: &str = "atc/register";
+
+/// `atc/list` — list the registered ATC instances (spec P9, D12). Params: `{}`.
+/// Result: [`crate::snapshots::AtcListResult`]. A read (host-wide, since ATC is
+/// not workspace-partitioned).
+pub const ATC_LIST: &str = "atc/list";
+
+/// `atc/escalate` — raise an ATC escalation as an `escalation` attention row
+/// (spec P9, D12). Params: [`crate::snapshots::AtcEscalateParams`]. Result:
+/// [`crate::snapshots::AtcEscalateResult`] (the raised attention id). The
+/// escalation flows through the same attention pipeline as every other input
+/// request, so it reaches the phone/web push instead of dead-ending in
+/// `task-log.md`. Mutating.
+pub const ATC_ESCALATE: &str = "atc/escalate";
+
+/// `atc/unregister` — disable a registered ATC instance's heartbeat cron (spec
+/// P9, D12). Params: [`crate::snapshots::AtcUnregisterParams`] (`{ name }`).
+/// Result: [`crate::snapshots::AtcUnregisterResult`]. The daemon-native
+/// counterpart to `ainb fleet atc teardown`'s launchd/systemd timer removal: it
+/// flips `enabled = 0` and clears `next_tick_at` so the heartbeat cron stops
+/// scheduling the instance, without deleting its audit/ledger rows. Mutating +
+/// idempotent (unregistering an unknown or already-disabled instance is a no-op).
+pub const ATC_UNREGISTER: &str = "atc/unregister";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -646,6 +676,10 @@ pub const ALL_METHODS: &[&str] = &[
     ATTENTION_LIST,
     ATTENTION_SUBSCRIBE,
     ATTENTION_ANSWER,
+    ATC_REGISTER,
+    ATC_LIST,
+    ATC_ESCALATE,
+    ATC_UNREGISTER,
     AUTH_HELLO,
     PING,
     // Board methods (P4 / D8) are APPENDED at the catalogue tail — the wire
@@ -808,6 +842,10 @@ mod tests {
             ATTENTION_LIST,
             ATTENTION_SUBSCRIBE,
             ATTENTION_ANSWER,
+            ATC_REGISTER,
+            ATC_LIST,
+            ATC_ESCALATE,
+            ATC_UNREGISTER,
             AUTH_HELLO,
             PING,
             HANGAR_BOARDS_LIST,
