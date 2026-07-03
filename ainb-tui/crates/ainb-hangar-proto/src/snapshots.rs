@@ -643,6 +643,67 @@ pub struct UsageRollupResult {
     pub agents: Vec<AgentUsageRow>,
 }
 
+/// One run-history row on the workspace timeline
+/// ([`crate::methods::HANGAR_RUN_HISTORY`], P10 / D19): one finished provider run
+/// with its provider / session / profile / outcome / duration and token-cost.
+///
+/// Carries an `f64` cost, so it is `PartialEq` only (no `Eq`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunHistoryRow {
+    /// The run's id (fresh per run, never the task id).
+    pub run_id: String,
+    /// The task the run executed, or `None` for a task-less run.
+    pub task_id: Option<String>,
+    /// The provider session id the run used, or `None`.
+    pub session_id: Option<String>,
+    /// The provider that executed the run (`claude` / `codex`).
+    pub provider: String,
+    /// The agent profile slug the run launched under, or `None` until P5 wires it.
+    pub profile: Option<String>,
+    /// When the run started (epoch ms), or `None`.
+    pub started_at: Option<i64>,
+    /// When the run finished (epoch ms).
+    pub finished_at: i64,
+    /// Terminal FSM result: `success` | `failed`.
+    pub outcome: String,
+    /// Prompt/input tokens the run reported.
+    pub input_tokens: i64,
+    /// Completion/output tokens the run reported.
+    pub output_tokens: i64,
+    /// Total run cost in USD.
+    pub cost_usd: f64,
+    /// Lines added by the run's diff (0 until diff plumbing lands).
+    pub diff_add: i64,
+    /// Lines removed by the run's diff (0 until diff plumbing lands).
+    pub diff_del: i64,
+}
+
+/// Params for [`crate::methods::HANGAR_RUN_HISTORY`] (P10 / D19): the workspace
+/// to snapshot plus an optional row cap.
+///
+/// `limit` is the max number of newest-first rows to return; `None` lets the
+/// daemon apply its default cap. A `WorkspaceScopedParams` extractor still reads
+/// `workspace_id` off this shape (the extra `limit` field is ignored there).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunHistoryParams {
+    /// The workspace whose run timeline to snapshot.
+    pub workspace_id: String,
+    /// Max newest-first rows to return, or `None` for the daemon default.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Result of [`crate::methods::HANGAR_RUN_HISTORY`] (P10 / D19): the workspace's
+/// per-run observability timeline, newest finished first.
+///
+/// A workspace with no recorded runs answers an empty `runs` vec (the
+/// empty-history state). Carries `f64` costs, so it is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct RunHistoryResult {
+    /// The run rows, newest finished first (capped by the request limit).
+    pub runs: Vec<RunHistoryRow>,
+}
+
 /// Params for [`crate::methods::HANGAR_PR_STATUS_REFRESH`] (e38.34): refresh the
 /// CI + merge status of one issue's bound PR.
 ///
