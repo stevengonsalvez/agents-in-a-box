@@ -163,6 +163,9 @@ const ATTENTION_ANSWER_REQ_ID: i64 = 35;
 /// `hangar/board_*` with the refreshed `BoardsListResult`, so one `apply_boards`
 /// handler folds them all.
 const BOARDS_REQ_ID: i64 = 36;
+/// JSON-RPC id for the `hangar/run_history` snapshot request feeding the usage
+/// dashboard's recent-runs timeline (P10 / D19).
+const RUN_HISTORY_REQ_ID: i64 = 37;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -643,6 +646,7 @@ impl HangarPlugin {
             RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
+            RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
@@ -834,6 +838,19 @@ impl HangarPlugin {
             >(result.clone())
             {
                 self.screens.set_usage(rollup);
+            }
+        }
+    }
+
+    /// Populate the usage dashboard's recent-runs timeline from a
+    /// `hangar/run_history` result (P10 / D19): the newest-first run rows.
+    fn apply_run_history(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(history) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::RunHistoryResult,
+            >(result.clone())
+            {
+                self.screens.set_run_history(history);
             }
         }
     }
@@ -1038,6 +1055,11 @@ impl HangarPlugin {
             (
                 USAGE_ROLLUP_REQ_ID,
                 daemon_methods::HANGAR_USAGE_ROLLUP,
+                scoped.clone(),
+            ),
+            (
+                RUN_HISTORY_REQ_ID,
+                daemon_methods::HANGAR_RUN_HISTORY,
                 scoped.clone(),
             ),
             (

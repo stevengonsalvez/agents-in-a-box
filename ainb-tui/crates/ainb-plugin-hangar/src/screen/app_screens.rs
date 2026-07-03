@@ -17,7 +17,7 @@ use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, Task
 use ainb_hangar_proto::settings::{
     DaemonHealthSnapshot, HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow,
 };
-use ainb_hangar_proto::snapshots::{MemberWireRow, UsageRollupResult};
+use ainb_hangar_proto::snapshots::{MemberWireRow, RunHistoryResult, UsageRollupResult};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{
@@ -398,10 +398,17 @@ impl ScreenStates {
         self.daemon_health = DaemonHealthState::from_snapshot(snap);
     }
 
-    /// Rebuild the usage dashboard from a `hangar/usage_rollup` snapshot
-    /// (e38.35).
+    /// Rebuild the usage dashboard's rollup fields from a `hangar/usage_rollup`
+    /// snapshot (e38.35), preserving the run-history timeline (they arrive on
+    /// separate replies, P10 / D19).
     pub fn set_usage(&mut self, rollup: UsageRollupResult) {
-        self.usage = UsageState::from_rollup(rollup);
+        self.usage.apply_rollup(rollup);
+    }
+
+    /// Update the usage dashboard's recent-runs timeline from a
+    /// `hangar/run_history` snapshot (P10 / D19), preserving the rollup totals.
+    pub fn set_run_history(&mut self, history: RunHistoryResult) {
+        self.usage.apply_run_history(history);
     }
 
     /// Replace the logs-tail rows from a fresh read of the `daemon.*` file
