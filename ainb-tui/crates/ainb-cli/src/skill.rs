@@ -351,6 +351,22 @@ fn remove(home: &Path, args: RemoveSkillArgs, out: &mut dyn io::Write) -> Result
         }
     }
 
+    // Mirror the outcome into the manifest — install declares the unit
+    // there (that's what the Skill Manager renders), so remove must
+    // undeclare it or the next `sync` reinstalls what was just removed.
+    {
+        let manifest_path = manifest_path_in(home);
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        if retained.is_empty() {
+            manifest.units.retain(|u| u.uri != args.uri);
+        } else if let Some(entry) = manifest.units.iter_mut().find(|u| u.uri == args.uri) {
+            // Partial removal: keep the declaration, narrowed to the
+            // tools that still hold a deployment.
+            entry.targets = Some(retained.keys().cloned().collect());
+        }
+        manifest.save_to(&manifest_path)?;
+    }
+
     if retained.is_empty() {
         lockfile.units.remove(idx);
     } else {
