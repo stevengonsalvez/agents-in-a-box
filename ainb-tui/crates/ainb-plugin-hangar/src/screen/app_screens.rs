@@ -201,6 +201,13 @@ pub enum BoardsAction {
         /// The new column name.
         name: String,
     },
+    /// Re-fetch `hangar/boards_list` to force a repaint after a purely-local
+    /// overlay change (open / typed keystroke). A local key change arms no daemon
+    /// reply of its own, so without this round-trip the overlay never renders
+    /// (the host repaints a plugin on a daemon socket event, and a lone key can
+    /// race the one dirty-kick before the plugin observes it). The reply preserves
+    /// the open overlay via `adopt_context`.
+    Refresh,
 }
 
 /// A deferred daemon RPC raised by the agent-picker modal (e38.8).
@@ -1212,7 +1219,14 @@ fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
     };
     let out = reduce_boards(&states.boards, ev);
     states.boards = out.state;
-    states.pending_boards_action = lift_boards_intent(out.intent);
+    // A committed intent lifts to its RPC; otherwise, while an overlay is open,
+    // request a boards refresh so the local overlay change (open / typed key)
+    // actually repaints — a lone key arms no daemon reply of its own.
+    states.pending_boards_action = match lift_boards_intent(out.intent) {
+        Some(action) => Some(action),
+        None if states.boards.overlay().is_some() => Some(BoardsAction::Refresh),
+        None => None,
+    };
 }
 
 /// Translate a raw key into an overlay [`BoardsEvent::Key`] while an overlay is

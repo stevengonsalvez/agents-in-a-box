@@ -1517,6 +1517,13 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_BOARD_CARD_RUN,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id, "mode": mode }),
             ),
+            // A local-overlay repaint round-trip: re-fetch the board list; the
+            // reply re-renders with the open overlay preserved.
+            BoardsAction::Refresh => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARDS_LIST,
+                serde_json::json!({ "workspace_id": ws }),
+            ),
             // Handled above as a local note; never reached here.
             BoardsAction::CardAttach { .. } => return,
         };
@@ -2204,6 +2211,15 @@ impl HangarPlugin {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
             }
+            return;
+        }
+        // ccc (lu5): the Boards card overlays (create title / profile pick / column
+        // rename / `Run ▾`) are text/pick capture surfaces too — while one is open
+        // every key, including the tab-switch chars (`B`/`C`/`,`/…) and `q`, is
+        // input, not a nav key (a card titled `Cardrun` must not switch to Control
+        // on its `C`). Route straight to the boards reducer, which owns Esc-cancel.
+        if matches!(app.screen, Screen::Boards) && self.screens.boards.overlay().is_some() {
+            let _ = route_key(&app, &mut self.screens, key);
             return;
         }
 
@@ -3181,12 +3197,20 @@ impl Plugin for HangarPlugin {
         // 63l.6: the list-screen mouse intents + the generic list context menu
         // arm the same redraw so the Kanban / Autopilots / Skills boards repaint
         // after a click / scroll / hover / menu navigation.
+        //
+        // ccc (lu5): a Boards card overlay (create title / profile pick / rename /
+        // `Run ▾`) is a key-driven local state with no daemon reply to trigger the
+        // next frame, so its every keystroke must arm a redraw or the input never
+        // paints. A pending board action likewise needs one render to fire its RPC
+        // (or set the attach note) — the reply then drives the following frame.
         !self.pending_mouse_intents.is_empty()
             || self.context_menu.is_some()
             || self.pending_issue_priority_update.is_some()
             || self.pending_issue_assignee_update.is_some()
             || !self.pending_board_mouse_intents.is_empty()
             || self.list_context_menu.is_some()
+            || self.screens.boards.overlay().is_some()
+            || self.screens.pending_boards_action.is_some()
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
@@ -4437,6 +4461,67 @@ mod tests {
             matches!(p.app_state().screen, Screen::TaskDetail(_)),
             "clicking Open opens the card's task detail, got {:?}",
             p.app_state().screen
+        );
+    }
+
+    /// ccc (lu5): on the Boards screen, `c` opens the card-title input, and while
+    /// it is open an uppercase `C` (my card title starts with one) is TYPED, not
+    /// routed to the control-center tab-switch — proving the card interaction layer
+    /// is wired end to end through the real key path (not just the pure reducer).
+    #[test]
+    fn boards_c_opens_card_title_and_captures_tab_chars() {
+        use ainb_hangar_proto::snapshots::{
+            BoardColumnWireRow, BoardWireRow, BoardsListResult,
+        };
+        let mut p = connected_plugin_with_issue();
+
+        // Load a board with one column, then land on the Boards screen.
+        p.screens.set_boards(&BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Delivery".into(),
+                auto_move: true,
+                columns: vec![BoardColumnWireRow {
+                    id: "c-todo".into(),
+                    name: "Todo".into(),
+                    ord: 0,
+                    fsm_state: None,
+                    auto_move: false,
+                    cards: Vec::new(),
+                }],
+                unmapped: Vec::new(),
+            }],
+        });
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Boards;
+        p.app = Some(app);
+
+        // `c` opens the card-title input on the focused Todo column.
+        p.on_key(&char_press('c'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(crate::screen::boards::BoardsOverlay::CardTitle { column_id, .. })
+                    if column_id == "c-todo"
+            ),
+            "`c` must open the card-title input, got {:?}",
+            p.screens.boards.overlay()
+        );
+
+        // Typing the title's leading `C` must be captured, not switch to Control.
+        p.on_key(&char_press('C'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards),
+            "typing `C` into the title must NOT switch to the control center, got {:?}",
+            p.app_state().screen
+        );
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(crate::screen::boards::BoardsOverlay::CardTitle { title, .. }) if title == "C"
+            ),
+            "`C` must land in the title buffer, got {:?}",
+            p.screens.boards.overlay()
         );
     }
 
