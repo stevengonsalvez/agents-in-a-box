@@ -174,8 +174,10 @@ fn github_auth_prompt_shows_and_exits_without_credential_hang() {
     );
     // The remediation + key hints are visible so the user knows how to recover.
     assert!(
-        prompt_cap.contains("Retry") && prompt_cap.contains("Skip") && prompt_cap.contains("Back"),
-        "auth prompt key hints (Retry/Skip/Back) missing:\n---\n{prompt_cap}\n---"
+        prompt_cap.contains("Retry")
+            && prompt_cap.contains("Skip")
+            && prompt_cap.contains("Dismiss"),
+        "auth prompt key hints (Retry/Skip/Dismiss) missing:\n---\n{prompt_cap}\n---"
     );
 
     // Return path: Esc dismisses the prompt and lands back on the picker.
