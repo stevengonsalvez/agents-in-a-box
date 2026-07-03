@@ -63,8 +63,11 @@ build_plugin() {
 
     # Cargo binary name == crate name. Staged binary name == plugin id
     # (the runtime probes <root>/<id>/<id>). Cross-compiles land under
-    # target/<triple>/<profile>.
-    cp "target/${TARGET:+$TARGET/}$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
+    # target/<triple>/<profile>. Honour $CARGO_TARGET_DIR the same way `cargo
+    # build` above does — a hardcoded `target/` here silently stages a stale
+    # binary from the workspace-local dir whenever a shared target cache is in
+    # play, while `cargo build` itself writes the fresh one there instead.
+    cp "${CARGO_TARGET_DIR:-target}/${TARGET:+$TARGET/}$PROFILE_DIR/$crate" "$out_dir/$plugin_id"
     resign_macos "$out_dir/$plugin_id"
 
     # The manifest lives next to the crate. Most plugin crates are under
