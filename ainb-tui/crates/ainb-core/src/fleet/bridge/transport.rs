@@ -3,11 +3,12 @@
 // Ported from the Python `ainb_phone_bridge.ainb_client` (the verified spec),
 // reusing ainb's EXISTING mechanisms where they exist:
 //   1. discover()        — `crate::fleet::discover_from_ainb` -> TargetSessions.
-//   2. send_keys()       — tmux send-keys (`-l` literal + `--` terminator +
-//                          Enter). The `--` terminator is the verified fix that
-//                          stops a payload starting with `-` from being parsed
-//                          as a tmux flag; the in-tree `fleet::send::tmux_send`
-//                          lacks it, so the bridge owns its own send.
+//   2. send             — the ONE verified send path (`crate::fleet::send::send`,
+//                          re-exported from ainb-fleet-core). It already uses the
+//                          `-l` literal + `--` terminator AND the multi-line
+//                          paste-settle / submit-verify logic the daemon relies
+//                          on, so the bridge no longer owns a private raw
+//                          send-keys (INV-2: no raw send-keys anywhere).
 //   3. capture_reply()   — read the session's JSONL transcript: snapshot the
 //                          byte offset + wall-clock send time, send, then wait
 //                          for the next assistant row with stop_reason ==
@@ -30,12 +31,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::process::Command;
 
 use super::relay::FleetTransport;
 use super::routing::TargetSession;
 use crate::fleet::discover::discover_from_ainb;
 use crate::fleet::read::{cwd_to_project_slug, is_turn_end_stop_reason};
+use crate::fleet::send::send as verified_send;
+use crate::fleet::types::{SendOutcome, Session};
 
 /// The live transport: discovery via `ainb list`, delivery via tmux send-keys,
 /// reply capture via the JSONL transcript tail. This is the production
@@ -116,26 +118,48 @@ fn run_name_from_tmux(tmux: &str, workspace: &str) -> String {
     }
 }
 
-/// Send `text` to a tmux session via literal send-keys + Enter.
-///
-/// Uses `-l` (literal) so the payload is never interpreted as key names, and a
-/// `--` terminator so a message starting with `-` is treated as literal text,
-/// not as a tmux flag. This is the injection-safe transport the Python bridge
-/// verified; the Enter is sent as a separate key event afterwards.
-pub async fn send_keys(tmux_session: &str, text: &str) -> bool {
-    let lit = Command::new("tmux")
-        .args(["send-keys", "-t", tmux_session, "-l", "--", text])
-        .status()
-        .await;
-    let lit_ok = matches!(lit, Ok(s) if s.success());
-    if !lit_ok {
-        return false;
+/// Build the minimal fleet [`Session`] the verified send needs from a bridge
+/// [`TargetSession`]. Only the tmux name + cwd + id are load-bearing for a
+/// tmux-first send; the rest default (no broker peer, so the send stays on the
+/// tmux path). Keeping this a thin adapter is what lets the bridge route through
+/// the ONE verified send path instead of a private raw send-keys (INV-2).
+fn target_to_session(target: &TargetSession) -> Session {
+    Session {
+        id: target.session_id.clone(),
+        cwd: target.cwd.clone(),
+        pid: None,
+        git_root: None,
+        tmux_session: Some(target.tmux_session.clone()),
+        workspace_name: (!target.workspace_name.is_empty()).then(|| target.workspace_name.clone()),
+        worktree_path: None,
+        peer_id: None,
+        bg_job_id: None,
+        transcript_path: None,
+        sources: Vec::new(),
+        summary: None,
+        last_seen_ms: None,
     }
-    let enter = Command::new("tmux")
-        .args(["send-keys", "-t", tmux_session, "Enter"])
-        .status()
-        .await;
-    matches!(enter, Ok(s) if s.success())
+}
+
+/// Send `text` to `target` through the ONE verified send path
+/// (`crate::fleet::send::send`, from ainb-fleet-core). That path owns the `-l`
+/// literal + `--` terminator AND the multi-line paste-settle / submit-verify
+/// logic, so the bridge no longer carries a private raw send-keys (INV-2).
+/// Returns `true` when the send actually landed (tmux or broker), `false` on a
+/// failed/undeliverable send.
+async fn send_verified(target: &TargetSession, text: &str) -> bool {
+    let session = target_to_session(target);
+    match verified_send(&session, text).await {
+        Ok(SendOutcome::Tmux { .. } | SendOutcome::Broker { .. }) => true,
+        Ok(SendOutcome::Failed { reason }) => {
+            tracing::warn!(target = %target.name, %reason, "bridge send did not land");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(target = %target.name, error = %e, "bridge send errored");
+            false
+        }
+    }
 }
 
 /// Newest `*.jsonl` under the cwd's Claude project dir, or `None`.
@@ -347,7 +371,7 @@ pub async fn send_and_capture(
     let offset = current_offset(transcript.as_deref());
     // Wall-clock watermark: the reply must be a turn that ends AFTER this instant.
     let send_time_ms = chrono::Utc::now().timestamp_millis();
-    if !send_keys(&session.tmux_session, text).await {
+    if !send_verified(session, text).await {
         return None;
     }
     wait_for_reply(

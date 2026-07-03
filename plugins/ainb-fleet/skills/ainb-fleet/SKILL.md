@@ -36,7 +36,7 @@ sub-skill with focused docs.
 | [`/ainb-fleet:daemon`](../daemon/SKILL.md) | Background auto-continue watcher (**superseded by ATC** for managed fleets) |
 
 ATC is the orchestrating brain that drives the other verbs on a schedule. The
-verbs are its hands/eyes; the [phone bridge](../../bridge/README.md) is its voice
+verbs are its hands/eyes; the [phone bridge](../bridge/SKILL.md) is its voice
 to you. Reach for ATC when you want unattended, policy-driven fleet supervision;
 reach for the individual verbs for one-off actions.
 

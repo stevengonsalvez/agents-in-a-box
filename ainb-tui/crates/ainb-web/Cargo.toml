@@ -32,6 +32,13 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# The daemon control plane (D18): the web surface reads `attention/list` and
+# routes answers through `attention/answer` over the hangar unix socket. These
+# are the PURE wire crates (no host/IO deps) — the socket dial + framing live in
+# `daemon.rs` here, the shapes come from the shared proto.
+ainb-hangar-proto = { path = "../ainb-hangar-proto", version = "0.1.0" }
+ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
+
 # Live tmux terminal bridge: a real `tmux attach-session` PTY whose raw bytes
 # stream to xterm.js in the browser (mirrors agent-deck's tmuxPTYBridge).
 portable-pty = { workspace = true }

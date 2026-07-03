@@ -43,7 +43,7 @@ irreducibly-interactive last mile (HUD + AskUserQuestion + routing).
 > machinery: workflow-batched cockpit (here) vs plain prompt panel (`needs`).
 
 ```
-SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs'}})──▶ brain
+SESSION (this skill) ──Workflow({name:'ainb-fleet:jarvis', args:{verb:'needs'}})──▶ brain
    render HUD ◀──{banner,cards,asks}──────────────────────────────────────────┘
    AskUserQuestion per ask  ──answer──▶  tmux send-keys (write leg)
 ```
@@ -97,7 +97,7 @@ stale=$(echo "$out" | jq '[.[] | select(.need_enrich==true)] | length')
 ```
 stale == 0  ─▶ render straight from $out          (0 tokens — all cached/--no-enrich)
 stale ≤ 6   ─▶ draft inline in THIS session        (0 subagents)
-stale  > 6  ─▶ run the hangar workflow (Step 1)     (exactly 1 batched agent)
+stale  > 6  ─▶ run the jarvis workflow (Step 1)     (exactly 1 batched agent)
 ```
 
 Cutoff is `AINB_FLEET_ENRICH_INLINE_MAX` (default 6).
@@ -116,14 +116,14 @@ subagent. For `stale == 0`, skip drafting entirely.
 **0-token mode:** `ainb fleet needs --no-enrich` (or `AINB_FLEET_ENRICH=0`)
 returns cards with no `need_enrich` flags — render cached suggestions only.
 
-## Step 1 — run the hangar workflow with verb=needs (only when stale > 6)
+## Step 1 — run the jarvis workflow with verb=needs (only when stale > 6)
 
 `hangar` is the single multi-verb workflow under `ainb-fleet`. The `needs`
 verb runs the Discover ▸ Enrich ▸ Prioritize chain and returns the render-ready
 panel data. Other verbs (`standup`, `sequence`) are wired into the same workflow.
 
 ```
-Workflow({ name: 'ainb-fleet:hangar', args: { verb: 'needs' } })
+Workflow({ name: 'ainb-fleet:jarvis', args: { verb: 'needs' } })
 ```
 
 It runs in background; wait for completion. The result is render-ready:

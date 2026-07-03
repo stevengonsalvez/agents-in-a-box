@@ -100,12 +100,15 @@ async fn resolve_tmux_name(state: &AppState, id: &str) -> Option<String> {
     })
 }
 
-/// Middleware that refuses the terminal route with `403 READ_ONLY` whenever the
-/// server runs `--read-only`. It runs *before* the [`WebSocketUpgrade`]
-/// extractor, so the write surface is rejected at the routing layer — there is
-/// no "upgrade then reject" window, and the refusal is observable without a
-/// real socket. Auth is enforced by [`crate::auth::require_bearer`] alongside
-/// the rest of `/api/*`; this is the second, posture-based gate.
+/// Middleware that refuses a **write surface** with `403 READ_ONLY` whenever the
+/// server runs `--read-only`. It gates both fleet-state write surfaces: the WS
+/// terminal (`/ws/session/:id`) and `POST /api/answer` (the daemon send seam).
+/// It runs *before* the route handler (for the terminal, before the
+/// [`WebSocketUpgrade`] extractor), so the surface is rejected at the routing
+/// layer — there is no "upgrade/parse then reject" window, and the refusal is
+/// observable without a real socket. Auth is enforced by
+/// [`crate::auth::require_bearer`] alongside the rest of `/api/*`; this is the
+/// second, posture-based gate.
 pub async fn read_only_gate(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -115,7 +118,7 @@ pub async fn read_only_gate(
         let body = axum::Json(json!({
             "error": {
                 "code": "READ_ONLY",
-                "message": "terminal is disabled in --read-only mode"
+                "message": "write surface is disabled in --read-only mode"
             }
         }));
         return (StatusCode::FORBIDDEN, body).into_response();

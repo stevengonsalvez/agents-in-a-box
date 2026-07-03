@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'hangar',
+  name: 'jarvis',
   description: 'Multi-verb fleet orchestrator. One deterministic workflow that dispatches by args.verb. Verbs today: `needs` (the Jarvis panel — discover → enrich → prioritize → render-ready cards), `standup` (per-workspace briefing — discover → enrich → group; pass brief:false for a cheap raw roster), `sequence` (ordered ack-gated multi-step send via pipeline). Reads always go through ainb (which tails JSONL + pane); writes always happen in the calling session (tmux send-keys), never inside the sandbox. Enrich model configurable via args.enrichModel (default haiku).',
   whenToUse: 'Invoked by the per-verb skills under ainb-fleet (fleet-needs / standup-rich / sequence). Args = {verb, ...opts}. Default verb = "needs" when omitted.',
   phases: [
@@ -21,7 +21,7 @@ const parsed = (() => {
 })()
 const verb = parsed.verb || 'needs'
 
-log('hangar verb=' + verb)
+log('jarvis verb=' + verb)
 
 if (verb === 'needs') {
   return await runNeeds(parsed)
@@ -32,7 +32,7 @@ if (verb === 'standup') {
 if (verb === 'sequence') {
   return await runSequence(parsed)
 }
-throw new Error('hangar: unknown verb "' + verb + '" — valid: needs | standup | sequence')
+throw new Error('jarvis: unknown verb "' + verb + '" — valid: needs | standup | sequence')
 
 // ===========================================================================
 // Resilience: retry an agent call on transient failure (API throttle shows as
@@ -337,10 +337,10 @@ async function runSequence(opts) {
   const steps = (opts && Array.isArray(opts.steps)) ? opts.steps : []
   const filter = (opts && typeof opts.filter === 'string') ? opts.filter : ''
   if (steps.length === 0) {
-    throw new Error('hangar(sequence): args.steps must be a non-empty array of prompts')
+    throw new Error('jarvis(sequence): args.steps must be a non-empty array of prompts')
   }
   if (!filter) {
-    throw new Error('hangar(sequence): args.filter is required (regex against tmux/workspace name)')
+    throw new Error('jarvis(sequence): args.filter is required (regex against tmux/workspace name)')
   }
 
   // pipeline: send → ack. Each step proceeds only after the previous one's ack lands.
