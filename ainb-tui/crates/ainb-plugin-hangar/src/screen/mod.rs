@@ -26,6 +26,7 @@ pub mod issue_list;
 pub mod kanban;
 pub mod list_context_menu;
 pub mod logs;
+pub mod profiles;
 mod router;
 pub mod settings;
 pub mod skill_manager;
@@ -78,6 +79,11 @@ pub enum Screen {
     /// board, backed by the P2 attention feed (`attention/list` +
     /// `attention/subscribe`) with inline answering via `attention/answer`.
     ControlCenter,
+    /// Profile editor (hotkey `P`) — the agent-profile roster + a live preview of
+    /// BOTH compile targets (lossless Claude `.md`, lossy Codex fragment/prompt),
+    /// backed by `profile/list` + `profile/get`, with tier editing via
+    /// `profile/upsert` (P5).
+    Profiles,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -105,6 +111,7 @@ impl Screen {
             Self::Logs => "Logs",
             Self::Inbox => "Inbox",
             Self::ControlCenter => "Control",
+            Self::Profiles => "Profiles",
             Self::Settings => "Settings",
             Self::Help => "Help",
             Self::CommandPalette => "Search",

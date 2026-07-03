@@ -32,6 +32,7 @@ use super::control_center::{
 };
 use super::daemon_health::DaemonHealthState;
 use super::inbox::InboxState;
+use super::profiles::{reduce_profiles, ProfilesEvent, ProfilesIntent, ProfilesState};
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
 use super::logs::LogsState;
@@ -224,6 +225,9 @@ pub struct ScreenStates {
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
+    /// Profile-editor screen cache (P5), filled from `profile/list` (roster) +
+    /// `profile/get` (the selected profile's detail + both compile previews).
+    pub profiles: ProfilesState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -287,6 +291,14 @@ pub struct ScreenStates {
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
     pub pending_answer_action: Option<AttentionAnswerAction>,
+    /// A `profile/get` raised by the profile editor (selection moved to a row
+    /// whose detail is not loaded), awaiting the `render` pass to fire it. Carries
+    /// the slug to fetch. `None` when idle (P5).
+    pub pending_profile_detail: Option<String>,
+    /// A `profile/upsert` raised by the profile editor (`t` cycled the tier),
+    /// awaiting the `render` pass to fire it. Carries `(slug, tier)`. `None` when
+    /// idle (P5).
+    pub pending_profile_upsert: Option<(String, String)>,
 }
 
 impl Default for SkillManagerState {
@@ -374,6 +386,28 @@ impl ScreenStates {
     /// Take the pending `attention/answer` raised by the control center, if any (P2).
     pub const fn take_pending_answer_action(&mut self) -> Option<AttentionAnswerAction> {
         self.pending_answer_action.take()
+    }
+
+    /// Replace the profile-editor roster from a `profile/list` result (P5),
+    /// preserving the selection where possible.
+    pub fn set_profiles(&mut self, rows: Vec<super::profiles::ProfileRosterEntry>) {
+        self.profiles.set_roster(rows);
+    }
+
+    /// Fold a `profile/get` result into the selected profile's detail (P5).
+    pub fn set_profile_detail(&mut self, detail: super::profiles::ProfileDetailView) {
+        self.profiles.set_detail(detail);
+    }
+
+    /// Take the pending `profile/get` slug raised by the profile editor, if any (P5).
+    pub fn take_pending_profile_detail(&mut self) -> Option<String> {
+        self.pending_profile_detail.take()
+    }
+
+    /// Take the pending `profile/upsert` `(slug, tier)` raised by the profile
+    /// editor, if any (P5).
+    pub fn take_pending_profile_upsert(&mut self) -> Option<(String, String)> {
+        self.pending_profile_upsert.take()
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -594,6 +628,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 &states.control_center,
                 now_ms(),
             );
+        }
+        Screen::Profiles => {
+            super::profiles::render_profiles(buf, w, top, bottom, &states.profiles);
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -816,6 +853,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             route_control_center(states, key);
             None
         }
+        Screen::Profiles => {
+            route_profiles(states, key);
+            None
+        }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
         // pane (P8.5), the usage dashboard (e38.35), and the help overlay (the
         // `D`/`U`/`?` tab-switch + global keys are handled by the router before
@@ -960,6 +1001,34 @@ fn route_control_center(states: &mut ScreenStates, key: &KeyEvent) {
             attention_id,
             answer,
         });
+    }
+}
+
+/// Profile-editor key routing (P5): fold the key into the profile reducer,
+/// lifting its intents into deferred daemon RPCs the `render` pass drains — a
+/// [`ProfilesIntent::LoadDetail`] into a `profile/get`
+/// ([`ScreenStates::pending_profile_detail`]) and a
+/// [`ProfilesIntent::CycleTier`] into a `profile/upsert`
+/// ([`ScreenStates::pending_profile_upsert`]). The sync key router can't `await`.
+fn route_profiles(states: &mut ScreenStates, key: &KeyEvent) {
+    let c = match &key.code {
+        KeyCode::Down => 'j',
+        KeyCode::Up => 'k',
+        _ => match key_char(key) {
+            Some(c) => c,
+            None => return,
+        },
+    };
+    let out = reduce_profiles(&states.profiles, ProfilesEvent::Key(c));
+    states.profiles = out.state;
+    match out.intent {
+        Some(ProfilesIntent::LoadDetail(slug)) => {
+            states.pending_profile_detail = Some(slug);
+        }
+        Some(ProfilesIntent::CycleTier { slug, tier }) => {
+            states.pending_profile_upsert = Some((slug, tier));
+        }
+        None => {}
     }
 }
 

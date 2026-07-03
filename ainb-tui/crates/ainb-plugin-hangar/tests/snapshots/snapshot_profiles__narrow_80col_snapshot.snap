@@ -1,0 +1,28 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_profiles.rs
+expression: full
+---
+Profiles                                                              3 profiles
+▶ author          balanced│author · balanced
+  code-reviewer    premium│Drafts release notes from a diff
+  docs-writer         fast│tools: Read, Grep   color: cyan
+                          │
+                          │CLAUDE  .claude/agents/author.md
+                          │---
+                          │name: author
+                          │model: sonnet
+                          │tools: Read, Grep
+                          │---
+                          │You draft notes.
+                          │
+                          │CODEX   ~/.codex/config.toml + prompts/author.md
+                          │[profiles.author]
+                          │model = "gpt-5-codex"
+                          │⚠ profile "author": dropped Claude-only field `tools`
+                          │⚠ profile "author": dropped Claude-only field `color`
+                          │
+                          │
+                          │
+                          │
+                          │
+[j/k] move   [t] cycle tier

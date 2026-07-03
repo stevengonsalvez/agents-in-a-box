@@ -60,6 +60,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'I' => switch_tab(state, Screen::Inbox),
         // `C` (capital) opens the fleet-wide control center from anywhere (P2).
         'C' => switch_tab(state, Screen::ControlCenter),
+        // `P` (capital) opens the profile editor from anywhere (P5).
+        'P' => switch_tab(state, Screen::Profiles),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.
