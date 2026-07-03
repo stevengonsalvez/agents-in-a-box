@@ -37,7 +37,7 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
 /// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
 /// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 12] = [
+const PRIMARY_TABS: [(char, &str); 13] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('3', "Skills"),
@@ -49,6 +49,7 @@ const PRIMARY_TABS: [(char, &str); 12] = [
     ('L', "Logs"),
     ('I', "Inbox"),
     ('C', "Control"),
+    ('S', "Squads"),
     (',', "Settings"),
 ];
 
@@ -172,6 +173,14 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         // The control center: navigate sessions + answer an ASK inline (P2). The
         // option / number-key answer hints render in the body next to the options.
         Screen::ControlCenter => vec![("j/k", "sessions"), ("enter", "answer")],
+        // The squads screen: create a squad + edit membership + assign an issue
+        // (P7). The `[c]/[a]/[d]/[x]` hints also render on the screen header row.
+        Screen::Squads => vec![
+            ("c", "create"),
+            ("a", "add"),
+            ("d", "remove"),
+            ("x", "assign"),
+        ],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -207,6 +216,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         'L' => matches!(active, Screen::Logs),
         'I' => matches!(active, Screen::Inbox),
         'C' => matches!(active, Screen::ControlCenter),
+        'S' => matches!(active, Screen::Squads),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }

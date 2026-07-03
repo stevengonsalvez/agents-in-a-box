@@ -40,6 +40,7 @@ use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsSt
 use super::skill_manager::{
     reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
 };
+use super::squads::{reduce_squads, SquadsEvent, SquadsIntent, SquadsState};
 use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailIntent, TaskDetailState};
 use super::usage_dashboard::UsageState;
 use super::{AppState, Screen};
@@ -215,6 +216,44 @@ pub enum IssueCreateAction {
     },
 }
 
+/// A deferred daemon squad RPC raised by the Squads screen (P7 / D17).
+///
+/// Like [`BoardsAction`], the sync key router can't `await`; it stashes the action
+/// on [`ScreenStates::pending_squads_action`] and the plugin's `render` pass
+/// drains it and fires the matching `hangar/squad_*` RPC over the daemon socket,
+/// then re-pulls `hangar/squads_list`. The leader (create), member (add), and
+/// issue (assign) *selection* is resolved by the glue from its cached
+/// agents/issues — the screen intent carries only ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SquadAction {
+    /// Create a squad named `name` (`c` + Enter) — `hangar/squad_create`; the glue
+    /// picks the leader from the cached agents.
+    Create {
+        /// The new squad's name.
+        name: String,
+    },
+    /// Add a member to `squad_id` (`a`) — `hangar/squad_member_add`; the glue picks
+    /// the next cached agent not already on the squad.
+    AddMember {
+        /// The squad to add a member to.
+        squad_id: String,
+    },
+    /// Remove `member_ref` from `squad_id` (`d` on a member row) —
+    /// `hangar/squad_member_remove`.
+    RemoveMember {
+        /// The squad to remove the member from.
+        squad_id: String,
+        /// The member actor-ref to remove.
+        member_ref: String,
+    },
+    /// Assign the current issue to `squad_id` (`x`) — `hangar/squad_fanout`; the
+    /// glue picks the issue and fans the brief to the leader + agent members.
+    Assign {
+        /// The squad the issue is assigned to.
+        squad_id: String,
+    },
+}
+
 /// A deferred `attention/answer` RPC raised by the control-center screen (P2).
 ///
 /// Like the other deferred actions, the sync key router can't `await`; the
@@ -274,6 +313,9 @@ pub struct ScreenStates {
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
+    /// Squads screen cache (P7 / D17), built from `hangar/squads_list` with each
+    /// leader/member resolved against the cached actor snapshot for live status.
+    pub squads: SquadsState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -341,6 +383,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire the matching `hangar/board_*` over the
     /// daemon socket (P4). `None` when idle.
     pub pending_boards_action: Option<BoardsAction>,
+    /// A squad mutation RPC raised by the Squads screen (`c`, `a`, `d`, `x`),
+    /// awaiting the `render` pass to fire the matching `hangar/squad_*` over the
+    /// daemon socket (P7 / D17). `None` when idle.
+    pub pending_squads_action: Option<SquadAction>,
 }
 
 impl Default for SkillManagerState {
@@ -447,6 +493,28 @@ impl ScreenStates {
     /// Take the pending `attention/answer` raised by the control center, if any (P2).
     pub const fn take_pending_answer_action(&mut self) -> Option<AttentionAnswerAction> {
         self.pending_answer_action.take()
+    }
+
+    /// Rebuild the Squads screen from a `hangar/squads_list` snapshot (or any
+    /// `hangar/squad_*` mutation reply, which returns the same refreshed envelope)
+    /// (P7 / D17), resolving actors against the cached agent snapshot and
+    /// preserving the selection, open create input, and transient note across the
+    /// refresh.
+    pub fn set_squads(&mut self, snapshot: &ainb_hangar_proto::snapshots::SquadsListResult) {
+        let selected = self.squads.selected_index();
+        let creating = self.squads.create_buffer().map(str::to_string);
+        let note = self.squads.note().map(str::to_string);
+        let mut next = SquadsState::from_snapshot(snapshot, &self.actors);
+        next.set_selected(selected);
+        next.set_create_buffer(creating);
+        next.set_note(note);
+        self.squads = next;
+    }
+
+    /// Take the pending squad mutation RPC raised by the Squads screen, if any
+    /// (P7 / D17).
+    pub const fn take_pending_squads_action(&mut self) -> Option<SquadAction> {
+        self.pending_squads_action.take()
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -671,6 +739,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 now_ms(),
             );
         }
+        Screen::Squads => {
+            super::squads::render_squads(buf, w, top, bottom, &states.squads);
+        }
         Screen::Settings => {
             if let Some(s) = &states.settings {
                 super::settings::render_settings(buf, w, h, top, bottom, s);
@@ -894,6 +965,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::ControlCenter => {
             route_control_center(states, key);
+            None
+        }
+        Screen::Squads => {
+            route_squads(states, key);
             None
         }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
@@ -1127,6 +1202,39 @@ fn route_control_center(states: &mut ScreenStates, key: &KeyEvent) {
             answer,
         });
     }
+}
+
+/// Squads screen key routing (P7 / D17): fold the key into the pure reducer,
+/// lifting a [`SquadsIntent`] into a deferred [`SquadAction`] the `render` pass
+/// fires over the daemon socket (the sync key router can't `await`).
+///
+/// Esc cancels an open create input; every other printable key (incl. Enter /
+/// Backspace while creating) folds into the reducer. The create/add/assign
+/// selection policy (which leader / member / issue) is resolved by the plugin glue
+/// from its cached agents/issues, so the lifted action carries only ids.
+fn route_squads(states: &mut ScreenStates, key: &KeyEvent) {
+    let ev = if matches!(key.code, KeyCode::Esc) {
+        SquadsEvent::Esc
+    } else if let Some(c) = key_char(key) {
+        SquadsEvent::Key(c)
+    } else {
+        return;
+    };
+    let out = reduce_squads(&states.squads, ev);
+    states.squads = out.state;
+    states.pending_squads_action = match out.intent {
+        Some(SquadsIntent::CreateSquad { name }) => Some(SquadAction::Create { name }),
+        Some(SquadsIntent::AddMember { squad_id }) => Some(SquadAction::AddMember { squad_id }),
+        Some(SquadsIntent::RemoveMember {
+            squad_id,
+            member_ref,
+        }) => Some(SquadAction::RemoveMember {
+            squad_id,
+            member_ref,
+        }),
+        Some(SquadsIntent::AssignIssue { squad_id }) => Some(SquadAction::Assign { squad_id }),
+        None => None,
+    };
 }
 
 /// Agent-picker key routing: fold the key into the pure reducer, then act on the

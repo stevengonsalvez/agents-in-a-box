@@ -30,13 +30,14 @@ pub mod logs;
 mod router;
 pub mod settings;
 pub mod skill_manager;
+pub mod squads;
 pub mod task_detail;
 pub mod usage_dashboard;
 
 pub use app_screens::{
     render_body, route_key, AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction,
     IssueCommentAction, IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates,
-    SkillAction, WorkspaceAction,
+    SkillAction, SquadAction, WorkspaceAction,
 };
 pub use router::reduce;
 
@@ -82,6 +83,10 @@ pub enum Screen {
     /// board, backed by the P2 attention feed (`attention/list` +
     /// `attention/subscribe`) with inline answering via `attention/answer`.
     ControlCenter,
+    /// Squads (hotkey `S`) — the daemon-native team primitive (D17): squads with
+    /// a leader + members, live per-member status, and issue-assign leader-routing
+    /// dispatch, backed by `hangar/squads_list` + the squad mutation RPCs (P7).
+    Squads,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -110,6 +115,7 @@ impl Screen {
             Self::Logs => "Logs",
             Self::Inbox => "Inbox",
             Self::ControlCenter => "Control",
+            Self::Squads => "Squads",
             Self::Settings => "Settings",
             Self::Help => "Help",
             Self::CommandPalette => "Search",
