@@ -713,6 +713,13 @@ async fn handle_profile_get(
 ) -> Result<serde_json::Value, RpcError> {
     let params: ainb_hangar_proto::snapshots::ProfileGetParams =
         parse_params(req, "{ slug }")?;
+    // Containment guard: the slug is joined into `<profiles>/<slug>.md`, so an
+    // unvalidated `../` would escape the profiles dir and read any parseable
+    // `.md` on disk. Mirror the `profile/upsert` guard — an invalid slug is a
+    // read miss (not-found), never a traversal. read_master hardens this too.
+    if !ainb_hangar_core::profile::is_valid_slug(&params.slug) {
+        return to_value(&ainb_hangar_proto::snapshots::ProfileGetResult::not_found());
+    }
     // Best-effort: keep the index current so a get after an out-of-band edit
     // reflects disk (the RPC path does not depend on the watcher being alive).
     let dir = profiles_dir_or_err()?;

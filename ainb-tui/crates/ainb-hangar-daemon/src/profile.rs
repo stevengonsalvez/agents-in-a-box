@@ -77,6 +77,13 @@ pub enum ProfileError {
 /// [`ProfileError::Io`] on a read fault, [`ProfileError::Parse`] on a malformed
 /// master.
 pub fn read_master(dir: &Path, slug: &str) -> Result<Option<ProfileMaster>, ProfileError> {
+    // Defence in depth: a slug is joined into `<dir>/<slug>.md`, so any path
+    // separator or `..` segment could escape `dir`. The RPC layer already
+    // rejects invalid slugs; treat an escaping slug here as a read miss so no
+    // caller can traverse out of the profiles directory.
+    if slug.contains('/') || slug.contains('\\') || slug.split(['/', '\\']).any(|c| c == "..") {
+        return Ok(None);
+    }
     let path = master_path(dir, slug);
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
@@ -163,7 +170,6 @@ pub async fn refresh_index(pool: &SqlitePool, dir: &Path) -> anyhow::Result<usiz
     let mut upserted = 0usize;
 
     for (slug, mtime) in &files {
-        on_disk.push(slug.clone());
         match read_master(dir, slug) {
             Ok(Some(master)) => {
                 // Index by the FILE STEM (`slug`), NOT `master.slug`: the stem is
@@ -181,6 +187,12 @@ pub async fn refresh_index(pool: &SqlitePool, dir: &Path) -> anyhow::Result<usiz
                     );
                 }
                 ProfileRepo::upsert(pool, slug, master.tier.as_str(), *mtime).await?;
+                // Mark on-disk ONLY after a successful parse/upsert. A slug whose
+                // master became malformed (Err below) is deliberately left out of
+                // `on_disk`, so the prune pass drops its now-unloadable index row
+                // — `profile/list` must never advertise a profile `profile/get`
+                // cannot parse.
+                on_disk.push(slug.clone());
                 upserted += 1;
             }
             Ok(None) => {
@@ -193,7 +205,7 @@ pub async fn refresh_index(pool: &SqlitePool, dir: &Path) -> anyhow::Result<usiz
         }
     }
 
-    // Prune rows whose master file has disappeared.
+    // Prune rows whose master file has disappeared (or became unparseable).
     for indexed in ProfileRepo::list_slugs(pool).await? {
         if !on_disk.iter().any(|s| s == &indexed) {
             ProfileRepo::delete(pool, &indexed).await?;
@@ -236,22 +248,34 @@ pub fn spawn_index_watch(pool: SqlitePool, dir: PathBuf) -> Option<notify::Recom
         });
     }
 
-    // A change under the dir schedules a debounced reconcile on the tokio
-    // runtime (the notify callback runs on notify's own thread, so it hands the
-    // async reconcile off via the runtime handle captured here).
+    // A change under the dir wakes a SINGLE reconcile worker (not a fresh task
+    // per event). Concurrent refreshes would each `list` a directory snapshot and
+    // then `prune`, so an older refresh could delete a row a newer refresh just
+    // upserted. Serialising every reconcile through one worker makes each
+    // `list`+`prune` atomic w.r.t. the others; the bounded(1) channel coalesces a
+    // burst of events into one trailing reconcile that re-lists fresh from disk.
     let handle = tokio::runtime::Handle::current();
-    let watch_pool = pool.clone();
-    let watch_dir = dir.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    {
+        let pool = pool.clone();
+        let dir = dir.clone();
+        handle.spawn(async move {
+            while rx.recv().await.is_some() {
+                // Drain any ticks that piled up while a reconcile was running so
+                // the burst collapses to a single fresh scan.
+                while rx.try_recv().is_ok() {}
+                if let Err(e) = refresh_index(&pool, &dir).await {
+                    tracing::warn!(error = %e, "profile index: watch reconcile failed");
+                }
+            }
+        });
+    }
     let mut watcher = match notify::recommended_watcher(
         move |res: notify::Result<notify::Event>| match res {
             Ok(_event) => {
-                let pool = watch_pool.clone();
-                let dir = watch_dir.clone();
-                handle.spawn(async move {
-                    if let Err(e) = refresh_index(&pool, &dir).await {
-                        tracing::warn!(error = %e, "profile index: watch reconcile failed");
-                    }
-                });
+                // Non-blocking: a full channel already has a reconcile queued, so
+                // a dropped send just coalesces into that pending run.
+                let _ = tx.try_send(());
             }
             Err(e) => tracing::warn!(error = %e, "profile watch error"),
         },
@@ -468,6 +492,41 @@ You are a reviewer.\n";
         assert!(
             ProfileRepo::get(store.pool(), "different-name").await.unwrap().is_none(),
             "never indexed under the divergent name: field"
+        );
+    }
+
+    #[test]
+    fn read_master_refuses_path_escaping_slug() {
+        // A slug that tries to climb out of the profiles dir is a read miss, not
+        // a traversal — even if a real `.md` sits at the escaped path.
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = dir.path().join("profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        // A parseable master OUTSIDE the profiles dir.
+        fs::write(dir.path().join("secret.md"), SAMPLE).unwrap();
+        assert!(read_master(&profiles, "../secret").unwrap().is_none());
+        assert!(read_master(&profiles, "../../etc/passwd").unwrap().is_none());
+        assert!(read_master(&profiles, "sub/../../secret").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_index_prunes_a_master_that_became_malformed() {
+        // A previously-indexed master that later fails to parse must be pruned —
+        // `profile/list` must never advertise a profile `profile/get` cannot load.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let profiles = dir.path().join("profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        write_master(&profiles, &master()).unwrap();
+        refresh_index(store.pool(), &profiles).await.unwrap();
+        assert!(ProfileRepo::get(store.pool(), "reviewer").await.unwrap().is_some());
+
+        // The master becomes malformed on disk (no frontmatter).
+        fs::write(master_path(&profiles, "reviewer"), "no frontmatter here").unwrap();
+        refresh_index(store.pool(), &profiles).await.unwrap();
+        assert!(
+            ProfileRepo::get(store.pool(), "reviewer").await.unwrap().is_none(),
+            "stale row for an unparseable master is pruned, not left advertised"
         );
     }
 
