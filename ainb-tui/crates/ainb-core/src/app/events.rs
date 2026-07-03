@@ -6416,6 +6416,13 @@ impl EventHandler {
             AppEvent::OnboardingNext => {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding next step");
+                // Save git directories as soon as the user leaves the step,
+                // not only on wizard finish.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 let mut trigger_dep_check = false;
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     if onboarding_state.is_final_step() {
@@ -6454,6 +6461,12 @@ impl EventHandler {
             AppEvent::OnboardingBack => {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding back step");
+                // Persist git dirs when stepping back out of the step too.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     onboarding_state.go_back();
                     // Refresh per-agent auth when stepping back into the step.
@@ -6465,7 +6478,14 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingToMenu => {
+                use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Leaving onboarding wizard for the Setup menu");
+                // Persist git dirs before dropping the wizard state.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {

@@ -3970,6 +3970,19 @@ impl AppState {
             OnboardingState::new()
         };
 
+        // Seed git directories from the last saved paths so re-opening onboarding
+        // shows what the user set previously, not a fresh default scan. Prefer the
+        // onboarding record; fall back to the app-config scan paths.
+        let saved = crate::config::OnboardingConfig::load()
+            .map(|c| c.git_directories)
+            .unwrap_or_default();
+        let saved = if saved.is_empty() {
+            self.app_config.workspace_defaults.workspace_scan_paths.clone()
+        } else {
+            saved
+        };
+        state.set_git_directories(&saved);
+
         // If a specific start step is provided, jump to it
         if let Some(step) = start_step {
             state.current_step = step;
@@ -3985,6 +3998,37 @@ impl AppState {
 
         self.onboarding_state = Some(state);
         self.current_screen = screen_ids::ONBOARDING.to_string();
+    }
+
+    /// Persist the onboarding git directories immediately — called when leaving
+    /// the Git Directories step in any direction (Next / Back / to menu) so the
+    /// user's edit is saved without having to finish the whole wizard.
+    ///
+    /// Only writes when at least one path is VALID, so invalid/empty input never
+    /// clobbers previously-saved config.
+    pub fn persist_onboarding_git_dirs(&mut self) {
+        use crate::config::OnboardingConfig;
+
+        let Some(state) = self.onboarding_state.as_ref() else {
+            return;
+        };
+        let valid = state.get_valid_directories();
+        if valid.is_empty() {
+            return;
+        }
+
+        // Onboarding record — load first so we preserve completed/version/etc.
+        let mut cfg = OnboardingConfig::load().unwrap_or_default();
+        cfg.git_directories = valid.clone();
+        if let Err(e) = cfg.save() {
+            warn!("Failed to persist onboarding git directories: {}", e);
+        }
+
+        // App-config scan paths (what session creation actually reads).
+        self.app_config.workspace_defaults.workspace_scan_paths = valid;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist workspace scan paths: {}", e);
+        }
     }
 
     /// Complete the onboarding process
