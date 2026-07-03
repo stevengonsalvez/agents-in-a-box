@@ -380,10 +380,24 @@ async fn execute_claimed(
     // agent still runs rather than stranding the task.
     let dispatch = resolve_dispatch(pool, &task.agent_id).await.unwrap_or_default();
 
+    // T8: the typed in-process lifecycle guard. It begins at `dispatched` (the
+    // `queued -> dispatched` claim already committed via `ClaimTaskService`,
+    // arbitrated by the migration-0012 SQL index) and types every remaining edge
+    // the loop drives. Advancing it BEFORE each store-service write turns an
+    // out-of-order finalize into a typed error rather than a silent mis-step;
+    // the store-service idempotent finalize + the SQL guard stay the
+    // authoritative DB-level enforcers for atomicity and cross-daemon races.
+    let mut lifecycle = crate::fsm::LifecycleGuard::claimed();
+
     // dispatched -> running. A lost race (another worker started it) surfaces as
-    // an FSM error; bail without running a duplicate provider.
+    // an FSM error; bail without running a duplicate provider. The typed guard
+    // advances first: a `dispatched -> running` edge is legal, so this only fails
+    // if the loop is driven out of order (a logic bug), never on a real run.
+    lifecycle.fire(crate::fsm::LifecycleEvent::Start)?;
     StartTaskService::start(pool, &task.id, clock).await?;
-    tracing::info!(task_id = %task.id, "task running");
+    // Surface the typed FSM position beside the DB transition so a lifecycle
+    // race is greppable in the daemon log next to the store's `task.start` span.
+    tracing::info!(task_id = %task.id, lifecycle = lifecycle.state().as_db_str(), "task running");
     // e38.2: announce the start to subscribed plugins (best-effort push; the
     // next snapshot pull reconciles if no subscriber is connected).
     emit_task_started(events, &task, clock);
@@ -453,9 +467,13 @@ async fn execute_claimed(
 
     match outcome {
         RunOutcome::Success(result) => {
+            // running -> done: type the terminal edge before the store finalize.
+            lifecycle.fire(crate::fsm::LifecycleEvent::Complete)?;
             finalize_success(pool, &task, &env, result, clock, stats, events).await?;
         }
         RunOutcome::Failed { reason, result } => {
+            // running -> failed: type the terminal edge before the store finalize.
+            lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
             finalize_failure(pool, &task, reason, result, clock, stats, events).await?;
         }
     }
