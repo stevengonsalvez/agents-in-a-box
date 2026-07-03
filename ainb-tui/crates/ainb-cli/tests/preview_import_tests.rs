@@ -131,3 +131,44 @@ fn _types(p: ainb_cli::source::SourcePreview, home: &Path) {
     _assert_send(p);
     let _ = home;
 }
+
+#[test]
+fn reinstall_with_different_targets_refreshes_manifest_entry() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = tmp_home();
+    let (_repo, uri) = fixture_repo();
+
+    let claude_root = home.path().join("tools/claude");
+    let codex_root = home.path().join("tools/codex");
+    // SAFETY: ENV_LOCK serialises env mutation across this suite.
+    unsafe {
+        std::env::set_var("AINB_TOOL_HOME_CLAUDE", &claude_root);
+        std::env::set_var("AINB_TOOL_HOME_CODEX", &codex_root);
+    }
+
+    let preview = preview_source(home.path(), &uri).expect("preview");
+    let commit_path = unit_paths(&preview)
+        .into_iter()
+        .find(|p| p.contains("commit"))
+        .expect("commit path");
+
+    let mut out = Vec::new();
+    import_selected(home.path(), &preview, &[commit_path.clone()], "claude", &mut out)
+        .expect("first import");
+    // Re-import the same unit targeting codex only.
+    import_selected(home.path(), &preview, &[commit_path], "codex", &mut out)
+        .expect("second import");
+
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert_eq!(manifest.units.len(), 1, "still one declaration");
+    assert_eq!(
+        manifest.units[0].targets.as_deref(),
+        Some(&["codex".to_string()][..]),
+        "declared targets must follow the latest install"
+    );
+
+    unsafe {
+        std::env::remove_var("AINB_TOOL_HOME_CLAUDE");
+        std::env::remove_var("AINB_TOOL_HOME_CODEX");
+    }
+}

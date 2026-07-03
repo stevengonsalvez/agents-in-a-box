@@ -246,21 +246,19 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
     // Record the unit in the manifest too — the manifest is the
     // declarative intent the Skill Manager's Units table renders;
     // without this entry an installed unit was lockfile-only and
-    // invisible in the TUI ("imported but nothing shows").
+    // invisible in the TUI ("imported but nothing shows"). Upsert, not
+    // insert-only: a reinstall with different --targets must refresh
+    // the declared targets or manifest and lockfile drift apart.
     {
         let manifest_path = manifest_path_in(home);
         let mut manifest = Manifest::load_from(&manifest_path)?;
-        if !manifest.units.iter().any(|u| u.uri == args.uri) {
-            manifest.units.push(ainb_skill_core::manifest::UnitEntry {
-                uri: args.uri.clone(),
-                targets: args
-                    .targets
-                    .as_deref()
-                    .map(|s| s.split(',').map(|t| t.trim().to_string()).collect()),
-                shadowed_by: None,
-            });
-            manifest.save_to(&manifest_path)?;
-        }
+        manifest.upsert_unit(
+            &args.uri,
+            args.targets
+                .as_deref()
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect()),
+        );
+        manifest.save_to(&manifest_path)?;
     }
 
     // Replace or insert the LockedUnit.
