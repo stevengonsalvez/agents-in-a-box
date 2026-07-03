@@ -74,6 +74,10 @@ pub struct CardView {
     pub display_id: String,
     /// The issue's latest task status (`done` turns the card green / `✓`).
     pub state: Option<String>,
+    /// The exact tmux session name an interactive run spawned for this card's
+    /// latest task (`tmux_hangar-<task_id>`, ccc / D6), or `None` for a headless
+    /// task / no run. The attach affordance surfaces it as `tmux attach -t <name>`.
+    pub session_name: Option<String>,
 }
 
 impl CardView {
@@ -83,6 +87,7 @@ impl CardView {
             title: w.title.clone(),
             display_id: w.display_id.clone(),
             state: w.state.clone(),
+            session_name: w.session_name.clone(),
         }
     }
 
@@ -1243,6 +1248,7 @@ mod tests {
             title: title.into(),
             display_id: issue.chars().rev().take(5).collect::<String>().chars().rev().collect(),
             state: state.map(str::to_string),
+            session_name: None,
         }
     }
 

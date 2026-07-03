@@ -1535,19 +1535,27 @@ impl HangarPlugin {
         }
     }
 
-    /// Build the attach note for `issue_id`: the card's latest run state when it is
-    /// on a board, so `a` gives honest feedback (a headless run has no attachable
-    /// pane under the current runner — D6's interactive attach lands with it).
+    /// Build the attach note for `issue_id` (ccc / D6).
+    ///
+    /// When the card's latest task ran `interactive`, the daemon recorded the exact
+    /// tmux session name on it — surface a copyable `tmux attach -t <name>` so the
+    /// user can attach to the live agent. This is the HONEST contract: a plugin
+    /// subprocess has no controlling terminal and the `host/*` protocol exposes no
+    /// terminal-attach method, so the plugin cannot drive the attach itself — it
+    /// hands over the exact command instead of faking a takeover. A headless run
+    /// has no attachable pane, so it keeps reporting the card's run state.
     fn card_attach_note(&self, issue_id: &str) -> String {
-        let state = self
+        let card = self
             .screens
             .boards
             .boards()
             .iter()
             .flat_map(|b| b.columns.iter().flat_map(|c| c.cards.iter()).chain(b.unmapped.iter()))
-            .find(|c| c.issue_id == issue_id)
-            .and_then(|c| c.state.clone());
-        match state.as_deref() {
+            .find(|c| c.issue_id == issue_id);
+        if let Some(name) = card.and_then(|c| c.session_name.as_deref()) {
+            return format!("attach: #{issue_id} — tmux attach -t {name}");
+        }
+        match card.and_then(|c| c.state.as_deref()) {
             Some("running") => format!("attach: #{issue_id} is running (headless — no live pane yet)"),
             Some(other) => format!("attach: #{issue_id} is {other} — press Enter to launch"),
             None => format!("attach: #{issue_id} has no run yet — press Enter to launch"),
