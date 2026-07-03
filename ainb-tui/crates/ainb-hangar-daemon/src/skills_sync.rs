@@ -396,10 +396,22 @@ fn walk_files(base: &Path, current: &Path, out: &mut Vec<SkillFileInput>) -> Res
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            let content = std::fs::read_to_string(&path).map_err(|source| SyncError::Io {
+            // Skill payloads are text (SKILL.md, references, scripts); a binary
+            // asset alongside them (compiled helper bins, __pycache__, vendored
+            // tool binaries) is not representable in the TEXT-column store and
+            // isn't consumed downstream either — skip it rather than hard-failing
+            // the whole import over an unrelated build artifact.
+            let bytes = std::fs::read(&path).map_err(|source| SyncError::Io {
                 path: path.clone(),
                 source,
             })?;
+            let content = match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(_) => {
+                    tracing::debug!(path = %path.display(), "skills sync: skipping non-UTF-8 file");
+                    continue;
+                }
+            };
             out.push(SkillFileInput { path: rel, content });
         }
     }
