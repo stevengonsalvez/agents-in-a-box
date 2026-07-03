@@ -54,80 +54,68 @@ fn add(
     lockfile_path: &Path,
     out: &mut dyn io::Write,
 ) -> Result<()> {
-    let uri =
-        Uri::parse(&args.uri).with_context(|| format!("parsing source URI `{}`", args.uri))?;
-
-    if uri.path.is_some() {
-        bail!(
-            "`{}` looks like a unit URI (has a path). Use `ainb skill install` for units; \
-             pass a source URI (no `/path`) here.",
-            args.uri
-        );
+    // `add` = the shared preview front-half + persist. Duplicate NAME is
+    // rejected up front (before the fetch) to keep the historical
+    // fast-fail + `SourceAlreadyExists` contract.
+    if let Some(name) = args.name.as_deref() {
+        let manifest = Manifest::load_from(manifest_path)?;
+        if manifest.source(name).is_some() {
+            return Err(ainb_skill_core::CoreError::SourceAlreadyExists(name.to_string()).into());
+        }
     }
 
-    let stored_uri = format!("{}:{}", uri.source_type, uri.locator);
-    let ref_ = uri.ref_.clone().unwrap_or_else(|| "main".to_string());
-    let name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| derive_name_slug(&uri.source_type, &uri.locator));
-
-    if name.is_empty() {
-        return Err(anyhow!(
-            "could not derive a non-empty name from `{}` — pass --name explicitly",
-            args.uri
-        ));
+    let preview = preview_source_with(home, &args.uri, args.name.as_deref(), args.kind.as_deref())?;
+    if preview.already_added {
+        return Err(ainb_skill_core::CoreError::SourceAlreadyExists(preview.name).into());
     }
-
-    // Reject duplicate before doing any expensive fetch work.
-    let mut manifest = Manifest::load_from(manifest_path)?;
-    if manifest.source(&name).is_some() {
-        return Err(ainb_skill_core::CoreError::SourceAlreadyExists(name).into());
-    }
-
-    // Fetch the source via the type-appropriate fetcher.
-    let cache_root = cache_dir_in(home);
-    let fetched = run_fetcher(&uri, &name, &cache_root)
-        .with_context(|| format!("fetching source `{name}`"))?;
-
-    // Adapter selection: explicit --type wins, otherwise auto-detect.
-    let (adapter, detected_kind) = pick_adapter_for(&fetched.path, args.kind.as_deref())?;
-    let units = adapter
-        .list_units(&fetched.path)
-        .with_context(|| format!("listing units in `{}`", fetched.path.display()))?;
-    let unit_count = units.len();
-
-    // Persist the discovered kind in the manifest.
-    manifest
-        .add_source(SourceEntry {
-            name: name.clone(),
-            kind: Some(detected_kind.clone()),
-            uri: stored_uri,
-            r#ref: ref_.clone(),
-            enabled: true,
-            read_only: false,
-            target_layout: Vec::new(),
-        })
-        .map_err(anyhow::Error::from)?;
-    manifest.save_to(manifest_path)?;
-
-    // Lockfile records where the fetched checkout lives so `search`
-    // can find it without re-running the fetcher.
-    let mut lockfile = Lockfile::load_from(lockfile_path)?;
-    lockfile.sources.push(LockedSource {
-        name: name.clone(),
-        uri: format!("{}:{}", uri.source_type, uri.locator),
-        declared_ref: ref_,
-        resolved_sha: Some(fetched.resolved_sha),
-        fetched_at: Some(fetched.fetched_at),
-        fetched_path: Some(fetched.path.to_string_lossy().to_string()),
-    });
-    lockfile.save_to(lockfile_path)?;
+    persist_source(manifest_path, lockfile_path, &preview)?;
 
     writeln!(
         out,
-        "added source {name} ({detected_kind}) → {unit_count} unit(s)"
+        "added source {} ({}) → {} unit(s)",
+        preview.name,
+        preview.kind,
+        preview.units.len()
     )?;
+    Ok(())
+}
+
+/// Write the manifest `SourceEntry` + lockfile `LockedSource` for a
+/// previewed source. The single persistence point shared by `add` and
+/// `import_selected`, so TUI-imported and CLI-added sources can never
+/// drift in record shape.
+fn persist_source(
+    manifest_path: &Path,
+    lockfile_path: &Path,
+    preview: &SourcePreview,
+) -> Result<()> {
+    let mut manifest = Manifest::load_from(manifest_path)?;
+    if manifest.source(&preview.name).is_none() {
+        manifest
+            .add_source(SourceEntry {
+                name: preview.name.clone(),
+                kind: Some(preview.kind.clone()),
+                uri: preview.stored_uri.clone(),
+                r#ref: preview.r#ref.clone(),
+                enabled: true,
+                read_only: false,
+                target_layout: Vec::new(),
+            })
+            .map_err(anyhow::Error::from)?;
+        manifest.save_to(manifest_path)?;
+    }
+    let mut lockfile = Lockfile::load_from(lockfile_path)?;
+    if !lockfile.sources.iter().any(|s| s.name == preview.name) {
+        lockfile.sources.push(LockedSource {
+            name: preview.name.clone(),
+            uri: preview.stored_uri.clone(),
+            declared_ref: preview.r#ref.clone(),
+            resolved_sha: Some(preview.resolved_sha.clone()),
+            fetched_at: Some(preview.fetched_at.clone()),
+            fetched_path: Some(preview.fetched_path.to_string_lossy().to_string()),
+        });
+        lockfile.save_to(lockfile_path)?;
+    }
     Ok(())
 }
 
@@ -194,15 +182,33 @@ pub struct SourcePreview {
 /// Fetch `uri_str` into the cache and list its units — no manifest or
 /// lockfile writes. Backs the Skill Manager's preview-first add flow.
 pub fn preview_source(home: &Path, uri_str: &str) -> Result<SourcePreview> {
+    preview_source_with(home, uri_str, None, None)
+}
+
+/// [`preview_source`] with the `add`-path overrides: an explicit source
+/// name (`--name`) and a forced adapter kind (`--type`). The one shared
+/// front-half for CLI add and TUI preview, so name derivation, ref
+/// defaulting, and validation cannot drift between the two.
+fn preview_source_with(
+    home: &Path,
+    uri_str: &str,
+    name_override: Option<&str>,
+    kind_override: Option<&str>,
+) -> Result<SourcePreview> {
     let uri = Uri::parse(uri_str).with_context(|| format!("parsing source URI `{uri_str}`"))?;
     if uri.path.is_some() {
-        bail!("`{uri_str}` looks like a unit URI (has a path) — pass a repo/source URI");
+        bail!(
+            "`{uri_str}` looks like a unit URI (has a path). Use `ainb skill install` for \
+             units; pass a repo/source URI (no `/path`) here."
+        );
     }
     let stored_uri = format!("{}:{}", uri.source_type, uri.locator);
     let ref_ = uri.ref_.clone().unwrap_or_else(|| "main".to_string());
-    let derived = derive_name_slug(&uri.source_type, &uri.locator);
+    let derived = name_override
+        .map(str::to_string)
+        .unwrap_or_else(|| derive_name_slug(&uri.source_type, &uri.locator));
     if derived.is_empty() {
-        bail!("could not derive a source name from `{uri_str}`");
+        bail!("could not derive a source name from `{uri_str}` — pass --name explicitly");
     }
 
     // Identity is the stored URI, not the derived name — a source added
@@ -225,7 +231,7 @@ pub fn preview_source(home: &Path, uri_str: &str) -> Result<SourcePreview> {
 
     let fetched = run_fetcher(&uri, &name, &cache_dir_in(home))
         .with_context(|| format!("fetching source `{name}`"))?;
-    let (adapter, kind) = pick_adapter_for(&fetched.path, None)?;
+    let (adapter, kind) = pick_adapter_for(&fetched.path, kind_override)?;
     let units = adapter
         .list_units(&fetched.path)
         .with_context(|| format!("listing units in `{}`", fetched.path.display()))?;
@@ -263,38 +269,13 @@ pub fn import_selected(
     let manifest_path = manifest_path_in(home);
     let lockfile_path = lockfile_path_in(home);
 
-    // Persist the source on first import — same records `add` writes.
-    // Remembered so a fully-failed import can roll it back (the
-    // preview-first contract: no imported units → no trace).
+    // Persist the source on first import — the same records `add` writes
+    // (shared `persist_source`). Remembered so a fully-failed import can
+    // roll it back (the preview-first contract: no imported units → no
+    // trace).
     let persisted_now = !preview.already_added;
-    if !preview.already_added {
-        let mut manifest = Manifest::load_from(&manifest_path)?;
-        if manifest.source(&preview.name).is_none() {
-            manifest
-                .add_source(SourceEntry {
-                    name: preview.name.clone(),
-                    kind: Some(preview.kind.clone()),
-                    uri: preview.stored_uri.clone(),
-                    r#ref: preview.r#ref.clone(),
-                    enabled: true,
-                    read_only: false,
-                    target_layout: Vec::new(),
-                })
-                .map_err(anyhow::Error::from)?;
-            manifest.save_to(&manifest_path)?;
-        }
-        let mut lockfile = Lockfile::load_from(&lockfile_path)?;
-        if !lockfile.sources.iter().any(|s| s.name == preview.name) {
-            lockfile.sources.push(LockedSource {
-                name: preview.name.clone(),
-                uri: preview.stored_uri.clone(),
-                declared_ref: preview.r#ref.clone(),
-                resolved_sha: Some(preview.resolved_sha.clone()),
-                fetched_at: Some(preview.fetched_at.clone()),
-                fetched_path: Some(preview.fetched_path.to_string_lossy().to_string()),
-            });
-            lockfile.save_to(&lockfile_path)?;
-        }
+    if persisted_now {
+        persist_source(&manifest_path, &lockfile_path, preview)?;
     }
 
     // Install each selected unit via the standard install path so plans,
@@ -325,7 +306,11 @@ pub fn import_selected(
         let mut lockfile = Lockfile::load_from(&lockfile_path)?;
         lockfile.sources.retain(|s| s.name != preview.name);
         lockfile.save_to(&lockfile_path)?;
-        writeln!(out, "# rolled back source `{}` (no unit imported)", preview.name)?;
+        writeln!(
+            out,
+            "# rolled back source `{}` (no unit imported)",
+            preview.name
+        )?;
     }
 
     writeln!(

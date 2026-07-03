@@ -124,13 +124,12 @@ fn import_nothing_selected_is_an_error_and_persists_nothing() {
     assert!(!manifest_path_in(home.path()).exists());
 }
 
-fn _assert_send(_: impl Send) {}
-fn _types(p: ainb_cli::source::SourcePreview, home: &Path) {
-    // Compile-time: preview is Send (safe to move across the TUI's async
-    // action boundary later) and paths derive from `home`.
-    _assert_send(p);
-    let _ = home;
-}
+// Compile-time: SourcePreview is Send — it crosses the TUI's
+// spawn_blocking boundary in AsyncAction::SkillPreviewFetch.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<ainb_cli::source::SourcePreview>();
+};
 
 #[test]
 fn reinstall_with_different_targets_refreshes_manifest_entry() {
@@ -153,8 +152,14 @@ fn reinstall_with_different_targets_refreshes_manifest_entry() {
         .expect("commit path");
 
     let mut out = Vec::new();
-    import_selected(home.path(), &preview, &[commit_path.clone()], "claude", &mut out)
-        .expect("first import");
+    import_selected(
+        home.path(),
+        &preview,
+        &[commit_path.clone()],
+        "claude",
+        &mut out,
+    )
+    .expect("first import");
     // Re-import the same unit targeting codex only.
     import_selected(home.path(), &preview, &[commit_path], "codex", &mut out)
         .expect("second import");
@@ -199,7 +204,10 @@ fn preview_matches_existing_source_by_uri_not_slug() {
     .expect("add source");
 
     let preview = preview_source(home.path(), &uri).expect("preview");
-    assert!(preview.already_added, "same URI under custom name must be recognised");
+    assert!(
+        preview.already_added,
+        "same URI under custom name must be recognised"
+    );
     assert_eq!(preview.name, "mytools", "existing entry's name reused");
 
     // Import must not create a duplicate source.

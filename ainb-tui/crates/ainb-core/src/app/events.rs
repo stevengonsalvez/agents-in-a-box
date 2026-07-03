@@ -802,8 +802,9 @@ impl EventHandler {
             return;
         }
         state.skill_manager_state.preview_loading = Some(uri.to_string());
-        state.pending_async_action =
-            Some(crate::app::state::AsyncAction::SkillPreviewFetch(uri.to_string()));
+        state.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
+            uri.to_string(),
+        ));
     }
 
     /// Map a slash-command name (leading `/` already stripped by the
@@ -5316,20 +5317,28 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerPreviewConfirm => {
-                let Some(view) = state.skill_manager_state.preview.clone() else {
-                    return;
+                // Validate on a borrow (no deep clone of a potentially
+                // 95-unit view); only take() the state once we commit.
+                let (paths, targets) = {
+                    let Some(view) = state.skill_manager_state.preview.as_ref() else {
+                        return;
+                    };
+                    let paths = view.checked_paths();
+                    if paths.is_empty() {
+                        state.add_warning_notification(
+                            "Nothing selected — Space to pick, a for all".to_string(),
+                        );
+                        return;
+                    }
+                    let Some(targets) = view.targets_csv() else {
+                        state.add_warning_notification(
+                            "No target tool — 1/2/3 toggle claude/codex/copilot".to_string(),
+                        );
+                        return;
+                    };
+                    (paths, targets)
                 };
-                let paths = view.checked_paths();
-                if paths.is_empty() {
-                    state.add_warning_notification(
-                        "Nothing selected — Space to pick, a for all".to_string(),
-                    );
-                    return;
-                }
-                let Some(targets) = view.targets_csv() else {
-                    state.add_warning_notification(
-                        "No target tool — 1/2/3 toggle claude/codex/copilot".to_string(),
-                    );
+                let Some(view) = state.skill_manager_state.preview.take() else {
                     return;
                 };
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -5342,7 +5351,6 @@ impl EventHandler {
                     &mut buf,
                 ) {
                     Ok((installed, failed)) => {
-                        state.skill_manager_state.preview = None;
                         state.skill_manager_state.reload_from_disk(&ainb_home);
                         if failed == 0 {
                             state.add_success_notification(format!(
@@ -5360,6 +5368,8 @@ impl EventHandler {
                     }
                     Err(e) => {
                         state.add_error_notification(format!("import failed: {e:#}"));
+                        // Reopen the picker with the user's selection intact.
+                        state.skill_manager_state.preview = Some(view);
                     }
                 }
             }
