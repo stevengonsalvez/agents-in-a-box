@@ -115,6 +115,13 @@ tokio-util = { workspace = true }
 # while preserving foreign sections (the daemon reads its `[env]` table but
 # round-trips the rest of the document untouched).
 toml = { workspace = true }
+# T8 task-lifecycle FSM: the `statig` typed compile-time state machine that
+# types the in-process transition ordering the claim loop walks
+# (`dispatched -> running -> done|failed`). See `crate::fsm`. The
+# migration-0012 per-(issue, agent) SQL claim guard remains the DB-level
+# enforcer; this only types the daemon-side transition sequence so an
+# out-of-order finalize is a typed error, not a silent mis-step.
+statig = { workspace = true }
 
 # P8.2 OTLP export (ALL optional, only pulled under `--features otlp`). A plain
 # `cargo build` resolves none of these, so the shipped daemon links zero OTEL
