@@ -64,6 +64,9 @@ pub struct ProfileDetailView {
     pub tools: Vec<String>,
     /// The Claude-only card color (empty when unset).
     pub color: String,
+    /// The system-prompt body (carried so a tier-cycle upsert round-trips the
+    /// whole master rather than dropping it).
+    pub body: String,
     /// The lossless Claude subagent `.md` preview.
     pub claude_preview: String,
     /// The lossy Codex `[profiles.<slug>]` config fragment.
@@ -123,6 +126,15 @@ impl ProfilesState {
     #[must_use]
     pub fn selected_slug(&self) -> Option<&str> {
         self.selected_entry().map(|e| e.slug.as_str())
+    }
+
+    /// The loaded detail when it matches `slug` — the glue reads this to re-send
+    /// the FULL master on a tier-cycle upsert (so no field is dropped). `None`
+    /// when the detail has not loaded (the glue then falls back to a minimal
+    /// slug+tier write).
+    #[must_use]
+    pub fn detail_for_upsert(&self, slug: &str) -> Option<&ProfileDetailView> {
+        self.detail.as_ref().filter(|d| d.slug == slug)
     }
 
     /// The selected index (for tests / glue).
@@ -225,11 +237,15 @@ fn cycle_tier(state: &ProfilesState) -> ProfilesReduction {
     };
     let next = next_tier(&entry.tier).to_string();
     let slug = entry.slug.clone();
-    // Optimistically reflect the new tier in the roster row so the change is
-    // visible before the upsert round-trips; the re-fetched detail reconciles.
+    // Optimistically reflect the new tier in the roster row AND the loaded detail
+    // so the change is visible before the upsert round-trips; the re-fetched
+    // detail reconciles the previews. The detail is kept (not cleared) so the glue
+    // can re-send the FULL master on upsert rather than dropping its other fields.
     let mut s = state.clone();
     s.roster[s.selected].tier = next.clone();
-    s.detail = None;
+    if let Some(d) = &mut s.detail {
+        d.tier = next.clone();
+    }
     ProfilesReduction {
         state: s,
         intent: Some(ProfilesIntent::CycleTier { slug, tier: next }),

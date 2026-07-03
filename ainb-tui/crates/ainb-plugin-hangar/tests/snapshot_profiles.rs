@@ -40,6 +40,7 @@ fn author_detail() -> ProfileDetailView {
         tier: "balanced".into(),
         tools: vec!["Read".into(), "Grep".into()],
         color: "cyan".into(),
+        body: "You draft notes.".into(),
         claude_preview: "---\nname: author\nmodel: sonnet\ntools: Read, Grep\n---\nYou draft notes."
             .into(),
         codex_fragment: "[profiles.author]\nmodel = \"gpt-5-codex\"".into(),
