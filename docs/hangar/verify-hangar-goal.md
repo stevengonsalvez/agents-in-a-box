@@ -1,5 +1,11 @@
 # GOAL: verify-hangar — full autonomous product verification
 
+> **Superseded by `verify-converged-goal.md`** (P11). This file's F01–F44 feature walk and
+> R01–R08 resilience legs are carried into the converged harness verbatim (its Phase B / C);
+> the converged doc adds the P1–P10 control-plane legs (attention answer-flip, boards,
+> squads, ATC, history) and the J1–J5 × C1–C5 traceability table. Prefer the converged doc
+> for new runs; this one remains as the hangar-parity baseline.
+
 Drop this file into a fresh Claude Code / Codex session at the repo root and run it
 end-to-end without hand-holding. The outcome is a per-feature PASS/SKIP/FAIL table
 covering every user-facing Hangar feature (F01–F44) plus eight resilience legs

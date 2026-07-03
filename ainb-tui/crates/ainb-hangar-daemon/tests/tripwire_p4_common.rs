@@ -201,6 +201,14 @@ pub const ATTENTION_ASK_QUESTION: &str = "Ship to which env?";
 pub const ATTENTION_ASK_OPTION_1: &str = "staging";
 /// The seeded ASK row's second option label (rendered next to the ② glyph).
 pub const ATTENTION_ASK_OPTION_2: &str = "prod";
+/// The deliverable ASK's third option label (rendered next to the ③ glyph) —
+/// the answer-flip tripwire ([`prepare_pipeline_answer_flip`]) seeds three
+/// options so the recording asserts the full ①②③ span; it answers option 2.
+pub const ATTENTION_ASK_OPTION_3: &str = "canary";
+/// The session id the deliverable ASK is raised from. The fake `ainb list`
+/// stub ([`write_fake_ainb`]) binds this id to a live tmux target so the answer
+/// router's C1 resolve finds an exact-id match and the last-mile send delivers.
+pub const ATTENTION_ASK_SESSION: &str = "s-deploy";
 
 /// Seed one NEWER `waiting` row + one OLDER `ask_user_question` row into an
 /// about-to-be-opened `hangar.db`, both scoped to no workspace (a hand-started
@@ -271,6 +279,235 @@ fn seed_attention_pair(home: &Path) {
         .await
         .expect("seed ask attention row");
     });
+}
+
+/// A plain-shell tmux session that receives the daemon's last-mile answer
+/// delivery, killed by **exact name** on drop (never a wildcard / kill-server).
+///
+/// The answer-flip tripwire ([`prepare_pipeline_answer_flip`]) needs a live,
+/// tmux-deliverable session bound to the seeded ASK's raising id so the answer
+/// router's verified send actually lands the picked option somewhere — a plain
+/// 80×24 shell pane accepts the `send-keys` exactly as the vhs harness
+/// (`record-control-center.sh`) relied on.
+pub struct DeliveryTarget {
+    name: String,
+}
+
+impl DeliveryTarget {
+    /// Stand up a detached 80×24 plain-shell tmux session. Panics only on a tmux
+    /// spawn failure (the caller is gated by [`can_run_tripwire`]).
+    #[must_use]
+    pub fn spawn() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let name = format!("hangar-answer-target-{}-{nanos}", std::process::id());
+        let status = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name, "-x", "80", "-y", "24"])
+            .status()
+            .expect("tmux new-session (delivery target)");
+        assert!(status.success(), "tmux new-session failed for {name}");
+        Self { name }
+    }
+
+    /// The exact session name — bound into the fake `ainb list` stub so the
+    /// daemon resolves the ASK's target to this pane.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Capture the target pane's visible text (empty on error) — the tripwire
+    /// asserts the delivered option landed here.
+    #[must_use]
+    pub fn capture(&self) -> String {
+        Command::new("tmux")
+            .args(["capture-pane", "-p", "-t", &self.name])
+            .output()
+            .map_or_else(
+                |_| String::new(),
+                |o| String::from_utf8_lossy(&o.stdout).into_owned(),
+            )
+    }
+}
+
+impl Drop for DeliveryTarget {
+    fn drop(&mut self) {
+        // Exact-name kill only — never wildcard or kill-server.
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.name]).status();
+    }
+}
+
+/// Seed an isolated `$HOME` with the P4 fixture + a WAIT row + a THREE-option
+/// **deliverable** ASK (raised from [`ATTENTION_ASK_SESSION`]), write a fake
+/// `ainb list --format json` stub binding that session to `target_tmux`, and
+/// spawn the daemon with `AINB_BIN=<fake>` + `AINB_FLEET_TRANSPORT=tmux-only`
+/// so the answer router's C1 target-resolve + verified send actually deliver the
+/// picked option into `target_tmux`.
+///
+/// This is the real-delivery sibling of [`prepare_pipeline_with_attention`]:
+/// that one seeds a render/shuffle ASK but never makes it deliverable, so
+/// pressing a digit cannot flip the row. This one closes the full loop
+/// (answer RPC → C1 resolve → tmux delivery → `open`→`answered` → board refresh)
+/// — the path `agents-in-a-box-43e` flagged as untested, first driven only by
+/// the `docs/hangar/assets/record-control-center.sh` vhs harness.
+///
+/// Panics only after [`can_run_tripwire`] has gated the caller.
+pub fn prepare_pipeline_answer_flip(target_tmux: &str) -> Pipeline {
+    let home = tempfile::tempdir().expect("isolated HOME tempdir");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
+
+    seed_onboarding(home.path());
+    seed_database(&hangar_dir);
+    seed_first_run_ack(home.path());
+    seed_notify_prompt_dismissed(home.path());
+    seed_deliverable_ask(home.path());
+
+    // The fake `ainb list` stub the daemon shells out to for session discovery.
+    let fake = write_fake_ainb(home.path(), target_tmux);
+
+    let bin = daemon_bin().expect("gated by can_run_tripwire");
+    let mut cmd = Command::new(bin);
+    cmd.env("HOME", home.path())
+        .env_remove("AINB_HANGAR_HOME")
+        .env("HANGAR_DAEMON_DISABLE_CLAIM", "1")
+        // Point discovery at the stub + force tmux-only delivery so the seeded
+        // ASK's target (`s-deploy`) resolves to the real tmux pane the tripwire
+        // stood up (mirrors `seed_control_center.rs`).
+        .env("AINB_BIN", &fake)
+        .env("AINB_FLEET_TRANSPORT", "tmux-only")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let daemon = cmd.spawn().expect("spawn ainb-hangar-daemon");
+
+    let socket = hangar_dir.join("hangar.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    Pipeline { home, daemon }
+}
+
+/// Seed one NEWER WAIT row + one OLDER **three-option** ASK raised from
+/// [`ATTENTION_ASK_SESSION`] into an about-to-open `hangar.db`. Distinct from
+/// [`seed_attention_pair`] only in the ASK's third option + raising session
+/// (the delivery target); the ids/text match so the answer-flip tripwire reuses
+/// the same [`ATTENTION_ASK_ID`] / [`ATTENTION_ASK_QUESTION`] markers.
+fn seed_deliverable_ask(home: &Path) {
+    use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("deliverable-ask seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open deliverable-ask store");
+        let pool = store.pool();
+
+        AttentionRepo::insert(
+            pool,
+            &NewAttention {
+                id: ATTENTION_WAIT_ID.to_string(),
+                session_id: "s-idle".to_string(),
+                cwd: "/work/idle".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::Waiting,
+                payload: serde_json::json!({
+                    "kind": "WAIT",
+                    "context": { "marker": "WAITING: still idle" }
+                })
+                .to_string(),
+                degraded: false,
+                created_at: 1_700_000_000_000,
+                raise_transcript: None,
+            },
+        )
+        .await
+        .expect("seed waiting attention row");
+
+        AttentionRepo::insert(
+            pool,
+            &NewAttention {
+                id: ATTENTION_ASK_ID.to_string(),
+                session_id: ATTENTION_ASK_SESSION.to_string(),
+                cwd: "/work/deploy".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::AskUserQuestion,
+                payload: serde_json::json!({
+                    "kind": "ASK",
+                    "context": {
+                        "question": ATTENTION_ASK_QUESTION,
+                        "options": [
+                            { "label": ATTENTION_ASK_OPTION_1 },
+                            { "label": ATTENTION_ASK_OPTION_2 },
+                            { "label": ATTENTION_ASK_OPTION_3 },
+                        ]
+                    }
+                })
+                .to_string(),
+                degraded: false,
+                created_at: 1_699_999_000_000,
+                raise_transcript: None,
+            },
+        )
+        .await
+        .expect("seed deliverable ask attention row");
+    });
+}
+
+/// Write an executable fake `ainb` whose `list --format json` reports one
+/// running session (`session_id = s-deploy`) bound to `target_tmux`, so the
+/// daemon's `discover_from_ainb` (`<AINB_BIN> list --format json`) returns an
+/// exact-id match for the seeded ASK's raising session. Every other invocation
+/// prints `[]`. Returns its path.
+fn write_fake_ainb(home: &Path, target_tmux: &str) -> PathBuf {
+    let path = home.join(".agents-in-a-box").join("fake-ainb.sh");
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"list\" ]; then\n\
+         \tprintf '%s' '[{{\"session_id\":\"{ATTENTION_ASK_SESSION}\",\
+         \"tmux_session_name\":\"{target_tmux}\",\"workspace_name\":\"deploy\",\
+         \"worktree_path\":\"/work/deploy\",\"created_at\":\"2026-07-01T00:00:00+00:00\",\
+         \"is_running\":true,\"claude_active\":true}}]'\n\
+         \texit 0\n\
+         fi\n\
+         printf '%s' '[]'\n"
+    );
+    std::fs::write(&path, &body).expect("write fake-ainb stub");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).expect("stat fake-ainb").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake-ainb");
+    }
+    path
+}
+
+/// Read `(state, answer)` for an attention row from the isolated `$HOME`'s db,
+/// or `None` if the row is absent / the db can't be opened. The answer-flip
+/// tripwire uses this to assert the row deterministically reached `answered`
+/// with the picked option — a DB-level belt-and-suspenders alongside the
+/// board-flip (`0 need you`) + target-pane-delivery proofs.
+#[must_use]
+pub fn attention_row_state(home: &Path, id: &str) -> Option<(String, Option<String>)> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("attention-read runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let row = ainb_hangar_store::repo::attention::AttentionRepo::get(store.pool(), id)
+            .await
+            .ok()??;
+        Some((row.state, row.answer))
+    })
 }
 
 /// Shared body of [`prepare_pipeline_with`] and its variants: seed the isolated
