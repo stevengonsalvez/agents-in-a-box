@@ -8,20 +8,22 @@
 //!
 //! - writes an on-disk profile master (`journey-runner.md`, tier `fast`) for
 //!   the live P5 profile-editor screen to index and preview (CH0);
-//! - seeds a "Delivery" board with a Backlog card already assigned to that
-//!   profile (CH1) — because the live Boards-screen `c`/`Enter`/`a` keys are
-//!   reducer-only right now (see `app_screens.rs::route_boards`; the
-//!   `pending_boards_action` drain only lifts `⇧←/→`/`x`/`n`/`m`). This
-//!   harness seeds the RESULT those keys would one day produce, exactly as
-//!   `seed_boards_journey.rs` already does for its run-to-done state;
+//! - seeds an EMPTY "Delivery" board (`Backlog` / `Running` / `Done`↦`done`
+//!   columns, no cards) assigned no cards yet — CH1 creates the demo card
+//!   live via the Boards-screen `c` → type title → Enter → pick profile →
+//!   Enter flow, which is now fully wired end to end (`AddCard`/`RunCard`
+//!   lift through `pending_boards_action` to a real RPC — see
+//!   `app_screens.rs::lift_boards_intent` / `plugin.rs::BoardsAction::CardCreate`);
 //! - lowers `autostandup.stagnant_min` / `.cooldown_min` to 1 so CH6's idle
 //!   standup fires inside a recording window instead of the 15/60-minute
 //!   production default (`crates/ainb-hangar-daemon/src/standup.rs`);
 //! - spawns the daemon with `HANGAR_DAEMON_DISABLE_CLAIM=1` and
-//!   `AINB_FLEET_TRANSPORT=tmux-only` — no fake-claude headless runner; the
-//!   real-agent chapters spawn a REAL claude session out-of-band via
-//!   `ainb run --interactive`, a separate mechanism from the daemon's task
-//!   queue, and ASK answers deliver over real tmux, not the broker.
+//!   `AINB_FLEET_TRANSPORT=tmux-only` — this seeder is for the CH0/CH1
+//!   deterministic vhs chapters only (profile preview + card creation), no
+//!   card ever runs here. The live real-agent chapters (CH2-CH6) use the
+//!   separate `seed_master_journey_live` harness, which enables the claim
+//!   loop and points `HANGAR_CLAUDE_PATH` at a real `claude` binary so a
+//!   `Run ▾ Interactive` dispatch spawns an attachable, real tmux session.
 //!
 //! Usage: `seed_master_journey <HOME_DIR> <DAEMON_BIN>`
 
@@ -29,14 +31,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
-use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
-const CARD_ISSUE: &str = "HG-77";
-const CARD_TITLE: &str = "Journey task: ask me which environment to ship to";
 const BOARD_ID: &str = "board-journey";
 const PROFILE_SLUG: &str = "journey-runner";
 
@@ -72,27 +70,6 @@ fn main() {
             .await
             .expect("lower autostandup.cooldown_min");
 
-        let agent = ActorRef::new(ActorKind::Agent, PROFILE_SLUG).expect("agent ref");
-        let creator = ActorRef::new(ActorKind::Member, "user-1").expect("member ref");
-        IssueRepo::insert(
-            pool,
-            &NewIssue {
-                id: CARD_ISSUE.into(),
-                workspace_id: ainb_hangar_daemon::seed::WS_ID.into(),
-                title: CARD_TITLE.into(),
-                description: None,
-                state: "open".into(),
-                assignee: Some(agent),
-                creator,
-                created_at: now,
-                priority: 0,
-                due_date: None,
-                labels: Vec::new(),
-            },
-        )
-        .await
-        .expect("insert card issue");
-
         BoardRepo::create(pool, &ws, BOARD_ID, "Delivery", now).await.expect("create board");
         BoardRepo::column_add(pool, &ws, BOARD_ID, "col-backlog", "Backlog", None, false)
             .await
@@ -103,9 +80,9 @@ fn main() {
         BoardRepo::column_add(pool, &ws, BOARD_ID, "col-done", "Done", Some("done"), true)
             .await
             .expect("add Done");
-        BoardRepo::card_add(pool, &ws, BOARD_ID, CARD_ISSUE, Some("col-backlog"), now)
-            .await
-            .expect("place card in Backlog");
+        // No card is pre-seeded — CH1 creates it live via `c` → type title →
+        // Enter → pick profile → Enter (the `board_nav_event`/`lift_boards_intent`
+        // path is fully wired to a real RPC now, not a reducer-only stub).
     });
     // store/pool dropped here → the seed connection closes before the daemon opens.
 
@@ -130,7 +107,6 @@ fn main() {
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());
-    println!("CARD_ISSUE={CARD_ISSUE}");
     println!("BOARD_ID={BOARD_ID}");
     println!("PROFILE_SLUG={PROFILE_SLUG}");
     // Intentionally do NOT wait on `child` — leave the daemon running.
