@@ -3986,6 +3986,16 @@ impl AppState {
         };
         state.set_git_directories(&saved);
 
+        // Re-populate the OTEL form from previously-saved Grafana creds so
+        // re-opening onboarding shows what was configured, not blank fields
+        // (same remember-on-reopen contract as git directories).
+        if let Some(creds) = crate::otel::read_grafana_creds() {
+            state.otel_otlp_endpoint = creds.otlp_endpoint;
+            state.otel_instance_id = creds.instance_id;
+            state.otel_api_token = creds.api_token;
+            state.otel_skip = false;
+        }
+
         // If a specific start step is provided, jump to it
         if let Some(step) = start_step {
             state.current_step = step;
