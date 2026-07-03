@@ -321,6 +321,14 @@ impl Runner {
         Self { cfg }
     }
 
+    /// The hard wall-clock deadline each run is bounded by (the interactive tmux
+    /// path — [`crate::interactive`] — reuses the same budget the headless path
+    /// enforces).
+    #[must_use]
+    pub const fn max_runtime(&self) -> Duration {
+        self.cfg.max_runtime
+    }
+
     /// Build the (tokio) spawn command for `program`, wrapped in the OS-level FS
     /// sandbox when [`RunnerConfig::sandbox`] is on.
     ///
@@ -450,6 +458,25 @@ impl Runner {
         self.run_provider(&self.cfg.codex_path, env, source_env, extra_env, spec).await
     }
 
+    /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
+    ///
+    /// The interactive tmux path ([`crate::interactive`]) needs the exact program
+    /// and arguments the headless path would exec, but launched inside a tmux
+    /// session instead of a captured subprocess. Returning them from here keeps the
+    /// per-provider argv shape (`codex exec [-m …]`) in one place rather than
+    /// re-deriving it at the call site.
+    #[must_use]
+    pub fn provider_command(
+        &self,
+        backend: Backend,
+        invocation: &ProviderInvocation,
+    ) -> (PathBuf, Vec<String>) {
+        match backend {
+            Backend::Claude => (self.cfg.claude_path.clone(), Self::claude_spec().argv),
+            Backend::Codex => (self.cfg.codex_path.clone(), Self::codex_spec(invocation).argv),
+        }
+    }
+
     /// The `claude` provider spec: claude log file, no argv.
     const fn claude_spec() -> ProviderSpec {
         ProviderSpec {
@@ -496,13 +523,7 @@ impl Runner {
         I: IntoIterator<Item = (String, String)>,
         E: IntoIterator<Item = (String, String)>,
     {
-        let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
-        // Deny-by-default ambient filter, then layer the agent's explicit env
-        // overrides on top (so a per-agent value wins over an allowlisted ambient
-        // one of the same name, and arbitrary agent keys still reach the child).
-        let mut child_env: Vec<(String, String)> =
-            source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
-        child_env.extend(extra_env);
+        let child_env = compose_child_env(source_env, extra_env);
 
         let log_path = env.logs.join(spec.log_file);
         let log_file = std::fs::OpenOptions::new()
@@ -632,6 +653,26 @@ impl Runner {
         };
         Ok(outcome)
     }
+}
+
+/// Compose a provider subprocess's child environment: the deny-by-default
+/// [`ENV_ALLOWLIST`] filter over the ambient `source_env`, with the agent's
+/// explicit `extra_env` overrides layered on top.
+///
+/// Shared by the headless [`Runner::run_provider`] and the interactive tmux path
+/// ([`crate::interactive`]) so both apply the identical secret-leak boundary: a
+/// per-agent value wins over an allowlisted ambient one of the same name, and
+/// arbitrary agent keys still reach the child.
+pub(crate) fn compose_child_env<I, E>(source_env: I, extra_env: E) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+    E: IntoIterator<Item = (String, String)>,
+{
+    let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
+    let mut child_env: Vec<(String, String)> =
+        source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
+    child_env.extend(extra_env);
+    child_env
 }
 
 /// Read the child's stdout line-by-line, appending each line to `log_file`,

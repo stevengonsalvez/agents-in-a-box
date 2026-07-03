@@ -2288,9 +2288,15 @@ async fn handle_board_card_run(
     // never resolved still runs rather than dead-ending.
     let agent = resolve_run_agent(pool, &ws, issue.assignee.as_ref()).await?;
 
+    // Enqueue the task and stamp its launch mode in ONE transaction so the claim
+    // loop can never claim it between the insert and the mode write (the runner
+    // branches on `mode` at dispatch). `NewTask` carries only the enqueue columns;
+    // `mode` defaults to `headless` in the schema, so only an interactive launch
+    // needs the follow-up UPDATE — a headless run leaves the row at its default.
     let task_id = SystemIdGen.new_ulid();
-    TaskRepo::insert(
-        pool,
+    let mut tx = pool.begin().await.map_err(|e| store_err(&e))?;
+    TaskRepo::insert_in_tx(
+        &mut tx,
         &NewTask {
             id: task_id.clone(),
             workspace_id: ws.as_str().to_string(),
@@ -2305,6 +2311,14 @@ async fn handle_board_card_run(
     )
     .await
     .map_err(|e| store_err(&e))?;
+    if mode == "interactive" {
+        sqlx::query("UPDATE agent_task_queue SET mode = 'interactive' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| store_err(&e))?;
+    }
+    tx.commit().await.map_err(|e| store_err(&e))?;
 
     to_value(&ainb_hangar_proto::snapshots::BoardCardRunResult {
         task_id,

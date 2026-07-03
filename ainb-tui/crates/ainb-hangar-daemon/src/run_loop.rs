@@ -467,16 +467,26 @@ async fn execute_claimed(
     // backend, so a codex task warns under `codex` rather than always `claude`.
     warn_danger_access(&task, dispatch.backend.name());
 
-    // e38.16: route to the resolved provider's exec path. `claude` takes the
-    // allowlist-filtered env and no argv; `codex` runs `codex exec` with the
-    // agent's model/cli_args on the argv and its `agent_env` layered onto the
+    // ccc / D6: an `interactive` task launches the provider inside a REAL,
+    // attachable tmux session (not the headless pipe-capture path). The session
+    // name is recorded on the row the moment it is created so the attach-from-card
+    // affordance can reach it mid-run; completion is detected by the session being
+    // reaped, mapped onto the same `RunOutcome` the headless path returns.
+    //
+    // e38.16 (headless): route to the resolved provider's exec path. `claude`
+    // takes the allowlist-filtered env and no argv; `codex` runs `codex exec` with
+    // the agent's model/cli_args on the argv and its `agent_env` layered onto the
     // child env. Both spawn through the same OS sandbox (e38.23).
-    let outcome = match dispatch.backend {
-        Backend::Claude => runner.run_claude(&env, task_env).await?,
-        Backend::Codex => {
-            runner
-                .run_codex_with_env(&env, task_env, dispatch.agent_env, &dispatch.invocation)
-                .await?
+    let outcome = if task.mode == "interactive" {
+        run_interactive(pool, runner, &task, &env, task_env, &dispatch).await?
+    } else {
+        match dispatch.backend {
+            Backend::Claude => runner.run_claude(&env, task_env).await?,
+            Backend::Codex => {
+                runner
+                    .run_codex_with_env(&env, task_env, dispatch.agent_env, &dispatch.invocation)
+                    .await?
+            }
         }
     };
 
@@ -496,6 +506,83 @@ async fn execute_claimed(
         }
     }
     Ok(())
+}
+
+/// Launch a task's provider inside a REAL, attachable tmux session and await its
+/// completion (ccc / D6 interactive mode).
+///
+/// Resolves the provider program + argv (the same the headless path would exec),
+/// composes the deny-by-default child env, spawns the session under
+/// `tmux_hangar-<task_id>`, and — crucially — records that exact session name on
+/// the task row BEFORE awaiting, so the attach-from-card affordance can surface a
+/// copyable `tmux attach -t <name>` while the agent is live. The returned
+/// [`RunOutcome`] is the same shape the headless runner returns, so the finalize
+/// seam ([`finalize_success`] / [`finalize_failure`]) is unchanged.
+///
+/// # Errors
+///
+/// Returns an error only on an unrecoverable IO fault spawning the session (a bad
+/// tmux invocation, an unwritable wrapper). A non-zero provider exit or a timeout
+/// is a normal FSM outcome carried in the [`RunOutcome`], not an error.
+async fn run_interactive(
+    pool: &SqlitePool,
+    runner: &Runner,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+    task_env: std::collections::HashMap<String, String>,
+    dispatch: &ResolvedDispatch,
+) -> anyhow::Result<RunOutcome> {
+    // ccc / D6: the interactive session is a REAL, attachable tmux terminal (YOLO)
+    // — it is DELIBERATELY not wrapped in the headless OS FS sandbox (Seatbelt /
+    // Landlock). Confining a live terminal the user attaches to and drives would
+    // defeat the interactive feature; the human operator is present and in control,
+    // which is the trust model D6 chose for interactive over headless.
+    let session_name = crate::interactive::session_name_for(&task.id);
+    let (program, argv) = runner.provider_command(dispatch.backend, &dispatch.invocation);
+    // Mirror the headless env composition: the codex path layers the agent's
+    // `agent_env`; the claude path layers nothing (parity with `execute_claimed`).
+    let extra_env = match dispatch.backend {
+        Backend::Codex => dispatch.agent_env.clone(),
+        Backend::Claude => Vec::new(),
+    };
+    let child_env = crate::runner::compose_child_env(task_env, extra_env);
+
+    let run = crate::interactive::spawn(
+        &program,
+        &env.workdir,
+        &argv,
+        &child_env,
+        &session_name,
+        &env.logs,
+        runner.max_runtime(),
+    )
+    .await?;
+
+    // Record the session name on the row NOW (the session is live) so the card's
+    // `a` attach affordance can reach it before the run finishes. This handle IS
+    // the interactive feature: a run whose name cannot be recorded is
+    // un-attachable-from-card, so on a persist failure (DB fault, or the row
+    // vanished mid-flight) tear the just-spawned session down and fail the task
+    // with a retryable reason rather than run an un-attachable agent to completion.
+    match TaskRepo::set_session_name(pool, &task.id, &session_name).await {
+        Ok(true) => {
+            tracing::info!(task_id = %task.id, session = %session_name, "interactive session recorded");
+        }
+        Ok(false) => {
+            tracing::warn!(task_id = %task.id, "interactive session name update matched no row; aborting");
+            return Ok(run
+                .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
+                .await);
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task.id, error = %e, "interactive session name persist failed; aborting");
+            return Ok(run
+                .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
+                .await);
+        }
+    }
+
+    Ok(run.wait().await?)
 }
 
 /// Finalise a successful run: capture any `gh pr create` URL, complete the row,

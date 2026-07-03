@@ -61,6 +61,8 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         started_at: None,
         finished_at: None,
         autopilot_run_id: None,
+        mode: "headless".to_string(),
+        session_name: None,
     }
 }
 

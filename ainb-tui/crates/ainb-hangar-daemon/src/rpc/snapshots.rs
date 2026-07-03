@@ -443,9 +443,11 @@ async fn enrich_board_card(
             .bind(workspace_id)
             .fetch_optional(pool)
             .await?;
-    // The issue's most recent task's status — the card's live state.
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM agent_task_queue \
+    // The issue's most recent task's status — the card's live state — plus the
+    // tmux session name an interactive run recorded on it (ccc / D6), so the
+    // attach-from-card affordance can surface `tmux attach -t <session_name>`.
+    let latest: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, session_name FROM agent_task_queue \
          WHERE issue_id = ? AND workspace_id = ? \
          ORDER BY created_at DESC, id DESC LIMIT 1",
     )
@@ -453,11 +455,16 @@ async fn enrich_board_card(
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?;
+    let (state, session_name) = match latest {
+        Some((status, session)) => (Some(status), session),
+        None => (None, None),
+    };
     Ok(ainb_hangar_proto::snapshots::BoardCardWireRow {
         issue_id: issue_id.to_string(),
         title: title.unwrap_or_else(|| issue_id.to_string()),
         display_id: short_display_id(issue_id),
         state,
+        session_name,
     })
 }
 

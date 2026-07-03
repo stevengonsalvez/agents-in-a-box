@@ -73,6 +73,14 @@ pub mod events;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// Interactive-mode launch: a real, attachable tmux session per task (ccc / D6).
+///
+/// [`interactive::spawn`] runs the provider inside a detached tmux session
+/// (`tmux_hangar-<task_id>`) the way `ainb run` sessions look, and
+/// [`interactive::TmuxRun::wait`] maps its recorded exit code onto the same
+/// [`runner::RunOutcome`] the headless path returns, so the finalize seam is
+/// shared across both modes.
+pub mod interactive;
 /// In-memory daemon health stats for the daemon-health pane (P8.5).
 ///
 /// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
