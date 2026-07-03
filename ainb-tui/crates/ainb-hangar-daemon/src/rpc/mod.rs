@@ -670,6 +670,16 @@ async fn handle(
         methods::HANGAR_PR_STATUS_REFRESH => handle_pr_status_refresh(pool, req, events).await,
         methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
         methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
+        methods::HANGAR_BOARDS_LIST => handle_boards_list(pool, req).await,
+        methods::HANGAR_BOARD_CREATE => handle_board_create(pool, req).await,
+        methods::HANGAR_BOARD_UPDATE => handle_board_update(pool, req).await,
+        methods::HANGAR_BOARD_DELETE => handle_board_delete(pool, req).await,
+        methods::HANGAR_BOARD_COLUMN_ADD => handle_board_column_add(pool, req).await,
+        methods::HANGAR_BOARD_COLUMN_UPDATE => handle_board_column_update(pool, req).await,
+        methods::HANGAR_BOARD_COLUMN_DELETE => handle_board_column_delete(pool, req).await,
+        methods::HANGAR_BOARD_COLUMN_REORDER => handle_board_column_reorder(pool, req).await,
+        methods::HANGAR_BOARD_CARD_ADD => handle_board_card(pool, req, true).await,
+        methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -1630,6 +1640,306 @@ fn squad_repo_err(e: &ainb_hangar_store::repo::squad::SquadRepoError) -> RpcErro
         }
         SquadRepoError::NotFound => invalid_params("no squad with that id in this workspace"),
         SquadRepoError::Db(db) => store_err(db),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4 — user-defined kanban boards (D8).
+// ---------------------------------------------------------------------------
+
+/// The task-FSM status tokens a column's `fsm_state` may map to. A non-empty
+/// `fsm_state` outside this set is rejected (a typo would silently never match).
+const KNOWN_FSM_STATES: &[&str] = &[
+    "queued",
+    "dispatched",
+    "running",
+    "done",
+    "failed",
+    "cancelled",
+];
+
+/// Dispatch `hangar/boards_list` (P4): snapshot the workspace's boards. A read,
+/// so an unknown workspace answers an empty list rather than an error.
+async fn handle_boards_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let boards = match resolve(pool, req).await? {
+        Some(ws) => snapshots::boards_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        None => Vec::new(),
+    };
+    to_value(&ainb_hangar_proto::snapshots::BoardsListResult { boards })
+}
+
+/// Dispatch `hangar/board_create` (P4): create one empty board, then answer with
+/// the refreshed board list. Rejects a blank name and a duplicate (the
+/// resolve-or-reject `(workspace, name)` guard).
+async fn handle_board_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCreateParams =
+        parse_params(req, "{ workspace_id, name }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.name.trim().is_empty() {
+        return Err(invalid_params("board name must not be empty"));
+    }
+    let id = SystemIdGen.new_ulid();
+    BoardRepo::create(pool, &ws, &id, &params.name, SystemClock.now_ms())
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_update` (P4): rename a board and/or flip its auto-move
+/// master toggle. A rename to a blank name is rejected.
+async fn handle_board_update(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardUpdateParams =
+        parse_params(req, "{ workspace_id, board_id, name?, auto_move? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if let Some(n) = params.name.as_deref() {
+        if n.trim().is_empty() {
+            return Err(invalid_params("board name must not be empty"));
+        }
+    }
+    BoardRepo::update(
+        pool,
+        &ws,
+        &params.board_id,
+        params.name.as_deref(),
+        params.auto_move,
+    )
+    .await
+    .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_delete` (P4): delete a board with its columns + cards.
+async fn handle_board_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardIdParams =
+        parse_params(req, "{ workspace_id, board_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    BoardRepo::delete(pool, &ws, &params.board_id)
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_column_add` (P4): append a column. Validates the
+/// `fsm_state` token (when present + non-empty) so a typo cannot yield a column
+/// that never matches an auto-move.
+async fn handle_board_column_add(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardColumnAddParams =
+        parse_params(req, "{ workspace_id, board_id, name, fsm_state?, auto_move? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.name.trim().is_empty() {
+        return Err(invalid_params("column name must not be empty"));
+    }
+    // A blank fsm_state means "manual column"; a non-blank one must be a known
+    // task status.
+    let fsm_state = normalise_fsm_state(params.fsm_state.as_deref())?;
+    let id = SystemIdGen.new_ulid();
+    BoardRepo::column_add(
+        pool,
+        &ws,
+        &params.board_id,
+        &id,
+        &params.name,
+        fsm_state,
+        params.auto_move.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_column_update` (P4): rename / re-map / retune a column.
+/// `fsm_state` is tri-state: omitted leaves the mapping, empty clears it, a token
+/// sets it (validated).
+async fn handle_board_column_update(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardColumnUpdateParams =
+        parse_params(req, "{ workspace_id, board_id, column_id, name?, fsm_state?, auto_move? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if let Some(n) = params.name.as_deref() {
+        if n.trim().is_empty() {
+            return Err(invalid_params("column name must not be empty"));
+        }
+    }
+    // Map the wire Option<String> onto the repo's Option<Option<&str>>:
+    // None => leave unchanged; Some("") => clear to a manual column; Some(tok) =>
+    // set (validated).
+    let fsm_state = match params.fsm_state.as_deref() {
+        None => None,
+        Some("") => Some(None),
+        Some(tok) => {
+            if !KNOWN_FSM_STATES.contains(&tok) {
+                return Err(invalid_params(&format!(
+                    "fsm_state `{tok}` is not a task status ({})",
+                    KNOWN_FSM_STATES.join(", ")
+                )));
+            }
+            Some(Some(tok))
+        }
+    };
+    BoardRepo::column_update(
+        pool,
+        &ws,
+        &params.board_id,
+        &params.column_id,
+        params.name.as_deref(),
+        fsm_state,
+        params.auto_move,
+    )
+    .await
+    .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_column_delete` (P4): delete a column (cards park
+/// unmapped, remaining columns renumber).
+async fn handle_board_column_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardColumnDeleteParams =
+        parse_params(req, "{ workspace_id, board_id, column_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    BoardRepo::column_delete(pool, &ws, &params.board_id, &params.column_id)
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_column_reorder` (P4): set a board's column order. The
+/// id list must be exactly the board's current columns (a permutation).
+async fn handle_board_column_reorder(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardColumnReorderParams =
+        parse_params(req, "{ workspace_id, board_id, column_ids }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    BoardRepo::column_reorder(pool, &ws, &params.board_id, &params.column_ids)
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/board_card_add` (`add = true`) and `hangar/board_card_move`
+/// (`add = false`) (P4): place / move an issue card on a board.
+async fn handle_board_card(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id, column_id? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.issue_id.trim().is_empty() {
+        return Err(invalid_params("issue_id must not be empty"));
+    }
+    if add {
+        BoardRepo::card_add(
+            pool,
+            &ws,
+            &params.board_id,
+            &params.issue_id,
+            params.column_id.as_deref(),
+            SystemClock.now_ms(),
+        )
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    } else {
+        BoardRepo::card_move(
+            pool,
+            &ws,
+            &params.board_id,
+            &params.issue_id,
+            params.column_id.as_deref(),
+        )
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    }
+    boards_list_value(pool, &ws).await
+}
+
+/// Validate an optional column `fsm_state` for the ADD path: `None` / `Some("")`
+/// both mean "manual column" (`None` stored); a non-blank token must be known.
+fn normalise_fsm_state<'a>(raw: Option<&'a str>) -> Result<Option<&'a str>, RpcError> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some(tok) => {
+            if KNOWN_FSM_STATES.contains(&tok) {
+                Ok(Some(tok))
+            } else {
+                Err(invalid_params(&format!(
+                    "fsm_state `{tok}` is not a task status ({})",
+                    KNOWN_FSM_STATES.join(", ")
+                )))
+            }
+        }
+    }
+}
+
+/// Re-read `ws`'s boards and serialize them as a
+/// [`BoardsListResult`](ainb_hangar_proto::snapshots::BoardsListResult) wire
+/// value — the refreshed view every `board_*` mutation answers with.
+async fn boards_list_value(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+) -> Result<serde_json::Value, RpcError> {
+    let boards = snapshots::boards_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::BoardsListResult { boards })
+}
+
+/// Map a [`BoardRepoError`] onto an RPC error: a duplicate-name / not-found /
+/// bad-reorder rejection is a client error (`INVALID_PARAMS`), every store fault
+/// an internal error. Mirrors [`squad_repo_err`].
+///
+/// [`BoardRepoError`]: ainb_hangar_store::repo::board::BoardRepoError
+fn board_repo_err(e: &ainb_hangar_store::repo::board::BoardRepoError) -> RpcError {
+    use ainb_hangar_store::repo::board::BoardRepoError;
+    match e {
+        BoardRepoError::DuplicateName => {
+            invalid_params("a board with that name already exists in this workspace")
+        }
+        BoardRepoError::NotFound => {
+            invalid_params("no board, column, or card with that id in this workspace")
+        }
+        BoardRepoError::BadReorder => {
+            invalid_params("reorder must list exactly the board's current columns")
+        }
+        BoardRepoError::Db(db) => store_err(db),
     }
 }
 
