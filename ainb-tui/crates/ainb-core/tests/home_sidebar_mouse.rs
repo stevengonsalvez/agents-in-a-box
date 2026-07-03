@@ -13,7 +13,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    // Recover a poisoned lock: these tests mutate $HOME under the shared
+    // guard, so a panic in one must not cascade-poison the sibling.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_home = TempDir::new().unwrap();
     std::env::set_var("HOME", temp_home.path());
 
@@ -21,11 +23,14 @@ fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
     state.current_screen = screen_ids::HOME.to_string();
     state.home_screen_v2_state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
 
+    // Sidebar rect starts at y=4, so first item row is y=7. With Sessions
+    // (index 0) selected and thus 2 rows tall, y=10 lands on index 2 =
+    // Config per SidebarItem::all().
     let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state);
     assert!(first.is_none());
     assert_eq!(
         state.home_screen_v2_state.sidebar.selected_item(),
-        SidebarItem::Inbox
+        SidebarItem::Config
     );
 
     let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state);
@@ -34,7 +39,9 @@ fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
 
 #[test]
 fn home_sidebar_resize_release_persists_width_to_isolated_home() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    // Recover a poisoned lock: these tests mutate $HOME under the shared
+    // guard, so a panic in one must not cascade-poison the sibling.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_home = TempDir::new().unwrap();
     std::env::set_var("HOME", temp_home.path());
 
