@@ -166,7 +166,21 @@ pub async fn refresh_index(pool: &SqlitePool, dir: &Path) -> anyhow::Result<usiz
         on_disk.push(slug.clone());
         match read_master(dir, slug) {
             Ok(Some(master)) => {
-                ProfileRepo::upsert(pool, &master.slug, master.tier.as_str(), *mtime).await?;
+                // Index by the FILE STEM (`slug`), NOT `master.slug`: the stem is
+                // the canonical identity everywhere else (the read path
+                // `read_master(dir, stem)`, the compile-on-dispatch lookup by
+                // agent slug, `master_path`), and the prune pass below diffs the
+                // indexed slugs against these stems. Indexing by a divergent
+                // `name:` field would insert a row the prune then immediately
+                // deletes (the stem never matches it).
+                if master.slug != *slug {
+                    tracing::warn!(
+                        stem = %slug,
+                        name = %master.slug,
+                        "profile index: master `name:` differs from filename; indexing by filename"
+                    );
+                }
+                ProfileRepo::upsert(pool, slug, master.tier.as_str(), *mtime).await?;
                 upserted += 1;
             }
             Ok(None) => {
@@ -427,6 +441,34 @@ You are a reviewer.\n";
         fs::remove_file(master_path(&profiles, "author")).unwrap();
         refresh_index(store.pool(), &profiles).await.unwrap();
         assert!(ProfileRepo::get(store.pool(), "author").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_index_keys_by_filename_not_name_field() {
+        // A hand-authored master whose `name:` diverges from its filename must be
+        // indexed by the FILENAME stem, not `name:` — otherwise the prune pass
+        // (which diffs indexed slugs against file stems) would delete the row it
+        // just inserted.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let profiles = dir.path().join("profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        fs::write(
+            profiles.join("on-disk-name.md"),
+            "---\nname: different-name\nmodel: premium\n---\nbody\n",
+        )
+        .unwrap();
+
+        refresh_index(store.pool(), &profiles).await.unwrap();
+        // Indexed under the filename stem, and NOT pruned.
+        assert!(
+            ProfileRepo::get(store.pool(), "on-disk-name").await.unwrap().is_some(),
+            "indexed by filename stem, survives the prune pass"
+        );
+        assert!(
+            ProfileRepo::get(store.pool(), "different-name").await.unwrap().is_none(),
+            "never indexed under the divergent name: field"
+        );
     }
 
     #[tokio::test]
