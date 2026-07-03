@@ -125,6 +125,15 @@ pub mod progress_comment;
 /// repos. The plugin dials this socket through the host `unix_socket_dial` cap
 /// to populate its screens with live data.
 pub mod rpc;
+/// The task-lifecycle state machine (T8): `statig` typed compile-time
+/// transitions.
+///
+/// [`fsm::LifecycleGuard`] types the in-process transition ordering the claim
+/// loop drives (`dispatched -> running -> done|failed`); the migration-0012 SQL
+/// claim guard and the store-service idempotent finalize remain the DB-level
+/// enforcers. Crate-internal: the generated `State` enum is an implementation
+/// detail of the typed FSM, not part of the daemon's public surface.
+mod fsm;
 /// The daemon's claim loop + sweeper scheduler (P1.7).
 ///
 /// Polls [`ainb_hangar_store::service::claim`] for the oldest queued task bound
