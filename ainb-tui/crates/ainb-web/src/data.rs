@@ -23,7 +23,7 @@ pub type SnapshotFuture<'a> =
 pub struct CoreSnapshot {
     /// `ainb --format json list` — the live session list.
     pub sessions: Value,
-    /// `ainb --format json fleet needs` — ASK/ERR/IDLE/WAIT cards.
+    /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
     pub needs: Value,
 }
 
@@ -42,7 +42,9 @@ pub type CostFuture<'a> = Pin<Box<dyn Future<Output = Value> + Send + 'a>>;
 pub struct FleetSnapshot {
     /// `ainb --format json list` — the live session list.
     pub sessions: Value,
-    /// `ainb --format json fleet needs` — ASK/ERR/IDLE/WAIT cards.
+    /// The daemon `attention/list` inbox mapped to ASK/ERR/WAIT cards (D18).
+    /// Each card carries `attentionId` so an ASK can be answered via
+    /// `POST /api/answer`.
     pub needs: Value,
     /// `ainb --format json fleet cost` — cost rollups. `null` when the verb is
     /// absent from this build (cost-surface not yet merged) so the dashboard
@@ -254,6 +256,29 @@ impl AinbCliSource {
     }
 }
 
+/// Fetch the open attention inbox from the daemon (`attention/list`, fleet-wide)
+/// and map it to the dashboard's `needs` cards (D18). Best-effort: a
+/// down / unreachable daemon (or a token that hasn't been minted yet) degrades
+/// to an empty list so the dashboard still renders sessions instead of failing
+/// the whole poll. This is the read half of the web-on-the-bus retarget — the
+/// old `ainb fleet needs` subprocess (which cold-booted a plugin runtime and
+/// capture-paned every session) is gone.
+async fn daemon_needs() -> Value {
+    match crate::daemon::DaemonClient::from_env() {
+        Ok(client) => match client.attention_list_fleet().await {
+            Ok(rows) => crate::daemon::attention_to_needs(&rows),
+            Err(e) => {
+                tracing::debug!(error = %e, "attention/list unavailable; needs degrades to empty");
+                Value::Array(Vec::new())
+            }
+        },
+        Err(e) => {
+            tracing::debug!(error = %e, "daemon client unavailable; needs degrades to empty");
+            Value::Array(Vec::new())
+        }
+    }
+}
+
 impl DataSource for AinbCliSource {
     fn snapshot(&self) -> SnapshotFuture<'_> {
         Box::pin(async move {
@@ -266,9 +291,11 @@ impl DataSource for AinbCliSource {
 
     fn core(&self) -> CoreFuture<'_> {
         Box::pin(async move {
-            // Required surfaces fail loudly.
+            // Sessions still come from `ainb list` (the daemon exposes no
+            // host-session snapshot RPC). Needs now read the daemon's attention
+            // inbox instead of the old `ainb fleet needs` capture-pane poll (D18).
             let sessions = self.run_json(&["list"], false).await?;
-            let needs = self.run_json(&["fleet", "needs"], false).await?;
+            let needs = daemon_needs().await;
             Ok(CoreSnapshot { sessions, needs })
         })
     }
