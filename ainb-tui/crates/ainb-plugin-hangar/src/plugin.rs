@@ -163,6 +163,15 @@ const ATTENTION_ANSWER_REQ_ID: i64 = 35;
 /// `hangar/board_*` with the refreshed `BoardsListResult`, so one `apply_boards`
 /// handler folds them all.
 const BOARDS_REQ_ID: i64 = 36;
+/// JSON-RPC id for the `hangar/squads_list` snapshot request (P7 / D17). Every
+/// squad read AND the `squad_create` / `squad_member_add` / `squad_member_remove`
+/// mutation replies carry this id — the daemon answers each with the refreshed
+/// `SquadsListResult`, so one `apply_squads` handler folds them all.
+const SQUADS_LIST_REQ_ID: i64 = 37;
+/// JSON-RPC id for a `hangar/squad_fanout` request raised by the Squads screen's
+/// assign key (P7). Its reply is a `SquadFanoutResult` (not a squads list), so it
+/// is dispatched separately to surface the "briefed the leader + N members" note.
+const SQUAD_FANOUT_REQ_ID: i64 = 38;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -641,6 +650,8 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
+            RpcId::Number(SQUADS_LIST_REQ_ID) => self.apply_squads(resp),
+            RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
@@ -809,6 +820,52 @@ impl HangarPlugin {
             None => self
                 .screens
                 .set_boards_error("empty boards reply".to_string()),
+        }
+    }
+
+    /// Populate the Squads screen from a `hangar/squads_list` result (or any
+    /// `hangar/squad_create` / `squad_member_add` / `squad_member_remove` mutation
+    /// reply, which returns the same refreshed envelope) (P7 / D17). A malformed /
+    /// error reply is logged but non-fatal — the screen keeps its last-good rows.
+    fn apply_squads(&mut self, resp: &RpcResponse) {
+        // A rejected mutation (e.g. a duplicate squad name) surfaces as a note
+        // above the list rather than blanking the last-good rows.
+        if let Some(err) = &resp.error {
+            self.screens
+                .squads
+                .set_note(Some(format!("squad error: {}", err.message)));
+            return;
+        }
+        if let Some(result) = resp.result.as_ref() {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::SquadsListResult>(
+                result.clone(),
+            ) {
+                self.screens.set_squads(&r);
+            }
+        }
+    }
+
+    /// Fold a `hangar/squad_fanout` reply into the Squads screen's transient note
+    /// (P7): a success surfaces "briefed <leader> + N member(s)" above the list; an
+    /// error surfaces the rejection reason. Non-fatal either way.
+    fn apply_squad_fanout(&mut self, resp: &RpcResponse) {
+        if let Some(err) = &resp.error {
+            self.screens
+                .squads
+                .set_note(Some(format!("assign failed: {}", err.message)));
+            return;
+        }
+        if let Some(result) = resp.result.as_ref() {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::SquadFanoutResult>(
+                result.clone(),
+            ) {
+                let n = r.members.len();
+                self.screens.squads.set_note(Some(format!(
+                    "briefed {} + {n} member{}",
+                    r.leader.leader_agent_id,
+                    if n == 1 { "" } else { "s" }
+                )));
+            }
         }
     }
 
@@ -1031,6 +1088,11 @@ impl HangarPlugin {
                 scoped.clone(),
             ),
             (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUADS_LIST,
+                scoped.clone(),
+            ),
+            (
                 DAEMON_HEALTH_REQ_ID,
                 daemon_methods::HANGAR_DAEMON_HEALTH,
                 scoped.clone(),
@@ -1219,6 +1281,111 @@ impl HangarPlugin {
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: board rpc send failed: {e}")).await;
         }
+    }
+
+    /// Fire a deferred squad RPC raised by the Squads screen (P7 / D17).
+    ///
+    /// Resolves the create/add/assign *selection* from the plugin's cached
+    /// agents/issues (the screen intent carries only ids), maps each
+    /// [`SquadAction`] to its `hangar/squad_*` RPC, and frames it over the socket
+    /// cap. The create / add / remove mutations reply with the refreshed
+    /// `SquadsListResult` under [`SQUADS_LIST_REQ_ID`] (folded by
+    /// [`Self::apply_squads`]); the assign fans out via `hangar/squad_fanout` under
+    /// [`SQUAD_FANOUT_REQ_ID`]. A selection that cannot be resolved (no agent, no
+    /// issue) surfaces a note rather than firing an empty RPC.
+    async fn apply_squad_action(&mut self, host: &HostClient, action: crate::screen::SquadAction) {
+        use crate::screen::SquadAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        // A fresh action clears any stale transient note; the reply sets a new one.
+        self.screens.squads.set_note(None);
+
+        let (id, method, params) = match action {
+            SquadAction::Create { name } => {
+                let Some(agent_id) = self.first_agent_ref() else {
+                    self.screens
+                        .squads
+                        .set_note(Some("no agent available to lead a squad".into()));
+                    return;
+                };
+                (
+                    SQUADS_LIST_REQ_ID,
+                    daemon_methods::HANGAR_SQUAD_CREATE,
+                    serde_json::json!({
+                        "workspace_id": ws,
+                        "name": name,
+                        "leader": format!("agent:{agent_id}"),
+                    }),
+                )
+            }
+            SquadAction::AddMember { squad_id } => {
+                let Some(member) = self.next_squad_member_ref(&squad_id) else {
+                    self.screens
+                        .squads
+                        .set_note(Some("no more agents to add".into()));
+                    return;
+                };
+                (
+                    SQUADS_LIST_REQ_ID,
+                    daemon_methods::HANGAR_SQUAD_MEMBER_ADD,
+                    serde_json::json!({ "workspace_id": ws, "squad_id": squad_id, "member": member }),
+                )
+            }
+            SquadAction::RemoveMember {
+                squad_id,
+                member_ref,
+            } => (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUAD_MEMBER_REMOVE,
+                serde_json::json!({ "workspace_id": ws, "squad_id": squad_id, "member": member_ref }),
+            ),
+            SquadAction::Assign { squad_id } => {
+                let Some(issue_id) = self.first_assignable_issue() else {
+                    self.screens
+                        .squads
+                        .set_note(Some("no issue available to assign".into()));
+                    return;
+                };
+                (
+                    SQUAD_FANOUT_REQ_ID,
+                    daemon_methods::HANGAR_SQUAD_FANOUT,
+                    serde_json::json!({ "workspace_id": ws, "squad_id": squad_id, "issue_id": issue_id }),
+                )
+            }
+        };
+        let Ok(body) = encode_request(id, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: squad rpc send failed: {e}")).await;
+        }
+    }
+
+    /// The first cached AGENT actor-ref not already the leader or a member of
+    /// `squad_id` — the glue's add-member selection policy (P7). `None` when every
+    /// cached agent is already on the squad.
+    fn next_squad_member_ref(&self, squad_id: &str) -> Option<String> {
+        let squad = self.screens.squads.squads().iter().find(|s| s.id == squad_id)?;
+        let mut taken: std::collections::HashSet<&str> =
+            squad.members.iter().map(|m| m.actor_ref.as_str()).collect();
+        taken.insert(squad.leader.actor_ref.as_str());
+        self.screens
+            .actors
+            .iter()
+            .find(|a| a.is_agent && !taken.contains(a.actor_ref.as_str()))
+            .map(|a| a.actor_ref.clone())
+    }
+
+    /// The issue the Squads `x` assign fans out — the selected issue-list row, else
+    /// the first visible issue (P7). `None` when the workspace has no issues.
+    fn first_assignable_issue(&self) -> Option<String> {
+        self.screens
+            .issue_list
+            .selected_row()
+            .or_else(|| self.screens.issue_list.visible_rows().next())
+            .map(|row| row.id.as_str().to_string())
     }
 
     /// Fire a deferred issue-assign RPC raised by the agent-picker modal (e38.8).
@@ -2777,6 +2944,13 @@ impl Plugin for HangarPlugin {
         // daemon socket; the refreshed BoardsListResult reply re-renders the board.
         if let Some(action) = self.screens.take_pending_boards_action() {
             self.apply_boards_action(host, action).await;
+        }
+        // P7 / D17: drain any deferred squad mutation (`c`, `a`, `d`, `x`) raised by
+        // the Squads screen and fire the matching `hangar/squad_*` over the daemon
+        // socket; the create/add/remove reply re-renders the list, the assign
+        // (`squad_fanout`) surfaces the leader+members brief note.
+        if let Some(action) = self.screens.take_pending_squads_action() {
+            self.apply_squad_action(host, action).await;
         }
         // e38.8: drain any deferred issue-assign (Enter in the agent picker)
         // raised by the modal and fire `hangar/issue_update` over the daemon
