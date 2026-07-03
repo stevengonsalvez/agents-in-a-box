@@ -47,6 +47,9 @@ const ERROR_RED: Color = Color::Rgb(230, 110, 110);
 pub struct SourceRow {
     pub name: String,
     pub uri: String,
+    /// Declared ref (branch/tag) from the manifest — `[p]` re-preview
+    /// must fetch this ref, not default to `main`.
+    pub r#ref: String,
     pub enabled: bool,
 }
 
@@ -2334,6 +2337,7 @@ fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Mani
         .map(|s| SourceRow {
             name: s.name.clone(),
             uri: s.uri.clone(),
+            r#ref: s.r#ref.clone(),
             enabled: s.enabled,
         })
         .collect();
@@ -2878,6 +2882,7 @@ mod tests {
         SourceRow {
             name: name.to_string(),
             uri: uri.to_string(),
+            r#ref: "main".to_string(),
             enabled: true,
         }
     }

@@ -5306,14 +5306,25 @@ impl EventHandler {
                 state.skill_manager_state.preview = None;
             }
             AppEvent::SkillManagerPreviewSource => {
-                // `[p]` on a source row — reopen the picker for that source.
-                let uri = state
+                // `[p]` on a source row — reopen the picker for that source,
+                // at its DECLARED ref (bare uri would default to `main`,
+                // silently swapping the name-keyed cache checkout).
+                let row = state
                     .skill_manager_state
                     .sources
                     .get(state.skill_manager_state.source_selected)
-                    .map(|s| s.uri.clone());
-                if let Some(uri) = uri {
-                    Self::open_source_preview(state, &uri);
+                    .cloned();
+                if let Some(row) = row {
+                    if !row.enabled {
+                        // install() only matches enabled sources — a preview
+                        // would fetch fine and then fail every unit late.
+                        state.add_warning_notification(format!(
+                            "source `{}` is disabled — enable it before importing",
+                            row.name
+                        ));
+                        return;
+                    }
+                    Self::open_source_preview(state, &format!("{}@{}", row.uri, row.r#ref));
                 }
             }
             AppEvent::SkillManagerPreviewConfirm => {
