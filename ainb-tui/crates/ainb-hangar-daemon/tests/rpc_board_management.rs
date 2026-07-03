@@ -424,6 +424,47 @@ async fn card_create_assigns_profile_then_run_enqueues() {
         )
         .await;
     assert!(!bad["error"].is_null(), "an unknown run mode must be rejected: {bad}");
+
+    // MEMBERSHIP GUARD: running a workspace issue that is NOT a card on the board
+    // is rejected (the run is a card affordance, not a bare issue dispatch).
+    let non_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": "issue-1", "mode": "headless" }),
+        )
+        .await;
+    assert!(
+        !non_card["error"].is_null(),
+        "an issue that is not a card on the board must not be runnable: {non_card}"
+    );
+
+    // ATOMIC CREATE: a card-create targeting a bad column rejects up front and
+    // leaves NO orphan issue (nothing persists unless the card can be placed).
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let orphan_create = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "board_id": board_id,
+                "column_id": "no-such-column",
+                "title": "Orphan",
+                "assignee_profile": null,
+            }),
+        )
+        .await;
+    assert!(
+        !orphan_create["error"].is_null(),
+        "a bad column must reject the create: {orphan_create}"
+    );
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(before, after, "a rejected card-create must not strand an orphan issue");
 }
 
 /// Board mutations are workspace-scoped: a sibling tenant cannot see the board,

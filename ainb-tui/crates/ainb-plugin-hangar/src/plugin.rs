@@ -3198,19 +3198,16 @@ impl Plugin for HangarPlugin {
         // arm the same redraw so the Kanban / Autopilots / Skills boards repaint
         // after a click / scroll / hover / menu navigation.
         //
-        // ccc (lu5): a Boards card overlay (create title / profile pick / rename /
-        // `Run ▾`) is a key-driven local state with no daemon reply to trigger the
-        // next frame, so its every keystroke must arm a redraw or the input never
-        // paints. A pending board action likewise needs one render to fire its RPC
-        // (or set the attach note) — the reply then drives the following frame.
+        // A Boards card overlay repaints via a one-shot boards_list refresh
+        // round-trip (ccc / lu5) — the reply's dirty-kick drives the next frame —
+        // so it is deliberately NOT a level-triggered redraw here (that would
+        // self-render every frame for the overlay's whole lifetime).
         !self.pending_mouse_intents.is_empty()
             || self.context_menu.is_some()
             || self.pending_issue_priority_update.is_some()
             || self.pending_issue_assignee_update.is_some()
             || !self.pending_board_mouse_intents.is_empty()
             || self.list_context_menu.is_some()
-            || self.screens.boards.overlay().is_some()
-            || self.screens.pending_boards_action.is_some()
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {

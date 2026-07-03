@@ -2189,6 +2189,16 @@ async fn handle_board_card_create(
         _ => None,
     };
 
+    // Prevalidate the placement target BEFORE creating the issue so a bad board /
+    // column rejects up front and never strands an orphan issue (the create is an
+    // atomic round-trip: nothing persists unless the card can be placed).
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if let Some(col) = params.column_id.as_deref() {
+        if !board.columns.iter().any(|c| c.id == col) {
+            return Err(invalid_params("no column with that id on this board"));
+        }
+    }
+
     // The TUI user owns cards it creates — mirror the plugin's `SELF_AUTHOR_REF`.
     let creator = ActorRef::new(ActorKind::Member, "me")
         .map_err(|e| internal(&format!("build creator ref: {e}")))?;
@@ -2258,6 +2268,14 @@ async fn handle_board_card_run(
         }
     };
 
+    // The issue must be a real CARD on this board (not merely any workspace issue)
+    // — the run is a card affordance, so a non-card / foreign-board issue id is
+    // rejected rather than silently enqueued.
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+        return Err(invalid_params("that issue is not a card on this board"));
+    }
+
     // The card's issue must exist in this workspace (a tenant guard + a real card).
     let issue = IssueRepo::get_by_id(pool, &params.issue_id)
         .await
@@ -2294,6 +2312,22 @@ async fn handle_board_card_run(
         runtime_id: agent.runtime_id,
         mode: mode.to_string(),
     })
+}
+
+/// Fetch board `board_id` in `ws`, or an `INVALID_PARAMS` rejection when no such
+/// board exists in the workspace — the membership guard both card handlers key
+/// off so a card create/run cannot target a foreign / unknown board.
+async fn board_in_ws(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    board_id: &str,
+) -> Result<ainb_hangar_store::repo::board::Board, RpcError> {
+    ainb_hangar_store::repo::board::BoardRepo::list(pool, ws)
+        .await
+        .map_err(|e| store_err(&e))?
+        .into_iter()
+        .find(|b| b.id == board_id)
+        .ok_or_else(|| invalid_params("no board with that id in this workspace"))
 }
 
 /// Resolve `slug` to a non-archived agent in `ws` by NAME (D16: the assignee
