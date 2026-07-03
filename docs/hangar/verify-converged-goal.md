@@ -105,6 +105,9 @@ re-run locally on macOS at P11 close.
 | CC15 | J5 | OTLP export: a run's span/metrics reach a local collector when the endpoint is set | `tripwire_otel_export_when_endpoint_set.rs` (`--features otlp`) | REAL exporter → local collector | GREEN (feature-gated) |
 | CC16 | J4 | autopilot cron: fires on schedule; skips when a run is in flight | `tripwire_autopilot_fires_on_schedule.rs`, `tripwire_autopilot_skips_when_running.rs` | REAL scheduler | GREEN |
 | CC17 | J1 | **profile compile — both targets** (Claude `.md` master → Codex `[profiles.<slug>]` + prompt, WARN on dropped tools/color); fs-watch pickup | — | — | **FAIL (P11-blocking) — P5 (bct.5) not landed; no profile-compiler module shipped yet. Un-landed upstream phase, not a product bug, but it blocks P11 completeness (see Reporting). Add + gate this leg when P5 lands.** |
+| CC18 | C2 | **web ASK-answer e2e** (real browser): the daemon-seeded 3-option ASK renders on the dashboard via `GET /api/snapshot` (attention/list, D18) → click option ② → `POST /api/answer(answeredBy=web)` → daemon C1 resolve + verified tmux send → the answered row drops off the open inbox (ASK card disappears) → the pick lands in the raising session's real tmux pane → the store row reads `answered`/`web`/`2` | `ainb-tui/crates/ainb-web/e2e/tests/ask-answer.spec.ts` via `scripts/hangar/run_web_e2e.sh` **(NEW, agents-in-a-box-bct.8)** | REAL daemon + REAL tmux last-mile + REAL chromium (provider not a live agent — the delivery target is a plain-shell tmux session, same as CC01) | GREEN |
+
+**Running CC18.** `bash scripts/hangar/run_web_e2e.sh` (macOS/Linux). Self-contained + idempotent: it builds `ainb` + `ainb-hangar-daemon` + the `seed_control_center` example into the shared target, provisions a short `/tmp` HOME (unix-socket 104-char limit), seeds the 3-option ASK + spawns the daemon, wires a real delivery-target tmux session via a fake `ainb list` (`AINB_BIN`) + `AINB_FLEET_TRANSPORT=tmux-only` (the `record-control-center.sh` technique), starts `ainb web` with a bearer token, installs the Playwright chromium on demand, runs the headless journey, and tears everything down by EXACT name / PID only. Requires `tmux`, `sqlite3`, `node`, `npm` (else it exits `2` with the missing tool named). Not CI-gated on this branch — it is a local real-browser leg (like the live-provider journey suite); the deterministic answer-path proof CI already gates is CC01.
 
 ## Phase E — resilience blind spots (the P11-mandated legs)
 
@@ -133,7 +136,7 @@ column lists the Phase D/E legs that serve it.
 | **J4** | autopilot cron kept | CC16, F19–F23 | REAL scheduler | GREEN |
 | **J5** | full history / traceability + OTel | CC14, CC15 | REAL daemon + REAL OTLP export | GREEN |
 | **C1** | every input surfaced + answerable, ALL sessions | CC01, CC02, CC03, CC04, CC05 | answer path REAL (incl. tmux last mile) | GREEN |
-| **C2** | web / channels same ecosystem | CC11 (bridge) green; web answer-button leg (P8 Playwright) ABSENT on this branch | bridge unit REAL; web Playwright NOT PRESENT | **FAIL (P11-blocking) — bridge green (CC11), but no runnable web ASK-answer Playwright suite exists (P8 not landed). Web click-② coverage is UNPROVEN; do not report C2 green until the suite lands + gates.** |
+| **C2** | web / channels same ecosystem | CC11 (bridge) + CC18 (web ASK-answer Playwright) | bridge unit REAL; web = REAL daemon + REAL tmux + REAL browser | **GREEN — bridge green (CC11) and the web click-② ASK-answer journey is now proven end to end by CC18 (`scripts/hangar/run_web_e2e.sh`): render → answer(by=web) → verified tmux delivery → store flip.** |
 | **C3** | ATC session notified + broadcast/correct via skills | CC13 | REAL daemon | GREEN |
 | **C4** | agentpeek UX (shuffle, standup) | CC02 (shuffle), CC12 (standup gate) | REAL render + unit gate | GREEN |
 | **C5** | squads / workspaces purposed | CC09, CC10, RB01 | REAL daemon | GREEN |
@@ -145,10 +148,10 @@ session (Jn) is answerable / observable through the converged plane (Cm) — the
 crossings are exercised by CC01 (a launched session's ASK answered from the TUI), CC06+CC02
 (a launched board card that auto-moves on the event bus), CC09+RB01 (a squad-launched
 fan-out scoped to its workspace), and CC14/CC15 (a launched run's history + OTLP span).
-Two crossings are still uncovered and BLOCK P11 completeness: J1×* profile-compile (CC17,
-P5 not landed) and C2×web ASK-answer (P8 Playwright suite absent). Both are un-landed
-upstream phases, not regressions — but P11 cannot be reported complete or green until both
-legs land and are gated.
+The C2×web ASK-answer crossing is now covered by CC18 (real-browser Playwright, P8 landed).
+One crossing still BLOCKS P11 completeness: J1×* profile-compile (CC17, P5 not landed) — an
+un-landed upstream phase, not a regression, but P11 cannot be reported complete or green
+until that leg lands and is gated.
 
 ## CI wiring — the non-dispatching legs
 
@@ -198,17 +201,20 @@ disclose per report which legs ran REAL vs seeded-fixture.
 - **DISCLOSE prominently** (mocked-vs-live rule): which legs dispatch a REAL provider vs a
   fake (`fake-claude.sh` / seeded fixtures). CC01's provider is not a live `claude` — its
   DELIVERY target is a real tmux shell and its daemon path is fully real; it proves the
-  answer FLIP, not a live agent turn.
+  answer FLIP, not a live agent turn. CC18 (web) is the same posture: a REAL daemon + REAL
+  tmux last-mile + REAL chromium, but its delivery target is a plain-shell tmux session, not
+  a live agent — it proves the web click-② answer FLIP, not a live agent turn.
 - **Un-landed matrix legs FAIL the P11 completeness bar — they are not benign PENDINGs.**
   The validation contract requires the full J1–J5 × C1–C5 matrix to be covered by P11, so
   a missing acceptance leg counts as a FAIL against P11 sign-off (and toward the exit code),
   even when its root cause is an un-landed upstream phase rather than a product regression.
-  On this branch two legs have no shipped module/test and therefore **P11 is NOT complete
+  On this branch one leg still has no shipped module/test and therefore **P11 is NOT complete
   and the harness is NOT green:**
   - CC17 (profile compile, P5 / bct.5) — no profile-compiler module shipped.
-  - C2 web ASK-answer (P8) — no Playwright web suite present.
-  Disclose the cause honestly (un-landed P5 / P8, not a regression), but do NOT report P11
-  as done and do NOT count these cells as covered. P11 closes green only after both legs
-  land and are gated.
+  - (RESOLVED) C2 web ASK-answer (P8) — CC18 now ships the Playwright web suite
+    (`scripts/hangar/run_web_e2e.sh`) and is GREEN; this cell is covered.
+  Disclose the cause honestly (un-landed P5, not a regression), but do NOT report P11
+  as done and do NOT count the CC17 cell as covered. P11 closes green only after that leg
+  lands and is gated.
 - Do not modify product code to make a leg pass. If a leg reveals a genuine product bug,
   file the evidence (a bead) — do not "fix" the product mid-run.
