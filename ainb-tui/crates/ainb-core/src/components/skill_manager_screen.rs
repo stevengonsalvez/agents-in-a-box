@@ -1064,7 +1064,10 @@ fn render_source_remove_confirm(frame: &mut Frame, area: Rect, c: &SourceRemoveC
     frame.render_widget(block, rect);
 
     let rows = [
-        format!("Remove skills + source  ({} unit(s), drops the dependency)", c.unit_count),
+        format!(
+            "Remove skills + source  ({} unit(s), drops the dependency)",
+            c.unit_count
+        ),
         "Remove skills, keep source  (back to preview — re-import via [p])".to_string(),
         "Cancel".to_string(),
     ];

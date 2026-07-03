@@ -277,12 +277,21 @@ fn remove_source_units_keep_vs_drop() {
     let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
     assert!(manifest.units.is_empty(), "units removed");
     assert_eq!(manifest.sources.len(), 1, "source kept for re-import");
-    assert!(!claude_root.join("skills/commit/SKILL.md").exists(), "files torn down");
+    assert!(
+        !claude_root.join("skills/commit/SKILL.md").exists(),
+        "files torn down"
+    );
 
     // Re-import, then drop the source entirely.
     let preview = preview_source(home.path(), &uri).expect("re-preview");
-    import_selected(home.path(), &preview, &unit_paths(&preview), "claude", &mut out)
-        .expect("re-import");
+    import_selected(
+        home.path(),
+        &preview,
+        &unit_paths(&preview),
+        "claude",
+        &mut out,
+    )
+    .expect("re-import");
     ainb_cli::source::remove_source_units(home.path(), &name, false, &mut out).expect("drop");
     let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
     assert!(manifest.sources.is_empty(), "source dropped");

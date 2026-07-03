@@ -366,47 +366,47 @@ pub enum AppEvent {
     // units of a fetched source + target tools, then import.
     SkillManagerPreviewUp,
     SkillManagerPreviewDown,
-    SkillManagerPreviewToggle,      // Space — toggle the cursor unit
-    SkillManagerPreviewAll,         // a — select every unit
-    SkillManagerPreviewNone,        // n — clear the selection
-    SkillManagerPreviewTool(usize), // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
-    SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
-    SkillManagerPreviewClose,       // Esc — discard, nothing persisted
-    SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
-    SkillManagerSourceRemoveOpen,     // r on a source row — open the remove dialog
+    SkillManagerPreviewToggle,           // Space — toggle the cursor unit
+    SkillManagerPreviewAll,              // a — select every unit
+    SkillManagerPreviewNone,             // n — clear the selection
+    SkillManagerPreviewTool(usize),      // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
+    SkillManagerPreviewConfirm,          // Enter — import selection to chosen tools
+    SkillManagerPreviewClose,            // Esc — discard, nothing persisted
+    SkillManagerPreviewSource,           // p on a source row — reopen the picker for it
+    SkillManagerSourceRemoveOpen,        // r on a source row — open the remove dialog
     SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
-    SkillManagerSourceRemoveConfirm,  // Enter — execute the chosen removal
-    SkillManagerSourceRemoveCancel,   // Esc — dismiss, remove nothing
-    GoToRecovery,                   // Navigate to session recovery view
-    GoToInbox,                      // Navigate to ainb-hooks notification inbox
-    GoToDaemons,                    // Navigate to the daemon runtime-health view
-    GoToFleetPanel,                 // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,               // Fleet panel: move row selection up
-    FleetPanelMoveDown,             // Fleet panel: move row selection down
-    FleetPanelOptionNext,           // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,           // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,               // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,            // Fleet panel: broadcast a ping to the selected session (B)
+    SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
+    SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
+    GoToRecovery,                        // Navigate to session recovery view
+    GoToInbox,                           // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                         // Navigate to the daemon runtime-health view
+    GoToFleetPanel,                      // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,                    // Fleet panel: move row selection up
+    FleetPanelMoveDown,                  // Fleet panel: move row selection down
+    FleetPanelOptionNext,                // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,                // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer, // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
     FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,    // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
     FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
     FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
     FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
     FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
     FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
-    PanelBack,         // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,        // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,       // Inbox: move selection up one row
-    InboxMoveDown,     // Inbox: move selection down one row
-    InboxPageUp,       // Inbox: jump 10 rows up
-    InboxPageDown,     // Inbox: jump 10 rows down
+    PanelBack,        // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,       // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,      // Inbox: move selection up one row
+    InboxMoveDown,    // Inbox: move selection down one row
+    InboxPageUp,      // Inbox: jump 10 rows up
+    InboxPageDown,    // Inbox: jump 10 rows down
     InboxOpenSelected, // Inbox: mark selected row read (Enter)
     InboxDismissSelected, // Inbox: dismiss selected row (d)
     InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
     InboxToggleArchived, // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,   // Inbox: cycle agent filter (p)
-    InboxRefresh,      // Inbox: force-refresh from store (r)
+    InboxCycleAgent,  // Inbox: cycle agent filter (p)
+    InboxRefresh,     // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -8427,7 +8427,10 @@ mod text_input_guard_tests {
         );
         assert!(consumed, "OTEL form must be a paste-accepting context");
         let o = state.onboarding_state.as_ref().unwrap();
-        assert_eq!(o.otel_otlp_endpoint, "https://otlp-gateway.grafana.net/otlp");
+        assert_eq!(
+            o.otel_otlp_endpoint,
+            "https://otlp-gateway.grafana.net/otlp"
+        );
         // Still on the OTEL step: the stripped \n must not advance.
         assert_eq!(
             o.current_step,
