@@ -1933,6 +1933,9 @@ fn board_repo_err(e: &ainb_hangar_store::repo::board::BoardRepoError) -> RpcErro
         BoardRepoError::DuplicateName => {
             invalid_params("a board with that name already exists in this workspace")
         }
+        BoardRepoError::DuplicateAutoMove => {
+            invalid_params("another auto-move column already maps this task state on this board")
+        }
         BoardRepoError::NotFound => {
             invalid_params("no board, column, or card with that id in this workspace")
         }

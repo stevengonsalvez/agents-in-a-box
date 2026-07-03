@@ -264,6 +264,15 @@ impl BoardRepo {
     ) -> Result<String, BoardRepoError> {
         let mut tx = pool.begin().await?;
         Self::ensure_board_in_ws(&mut tx, workspace, board_id).await?;
+        // An auto-move column must be the sole target for its state on the board
+        // (else the auto-move hook is ambiguous — see `auto_move_conflict`).
+        if auto_move {
+            if let Some(fs) = fsm_state {
+                if Self::auto_move_conflict(&mut tx, board_id, fs, None).await? {
+                    return Err(BoardRepoError::DuplicateAutoMove);
+                }
+            }
+        }
         let next_ord: i64 =
             sqlx::query_scalar("SELECT COALESCE(MAX(ord) + 1, 0) FROM board_column WHERE board_id = ?")
                 .bind(board_id)
@@ -306,6 +315,29 @@ impl BoardRepo {
     ) -> Result<(), BoardRepoError> {
         let mut tx = pool.begin().await?;
         Self::ensure_column_in_ws(&mut tx, workspace, board_id, column_id).await?;
+        // Compute the column's EFFECTIVE (auto_move, fsm_state) after this partial
+        // update, then reject it if that would give the board two auto-move columns
+        // for one state (the ambiguity guard — see `auto_move_conflict`). Read the
+        // current row so an update that touches only one of the two fields still
+        // sees the other's live value.
+        let cur = sqlx::query("SELECT fsm_state, auto_move FROM board_column WHERE id = ?")
+            .bind(column_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let cur_fsm: Option<String> = cur.try_get("fsm_state")?;
+        let cur_auto: bool = cur.try_get::<i64, _>("auto_move")? != 0;
+        let res_fsm: Option<String> = match fsm_state {
+            None => cur_fsm,
+            Some(inner) => inner.map(str::to_string),
+        };
+        let res_auto = auto_move.unwrap_or(cur_auto);
+        if res_auto {
+            if let Some(state) = res_fsm.as_deref() {
+                if Self::auto_move_conflict(&mut tx, board_id, state, Some(column_id)).await? {
+                    return Err(BoardRepoError::DuplicateAutoMove);
+                }
+            }
+        }
         if let Some(n) = name {
             sqlx::query("UPDATE board_column SET name = ? WHERE id = ?")
                 .bind(n)
@@ -408,7 +440,11 @@ impl BoardRepo {
     /// idempotently — re-adding the same issue re-targets its column.
     ///
     /// Workspace-scoped via the board; a `column_id` that is `Some` must belong to
-    /// the board (else [`BoardRepoError::NotFound`]).
+    /// the board, and `issue_id` must name an issue that lives in the SAME
+    /// workspace (else [`BoardRepoError::NotFound`]). `board_card.issue_id` carries
+    /// no FK (`PRAGMA foreign_keys` is off), so this service-layer check is the
+    /// only guard against persisting a card for a nonexistent or sibling-tenant
+    /// issue — the "card = issue, workspace-scoped" invariant (D8/§4.5).
     ///
     /// # Errors
     ///
@@ -423,6 +459,7 @@ impl BoardRepo {
     ) -> Result<(), BoardRepoError> {
         let mut tx = pool.begin().await?;
         Self::ensure_board_in_ws(&mut tx, workspace, board_id).await?;
+        Self::ensure_issue_in_ws(&mut tx, workspace, issue_id).await?;
         if let Some(col) = column_id {
             Self::ensure_column_of_board(&mut tx, board_id, col).await?;
         }
@@ -648,6 +685,54 @@ impl BoardRepo {
         }
         Ok(())
     }
+
+    /// Confirm `issue_id` names an issue that lives in `workspace`. The
+    /// `board_card.issue_id` column has no FK, so this is the sole guard that a
+    /// card references a real, same-workspace issue (rejecting a nonexistent or
+    /// sibling-tenant id with [`BoardRepoError::NotFound`]).
+    async fn ensure_issue_in_ws(
+        tx: &mut sqlx::SqliteConnection,
+        workspace: &WorkspaceId,
+        issue_id: &str,
+    ) -> Result<(), BoardRepoError> {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM issue WHERE id = ? AND workspace_id = ?")
+                .bind(issue_id)
+                .bind(workspace.as_str())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Err(BoardRepoError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Whether another auto-move column on `board_id` already claims `fsm_state`
+    /// (an `auto_move = 1` column with the same `fsm_state`, excluding
+    /// `exclude_column_id`). This is the ambiguity guard for the AUTO-MOVE hook:
+    /// [`Self::auto_move_on_state`] selects EVERY matching column, so two columns
+    /// mapping the same state would move a card twice with unordered final
+    /// placement. One auto-move target per `(board_id, fsm_state)` keeps the hook
+    /// deterministic.
+    async fn auto_move_conflict(
+        tx: &mut sqlx::SqliteConnection,
+        board_id: &str,
+        fsm_state: &str,
+        exclude_column_id: Option<&str>,
+    ) -> Result<bool, BoardRepoError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM board_column \
+             WHERE board_id = ? AND fsm_state = ? AND auto_move = 1 \
+               AND (? IS NULL OR id <> ?) LIMIT 1",
+        )
+        .bind(board_id)
+        .bind(fsm_state)
+        .bind(exclude_column_id)
+        .bind(exclude_column_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        Ok(exists.is_some())
+    }
 }
 
 /// Whether a `sqlx` error is a `SQLite` UNIQUE-constraint violation (the
@@ -663,6 +748,13 @@ pub enum BoardRepoError {
     /// `(workspace_id, name)` UNIQUE index fired). The create / rename is rejected.
     #[error("a board with that name already exists in this workspace")]
     DuplicateName,
+    /// Another auto-move column on the board already maps this `fsm_state`. Two
+    /// auto-move columns for one state make [`BoardRepo::auto_move_on_state`]
+    /// ambiguous (it moves the card once per match, final placement unordered), so
+    /// the second mapping is rejected. Only one auto-move target per
+    /// `(board_id, fsm_state)` is allowed.
+    #[error("another auto-move column already maps this task state on this board")]
+    DuplicateAutoMove,
     /// The target board / column / card does not belong to the supplied workspace
     /// (covers an unknown id too). The mutation is rejected, nothing written.
     #[error("board, column, or card not found in this workspace")]
@@ -695,6 +787,21 @@ mod tests {
             .unwrap();
     }
 
+    /// Seed a minimal issue in `ws` so a card can reference it (card_add now
+    /// requires the issue to exist in the same workspace).
+    async fn seed_issue(pool: &SqlitePool, ws: &str, id: &str) {
+        sqlx::query(
+            "INSERT INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
+             VALUES (?, ?, ?, 'member', 'm1', 0)",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     /// create + column_add + card_add build a board; list reads it back with
     /// columns ordered and the card placed.
     #[tokio::test]
@@ -704,6 +811,7 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
 
+        seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true).await.unwrap();
@@ -758,6 +866,7 @@ mod tests {
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c3", "C", None, false).await.unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c2"), 10).await.unwrap();
 
         BoardRepo::column_reorder(pool, &ws("ws-a"), "b1", &["c3".into(), "c1".into(), "c2".into()])
@@ -790,6 +899,7 @@ mod tests {
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false).await.unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
 
         BoardRepo::column_delete(pool, &ws("ws-a"), "b1", "c1").await.unwrap();
@@ -812,6 +922,7 @@ mod tests {
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
         BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true).await.unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
 
         // A non-matching state moves nothing.
@@ -830,6 +941,7 @@ mod tests {
         assert!(again.is_empty(), "already in the target column");
 
         // With the board master toggle OFF, auto-move does nothing.
+        seed_issue(pool, "ws-a", "issue-2").await;
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-2", Some("c1"), 11).await.unwrap();
         BoardRepo::update(pool, &ws("ws-a"), "b1", None, Some(false)).await.unwrap();
         let off = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-2", "done").await.unwrap();
@@ -852,5 +964,72 @@ mod tests {
         assert!(matches!(err, BoardRepoError::NotFound), "got {err:?}");
         // The board is untouched.
         assert_eq!(BoardRepo::list(pool, &ws("ws-a")).await.unwrap().len(), 1);
+    }
+
+    /// A card for an issue that does not exist, or that lives in a sibling
+    /// workspace, is rejected — a card must reference a real, same-workspace issue.
+    #[tokio::test]
+    async fn card_add_rejects_unknown_and_foreign_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        // issue-b belongs to ws-b, not ws-a.
+        seed_issue(pool, "ws-b", "issue-b").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+
+        // No such issue anywhere.
+        let missing = BoardRepo::card_add(pool, &ws("ws-a"), "b1", "nope", Some("c1"), 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, BoardRepoError::NotFound), "got {missing:?}");
+
+        // The issue exists, but in a sibling workspace — still rejected.
+        let foreign = BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-b", Some("c1"), 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(foreign, BoardRepoError::NotFound), "got {foreign:?}");
+
+        // Nothing was persisted.
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        assert!(b.cards.is_empty(), "no card persisted for a bad issue");
+    }
+
+    /// One auto-move target per (board, fsm_state): a second auto-move column for
+    /// the same state is rejected on add, and on an update that would create the
+    /// clash (flipping auto-move on, or re-mapping an existing auto-move column
+    /// onto a state another column already owns).
+    #[tokio::test]
+    async fn auto_move_target_is_unique_per_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        // First auto-move `done` column: fine.
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Done", Some("done"), true).await.unwrap();
+
+        // Second auto-move `done` column on the same board: rejected.
+        let dup = BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done2", Some("done"), true)
+            .await
+            .unwrap_err();
+        assert!(matches!(dup, BoardRepoError::DuplicateAutoMove), "got {dup:?}");
+
+        // A NON-auto-move `done` column is allowed (no ambiguity).
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c3", "Done-manual", Some("done"), false).await.unwrap();
+
+        // Flipping the manual `done` column's auto-move ON now clashes with c1: rejected.
+        let flip = BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c3", None, None, Some(true))
+            .await
+            .unwrap_err();
+        assert!(matches!(flip, BoardRepoError::DuplicateAutoMove), "got {flip:?}");
+
+        // Re-mapping c1 onto its OWN state (a no-op clash with itself) is allowed —
+        // the conflict check excludes the column being updated.
+        BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c1", None, Some(Some("done")), Some(true))
+            .await
+            .unwrap();
     }
 }
