@@ -170,12 +170,14 @@ fn sync_removes_orphan_lockfile_unit() {
         );
         res.expect("install");
 
-        // Manifest does NOT declare the unit → orphan.
-        let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
-        assert!(
-            manifest.units.is_empty(),
-            "manifest must not list units yet"
-        );
+        // Install now declares the unit in the manifest (so the TUI can
+        // render it). Manufacture the orphan the way it happens in the
+        // wild — the manifest entry removed by hand — then sync must
+        // clear the stale lockfile record + deployed files.
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        assert_eq!(manifest.units.len(), 1, "install declares the unit");
+        manifest.units.clear();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run(
             home.path(),
