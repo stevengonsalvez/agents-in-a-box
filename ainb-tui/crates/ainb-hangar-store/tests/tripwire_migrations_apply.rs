@@ -988,6 +988,36 @@ async fn migration_0020_adds_workspace_config_columns() {
 }
 
 #[tokio::test]
+async fn migration_0031_adds_task_mode_and_session_name_columns() {
+    // ccc / D6: a board card launches `headless` or `interactive`; the runner
+    // needs the mode on the row and, for interactive, records the exact tmux
+    // session name it spawned. Two columns land on `agent_task_queue`:
+    //   - `mode TEXT NOT NULL DEFAULT 'headless'
+    //      CHECK (mode IN ('headless', 'interactive'))` — defaults to the
+    //     pre-0031 headless behaviour;
+    //   - `session_name TEXT` — the interactive tmux session name (nullable;
+    //     NULL for a headless task or one not yet dispatched).
+    // ALTER TABLE ADD COLUMN rewrites the catalog SQL, so each shows up in
+    // `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let tq = table_sql(&pool, "agent_task_queue").await;
+    assert!(
+        tq.contains(
+            "mode TEXT NOT NULL DEFAULT 'headless' CHECK (mode IN ('headless', 'interactive'))"
+        ),
+        "agent_task_queue.mode default headless + CHECK: {tq}"
+    );
+    assert!(
+        tq.contains("session_name TEXT"),
+        "agent_task_queue.session_name nullable TEXT: {tq}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn migration_0025_creates_attention_with_kind_state_checks_and_open_index() {
     // The control-plane inbox (architecture §4.3, spec P2): every input request
     // from every session lands in `attention`, answered exactly once via the

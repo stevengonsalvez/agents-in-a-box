@@ -108,6 +108,16 @@ pub struct Task {
     /// The autopilot run this task belongs to (`autopilot_run.id`), or `None`
     /// for ordinary issue / chat tasks. See [`NewTask::autopilot_run_id`].
     pub autopilot_run_id: Option<String>,
+    /// The launch mode (`headless` / `interactive`, migration 0031, ccc / D6).
+    /// `headless` is the schema default — the unchanged `claude -p` / `codex exec`
+    /// provider path; `interactive` dispatches the agent into a REAL attachable
+    /// tmux session. Enqueue paths that do not opt in inherit `headless`.
+    pub mode: String,
+    /// The exact tmux session name an interactive run spawned
+    /// (`tmux_hangar-<task_id>`, migration 0031), or `None` for a headless task or
+    /// an interactive task not yet dispatched. This is the durable handle the
+    /// attach-from-card affordance surfaces (`tmux attach -t <session_name>`).
+    pub session_name: Option<String>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -168,6 +178,27 @@ impl TaskRepo {
         .execute(&mut **tx)
         .await?;
         Ok(task.id.clone())
+    }
+
+    /// Record the tmux `session_name` an interactive run spawned onto the task
+    /// row (migration 0031, ccc / D6). Written the moment the session is created
+    /// so the attach-from-card affordance can reach it while the run is live.
+    /// Returns `true` iff exactly one row was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_session_name(
+        pool: &SqlitePool,
+        id: &str,
+        session_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET session_name = ? WHERE id = ?")
+            .bind(session_name)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// Fetch one task by primary key, or `None` if absent.
@@ -296,7 +327,8 @@ impl TaskRepo {
 /// reads them. Shared by every `SELECT` so the read shape stays in one place.
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
-     priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id";
+     priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
+     mode, session_name";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -320,5 +352,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
         autopilot_run_id: row.try_get("autopilot_run_id")?,
+        mode: row.try_get("mode")?,
+        session_name: row.try_get("session_name")?,
     })
 }

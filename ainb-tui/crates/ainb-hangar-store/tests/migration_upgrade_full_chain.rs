@@ -323,6 +323,23 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
             .expect("task.priority default");
     assert_eq!(task_priority, 0, "0013 task.priority defaults to 0");
 
+    // 0031 (ccc / D6) adds the launch mode + tmux session name to the task row.
+    let task_run_cols = sqlx::query("SELECT mode, session_name FROM agent_task_queue WHERE id = ?")
+        .bind("task-1")
+        .fetch_one(pool)
+        .await
+        .expect("task 0031 columns");
+    assert_eq!(
+        task_run_cols.get::<String, _>("mode"),
+        "headless",
+        "0031 task.mode defaults to headless"
+    );
+    assert_eq!(
+        task_run_cols.get::<Option<String>, _>("session_name"),
+        None,
+        "0031 task.session_name defaults NULL"
+    );
+
     let issue_row = sqlx::query("SELECT priority, due_date, labels FROM issue WHERE id = ?")
         .bind("issue-1")
         .fetch_one(pool)
@@ -461,7 +478,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 30, "head is migration 0030");
+    assert_eq!(head_version, 31, "head is migration 0031");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
