@@ -137,6 +137,20 @@ impl ProfilesState {
         self.detail.as_ref().filter(|d| d.slug == slug)
     }
 
+    /// The selected slug whose detail is not yet loaded — the glue uses this to
+    /// auto-fetch the initial selection's detail after a roster load (so the
+    /// preview pane fills without the user having to move first). `None` when the
+    /// roster is empty or the selection's detail is already loaded.
+    #[must_use]
+    pub fn needs_detail(&self) -> Option<String> {
+        match self.selected_slug() {
+            Some(slug) if self.detail.as_ref().map(|d| d.slug.as_str()) != Some(slug) => {
+                Some(slug.to_string())
+            }
+            _ => None,
+        }
+    }
+
     /// The selected index (for tests / glue).
     #[must_use]
     pub const fn selected(&self) -> usize {
@@ -620,6 +634,16 @@ mod tests {
         assert_eq!(next_tier("balanced"), "fast");
         assert_eq!(next_tier("fast"), "premium");
         assert_eq!(next_tier("garbage"), "balanced");
+    }
+
+    #[test]
+    fn needs_detail_tracks_the_unloaded_selection() {
+        let mut s = ProfilesState::default();
+        assert_eq!(s.needs_detail(), None, "empty roster needs nothing");
+        s.set_roster(roster()); // selected = author, no detail
+        assert_eq!(s.needs_detail(), Some("author".to_string()));
+        s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
+        assert_eq!(s.needs_detail(), None, "loaded selection needs nothing");
     }
 
     #[test]

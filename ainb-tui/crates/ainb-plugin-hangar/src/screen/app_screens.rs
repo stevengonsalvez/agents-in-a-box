@@ -389,9 +389,14 @@ impl ScreenStates {
     }
 
     /// Replace the profile-editor roster from a `profile/list` result (P5),
-    /// preserving the selection where possible.
+    /// preserving the selection where possible. Arms a `profile/get` for the
+    /// selected profile when its detail is not yet loaded, so the preview pane
+    /// fills right after the first roster load (no manual navigation needed).
     pub fn set_profiles(&mut self, rows: Vec<super::profiles::ProfileRosterEntry>) {
         self.profiles.set_roster(rows);
+        if self.pending_profile_detail.is_none() {
+            self.pending_profile_detail = self.profiles.needs_detail();
+        }
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5).
