@@ -773,7 +773,11 @@ impl OnboardingComponent {
         // Field renderer with focus + token masking.
         let field =
             |frame: &mut Frame, area: Rect, idx: usize, label: &str, value: &str, mask: bool| {
-                let focused = state.otel_field == idx && !state.otel_skip;
+                // Focus is pure navigation state — do NOT gate it on
+                // `otel_skip` (true until the first keystroke): the screen
+                // used to open with no visible focus anywhere, so nothing
+                // said "type here, Tab to move".
+                let focused = state.otel_field == idx;
                 let shown = if mask {
                     "•".repeat(value.chars().count())
                 } else {
@@ -960,25 +964,36 @@ impl OnboardingComponent {
             frame.render_widget(list, content_layout[1]);
         }
 
-        // Instructions
+        // Instructions — gold keys so "pick first, then Enter" is obvious
+        // (Enter advances the wizard; ↑↓ is how you actually choose).
         let selected_editor = state.get_selected_editor();
-        let instructions = if selected_editor.is_some() {
-            format!(
-                "Selected: {} • Press Enter to continue, or skip to use defaults",
-                state
-                    .available_editors
-                    .get(state.selected_editor_index)
-                    .map(|e| e.name.as_str())
-                    .unwrap_or("None")
-            )
+        let line = if selected_editor.is_some() {
+            let name = state
+                .available_editors
+                .get(state.selected_editor_index)
+                .map(|e| e.name.as_str())
+                .unwrap_or("None");
+            Line::from(vec![
+                Span::styled("\u{2191}\u{2193}", Style::default().fg(GOLD)),
+                Span::styled(" select \u{b7} ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("Enter", Style::default().fg(GOLD)),
+                Span::styled(
+                    format!(" use {name} & continue"),
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ])
         } else {
-            "No available editor selected • Press Enter to use fallback (code → $EDITOR)"
-                .to_string()
+            Line::from(vec![
+                Span::styled("\u{2191}\u{2193}", Style::default().fg(GOLD)),
+                Span::styled(" select \u{b7} ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("Enter", Style::default().fg(GOLD)),
+                Span::styled(
+                    " continue with fallback (code \u{2192} $EDITOR)",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ])
         };
-
-        let instr_widget =
-            Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
-                .alignment(Alignment::Center);
+        let instr_widget = Paragraph::new(line).alignment(Alignment::Center);
         frame.render_widget(instr_widget, content_layout[2]);
     }
 
