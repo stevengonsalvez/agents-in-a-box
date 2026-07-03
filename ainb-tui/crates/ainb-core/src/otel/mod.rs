@@ -93,6 +93,65 @@ impl GrafanaCloudCreds {
     }
 }
 
+/// Parse `export KEY='VALUE'` lines out of a sourced env file into a map.
+/// Values are single-quoted by `write_env_file`; strip one matching pair of
+/// surrounding single quotes. Lines without `export`/`=` are ignored.
+fn parse_env_exports(text: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("export ") else {
+            continue;
+        };
+        let Some((k, v)) = rest.split_once('=') else {
+            continue;
+        };
+        let v = v.trim();
+        let v = v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')).unwrap_or(v);
+        out.insert(k.trim().to_string(), v.to_string());
+    }
+    out
+}
+
+/// Read previously-saved Grafana Cloud creds back from `grafana-cloud.env`,
+/// so the onboarding OTEL form re-populates on re-open (mirrors the
+/// git-directories remember-on-reopen behaviour). `None` when the file is
+/// absent or missing any of the three values.
+pub fn read_grafana_creds() -> Option<GrafanaCloudCreds> {
+    let text = std::fs::read_to_string(env_file_path().ok()?).ok()?;
+    let map = parse_env_exports(&text);
+    let creds = GrafanaCloudCreds {
+        otlp_endpoint: map.get("GRAFANA_OTLP_ENDPOINT").cloned().unwrap_or_default(),
+        instance_id: map.get("GRAFANA_INSTANCE_ID").cloned().unwrap_or_default(),
+        api_token: map.get("GRAFANA_API_TOKEN").cloned().unwrap_or_default(),
+    };
+    creds.is_complete().then_some(creds)
+}
+
+/// Shell `export … && ` prefix that points an agent's OTLP exporter at the
+/// local Alloy collector, for injection into a spawned session's command.
+/// Empty when OTEL isn't configured. Only the non-secret `OTEL_*` vars are
+/// injected (the `GRAFANA_*` creds are Alloy's, not the agent's). Combined
+/// with `CLAUDE_CODE_ENABLE_TELEMETRY` (Claude reads that from
+/// settings.json), this makes telemetry flow from a non-interactive
+/// `sh -c` pane that never sourced the shell rc.
+pub fn session_otlp_exports() -> String {
+    let Ok(path) = env_file_path() else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let map = parse_env_exports(&text);
+    let mut prefix = String::new();
+    for key in ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"] {
+        if let Some(val) = map.get(key).filter(|v| !v.is_empty()) {
+            // Values are URLs / host attrs — no embedded single quotes.
+            prefix.push_str(&format!("export {key}='{val}' && "));
+        }
+    }
+    prefix
+}
+
 // ── Paths ───────────────────────────────────────────────────────────────────
 
 /// `~/.agents-in-a-box`.
@@ -586,6 +645,48 @@ mod tests {
             api_token: "line1\nexport EVIL=1".into(),
         };
         assert!(write_env_file_to(&path, &creds, "h").is_err());
+    }
+
+    /// The three Grafana values written by `write_env_file` parse back out
+    /// intact (remember-on-reopen), and the OTLP endpoint / resource attrs
+    /// become session export lines.
+    #[test]
+    fn creds_round_trip_and_session_exports() {
+        let text = ASSET_ENV_TEMPLATE
+            .replace("__GRAFANA_OTLP_ENDPOINT__", "https://otlp.grafana.net/otlp")
+            .replace("__GRAFANA_INSTANCE_ID__", "99999")
+            .replace("__GRAFANA_API_TOKEN__", "glc_secret")
+            .replace("__HOST_NAME__", "my-host");
+        let map = parse_env_exports(&text);
+        assert_eq!(
+            map.get("GRAFANA_OTLP_ENDPOINT").unwrap(),
+            "https://otlp.grafana.net/otlp"
+        );
+        assert_eq!(map.get("GRAFANA_INSTANCE_ID").unwrap(), "99999");
+        assert_eq!(map.get("GRAFANA_API_TOKEN").unwrap(), "glc_secret");
+        // Endpoint the agent actually posts to = the local Alloy collector.
+        assert_eq!(
+            map.get("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            "http://localhost:4318"
+        );
+
+        // Session exports carry the OTEL_* vars (never the GRAFANA_* creds).
+        let exports = {
+            // Exercise the same extraction session_otlp_exports uses.
+            let mut p = String::new();
+            for key in ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"] {
+                if let Some(v) = map.get(key).filter(|v| !v.is_empty()) {
+                    p.push_str(&format!("export {key}='{v}' && "));
+                }
+            }
+            p
+        };
+        assert!(exports.contains("export OTEL_EXPORTER_OTLP_ENDPOINT='http://localhost:4318'"));
+        assert!(exports.contains("host.name=my-host"));
+        assert!(
+            !exports.contains("GRAFANA_API_TOKEN"),
+            "creds must not leak into the agent env"
+        );
     }
 
     #[test]
