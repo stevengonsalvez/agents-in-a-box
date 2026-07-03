@@ -36,11 +36,7 @@ fn custom_preset_unlocks_agent_model_mode_yolo_editing() {
         .expect("tmux new-session");
     assert!(status.success());
 
-    let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
-        home_tmp.path().display(),
-        ainb.display()
-    );
+    let cmd = launch_cmd_gh_authed(home_tmp.path(), &ainb);
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()

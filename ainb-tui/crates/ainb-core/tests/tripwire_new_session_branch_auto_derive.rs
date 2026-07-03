@@ -40,11 +40,7 @@ fn branch_line_is_random_hex_and_stable_across_prompt_edits() {
         .expect("tmux new-session");
     assert!(status.success());
 
-    let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
-        home_tmp.path().display(),
-        ainb.display()
-    );
+    let cmd = launch_cmd_gh_authed(home_tmp.path(), &ainb);
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()

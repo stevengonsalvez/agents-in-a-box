@@ -33,6 +33,52 @@ pub fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
 
+/// Write a fake `gh` onto an isolated bin dir that behaves like a
+/// signed-in CLI: `gh auth status …` exits 0. Returns the bin dir to
+/// prepend onto PATH.
+///
+/// Entering the seeded GitHub-shorthand favorite triggers the
+/// `gh auth status` pre-check (`StartClone` → `CheckGitAuth`). Under an
+/// isolated `$HOME` the box's real `gh` has no usable credentials there, so
+/// the probe fails closed and parks the flow on the "GitHub auth required"
+/// modal instead of advancing to Configure. A stub that exits 0 lets the
+/// pre-check pass so the flow reaches the state each tripwire exercises.
+/// Mirrors the logged-out `seed_logged_out_gh` in
+/// `tripwire_new_session_github_auth_no_gh.rs`.
+pub fn seed_logged_in_gh(home: &Path) -> PathBuf {
+    let bin = home.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         # Stub: simulates `gh` installed and signed in.\n\
+         echo 'Logged in to github.com account trip (keyring)' 1>&2\n\
+         exit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Standard TUI launch command for the isolated-HOME tripwires, with a
+/// signed-in `gh` stub prepended onto PATH so the GitHub auth pre-check
+/// passes (see [`seed_logged_in_gh`]). `$PATH` expands in the launch shell
+/// before `exec` replaces it, so keystrokes still hit `ainb` directly.
+pub fn launch_cmd_gh_authed(home: &Path, bin: &Path) -> String {
+    let fakebin = seed_logged_in_gh(home);
+    format!(
+        "HOME={home} PATH={fake}:$PATH AINB_DISABLE_PLUGINS=1 exec {bin} tui",
+        home = home.display(),
+        fake = fakebin.display(),
+        bin = bin.display(),
+    )
+}
+
 /// True when `tmux` is on PATH and responsive — gates the PTY tripwires
 /// so CI hosts without tmux skip rather than fail.
 pub fn tmux_available() -> bool {
