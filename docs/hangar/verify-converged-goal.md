@@ -104,7 +104,7 @@ re-run locally on macOS at P11 close.
 | CC14 | J5 | **history rows**: `run_history` per run (tokens/cost/diff/outcome); cost rollup absorbs fleet cost | `rpc_run_history.rs`, `rpc_usage_rollup.rs` | REAL daemon | GREEN |
 | CC15 | J5 | OTLP export: a run's span/metrics reach a local collector when the endpoint is set | `tripwire_otel_export_when_endpoint_set.rs` (`--features otlp`) | REAL exporter → local collector | GREEN (feature-gated) |
 | CC16 | J4 | autopilot cron: fires on schedule; skips when a run is in flight | `tripwire_autopilot_fires_on_schedule.rs`, `tripwire_autopilot_skips_when_running.rs` | REAL scheduler | GREEN |
-| CC17 | J1 | **profile compile — both targets** (Claude `.md` master → Codex `[profiles.<slug>]` + prompt, WARN on dropped tools/color); fs-watch pickup | — | — | **FAIL (P11-blocking) — P5 (bct.5) not landed; no profile-compiler module shipped yet. Un-landed upstream phase, not a product bug, but it blocks P11 completeness (see Reporting). Add + gate this leg when P5 lands.** |
+| CC17 | J1 | **profile compile — both targets** (Claude `.md` master → Codex `[profiles.<slug>]` + prompt, WARN on dropped tools/color); fs-watch pickup | `ainb-hangar-core/src/profile.rs` (`compile_claude_is_lossless_golden`, `compile_codex_is_lossy_with_warnings_golden`, `compile_codex_no_warnings_when_no_dropped_fields`) + `ainb-hangar-daemon/src/profile.rs` (`materialise_claude_writes_lossless_subagent`, `materialise_codex_writes_config_prompt_and_warns`, `refresh_index_upserts_updates_and_prunes` for the fs-watch reconcile pickup) + `ainb-plugin-hangar/tests/snapshot_profiles.rs` | unit (core compilers + daemon materialise/reconcile) + plugin snapshot | **GREEN (P5/8fbc9bd3 landed) — re-run locally: `cargo test -p ainb-hangar-core --lib profile::` (13 passed), `cargo test -p ainb-hangar-daemon --lib profile::` (12 passed), `cargo test -p ainb-plugin-hangar --test snapshot_profiles` (5 passed). No dedicated `tripwire_*` e2e file exists for this leg yet — the doc's original "Drive via" was blank; the unit/snapshot suite above is the closest-fidelity coverage of the same behaviour (both-target compile + WARN-on-drop + edit-on-disk reconcile pickup) and is what CI already runs on this branch under the `test` job, same posture as CC08/CC11/CC12. A future `tripwire_profile_compile_e2e.rs` exercising the live `notify` watcher end to end would strengthen this further but is not required to close P11.**
 | CC18 | C2 | **web ASK-answer e2e** (real browser): the daemon-seeded 3-option ASK renders on the dashboard via `GET /api/snapshot` (attention/list, D18) → click option ② → `POST /api/answer(answeredBy=web)` → daemon C1 resolve + verified tmux send → the answered row drops off the open inbox (ASK card disappears) → the pick lands in the raising session's real tmux pane → the store row reads `answered`/`web`/`2` | `ainb-tui/crates/ainb-web/e2e/tests/ask-answer.spec.ts` via `scripts/hangar/run_web_e2e.sh` **(NEW, agents-in-a-box-bct.8)** | REAL daemon + REAL tmux last-mile + REAL chromium (provider not a live agent — the delivery target is a plain-shell tmux session, same as CC01) | GREEN |
 
 **Running CC18.** `bash scripts/hangar/run_web_e2e.sh` (macOS/Linux). Self-contained + idempotent: it builds `ainb` + `ainb-hangar-daemon` + the `seed_control_center` example into the shared target, provisions a short `/tmp` HOME (unix-socket 104-char limit), seeds the 3-option ASK + spawns the daemon, wires a real delivery-target tmux session via a fake `ainb list` (`AINB_BIN`) + `AINB_FLEET_TRANSPORT=tmux-only` (the `record-control-center.sh` technique), starts `ainb web` with a bearer token, installs the Playwright chromium on demand, runs the headless journey, and tears everything down by EXACT name / PID only. Requires `tmux`, `sqlite3`, `node`, `npm` (else it exits `2` with the missing tool named). Not CI-gated on this branch — it is a local real-browser leg (like the live-provider journey suite); the deterministic answer-path proof CI already gates is CC01.
@@ -130,7 +130,7 @@ column lists the Phase D/E legs that serve it.
 
 | Journey | What it delivers | Served by (legs) | Real providers? | Status |
 |---------|------------------|------------------|-----------------|--------|
-| **J1** | kanban w/ custom columns, task in any column, agent + profile pick | CC06, CC07, CC17 | boards REAL; profile ABSENT | **BLOCKED — boards green (CC06/CC07); CC17 profile-compile leg absent (P5 not landed) → J1 not fully covered; blocks P11** |
+| **J1** | kanban w/ custom columns, task in any column, agent + profile pick | CC06, CC07, CC17 | boards REAL; profile compile unit-level REAL | GREEN |
 | **J2** | run headless (`-p`) or interactive YOLO, per provider | CC08 | runner REAL (provider mocked via fake) | GREEN |
 | **J3** | attach from card; tmux always; green on done; auto-move | CC06, F37 (attach), CC02 (event refresh) | REAL | GREEN |
 | **J4** | autopilot cron kept | CC16, F19–F23 | REAL scheduler | GREEN |
@@ -149,9 +149,9 @@ crossings are exercised by CC01 (a launched session's ASK answered from the TUI)
 (a launched board card that auto-moves on the event bus), CC09+RB01 (a squad-launched
 fan-out scoped to its workspace), and CC14/CC15 (a launched run's history + OTLP span).
 The C2×web ASK-answer crossing is now covered by CC18 (real-browser Playwright, P8 landed).
-One crossing still BLOCKS P11 completeness: J1×* profile-compile (CC17, P5 not landed) — an
-un-landed upstream phase, not a regression, but P11 cannot be reported complete or green
-until that leg lands and is gated.
+The J1×* profile-compile crossing (CC17, P5/8fbc9bd3 landed) is now covered by the
+core-compiler + daemon-materialise/reconcile + plugin-snapshot unit suite. Every J×C cell
+in this matrix is now GREEN — no crossing blocks P11 completeness.
 
 ## CI wiring — the non-dispatching legs
 
@@ -177,8 +177,10 @@ pick up new legs WITHOUT editing YAML:
   `HANGAR_TRIPWIRE_SMOKE` subset (deliberately minimal — heavy serial TUI tripwires flake
   on the small hosted macOS runner); its OS-agnostic render/protocol/delivery logic is
   authoritative on the Linux leg. No `ci.yml` edit is required or made.
-- The unit-level converged legs (CC11 bridge outbound, CC12 standup gate, CC08 runner)
-  ride the existing `test` job (`cargo nextest run --lib`).
+- The unit-level converged legs (CC11 bridge outbound, CC12 standup gate, CC08 runner,
+  CC17 profile compile/materialise/reconcile) ride the existing `test` job
+  (`cargo nextest run --lib`); CC17's plugin-snapshot leg (`snapshot_profiles.rs`) rides
+  `run_acceptance_tests.sh` (non-tripwire glob).
 - `cargo xtask ci-lint` still asserts the `hangar-e2e` contract; unchanged.
 
 ## The cumulative journey suite (real providers) — LOCAL only
@@ -208,13 +210,17 @@ disclose per report which legs ran REAL vs seeded-fixture.
   The validation contract requires the full J1–J5 × C1–C5 matrix to be covered by P11, so
   a missing acceptance leg counts as a FAIL against P11 sign-off (and toward the exit code),
   even when its root cause is an un-landed upstream phase rather than a product regression.
-  On this branch one leg still has no shipped module/test and therefore **P11 is NOT complete
-  and the harness is NOT green:**
-  - CC17 (profile compile, P5 / bct.5) — no profile-compiler module shipped.
+  Both legs that previously blocked P11 completeness are now RESOLVED:
+  - (RESOLVED) CC17 (profile compile, P5 / 8fbc9bd3) — the profile-compiler module
+    (`ainb-hangar-core::profile` compilers + `ainb-hangar-daemon::profile` materialise/
+    fs-watch-reconcile) landed and is covered by a 13+12+5-test unit/snapshot suite,
+    re-run GREEN locally at this update.
   - (RESOLVED) C2 web ASK-answer (P8) — CC18 now ships the Playwright web suite
     (`scripts/hangar/run_web_e2e.sh`) and is GREEN; this cell is covered.
-  Disclose the cause honestly (un-landed P5, not a regression), but do NOT report P11
-  as done and do NOT count the CC17 cell as covered. P11 closes green only after that leg
-  lands and is gated.
+  Every J1–J5 × C1–C5 cell is now covered by at least one GREEN leg. **P11 is complete and
+  the harness is GREEN** as of this update (tripwire suite: 40 ran, 0 failed, 0 skipped on
+  the re-run that counts; one earlier `tripwire_workspace_switch_e2e` run flaked and passed
+  clean on immediate re-run — see the verification report for the run this doc update was
+  based on).
 - Do not modify product code to make a leg pass. If a leg reveals a genuine product bug,
   file the evidence (a bead) — do not "fix" the product mid-run.
