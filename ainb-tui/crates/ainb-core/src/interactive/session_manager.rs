@@ -1521,7 +1521,13 @@ impl InteractiveSessionManager {
             _ => String::new(),
         };
 
-        format!("{headroom_prefix}{base}")
+        // Point the agent's OTLP exporter at the local Alloy collector. The
+        // spawned pane runs `sh -c` (non-interactive — never sources the
+        // shell rc that would otherwise export these), so inject directly.
+        // Empty when OTEL isn't configured.
+        let otel_prefix = crate::otel::session_otlp_exports();
+
+        format!("{headroom_prefix}{otel_prefix}{base}")
     }
 }
 
