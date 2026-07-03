@@ -460,6 +460,99 @@ pub const HANGAR_INBOX_LIST: &str = "hangar/inbox_list";
 /// `hangar/task_transition`); a sibling tenant's inbox is never touched.
 pub const HANGAR_INBOX_MARK_READ: &str = "hangar/inbox_mark_read";
 
+/// `hangar/boards_list` — snapshot the user-defined kanban boards of a workspace
+/// (P4 / D8).
+///
+/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
+/// Result: [`crate::snapshots::BoardsListResult`] — the workspace's boards, each
+/// with its ordered columns and its cards (an issue placed in a column, with the
+/// issue title + latest task status folded in for the render). Drives the Boards
+/// screen. Workspace-scoped like every snapshot: a foreign / unknown workspace
+/// yields an empty list (a read, so no `INVALID_PARAMS` rejection). The
+/// `board_*` mutations all re-read and answer with this same envelope so a caller
+/// re-renders from the response without a separate round-trip.
+pub const HANGAR_BOARDS_LIST: &str = "hangar/boards_list";
+
+/// `hangar/board_create` — create one empty board in a workspace (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardCreateParams`] (`{ workspace_id, name }`).
+/// Result: the refreshed [`crate::snapshots::BoardsListResult`]. The board starts
+/// with no columns (added via `board_column_add`) and its auto-move master toggle
+/// on. A board name already used in the workspace is rejected (resolve-or-reject),
+/// never a silent no-op.
+pub const HANGAR_BOARD_CREATE: &str = "hangar/board_create";
+
+/// `hangar/board_update` — rename a board and/or flip its auto-move toggle (P4).
+///
+/// Params: [`crate::snapshots::BoardUpdateParams`]
+/// (`{ workspace_id, board_id, name?, auto_move? }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. Mutating + workspace-scoped: a
+/// foreign-tenant board id touches no row (a not-found error). A rename that
+/// collides with another board's name is rejected.
+pub const HANGAR_BOARD_UPDATE: &str = "hangar/board_update";
+
+/// `hangar/board_delete` — delete a board with its columns + cards (P4).
+///
+/// Params: [`crate::snapshots::BoardIdParams`] (`{ workspace_id, board_id }`).
+/// Result: the refreshed [`crate::snapshots::BoardsListResult`]. Mutating +
+/// workspace-scoped: a foreign-tenant board id touches no row (not-found).
+pub const HANGAR_BOARD_DELETE: &str = "hangar/board_delete";
+
+/// `hangar/board_column_add` — append a column to a board (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardColumnAddParams`]
+/// (`{ workspace_id, board_id, name, fsm_state?, auto_move? }`). Result: the
+/// refreshed [`crate::snapshots::BoardsListResult`]. `fsm_state` (a task-status
+/// token) + `auto_move` set the column's auto-move mapping; omit `fsm_state` for a
+/// purely manual column. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_COLUMN_ADD: &str = "hangar/board_column_add";
+
+/// `hangar/board_column_update` — rename / re-map / retune a column (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardColumnUpdateParams`]
+/// (`{ workspace_id, board_id, column_id, name?, fsm_state?, auto_move? }`).
+/// Result: the refreshed [`crate::snapshots::BoardsListResult`]. An OMITTED
+/// `fsm_state` leaves the mapping unchanged; an EMPTY-STRING `fsm_state` clears it
+/// to a manual column. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_COLUMN_UPDATE: &str = "hangar/board_column_update";
+
+/// `hangar/board_column_delete` — delete a column, parking its cards (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardColumnDeleteParams`]
+/// (`{ workspace_id, board_id, column_id }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. The deleted column's cards are parked
+/// UNMAPPED (no data loss, the edge-case contract) and the remaining columns'
+/// order renumbers contiguous. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_COLUMN_DELETE: &str = "hangar/board_column_delete";
+
+/// `hangar/board_column_reorder` — set a board's column order (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardColumnReorderParams`]
+/// (`{ workspace_id, board_id, column_ids }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. `column_ids` must be exactly the
+/// board's current columns (a permutation); any other set is rejected. Because
+/// cards reference the stable column id, a reorder never moves a card. Mutating +
+/// workspace-scoped via the board.
+pub const HANGAR_BOARD_COLUMN_REORDER: &str = "hangar/board_column_reorder";
+
+/// `hangar/board_card_add` — place an issue on a board in a column (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardCardParams`]
+/// (`{ workspace_id, board_id, issue_id, column_id? }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. Idempotent: re-adding the same issue
+/// re-targets its column. Omit `column_id` to place the card unmapped. Mutating +
+/// workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_ADD: &str = "hangar/board_card_add";
+
+/// `hangar/board_card_move` — move an existing card to another column (P4 / D8).
+///
+/// Params: [`crate::snapshots::BoardCardParams`]
+/// (`{ workspace_id, board_id, issue_id, column_id? }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. The card must already be on the board
+/// (else not-found); omit `column_id` to park it unmapped. Mutating +
+/// workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_MOVE: &str = "hangar/board_card_move";
+
 /// `attention/list` — snapshot the OPEN control-plane inbox for a scope (spec P2).
 ///
 /// Params: [`crate::snapshots::AttentionListParams`]
@@ -550,6 +643,16 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_PR_STATUS_REFRESH,
     HANGAR_INBOX_LIST,
     HANGAR_INBOX_MARK_READ,
+    HANGAR_BOARDS_LIST,
+    HANGAR_BOARD_CREATE,
+    HANGAR_BOARD_UPDATE,
+    HANGAR_BOARD_DELETE,
+    HANGAR_BOARD_COLUMN_ADD,
+    HANGAR_BOARD_COLUMN_UPDATE,
+    HANGAR_BOARD_COLUMN_DELETE,
+    HANGAR_BOARD_COLUMN_REORDER,
+    HANGAR_BOARD_CARD_ADD,
+    HANGAR_BOARD_CARD_MOVE,
     ATTENTION_LIST,
     ATTENTION_SUBSCRIBE,
     ATTENTION_ANSWER,
@@ -637,6 +740,16 @@ mod tests {
             HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
+            HANGAR_BOARDS_LIST,
+            HANGAR_BOARD_CREATE,
+            HANGAR_BOARD_UPDATE,
+            HANGAR_BOARD_DELETE,
+            HANGAR_BOARD_COLUMN_ADD,
+            HANGAR_BOARD_COLUMN_UPDATE,
+            HANGAR_BOARD_COLUMN_DELETE,
+            HANGAR_BOARD_COLUMN_REORDER,
+            HANGAR_BOARD_CARD_ADD,
+            HANGAR_BOARD_CARD_MOVE,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -689,6 +802,16 @@ mod tests {
             HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
+            HANGAR_BOARDS_LIST,
+            HANGAR_BOARD_CREATE,
+            HANGAR_BOARD_UPDATE,
+            HANGAR_BOARD_DELETE,
+            HANGAR_BOARD_COLUMN_ADD,
+            HANGAR_BOARD_COLUMN_UPDATE,
+            HANGAR_BOARD_COLUMN_DELETE,
+            HANGAR_BOARD_COLUMN_REORDER,
+            HANGAR_BOARD_CARD_ADD,
+            HANGAR_BOARD_CARD_MOVE,
             ATTENTION_LIST,
             ATTENTION_SUBSCRIBE,
             ATTENTION_ANSWER,
