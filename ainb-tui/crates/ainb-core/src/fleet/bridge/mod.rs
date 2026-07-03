@@ -18,10 +18,13 @@
 // (`service.rs`). The pure logic (routing, markdown/split, secrets, relay) is
 // unit-tested without a live fleet or network.
 
+pub mod answer;
 pub mod config;
+pub mod daemon;
 pub mod discord;
 pub mod format;
 pub mod heartbeat;
+pub mod outbound;
 pub mod redact;
 pub mod relay;
 pub mod routing;
