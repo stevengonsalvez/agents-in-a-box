@@ -195,14 +195,23 @@ impl SquadAssignService {
     /// the leader and every member each hold their own pending task on the one
     /// issue, and each claims it on its own runtime with no contention.
     ///
-    /// The leader brief is enqueued first (reusing [`Self::assign_to_leader`], so
-    /// a human-leader / unknown squad is rejected up front). Then the squad's
-    /// `agent` members are resolved: a human `member` carries no runtime and is
-    /// skipped, the leader's own agent is skipped (its brief is the leader task),
-    /// and a repeated member agent is deduped — so no member row can collide with
-    /// the leader (or another member) on the `(issue, agent)` guard. Each surviving
-    /// member is resolved to its runtime and enqueued keyed to its own
-    /// `(agent_id, runtime_id)`.
+    /// The fan-out is **all-or-nothing**: every dispatch target (the leader and
+    /// each `agent` member) is resolved and validated *before* a single row is
+    /// written, then the leader brief and all member tasks are inserted in ONE
+    /// transaction. A dangling / foreign member ref — or a mid-loop UNIQUE
+    /// `(issue, agent)` collision — rolls the whole fan-out back, so the caller
+    /// never sees a rejected fan-out that nonetheless left the leader (or some
+    /// members) queued and running.
+    ///
+    /// Resolution rules: a human `member` carries no runtime and is skipped (only
+    /// `agent` members reach the fan-out), the leader's own agent is skipped (its
+    /// brief is the leader task), a repeated member agent is deduped — so no member
+    /// row can collide with the leader (or another member) on the `(issue, agent)`
+    /// guard — and every agent (leader + members) is resolved **within this
+    /// workspace**: a member/leader ref that names another tenant's agent resolves
+    /// to no row and is rejected, so a squad cannot borrow a foreign workspace's
+    /// agent + runtime to dispatch across the tenant boundary. Each surviving
+    /// member is keyed to its own `(agent_id, runtime_id)`.
     ///
     /// # Errors
     ///
@@ -220,16 +229,32 @@ impl SquadAssignService {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<SquadFanout, SquadAssignError> {
-        // 1. Brief the leader (the guard for human-leader / unknown squad).
-        let leader = Self::assign_to_leader(pool, workspace, squad_id, request, idgen, clock).await?;
+        // Resolve + validate EVERY dispatch target before touching the queue, so a
+        // dangling / foreign member ref rejects the whole fan-out up front instead
+        // of leaving the leader (and earlier members) queued. Nothing is inserted
+        // until all targets are known-good; then every insert lands in ONE
+        // transaction (all-or-nothing).
 
-        // 2. Fan out to the distinct `agent` members. Seed the dedupe set with the
-        //    leader's agent so its brief is never double-dispatched as a member.
+        // 1. Resolve the squad's leader agent — the routing seam. A human-member
+        //    leader or unknown squad resolves to `None` and is rejected. The
+        //    leader agent is resolved WITHIN this workspace, so a leader ref that
+        //    names a foreign tenant's agent is rejected rather than dispatched.
+        let leader_agent_id = SquadRepo::leader_agent_id(pool, workspace, squad_id)
+            .await?
+            .ok_or(SquadAssignError::NoAgentLeader)?;
+        let leader_runtime_id = Self::agent_runtime_in_ws(pool, workspace, &leader_agent_id)
+            .await?
+            .ok_or_else(|| SquadAssignError::LeaderAgentMissing(leader_agent_id.clone()))?;
+
+        // 2. Resolve the distinct `agent` members. Seed the dedupe set with the
+        //    leader's agent so its brief is never double-dispatched as a member;
+        //    each member agent is resolved WITHIN this workspace so a member ref
+        //    cannot borrow a foreign tenant's agent + runtime.
         let mut seen = std::collections::HashSet::new();
-        seen.insert(leader.leader_agent_id.clone());
+        seen.insert(leader_agent_id.clone());
 
         let member_agent_ids = SquadRepo::member_agent_ids(pool, workspace, squad_id).await?;
-        let mut members = Vec::new();
+        let mut member_targets = Vec::new();
         for agent_id in member_agent_ids {
             // Skip the leader's own agent and any repeated member agent — either
             // would collide with an already-enqueued task on the `(issue, agent)`
@@ -237,13 +262,39 @@ impl SquadAssignService {
             if !seen.insert(agent_id.clone()) {
                 continue;
             }
-            let agent = AgentRepo::get(pool, &agent_id)
+            let runtime_id = Self::agent_runtime_in_ws(pool, workspace, &agent_id)
                 .await?
                 .ok_or_else(|| SquadAssignError::MemberAgentMissing(agent_id.clone()))?;
-            let runtime_id = agent.runtime_id.clone();
+            member_targets.push((agent_id, runtime_id));
+        }
+
+        // 3. Every target is known-good — enqueue the leader brief and all member
+        //    tasks in ONE transaction so a mid-loop failure (e.g. a UNIQUE
+        //    `(issue, agent)` collision) rolls the whole fan-out back, honouring
+        //    the documented all-or-nothing contract.
+        let leader_task_id = idgen.new_ulid();
+        let mut members = Vec::with_capacity(member_targets.len());
+
+        let mut tx = pool.begin().await?;
+        TaskRepo::insert_in_tx(
+            &mut tx,
+            &NewTask {
+                id: leader_task_id.clone(),
+                workspace_id: workspace.as_str().to_string(),
+                runtime_id: leader_runtime_id.clone(),
+                agent_id: leader_agent_id.clone(),
+                issue_id: request.issue_id.map(str::to_string),
+                work_dir: request.work_dir.map(str::to_string),
+                priority: request.priority,
+                created_at: clock.now_ms(),
+                autopilot_run_id: None,
+            },
+        )
+        .await?;
+        for (agent_id, runtime_id) in member_targets {
             let task_id = idgen.new_ulid();
-            TaskRepo::insert(
-                pool,
+            TaskRepo::insert_in_tx(
+                &mut tx,
                 &NewTask {
                     id: task_id.clone(),
                     workspace_id: workspace.as_str().to_string(),
@@ -263,8 +314,36 @@ impl SquadAssignService {
                 runtime_id,
             });
         }
+        tx.commit().await?;
 
-        Ok(SquadFanout { leader, members })
+        Ok(SquadFanout {
+            leader: SquadAssignment {
+                task_id: leader_task_id,
+                leader_agent_id,
+                runtime_id: leader_runtime_id,
+            },
+            members,
+        })
+    }
+
+    /// Resolve `agent_id` to its runtime **within `workspace`**, returning `None`
+    /// when no agent row with that id exists in the workspace — a dangling ref, or
+    /// a ref that names another tenant's agent. This is the guard that stops a
+    /// squad member/leader ref from borrowing a foreign workspace's agent +
+    /// runtime and dispatching a task across the tenant boundary (`AgentRepo::get`
+    /// alone keys only on the primary id, which is not workspace-scoped).
+    async fn agent_runtime_in_ws(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let Some(agent) = AgentRepo::get(pool, agent_id).await? else {
+            return Ok(None);
+        };
+        if agent.workspace_id != workspace.as_str() {
+            return Ok(None);
+        }
+        Ok(Some(agent.runtime_id))
     }
 }
 
@@ -441,10 +520,16 @@ mod tests {
         SquadRepo::create(pool, &ws("ws-a"), "s1", "shippers", &agent_ref("a-lead"), 1)
             .await
             .unwrap();
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1")).await.unwrap();
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m2")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1"))
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m2"))
+            .await
+            .unwrap();
         // A human member carries no runtime and must NOT be fanned out.
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &member_ref("u-1")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &member_ref("u-1"))
+            .await
+            .unwrap();
 
         // Fan out an ISSUE across the whole squad — naming only the squad + issue.
         let request = SquadAssignRequest {
@@ -456,11 +541,7 @@ mod tests {
             &ws("ws-a"),
             "s1",
             &request,
-            &FixedIdGen::new(vec![
-                "task-lead".into(),
-                "task-m1".into(),
-                "task-m2".into(),
-            ]),
+            &FixedIdGen::new(vec!["task-lead".into(), "task-m1".into(), "task-m2".into()]),
             &FixedClock(9_000),
         )
         .await
@@ -469,7 +550,11 @@ mod tests {
         // The leader gets the brief; both agent members fan out (the human does not).
         assert_eq!(fanout.leader.leader_agent_id, "a-lead");
         assert_eq!(fanout.leader.runtime_id, "rt-lead");
-        assert_eq!(fanout.members.len(), 2, "two agent members fanned out (human skipped)");
+        assert_eq!(
+            fanout.members.len(),
+            2,
+            "two agent members fanned out (human skipped)"
+        );
         assert_eq!(fanout.members[0].agent_id, "a-m1");
         assert_eq!(fanout.members[0].runtime_id, "rt-m1");
         assert_eq!(fanout.members[1].agent_id, "a-m2");
@@ -522,8 +607,12 @@ mod tests {
             .await
             .unwrap();
         // The leader is redundantly listed as a member, plus a real member.
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-lead")).await.unwrap();
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-lead"))
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1"))
+            .await
+            .unwrap();
 
         let request = SquadAssignRequest {
             issue_id: Some("issue-1"),
@@ -547,6 +636,119 @@ mod tests {
             "only the non-leader member fans out; the leader is not re-dispatched"
         );
         assert_eq!(fanout.members[0].agent_id, "a-m1");
+    }
+
+    /// FAN-OUT is all-or-nothing: a dangling member ref rejects the WHOLE fan-out,
+    /// leaving nothing queued — not even the leader brief. Regression guard for the
+    /// non-atomic path that committed the leader before a later member insert
+    /// failed, stranding a task the squad could never retry.
+    #[tokio::test]
+    async fn assign_fanout_rejects_atomically_leaving_no_leader_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "a-lead", "rt-lead").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "shippers", &agent_ref("a-lead"), 1)
+            .await
+            .unwrap();
+        // A member whose agent row does not exist — a dangling ref.
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-ghost"))
+            .await
+            .unwrap();
+
+        let request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            ..SquadAssignRequest::default()
+        };
+        let err = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &FixedIdGen::new(vec!["task-lead".into(), "task-ghost".into()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::MemberAgentMissing(ref id) if id == "a-ghost"),
+            "got {err:?}"
+        );
+
+        // The leader task must NOT have been committed — the fan-out rolled back
+        // whole, so the leader's runtime can still claim nothing and a retry is
+        // not blocked by a stranded pending task.
+        let leftover = ClaimTaskService::claim_for_runtime(pool, "rt-lead", &FixedClock(10_000))
+            .await
+            .unwrap();
+        assert!(
+            leftover.is_none(),
+            "the leader brief must have rolled back with the failed fan-out"
+        );
+    }
+
+    /// FAN-OUT is workspace-scoped: a member ref that names an agent living in
+    /// ANOTHER workspace is rejected, never dispatched. Guards against a squad
+    /// borrowing a foreign tenant's agent + runtime to cross the tenant boundary.
+    #[tokio::test]
+    async fn assign_fanout_rejects_a_cross_workspace_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_agent(pool, "ws-a", "a-lead", "rt-lead").await;
+        // `a-foreign` lives in ws-b, on a ws-b runtime.
+        seed_agent(pool, "ws-b", "a-foreign", "rt-foreign").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "shippers", &agent_ref("a-lead"), 1)
+            .await
+            .unwrap();
+        // A member ref naming the FOREIGN-workspace agent (no FK / existence check
+        // on the member side lets this ref be stored).
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-foreign"))
+            .await
+            .unwrap();
+
+        let request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            ..SquadAssignRequest::default()
+        };
+        let err = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &FixedIdGen::new(vec!["task-lead".into(), "task-x".into()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::MemberAgentMissing(ref id) if id == "a-foreign"),
+            "a foreign-workspace member must be rejected, got {err:?}"
+        );
+
+        // Nothing dispatched to the foreign runtime, and the fan-out rolled back
+        // whole so the leader was not stranded either.
+        let foreign = ClaimTaskService::claim_for_runtime(pool, "rt-foreign", &FixedClock(10_000))
+            .await
+            .unwrap();
+        assert!(
+            foreign.is_none(),
+            "no task may cross into the foreign runtime"
+        );
+        let lead = ClaimTaskService::claim_for_runtime(pool, "rt-lead", &FixedClock(10_000))
+            .await
+            .unwrap();
+        assert!(
+            lead.is_none(),
+            "the leader brief rolled back with the rejected fan-out"
+        );
     }
 
     /// A squad with a human-member leader has no agent to route to: the assignment
