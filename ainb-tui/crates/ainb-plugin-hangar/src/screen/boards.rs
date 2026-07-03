@@ -123,10 +123,109 @@ pub struct BoardView {
     pub unmapped: Vec<CardView>,
 }
 
+/// The launch mode of a card run (D6 `Run ▾`): a headless provider run
+/// (`claude -p` / `codex exec`) or an interactive YOLO session. Both dispatch
+/// through the one provider-runner path today; the choice is carried to the
+/// daemon so the D6 launch surface records which the user asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// A background headless run — the default (`claude -p` / `codex exec`).
+    Headless,
+    /// An interactive YOLO session.
+    Interactive,
+}
+
+impl RunMode {
+    /// The `hangar/board_card_run` `mode` wire token.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Interactive => "interactive",
+        }
+    }
+
+    /// The `Run ▾` menu label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Headless => "Headless (claude -p)",
+            Self::Interactive => "Interactive (YOLO)",
+        }
+    }
+
+    /// The two modes in menu order (Headless first / default).
+    const ALL: [Self; 2] = [Self::Headless, Self::Interactive];
+}
+
+/// An interactive text/pick overlay open over the Boards body.
+///
+/// The card-level keys open one of these instead of firing a bare intent, so a
+/// card create carries a typed title + a picked profile and a column rename
+/// carries a typed name. The reducer folds keystrokes into the open overlay and
+/// raises the matching [`BoardsIntent`] on commit; the glue lifts it to a daemon
+/// RPC (`project_ainb_plugin_owns_data_plane` — the daemon owns the mutation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardsOverlay {
+    /// Typing a new card's title on `column_id` (`c`, stage 1). Enter advances to
+    /// the profile pick.
+    CardTitle {
+        /// The column the new card lands in.
+        column_id: String,
+        /// The title typed so far.
+        title: String,
+    },
+    /// Picking the new card's assignee profile (`c`, stage 2 — the title is set).
+    /// Enter commits the create; the cursor indexes the injected profile roster.
+    CardProfile {
+        /// The column the new card lands in.
+        column_id: String,
+        /// The title typed in stage 1.
+        title: String,
+        /// The highlighted profile (index into the roster).
+        cursor: usize,
+    },
+    /// Typing a column's new name (`r`). Enter commits the rename.
+    ColumnRename {
+        /// The column being renamed.
+        column_id: String,
+        /// The name typed so far (seeded with the current name).
+        name: String,
+    },
+    /// Choosing the run mode for the focused card (`Enter`, the D6 `Run ▾`). Enter
+    /// commits the highlighted mode.
+    RunMode {
+        /// The card's issue to launch.
+        issue_id: String,
+        /// The highlighted mode (index into [`RunMode::ALL`]).
+        cursor: usize,
+    },
+}
+
+/// A raw key folded into an open [`BoardsOverlay`]. The reducer interprets each
+/// per the overlay type (a `Char` is text in an input but ignored in a picker;
+/// `Up`/`Down` move a picker cursor but are ignored in an input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardsKey {
+    /// A printable character.
+    Char(char),
+    /// Backspace (delete the last input char).
+    Backspace,
+    /// Enter (advance / commit the overlay).
+    Enter,
+    /// Escape (cancel / step back the overlay).
+    Esc,
+    /// Cursor up (move a picker selection up).
+    Up,
+    /// Cursor down (move a picker selection down).
+    Down,
+}
+
 /// The render-state cache for the Boards screen.
 ///
 /// Holds the boards + a `(board, column, card)` focus cursor, clamped on every
-/// mutation so a snapshot refresh never dangles the cursor past the end.
+/// mutation so a snapshot refresh never dangles the cursor past the end. Carries
+/// the profile roster (injected by the glue for the card-create picker) and the
+/// open interactive overlay, both preserved across a `boards_list` refresh.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BoardsState {
     boards: Vec<BoardView>,
@@ -135,6 +234,16 @@ pub struct BoardsState {
     focused_card: usize,
     /// The fetch load state — distinguishes empty from loading/error at render.
     status: BoardsStatus,
+    /// The assignee-profile roster (slugs) the card-create picker offers, injected
+    /// by the glue from its cached `profile/list` and preserved across refreshes.
+    profiles: Vec<String>,
+    /// The open interactive overlay (card create / column rename / run mode), or
+    /// `None`. Preserved across a `boards_list` refresh so a background refresh
+    /// while typing never drops the input.
+    overlay: Option<BoardsOverlay>,
+    /// A transient status note (e.g. the attach feedback, or a run's routed
+    /// agent), rendered in the title row and cleared by the next mutation.
+    note: Option<String>,
 }
 
 impl BoardsState {
@@ -169,9 +278,53 @@ impl BoardsState {
             focused_col: 0,
             focused_card: 0,
             status: BoardsStatus::Loaded,
+            profiles: Vec::new(),
+            overlay: None,
+            note: None,
         };
         state.clamp();
         state
+    }
+
+    /// Set a transient status note (shown in the title row until the next refresh
+    /// carries it forward or a fresh note replaces it).
+    pub fn set_note(&mut self, note: impl Into<String>) {
+        self.note = Some(note.into());
+    }
+
+    /// The transient status note, if any.
+    #[must_use]
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// Inject the assignee-profile roster (slugs) the card-create picker offers.
+    /// Called by the glue whenever `profile/list` refreshes; kept out of the wire
+    /// snapshot so the pure reducer never depends on IO.
+    pub fn set_profiles(&mut self, profiles: Vec<String>) {
+        self.profiles = profiles;
+    }
+
+    /// The injected assignee-profile roster (slugs).
+    #[must_use]
+    pub fn profiles(&self) -> &[String] {
+        &self.profiles
+    }
+
+    /// The open interactive overlay, if any (the render paints it).
+    #[must_use]
+    pub const fn overlay(&self) -> Option<&BoardsOverlay> {
+        self.overlay.as_ref()
+    }
+
+    /// Carry the profile roster + open overlay from `prev` onto a freshly-built
+    /// snapshot state, so a `boards_list` refresh never drops the injected roster
+    /// or an in-flight input. The clamp re-runs so the carried focus stays valid.
+    pub fn adopt_context(&mut self, prev: &Self) {
+        self.profiles = prev.profiles.clone();
+        self.overlay = prev.overlay.clone();
+        self.note = prev.note.clone();
+        self.clamp();
     }
 
     /// The current load status (loading / loaded / error) the render branches on.
@@ -283,6 +436,9 @@ pub enum BoardsEvent {
     ReorderColumnRight,
     /// Toggle the focused board's auto-move master toggle (`m`).
     ToggleAutoMove,
+    /// A key folded into the open interactive overlay (card create / column
+    /// rename / run mode). A no-op when no overlay is open.
+    Key(BoardsKey),
 }
 
 /// A side-effect the plugin glue performs after a Boards reduction — each lifts
@@ -292,13 +448,15 @@ pub enum BoardsIntent {
     /// Create a new board (`hangar/board_create`). Raised unconditionally — it is
     /// the empty-state affordance, so it must fire even with no board focused.
     CreateBoard,
-    /// Run the card's issue via the existing dispatch with the assignee profile
-    /// (`hangar/task_transition` / dispatch path). Card = issue.
+    /// Launch the card's issue on its assignee profile now, in `mode`
+    /// (`hangar/board_card_run`). Card = issue (D6, D16).
     RunCard {
         /// The board the card sits on.
         board_id: String,
         /// The issue to dispatch.
         issue_id: String,
+        /// The chosen launch mode (headless / interactive).
+        mode: RunMode,
     },
     /// Attach to the card's running session (the existing attach affordance).
     AttachCard {
@@ -312,13 +470,15 @@ pub enum BoardsIntent {
         /// The board to append a column to.
         board_id: String,
     },
-    /// Prompt for a new name and rename the focused column
+    /// Rename the focused column to the typed name
     /// (`hangar/board_column_update`).
     RenameColumn {
         /// The board the column belongs to.
         board_id: String,
         /// The column to rename.
         column_id: String,
+        /// The new column name (non-blank).
+        name: String,
     },
     /// Delete the focused column (`hangar/board_column_delete`); cards park
     /// unmapped.
@@ -328,13 +488,17 @@ pub enum BoardsIntent {
         /// The column to delete.
         column_id: String,
     },
-    /// Prompt for an issue and add a card to the focused column
-    /// (`hangar/board_card_add`).
-    AddCard {
+    /// Create a new card (issue) from the typed title + picked assignee profile
+    /// and place it in the focused column (`hangar/board_card_create`).
+    CreateCard {
         /// The board to add the card to.
         board_id: String,
         /// The column to place the card in.
         column_id: String,
+        /// The new issue's title (non-blank).
+        title: String,
+        /// The picked assignee profile slug, or `None` (unassigned).
+        assignee_profile: Option<String>,
     },
     /// Reorder the focused column: the board's new full column-id order
     /// (`hangar/board_column_reorder`).
@@ -377,9 +541,11 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             state: state.clone(),
             intent: Some(BoardsIntent::CreateBoard),
         },
-        BoardsEvent::RunFocusedCard => card_intent(state, |b, c| BoardsIntent::RunCard {
-            board_id: b.id.clone(),
+        // Run opens the `Run ▾` mode picker over the focused card (Enter commits
+        // the highlighted mode). A no-op with no card focused.
+        BoardsEvent::RunFocusedCard => open_overlay(state, |_, c| BoardsOverlay::RunMode {
             issue_id: c.issue_id.clone(),
+            cursor: 0,
         }),
         BoardsEvent::AttachFocusedCard => card_intent(state, |b, c| BoardsIntent::AttachCard {
             board_id: b.id.clone(),
@@ -388,17 +554,20 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         BoardsEvent::AddColumn => board_intent(state, |b| BoardsIntent::AddColumn {
             board_id: b.id.clone(),
         }),
-        BoardsEvent::RenameColumn => column_intent(state, |b, col| BoardsIntent::RenameColumn {
-            board_id: b.id.clone(),
+        // Rename opens the column-name input seeded with the current name.
+        BoardsEvent::RenameColumn => open_column_overlay(state, |col| BoardsOverlay::ColumnRename {
             column_id: col.id.clone(),
+            name: col.name.clone(),
         }),
         BoardsEvent::DeleteColumn => column_intent(state, |b, col| BoardsIntent::DeleteColumn {
             board_id: b.id.clone(),
             column_id: col.id.clone(),
         }),
-        BoardsEvent::AddCard => column_intent(state, |b, col| BoardsIntent::AddCard {
-            board_id: b.id.clone(),
+        // Add-card opens the title input on the focused column (stage 1 of the
+        // create; Enter advances to the profile pick).
+        BoardsEvent::AddCard => open_column_overlay(state, |col| BoardsOverlay::CardTitle {
             column_id: col.id.clone(),
+            title: String::new(),
         }),
         BoardsEvent::ReorderColumnLeft => reorder(state, -1),
         BoardsEvent::ReorderColumnRight => reorder(state, 1),
@@ -406,7 +575,290 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             board_id: b.id.clone(),
             auto_move: !b.auto_move,
         }),
+        BoardsEvent::Key(k) => reduce_overlay_key(state, k),
     }
+}
+
+/// Fold a key into the open overlay. A no-op when no overlay is open (so a stray
+/// key never mutates the board). Each overlay interprets the key by its type.
+fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
+    let Some(overlay) = state.overlay.clone() else {
+        return unchanged(state);
+    };
+    match overlay {
+        BoardsOverlay::CardTitle { column_id, title } => {
+            card_title_key(state, &column_id, title, key)
+        }
+        BoardsOverlay::CardProfile {
+            column_id,
+            title,
+            cursor,
+        } => card_profile_key(state, &column_id, title, cursor, key),
+        BoardsOverlay::ColumnRename { column_id, name } => {
+            column_rename_key(state, &column_id, name, key)
+        }
+        BoardsOverlay::RunMode { issue_id, cursor } => {
+            run_mode_key(state, &issue_id, cursor, key)
+        }
+    }
+}
+
+/// Stage 1 of card create: type the title. Enter advances to the profile pick
+/// (blank title holds the input open); Esc cancels; Backspace edits.
+fn card_title_key(
+    state: &BoardsState,
+    column_id: &str,
+    mut title: String,
+    key: BoardsKey,
+) -> BoardsReduction {
+    match key {
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Backspace => {
+            title.pop();
+            set_overlay(
+                state,
+                BoardsOverlay::CardTitle {
+                    column_id: column_id.to_string(),
+                    title,
+                },
+            )
+        }
+        BoardsKey::Char(c) => {
+            title.push(c);
+            set_overlay(
+                state,
+                BoardsOverlay::CardTitle {
+                    column_id: column_id.to_string(),
+                    title,
+                },
+            )
+        }
+        BoardsKey::Enter => {
+            if title.trim().is_empty() {
+                // A blank title is not a card — keep the input open.
+                return set_overlay(
+                    state,
+                    BoardsOverlay::CardTitle {
+                        column_id: column_id.to_string(),
+                        title,
+                    },
+                );
+            }
+            set_overlay(
+                state,
+                BoardsOverlay::CardProfile {
+                    column_id: column_id.to_string(),
+                    title,
+                    cursor: 0,
+                },
+            )
+        }
+        BoardsKey::Up | BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title,
+            },
+        ),
+    }
+}
+
+/// Stage 2 of card create: pick the assignee profile. Up/Down move the cursor
+/// over the injected roster; Enter commits the create (with `None` when the
+/// roster is empty); Esc steps back to the title input.
+fn card_profile_key(
+    state: &BoardsState,
+    column_id: &str,
+    title: String,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let n = state.profiles.len();
+    match key {
+        BoardsKey::Esc => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title,
+            },
+        ),
+        BoardsKey::Up => set_overlay(
+            state,
+            BoardsOverlay::CardProfile {
+                column_id: column_id.to_string(),
+                title,
+                cursor: cursor.saturating_sub(1),
+            },
+        ),
+        BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::CardProfile {
+                column_id: column_id.to_string(),
+                title,
+                cursor: (cursor + 1).min(n.saturating_sub(1)),
+            },
+        ),
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let assignee_profile = state.profiles.get(cursor).cloned();
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::CreateCard {
+                    board_id: board.id.clone(),
+                    column_id: column_id.to_string(),
+                    title,
+                    assignee_profile,
+                }),
+            }
+        }
+        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+            state,
+            BoardsOverlay::CardProfile {
+                column_id: column_id.to_string(),
+                title,
+                cursor,
+            },
+        ),
+    }
+}
+
+/// Column rename input: type the new name. Enter commits (blank holds the input
+/// open); Esc cancels; Backspace edits.
+fn column_rename_key(
+    state: &BoardsState,
+    column_id: &str,
+    mut name: String,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let reopen = |state: &BoardsState, name: String| {
+        set_overlay(
+            state,
+            BoardsOverlay::ColumnRename {
+                column_id: column_id.to_string(),
+                name,
+            },
+        )
+    };
+    match key {
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Backspace => {
+            name.pop();
+            reopen(state, name)
+        }
+        BoardsKey::Char(c) => {
+            name.push(c);
+            reopen(state, name)
+        }
+        BoardsKey::Up | BoardsKey::Down => reopen(state, name),
+        BoardsKey::Enter => {
+            if name.trim().is_empty() {
+                return reopen(state, name);
+            }
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::RenameColumn {
+                    board_id: board.id.clone(),
+                    column_id: column_id.to_string(),
+                    name,
+                }),
+            }
+        }
+    }
+}
+
+/// The `Run ▾` mode picker: Up/Down toggle Headless/Interactive; Enter commits
+/// the highlighted mode as a [`BoardsIntent::RunCard`]; Esc cancels.
+fn run_mode_key(
+    state: &BoardsState,
+    issue_id: &str,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    match key {
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Up => set_overlay(
+            state,
+            BoardsOverlay::RunMode {
+                issue_id: issue_id.to_string(),
+                cursor: cursor.saturating_sub(1),
+            },
+        ),
+        BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::RunMode {
+                issue_id: issue_id.to_string(),
+                cursor: (cursor + 1).min(RunMode::ALL.len() - 1),
+            },
+        ),
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let mode = RunMode::ALL.get(cursor).copied().unwrap_or(RunMode::Headless);
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::RunCard {
+                    board_id: board.id.clone(),
+                    issue_id: issue_id.to_string(),
+                    mode,
+                }),
+            }
+        }
+        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+            state,
+            BoardsOverlay::RunMode {
+                issue_id: issue_id.to_string(),
+                cursor,
+            },
+        ),
+    }
+}
+
+/// Open an overlay derived from the focused board + focused card, if both exist.
+fn open_overlay(
+    state: &BoardsState,
+    f: impl Fn(&BoardView, &CardView) -> BoardsOverlay,
+) -> BoardsReduction {
+    match (state.focused_board(), state.focused_card()) {
+        (Some(b), Some(c)) => set_overlay(state, f(b, c)),
+        _ => unchanged(state),
+    }
+}
+
+/// Open an overlay derived from the focused column, if one exists.
+fn open_column_overlay(
+    state: &BoardsState,
+    f: impl Fn(&ColumnView) -> BoardsOverlay,
+) -> BoardsReduction {
+    match state.focused_column() {
+        Some(col) => set_overlay(state, f(col)),
+        None => unchanged(state),
+    }
+}
+
+/// Replace the open overlay, emitting no intent.
+fn set_overlay(state: &BoardsState, overlay: BoardsOverlay) -> BoardsReduction {
+    let mut next = state.clone();
+    next.overlay = Some(overlay);
+    no_intent(next)
+}
+
+/// Close any open overlay, emitting no intent.
+fn close_overlay(state: &BoardsState) -> BoardsReduction {
+    let mut next = state.clone();
+    next.overlay = None;
+    no_intent(next)
 }
 
 /// Move the column focus by `delta`, clamped, resetting the card focus.
@@ -573,7 +1025,12 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
     } else {
         ("off", MUTED)
     };
-    put_str(buf, x, top, toggle, colour, area_w);
+    x = put_str(buf, x, top, toggle, colour, area_w);
+    // A transient note (attach feedback / run's routed agent) trails the toggle.
+    if let Some(note) = state.note() {
+        x = put_str(buf, x, top, "   ", MUTED, area_w);
+        put_str(buf, x, top, note, GOLD, area_w);
+    }
 
     // Hint band NEXT to the widget (letters next to the controls they affect).
     let hint_row = top.saturating_add(1);
@@ -593,6 +1050,75 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
         None
     };
     let _ = card_board::render_card_board(buf, area_w, body_top, bottom, &columns, selected);
+
+    // An open interactive overlay paints a banner over the top body rows so the
+    // typed title / picked profile / run mode is visible (and greppable by the
+    // e2e tripwire) without a full modal layer.
+    if let Some(overlay) = state.overlay() {
+        render_overlay(buf, area_w, body_top, overlay, state.profiles());
+    }
+}
+
+/// Paint the open overlay as a two-row banner at `row`: a prompt line plus its
+/// current value / selection. Kept text-only (no box) so it reads on an 80-col
+/// pane and a tripwire can assert the label + typed value.
+fn render_overlay(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    overlay: &BoardsOverlay,
+    profiles: &[String],
+) {
+    let value_row = row.saturating_add(1);
+    match overlay {
+        BoardsOverlay::CardTitle { title, .. } => {
+            put_str(buf, 0, row, "New card title (Enter → profile, Esc cancel):", GOLD, area_w);
+            let shown = format!("> {title}\u{2588}");
+            put_str(buf, 0, value_row, &shown, GREEN, area_w);
+        }
+        BoardsOverlay::CardProfile { title, cursor, .. } => {
+            let prompt = format!("Assignee profile for \"{title}\" (↑↓ pick, Enter run-ready):");
+            put_str(buf, 0, row, &prompt, GOLD, area_w);
+            if profiles.is_empty() {
+                put_str(buf, 0, value_row, "> (no profiles — card is unassigned)", MUTED, area_w);
+            } else {
+                let mut x = 0u16;
+                for (i, slug) in profiles.iter().enumerate() {
+                    let sel = i == *cursor;
+                    let marker = if sel { "[" } else { " " };
+                    let end = if sel { "]" } else { " " };
+                    let colour = if sel { GREEN } else { MUTED };
+                    x = put_str(buf, x, value_row, marker, colour, area_w);
+                    x = put_str(buf, x, value_row, slug, colour, area_w);
+                    x = put_str(buf, x, value_row, end, colour, area_w);
+                    x = put_str(buf, x, value_row, " ", MUTED, area_w);
+                    if x >= area_w {
+                        break;
+                    }
+                }
+            }
+        }
+        BoardsOverlay::ColumnRename { name, .. } => {
+            put_str(buf, 0, row, "Rename column (Enter commit, Esc cancel):", GOLD, area_w);
+            let shown = format!("> {name}\u{2588}");
+            put_str(buf, 0, value_row, &shown, GREEN, area_w);
+        }
+        BoardsOverlay::RunMode { cursor, .. } => {
+            put_str(buf, 0, row, "Run ▾ (↑↓ pick mode, Enter launch, Esc cancel):", GOLD, area_w);
+            let mut x = 0u16;
+            for (i, mode) in RunMode::ALL.iter().enumerate() {
+                let sel = i == *cursor;
+                let colour = if sel { GREEN } else { MUTED };
+                let marker = if sel { "▶ " } else { "  " };
+                x = put_str(buf, x, value_row, marker, colour, area_w);
+                x = put_str(buf, x, value_row, mode.label(), colour, area_w);
+                x = put_str(buf, x, value_row, "   ", MUTED, area_w);
+                if x >= area_w {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Render the no-board state on row `top`, branching on the load `status` so an
@@ -764,18 +1290,166 @@ mod tests {
         assert_eq!(edge.state.focus().1, 2, "clamped at last column");
     }
 
-    /// Enter on a focused card raises a RunCard intent carrying the issue.
+    /// Enter on a focused card opens the `Run ▾` mode picker (no intent yet);
+    /// Enter again commits the highlighted mode as a RunCard intent.
     #[test]
-    fn run_focused_card_emits_run_intent() {
+    fn run_focused_card_opens_mode_picker_then_commits() {
         let state = BoardsState::from_snapshot(&one_board());
-        let r = reduce_boards(&state, BoardsEvent::RunFocusedCard);
+        // Open `Run ▾` — an overlay, not an immediate dispatch.
+        let opened = reduce_boards(&state, BoardsEvent::RunFocusedCard);
+        assert_eq!(opened.intent, None, "opening the picker fires nothing");
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::RunMode { issue_id, cursor: 0 }) if issue_id == "issue-1"
+        ));
+        // Enter on the default (Headless) commits the run.
+        let run = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(
-            r.intent,
+            run.intent,
             Some(BoardsIntent::RunCard {
                 board_id: "b1".into(),
-                issue_id: "issue-1".into()
+                issue_id: "issue-1".into(),
+                mode: RunMode::Headless,
             })
         );
+        assert!(run.state.overlay().is_none(), "the picker closes on commit");
+    }
+
+    /// Down in `Run ▾` selects Interactive, and Enter commits that mode.
+    #[test]
+    fn run_mode_picker_selects_interactive() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let opened = reduce_boards(&state, BoardsEvent::RunFocusedCard);
+        let moved = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Down));
+        let run = reduce_boards(&moved.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            run.intent,
+            Some(BoardsIntent::RunCard {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                mode: RunMode::Interactive,
+            })
+        );
+    }
+
+    /// `c` opens the title input; typing + Enter advances to the profile pick;
+    /// Enter on a picked profile raises CreateCard carrying the title + slug.
+    #[test]
+    fn add_card_types_title_picks_profile_and_commits() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_profiles(vec!["claude-agent".into(), "codex-agent".into()]);
+
+        // Open the title input on the focused (Todo) column.
+        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardTitle { column_id, .. }) if column_id == "c1"
+        ));
+        // Type "Wire cards".
+        let mut s = s;
+        for ch in "Wire cards".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        // Enter → profile pick.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardProfile { title, cursor: 0, .. }) if title == "Wire cards"
+        ));
+        // Down to the second profile, Enter commits.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::CreateCard {
+                board_id: "b1".into(),
+                column_id: "c1".into(),
+                title: "Wire cards".into(),
+                assignee_profile: Some("codex-agent".into()),
+            })
+        );
+        assert!(out.state.overlay().is_none());
+    }
+
+    /// A blank title never advances — Enter holds the title input open.
+    #[test]
+    fn blank_card_title_holds_the_input_open() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None);
+        assert!(matches!(out.state.overlay(), Some(BoardsOverlay::CardTitle { .. })));
+    }
+
+    /// With no profiles cached, a card still commits with an unassigned profile.
+    #[test]
+    fn add_card_with_no_profiles_commits_unassigned() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('x'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → profile pick
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::CreateCard {
+                board_id: "b1".into(),
+                column_id: "c1".into(),
+                title: "x".into(),
+                assignee_profile: None,
+            })
+        );
+    }
+
+    /// `r` opens the column-rename input seeded with the current name; edit +
+    /// Enter raises RenameColumn with the new name.
+    #[test]
+    fn rename_column_edits_and_commits() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = reduce_boards(&state, BoardsEvent::RenameColumn).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::ColumnRename { name, .. }) if name == "Todo"
+        ));
+        // Backspace the "o", append "ay!" → "Today!".
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Backspace)).state;
+        let mut s = s;
+        for ch in "ay!".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::RenameColumn {
+                board_id: "b1".into(),
+                column_id: "c1".into(),
+                name: "Today!".into(),
+            })
+        );
+    }
+
+    /// Esc cancels an open overlay without raising an intent.
+    #[test]
+    fn esc_cancels_an_open_overlay() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(out.intent, None);
+        assert!(out.state.overlay().is_none(), "Esc closes the overlay");
+    }
+
+    /// A refresh preserves the injected profile roster + an in-flight overlay so a
+    /// background `boards_list` reply never drops the user's typing.
+    #[test]
+    fn refresh_preserves_profiles_and_open_overlay() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_profiles(vec!["claude-agent".into()]);
+        let typing = reduce_boards(&state, BoardsEvent::AddCard).state;
+        assert!(typing.overlay().is_some());
+
+        let mut refreshed = BoardsState::from_snapshot(&one_board());
+        refreshed.adopt_context(&typing);
+        assert_eq!(refreshed.profiles(), ["claude-agent"]);
+        assert!(refreshed.overlay().is_some(), "the open title input survives a refresh");
     }
 
     /// Toggling auto-move emits the flipped value for the focused board.

@@ -186,6 +186,9 @@ const PROFILE_GET_REQ_ID: i64 = 41;
 /// JSON-RPC id for a `profile/upsert` request raised by the profile-editor `t`
 /// tier cycle (P5).
 const PROFILE_UPSERT_REQ_ID: i64 = 42;
+/// JSON-RPC id for a `hangar/board_card_run` request raised by the Boards `Run ▾`
+/// (ccc / D6). The reply carries the routed agent/runtime, surfaced as a note.
+const BOARD_CARD_RUN_REQ_ID: i64 = 43;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -664,6 +667,7 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
+            RpcId::Number(BOARD_CARD_RUN_REQ_ID) => self.apply_board_card_run(resp),
             RpcId::Number(SQUADS_LIST_REQ_ID) => self.apply_squads(resp),
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
@@ -777,6 +781,10 @@ impl HangarPlugin {
                 ainb_hangar_proto::snapshots::ProfileListResult,
             >(result.clone())
             {
+                // Mirror the slugs into the Boards card-create picker roster
+                // (ccc / D16) before moving `r.profiles` into the editor rows.
+                let slugs = r.profiles.iter().map(|p| p.slug.clone()).collect();
+                self.screens.set_boards_profiles(slugs);
                 let rows = r
                     .profiles
                     .into_iter()
@@ -786,6 +794,27 @@ impl HangarPlugin {
                     })
                     .collect();
                 self.screens.set_profiles(rows);
+            }
+        }
+    }
+
+    /// Surface a `hangar/board_card_run` reply (ccc / D6): a transient note naming
+    /// the agent + mode the card launched on, or the daemon's rejection. The
+    /// enqueued task runs headless via the claim loop; the D8 auto-move hook then
+    /// slides the card as its FSM transitions (no board refresh needed here).
+    fn apply_board_card_run(&mut self, resp: &RpcResponse) {
+        if let Some(err) = &resp.error {
+            self.screens.boards.set_note(format!("run failed: {}", err.message));
+            return;
+        }
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::BoardCardRunResult,
+            >(result.clone())
+            {
+                self.screens
+                    .boards
+                    .set_note(format!("launched {} on {}", r.mode, r.agent_id));
             }
         }
     }
@@ -1389,25 +1418,39 @@ impl HangarPlugin {
         }
     }
 
-    /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8).
+    /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8,
+    /// ccc / D6, D16).
     ///
-    /// Maps the [`BoardsAction`] onto the matching `hangar/board_*` RPC, framed
-    /// over the socket cap under [`BOARDS_REQ_ID`] so the reply's refreshed
-    /// `BoardsListResult` folds straight back through [`Self::apply_boards`]. A
-    /// send failure is logged but non-fatal — the board simply doesn't change (the
-    /// next `boards_list` pull reconciles).
+    /// Maps the [`BoardsAction`] onto its `hangar/board_*` RPC. The CRUD +
+    /// card-create + column-rename mutations answer with the refreshed
+    /// `BoardsListResult` under [`BOARDS_REQ_ID`] ([`Self::apply_boards`]); the
+    /// card RUN answers with a `BoardCardRunResult` under [`BOARD_CARD_RUN_REQ_ID`]
+    /// ([`Self::apply_board_card_run`]). `CardAttach` fires no RPC — the current
+    /// runner exposes no live pane per task, so it surfaces the card's run state as
+    /// a note. A send failure is logged but non-fatal (the next pull reconciles).
     async fn apply_boards_action(
         &mut self,
         host: &HostClient,
         action: crate::screen::BoardsAction,
     ) {
         use crate::screen::BoardsAction;
+        let ws = self.app_state().ws_id.as_str().to_string();
+
+        // Attach is a local affordance: with no interactive runner yet (D6), a
+        // headless run has no attachable pane. Report the card's run state rather
+        // than faking an attach or dead-ending the key.
+        if let BoardsAction::CardAttach { issue_id, .. } = &action {
+            let note = self.card_attach_note(issue_id);
+            self.screens.boards.set_note(note);
+            return;
+        }
+
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
-        let ws = self.app_state().ws_id.as_str().to_string();
-        let (method, params) = match action {
+        let (req_id, method, params) = match action {
             BoardsAction::BoardCreate { name } => (
+                BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CREATE,
                 serde_json::json!({ "workspace_id": ws, "name": name }),
             ),
@@ -1415,6 +1458,7 @@ impl HangarPlugin {
                 board_id,
                 column_ids,
             } => (
+                BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_COLUMN_REORDER,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_ids": column_ids }),
             ),
@@ -1422,10 +1466,12 @@ impl HangarPlugin {
                 board_id,
                 column_id,
             } => (
+                BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_COLUMN_DELETE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id }),
             ),
             BoardsAction::ColumnAdd { board_id, name } => (
+                BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_COLUMN_ADD,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "name": name }),
             ),
@@ -1433,15 +1479,71 @@ impl HangarPlugin {
                 board_id,
                 auto_move,
             } => (
+                BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_UPDATE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "auto_move": auto_move }),
             ),
+            BoardsAction::CardCreate {
+                board_id,
+                column_id,
+                title,
+                assignee_profile,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_CREATE,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "board_id": board_id,
+                    "column_id": column_id,
+                    "title": title,
+                    "assignee_profile": assignee_profile,
+                }),
+            ),
+            BoardsAction::ColumnRename {
+                board_id,
+                column_id,
+                name,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_COLUMN_UPDATE,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id, "name": name }),
+            ),
+            BoardsAction::CardRun {
+                board_id,
+                issue_id,
+                mode,
+            } => (
+                BOARD_CARD_RUN_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_RUN,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id, "mode": mode }),
+            ),
+            // Handled above as a local note; never reached here.
+            BoardsAction::CardAttach { .. } => return,
         };
-        let Ok(body) = encode_request(BOARDS_REQ_ID, method, params) else {
+        let Ok(body) = encode_request(req_id, method, params) else {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: board rpc send failed: {e}")).await;
+        }
+    }
+
+    /// Build the attach note for `issue_id`: the card's latest run state when it is
+    /// on a board, so `a` gives honest feedback (a headless run has no attachable
+    /// pane under the current runner — D6's interactive attach lands with it).
+    fn card_attach_note(&self, issue_id: &str) -> String {
+        let state = self
+            .screens
+            .boards
+            .boards()
+            .iter()
+            .flat_map(|b| b.columns.iter().flat_map(|c| c.cards.iter()).chain(b.unmapped.iter()))
+            .find(|c| c.issue_id == issue_id)
+            .and_then(|c| c.state.clone());
+        match state.as_deref() {
+            Some("running") => format!("attach: #{issue_id} is running (headless — no live pane yet)"),
+            Some(other) => format!("attach: #{issue_id} is {other} — press Enter to launch"),
+            None => format!("attach: #{issue_id} has no run yet — press Enter to launch"),
         }
     }
 

@@ -24,7 +24,7 @@ use super::agent_picker::{
     AgentPickerEvent, AgentPickerIntent, AgentPickerState, reduce_agent_picker,
 };
 use super::autopilots::{AutopilotsEvent, AutopilotsIntent, AutopilotsState, reduce_autopilots};
-use super::boards::{BoardsEvent, BoardsIntent, BoardsState, reduce_boards};
+use super::boards::{BoardsEvent, BoardsIntent, BoardsKey, BoardsState, reduce_boards};
 use super::command_palette::{
     CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState, reduce_command_palette,
 };
@@ -162,6 +162,44 @@ pub enum BoardsAction {
         board_id: String,
         /// The new auto-move value.
         auto_move: bool,
+    },
+    /// Create a card (issue) from the typed title + picked assignee profile and
+    /// place it in a column (`c`) — `hangar/board_card_create` (D8, D16).
+    CardCreate {
+        /// The board to add the card to.
+        board_id: String,
+        /// The column to place the card in.
+        column_id: String,
+        /// The new issue's title.
+        title: String,
+        /// The picked assignee profile slug, or `None` (unassigned).
+        assignee_profile: Option<String>,
+    },
+    /// Launch a card's issue on its assignee profile now (`Enter` → `Run ▾`) —
+    /// `hangar/board_card_run` (D6, D16).
+    CardRun {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue to launch.
+        issue_id: String,
+        /// The launch-mode wire token (`headless` / `interactive`).
+        mode: String,
+    },
+    /// Attach to a card's live run session (`a`).
+    CardAttach {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue whose run to attach to.
+        issue_id: String,
+    },
+    /// Rename a column to the typed name (`r`) — `hangar/board_column_update`.
+    ColumnRename {
+        /// The board the column belongs to.
+        board_id: String,
+        /// The column to rename.
+        column_id: String,
+        /// The new column name.
+        name: String,
     },
 }
 
@@ -432,9 +470,19 @@ impl ScreenStates {
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
-    /// snapshot (P4 / D8).
+    /// snapshot (P4 / D8), preserving the injected profile roster + any open
+    /// overlay / transient note across the refresh (ccc): a background refresh
+    /// while the user is typing a card title must not drop the input.
     pub fn set_boards(&mut self, snapshot: &ainb_hangar_proto::snapshots::BoardsListResult) {
-        self.boards = BoardsState::from_snapshot(snapshot);
+        let mut next = BoardsState::from_snapshot(snapshot);
+        next.adopt_context(&self.boards);
+        self.boards = next;
+    }
+
+    /// Inject the assignee-profile roster (slugs) the Boards card-create picker
+    /// offers, from the cached `profile/list` (ccc / D16).
+    pub fn set_boards_profiles(&mut self, profiles: Vec<String>) {
+        self.boards.set_profiles(profiles);
     }
 
     /// Mark the Boards fetch as failed so the render shows the error rather than
@@ -1142,17 +1190,51 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
     }
 }
 
-/// Boards screen key routing (P4 / D8): map the arrow keys (plus Shift) and the
-/// column/card verbs into the boards reducer, lifting the self-contained mutation
-/// intents into a deferred [`BoardsAction`] the `render` pass fires over the
-/// daemon socket (the sync key router can't `await`). `←/→/↑/↓` (and `h/j/k/l`)
-/// move focus; `[`/`]` switch boards; `⇧←/→` reorder the focused column; `x`
-/// deletes it; `n` appends a default-named column; `m` toggles the board's
-/// auto-move; `enter` runs the card and `a` attaches (raised as intents; the
-/// dispatch/attach seam is wired in a follow-up).
+/// Boards screen key routing (P4 / D8, ccc / D6, D16): fold keys into the boards
+/// reducer, lifting each raised intent into a deferred [`BoardsAction`] the
+/// `render` pass fires over the daemon socket (the sync key router can't `await`).
+///
+/// When an interactive overlay is open (card create / column rename / `Run ▾`),
+/// EVERY key routes to it as a [`BoardsEvent::Key`] so typed text and picker
+/// motion land in the input rather than moving the board. With no overlay open
+/// the navigation/verb map applies: `←/→/↑/↓` (and `h/j/k/l`) move focus; `[`/`]`
+/// switch boards; `⇧←/→` reorder; `x` deletes a column; `n` appends one; `m`
+/// toggles auto-move; `c` opens card-create; `r` opens column-rename; `Enter`
+/// opens the card's `Run ▾`; `a` attaches to the card's run.
 fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
+    let ev = if states.boards.overlay().is_some() {
+        overlay_key_event(key)
+    } else {
+        board_nav_event(key)
+    };
+    let Some(ev) = ev else {
+        return;
+    };
+    let out = reduce_boards(&states.boards, ev);
+    states.boards = out.state;
+    states.pending_boards_action = lift_boards_intent(out.intent);
+}
+
+/// Translate a raw key into an overlay [`BoardsEvent::Key`] while an overlay is
+/// open. Every printable char / Backspace / Enter / Esc / ↑ / ↓ is folded into
+/// the input; unmapped keys are dropped.
+fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
+    let k = match &key.code {
+        KeyCode::Enter => BoardsKey::Enter,
+        KeyCode::Esc => BoardsKey::Esc,
+        KeyCode::Backspace => BoardsKey::Backspace,
+        KeyCode::Up => BoardsKey::Up,
+        KeyCode::Down => BoardsKey::Down,
+        KeyCode::Char { ch } => BoardsKey::Char(*ch),
+        _ => return None,
+    };
+    Some(BoardsEvent::Key(k))
+}
+
+/// Map a raw key to a board navigation / verb event when no overlay is open.
+fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
     let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
-    let ev = match &key.code {
+    match &key.code {
         KeyCode::Left => Some(if shift {
             BoardsEvent::ReorderColumnLeft
         } else {
@@ -1185,47 +1267,76 @@ fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
             _ => None,
         },
         _ => None,
-    };
-    let Some(ev) = ev else {
-        return;
-    };
-    let out = reduce_boards(&states.boards, ev);
-    states.boards = out.state;
-    // Lift the self-contained mutation intents into a deferred board RPC. The
-    // text-input intents (rename column, add card) and the dispatch/attach intents
-    // (run/attach a card) are raised by the reducer but not yet wired to an RPC —
-    // they fold as no-ops here, mirroring the Kanban `Add`/`Edit` precedent.
-    states.pending_boards_action = match out.intent {
-        Some(BoardsIntent::CreateBoard) => Some(BoardsAction::BoardCreate {
+    }
+}
+
+/// Lift a raised [`BoardsIntent`] into the deferred [`BoardsAction`] the render
+/// pass fires. Board/column CRUD carry their own defaults; the card intents carry
+/// the typed title / picked profile / chosen run mode from the committed overlay.
+fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
+    match intent? {
+        BoardsIntent::CreateBoard => Some(BoardsAction::BoardCreate {
             name: "New Board".to_string(),
         }),
-        Some(BoardsIntent::ReorderColumns {
+        BoardsIntent::ReorderColumns {
             board_id,
             column_ids,
-        }) => Some(BoardsAction::ColumnReorder {
+        } => Some(BoardsAction::ColumnReorder {
             board_id,
             column_ids,
         }),
-        Some(BoardsIntent::DeleteColumn {
+        BoardsIntent::DeleteColumn {
             board_id,
             column_id,
-        }) => Some(BoardsAction::ColumnDelete {
+        } => Some(BoardsAction::ColumnDelete {
             board_id,
             column_id,
         }),
-        Some(BoardsIntent::AddColumn { board_id }) => Some(BoardsAction::ColumnAdd {
+        BoardsIntent::AddColumn { board_id } => Some(BoardsAction::ColumnAdd {
             board_id,
             name: "New Column".to_string(),
         }),
-        Some(BoardsIntent::ToggleAutoMove {
+        BoardsIntent::ToggleAutoMove {
             board_id,
             auto_move,
-        }) => Some(BoardsAction::BoardUpdate {
+        } => Some(BoardsAction::BoardUpdate {
             board_id,
             auto_move,
         }),
-        _ => None,
-    };
+        BoardsIntent::CreateCard {
+            board_id,
+            column_id,
+            title,
+            assignee_profile,
+        } => Some(BoardsAction::CardCreate {
+            board_id,
+            column_id,
+            title,
+            assignee_profile,
+        }),
+        BoardsIntent::RunCard {
+            board_id,
+            issue_id,
+            mode,
+        } => Some(BoardsAction::CardRun {
+            board_id,
+            issue_id,
+            mode: mode.wire().to_string(),
+        }),
+        BoardsIntent::AttachCard { board_id, issue_id } => Some(BoardsAction::CardAttach {
+            board_id,
+            issue_id,
+        }),
+        BoardsIntent::RenameColumn {
+            board_id,
+            column_id,
+            name,
+        } => Some(BoardsAction::ColumnRename {
+            board_id,
+            column_id,
+            name,
+        }),
+    }
 }
 
 /// Control-center key routing (P2): map the navigation keys into the board
