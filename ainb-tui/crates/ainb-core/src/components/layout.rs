@@ -121,13 +121,20 @@ impl LayoutComponent {
             return;
         }
 
+        // The bottom keymap legend can be hidden (⇧M) to give the session list
+        // more room; hidden it collapses to a single hint row.
+        let menu_bar_h = if state.app_config.ui_preferences.show_session_menu_bar {
+            6 // full legend: 4 lines + borders
+        } else {
+            1 // collapsed hint row
+        };
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Top status bar
-                Constraint::Min(0),    // Main content area
-                Constraint::Length(3), // Session info (single line + borders)
-                Constraint::Length(6), // Bottom menu bar (4 lines + borders)
+                Constraint::Length(3),          // Top status bar
+                Constraint::Min(0),             // Main content area
+                Constraint::Length(3),          // Session info (single line + borders)
+                Constraint::Length(menu_bar_h), // Bottom menu bar / collapsed hint
             ])
             .split(frame.area());
 
@@ -191,7 +198,9 @@ impl LayoutComponent {
         // Render bottom logs area (traditional logs viewer)
         self.logs_viewer.render(frame, main_layout[2], state);
 
-        // Render bottom menu bar
+        // Render bottom menu bar. Publish its rect so a mouse click on the
+        // legend (or its collapsed hint row) can toggle visibility.
+        state.menu_bar_area = Some(main_layout[3]);
         self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
@@ -290,6 +299,12 @@ impl LayoutComponent {
     /// `menu_bar_keys_not_truncated_at_80_cols` test exercises the stacked
     /// path unchanged.
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        // Hidden legend → a single muted hint row (still discoverable: shows the
+        // ⇧M un-hide key plus help/home).
+        if !state.app_config.ui_preferences.show_session_menu_bar {
+            self.render_menu_bar_collapsed(frame, area);
+            return;
+        }
         // Below this width the two-column split can't hold the widest
         // session-action line (~41 cols) plus the panels column without
         // clipping, so fall back to the stacked legend.
@@ -299,6 +314,28 @@ impl LayoutComponent {
         } else {
             self.render_menu_bar_stacked(frame, area, state);
         }
+    }
+
+    /// One-line stand-in shown when the keymap legend is hidden.
+    fn render_menu_bar_collapsed(&self, frame: &mut Frame, area: Rect) {
+        let key = |k: &'static str, color: Color| {
+            Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        };
+        let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+        let line = Line::from(vec![
+            key("⇧M", GOLD),
+            desc(" keymap  "),
+            key("?/H", CORNFLOWER_BLUE),
+            desc(" help  "),
+            key("q", CORNFLOWER_BLUE),
+            desc(" home"),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(PANEL_BG)),
+            area,
+        );
     }
 
     fn render_menu_bar_stacked(&self, frame: &mut Frame, area: Rect, state: &AppState) {
