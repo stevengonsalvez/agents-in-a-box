@@ -191,6 +191,78 @@ async fn finalized_task_persists_provider_usage_row() {
     assert!((row.get::<f64, _>("cost_usd") - 0.0231).abs() < 1e-9);
 }
 
+/// P10 / D19: a real daemon run also appends a durable `run_history` row at the
+/// finalize seam — the observability timeline the History view reads. End-to-end
+/// through the genuine daemon binary (no mocks): seed → enqueue → claim → run →
+/// done → history appended, carrying provider / outcome / session / token-cost.
+#[tokio::test]
+async fn finalized_task_appends_run_history_row() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping e2e tripwire");
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+    let pool = open_pool(&db_path).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+
+    // A fake claude that pins a session id then reports usage on its result line.
+    let fake_claude = fake_claude_with_usage(home.path(), "history-sess-1", 900, 210, 0.0177);
+
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", home.path().to_str().unwrap()),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_CLAUDE_PATH", fake_claude.to_str().unwrap()),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+        ],
+    );
+
+    let task_id = "task-history-1";
+    sqlx::query(
+        "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(&ids.workspace_id)
+    .bind(&ids.runtime_id)
+    .bind(&ids.agent_id)
+    .bind(tripwire_support::now_ms())
+    .execute(&pool)
+    .await
+    .expect("enqueue task");
+
+    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30)).await;
+    drop(session); // kill the tmux session by exact name before assertions
+
+    // The finalize seam appended a run_history row for this run.
+    let row = sqlx::query(
+        "SELECT workspace_id, provider, outcome, session_id, input_tokens, output_tokens, \
+                cost_usd, started_at, finished_at \
+         FROM run_history WHERE task_id = ?",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("a run_history row was appended at finalize");
+
+    assert_eq!(row.get::<String, _>("workspace_id"), ids.workspace_id);
+    assert_eq!(row.get::<String, _>("provider"), "claude");
+    assert_eq!(row.get::<String, _>("outcome"), "success");
+    assert_eq!(row.get::<String, _>("session_id"), "history-sess-1");
+    assert_eq!(row.get::<i64, _>("input_tokens"), 900);
+    assert_eq!(row.get::<i64, _>("output_tokens"), 210);
+    assert!((row.get::<f64, _>("cost_usd") - 0.0177).abs() < 1e-9);
+    // The run recorded a start + finish, so a positive duration is derivable.
+    let started = row.get::<Option<i64>, _>("started_at").expect("started_at set");
+    let finished = row.get::<i64, _>("finished_at");
+    assert!(finished >= started, "finished_at must not precede started_at");
+}
+
 /// Open a `SQLite` WAL pool at `db_path` (creating the file if absent).
 async fn open_pool(db_path: &std::path::Path) -> SqlitePool {
     let opts = sqlx::sqlite::SqliteConnectOptions::new()

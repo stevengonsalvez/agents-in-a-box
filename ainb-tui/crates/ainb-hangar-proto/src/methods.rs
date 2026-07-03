@@ -572,6 +572,19 @@ pub const HANGAR_BOARD_CARD_ADD: &str = "hangar/board_card_add";
 /// workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_MOVE: &str = "hangar/board_card_move";
 
+/// `hangar/run_history` — snapshot the workspace's per-run observability timeline
+/// (P10 / D19).
+///
+/// Params: [`crate::snapshots::RunHistoryParams`] (`{ workspace_id, limit? }`).
+/// Result: [`crate::snapshots::RunHistoryResult`] — the newest-first run rows
+/// (each carrying provider / session / profile / outcome / duration / token-cost).
+/// Reads the durable `run_history` rows the daemon's run loop appends at each
+/// run's finalize seam (store migration 0029), so runs that accrued while no
+/// plugin was attached are still on the timeline. Workspace-scoped like every
+/// snapshot: a foreign / unknown workspace yields an empty timeline (a read, so no
+/// `INVALID_PARAMS` rejection — mirrors `usage_rollup`).
+pub const HANGAR_RUN_HISTORY: &str = "hangar/run_history";
+
 /// `attention/list` — snapshot the OPEN control-plane inbox for a scope (spec P2).
 ///
 /// Params: [`crate::snapshots::AttentionListParams`]
@@ -716,6 +729,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_BOARD_CARD_MOVE,
     // P7 squad fan-out is appended at the tail (append-only wire catalogue).
     HANGAR_SQUAD_FANOUT,
+    // Observability (P10 / D19) is APPENDED at the catalogue tail — the wire
+    // catalogue is append-only, so a new method must follow every pre-existing
+    // entry.
+    HANGAR_RUN_HISTORY,
 ];
 
 #[cfg(test)]
@@ -809,6 +826,7 @@ mod tests {
             HANGAR_BOARD_CARD_ADD,
             HANGAR_BOARD_CARD_MOVE,
             HANGAR_SQUAD_FANOUT,
+            HANGAR_RUN_HISTORY,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -881,6 +899,7 @@ mod tests {
             HANGAR_BOARD_CARD_ADD,
             HANGAR_BOARD_CARD_MOVE,
             HANGAR_SQUAD_FANOUT,
+            HANGAR_RUN_HISTORY,
         ];
         for m in declared {
             assert!(

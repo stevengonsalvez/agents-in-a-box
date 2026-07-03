@@ -172,6 +172,10 @@ const SQUADS_LIST_REQ_ID: i64 = 37;
 /// assign key (P7). Its reply is a `SquadFanoutResult` (not a squads list), so it
 /// is dispatched separately to surface the "briefed the leader + N members" note.
 const SQUAD_FANOUT_REQ_ID: i64 = 38;
+/// JSON-RPC id for the `hangar/run_history` snapshot request feeding the usage
+/// dashboard's recent-runs timeline (P10 / D19). Renumbered to 39 on the wave-C
+/// merge — P7's squad ids (37/38) landed first, so run-history takes the next id.
+const RUN_HISTORY_REQ_ID: i64 = 39;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -654,6 +658,7 @@ impl HangarPlugin {
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
+            RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
@@ -802,8 +807,7 @@ impl HangarPlugin {
         // A rejected fetch/mutation is an error state, not "no boards" — surface it
         // so the render never invites a create over a daemon failure (P4 / D8).
         if let Some(err) = &resp.error {
-            self.screens
-                .set_boards_error(format!("daemon error: {}", err.message));
+            self.screens.set_boards_error(format!("daemon error: {}", err.message));
             return;
         }
         match resp.result.as_ref() {
@@ -812,14 +816,12 @@ impl HangarPlugin {
                     result.clone(),
                 ) {
                     Ok(r) => self.screens.set_boards(&r),
-                    Err(e) => self
-                        .screens
-                        .set_boards_error(format!("malformed boards payload: {e}")),
+                    Err(e) => {
+                        self.screens.set_boards_error(format!("malformed boards payload: {e}"))
+                    }
                 }
             }
-            None => self
-                .screens
-                .set_boards_error("empty boards reply".to_string()),
+            None => self.screens.set_boards_error("empty boards reply".to_string()),
         }
     }
 
@@ -890,7 +892,28 @@ impl HangarPlugin {
                 ainb_hangar_proto::snapshots::UsageRollupResult,
             >(result.clone())
             {
-                self.screens.set_usage(rollup);
+                // Scope by the CURRENT active workspace so a rollup landing after a
+                // `SetActive` switch resets a stale prior-tenant run-history timeline
+                // rather than rendering beside it (cross-workspace stale-data leak).
+                let ws = self.app_state().ws_id.as_str().to_string();
+                self.screens.set_usage(&ws, rollup);
+            }
+        }
+    }
+
+    /// Populate the usage dashboard's recent-runs timeline from a
+    /// `hangar/run_history` result (P10 / D19): the newest-first run rows.
+    fn apply_run_history(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(history) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::RunHistoryResult,
+            >(result.clone())
+            {
+                // Scope by the CURRENT active workspace so a run-history reply
+                // landing after a `SetActive` switch resets stale prior-tenant
+                // totals rather than rendering beside them.
+                let ws = self.app_state().ws_id.as_str().to_string();
+                self.screens.set_run_history(&ws, history);
             }
         }
     }
@@ -1103,6 +1126,11 @@ impl HangarPlugin {
                 scoped.clone(),
             ),
             (
+                RUN_HISTORY_REQ_ID,
+                daemon_methods::HANGAR_RUN_HISTORY,
+                scoped.clone(),
+            ),
+            (
                 MEMBERS_REQ_ID,
                 daemon_methods::HANGAR_MEMBERS_LIST,
                 scoped.clone(),
@@ -1238,7 +1266,11 @@ impl HangarPlugin {
     /// `BoardsListResult` folds straight back through [`Self::apply_boards`]. A
     /// send failure is logged but non-fatal — the board simply doesn't change (the
     /// next `boards_list` pull reconciles).
-    async fn apply_boards_action(&mut self, host: &HostClient, action: crate::screen::BoardsAction) {
+    async fn apply_boards_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::BoardsAction,
+    ) {
         use crate::screen::BoardsAction;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
@@ -1918,7 +1950,11 @@ impl HangarPlugin {
         // instead of inserting it. Route straight to the screen reducer (which
         // owns Esc-to-close for both), mirroring the issue-list capture guard.
         if matches!(app.screen, Screen::TaskDetail(_))
-            && self.screens.task_detail.as_ref().is_some_and(|td| td.compose_buffer().is_some())
+            && self
+                .screens
+                .task_detail
+                .as_ref()
+                .is_some_and(|td| td.compose_buffer().is_some())
         {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
@@ -4225,8 +4261,8 @@ mod tests {
     /// hit, on the second existing text-capture surface.
     #[test]
     fn uppercase_c_stays_in_settings_key_entry_not_tab_switch() {
-        use ainb_hangar_proto::settings::HealthSnapshot;
         use crate::screen::settings::SettingsState;
+        use ainb_hangar_proto::settings::HealthSnapshot;
         let mut p = connected_plugin_with_issue();
 
         // Seed a connected settings screen and land on it.
@@ -4237,8 +4273,12 @@ mod tests {
             version: "test".into(),
             connected: true,
         };
-        p.screens.settings =
-            Some(SettingsState::new(health, Vec::new(), Vec::new(), Vec::new()));
+        p.screens.settings = Some(SettingsState::new(
+            health,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
         let mut app = p.app_state().clone();
         app.screen = Screen::Settings;
         p.app = Some(app);

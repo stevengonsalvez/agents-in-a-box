@@ -17,31 +17,31 @@ use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, Task
 use ainb_hangar_proto::settings::{
     DaemonHealthSnapshot, HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow,
 };
-use ainb_hangar_proto::snapshots::{MemberWireRow, UsageRollupResult};
+use ainb_hangar_proto::snapshots::{MemberWireRow, RunHistoryResult, UsageRollupResult};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{
-    reduce_agent_picker, AgentPickerEvent, AgentPickerIntent, AgentPickerState,
+    AgentPickerEvent, AgentPickerIntent, AgentPickerState, reduce_agent_picker,
 };
-use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
-use super::boards::{reduce_boards, BoardsEvent, BoardsIntent, BoardsState};
+use super::autopilots::{AutopilotsEvent, AutopilotsIntent, AutopilotsState, reduce_autopilots};
+use super::boards::{BoardsEvent, BoardsIntent, BoardsState, reduce_boards};
 use super::command_palette::{
-    reduce_command_palette, CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState,
+    CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState, reduce_command_palette,
 };
 use super::control_center::{
-    reduce_control_center, ControlCenterEvent, ControlCenterIntent, ControlCenterState,
+    ControlCenterEvent, ControlCenterIntent, ControlCenterState, reduce_control_center,
 };
 use super::daemon_health::DaemonHealthState;
 use super::inbox::InboxState;
-use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
-use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
+use super::issue_list::{IssueListEvent, IssueListIntent, IssueListState, reduce_issue_list};
+use super::kanban::{KanbanEvent, KanbanIntent, KanbanState, reduce_kanban};
 use super::logs::LogsState;
-use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
+use super::settings::{SettingsEvent, SettingsIntent, SettingsState, reduce_settings};
 use super::skill_manager::{
-    reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
+    SkillManagerEvent, SkillManagerIntent, SkillManagerState, reduce_skill_manager,
 };
-use super::squads::{reduce_squads, SquadsEvent, SquadsIntent, SquadsState};
-use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailIntent, TaskDetailState};
+use super::squads::{SquadsEvent, SquadsIntent, SquadsState, reduce_squads};
+use super::task_detail::{TaskDetailEvent, TaskDetailIntent, TaskDetailState, reduce_task_detail};
 use super::usage_dashboard::UsageState;
 use super::{AppState, Screen};
 
@@ -444,10 +444,21 @@ impl ScreenStates {
         self.daemon_health = DaemonHealthState::from_snapshot(snap);
     }
 
-    /// Rebuild the usage dashboard from a `hangar/usage_rollup` snapshot
-    /// (e38.35).
-    pub fn set_usage(&mut self, rollup: UsageRollupResult) {
-        self.usage = UsageState::from_rollup(rollup);
+    /// Rebuild the usage dashboard's rollup fields from a `hangar/usage_rollup`
+    /// snapshot (e38.35) for workspace `ws`, preserving the run-history timeline
+    /// when it belongs to the same workspace (they arrive on separate replies,
+    /// P10 / D19). A reply for a different workspace resets the state first so a
+    /// stale prior-tenant timeline can never sit beside fresh totals.
+    pub fn set_usage(&mut self, ws: &str, rollup: UsageRollupResult) {
+        self.usage.apply_rollup(ws, rollup);
+    }
+
+    /// Update the usage dashboard's recent-runs timeline from a
+    /// `hangar/run_history` snapshot (P10 / D19) for workspace `ws`, preserving the
+    /// rollup totals when they belong to the same workspace. A reply for a
+    /// different workspace resets the state first.
+    pub fn set_run_history(&mut self, ws: &str, history: RunHistoryResult) {
+        self.usage.apply_run_history(ws, history);
     }
 
     /// Replace the logs-tail rows from a fresh read of the `daemon.*` file

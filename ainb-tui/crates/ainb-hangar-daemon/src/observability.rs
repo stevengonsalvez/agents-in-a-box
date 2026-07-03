@@ -86,19 +86,67 @@ impl OtlpOpts {
         }
     }
 
-    /// Read the OTLP endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    /// Discover the OTLP endpoint: the `OTEL_EXPORTER_OTLP_ENDPOINT` env var
+    /// first, then the onboarding OTel creds file (P10 / D19).
     ///
-    /// Returns `None` when the var is unset or empty — the caller then leaves
-    /// [`ObservabilityOpts::otlp`] `None` and [`install`] keeps JSONL as the
-    /// only sink. This is the endpoint-discovery seam: OTLP is opt-in by the
-    /// operator setting the standard OTEL env var, never on by default.
+    /// Returns `None` when neither is present — the caller then leaves
+    /// [`ObservabilityOpts::otlp`] `None` and [`install`] keeps JSONL as the only
+    /// sink (the silent, no-error fallback). This is the endpoint-discovery seam:
+    /// OTLP is opt-in, never on by default.
+    ///
+    /// The env var wins (an operator or the shell rc that sourced the creds file
+    /// exports it). When it is unset, this reads the onboarding
+    /// `~/.agents-in-a-box/otel/grafana-cloud.env` file (the
+    /// `crate::otel::write_env_file` output) and parses its exported
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` — so a daemon launched OUTSIDE a shell that
+    /// sourced that file (e.g. from launchd) still wires OTLP when the onboarding
+    /// creds exist.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .ok()
-            .filter(|e| !e.trim().is_empty())
-            .map(|endpoint| Self { endpoint })
+        if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+            let endpoint = endpoint.trim().to_string();
+            if !endpoint.is_empty() {
+                return Some(Self { endpoint });
+            }
+        }
+        Self::endpoint_from_creds_file(&creds_env_file_path()?)
     }
+
+    /// Parse `OTEL_EXPORTER_OTLP_ENDPOINT` out of an onboarding creds file at
+    /// `path` (the `export KEY='value'` shell-env shape `write_env_file` emits).
+    ///
+    /// Returns `None` when the file is absent / unreadable, has no endpoint line,
+    /// or the endpoint value is empty — every one of which is the silent
+    /// JSONL-only fallback. Split out (against an explicit path) so it is unit
+    /// testable without touching `$HOME`.
+    #[must_use]
+    pub fn endpoint_from_creds_file(path: &std::path::Path) -> Option<Self> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        for line in contents.lines() {
+            let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+            let Some(rest) = line.strip_prefix("OTEL_EXPORTER_OTLP_ENDPOINT=") else {
+                continue;
+            };
+            // Strip surrounding single/double quotes the onboarding writer adds.
+            let endpoint = rest
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .trim()
+                .to_string();
+            if !endpoint.is_empty() {
+                return Some(Self { endpoint });
+            }
+        }
+        None
+    }
+}
+
+/// The onboarding OTel creds file path: `~/.agents-in-a-box/otel/grafana-cloud.env`
+/// (the `crate::otel::write_env_file` output). Mirrors that resolver — the daemon
+/// cannot depend on the `ainb-core` crate (it would form a cycle), so the path is
+/// replicated here. `None` when the home directory cannot be resolved.
+fn creds_env_file_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("otel").join("grafana-cloud.env"))
 }
 
 /// Tracer name attached to OTLP-exported spans (the instrumentation scope).
@@ -286,4 +334,44 @@ pub fn install(opts: ObservabilityOpts) -> anyhow::Result<Guard> {
         #[cfg(feature = "otlp")]
         otlp_provider,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OtlpOpts;
+
+    /// The creds-file parser lifts the exported endpoint out of the onboarding
+    /// `grafana-cloud.env` shape (`export KEY='value'`), stripping the quotes.
+    #[test]
+    fn endpoint_parsed_from_onboarding_creds_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grafana-cloud.env");
+        std::fs::write(
+            &path,
+            "# comment\n\
+             export OTEL_RESOURCE_ATTRIBUTES='host.name=box'\n\
+             export OTEL_EXPORTER_OTLP_ENDPOINT='http://localhost:4318'\n",
+        )
+        .unwrap();
+        let opts = OtlpOpts::endpoint_from_creds_file(&path).expect("endpoint parsed");
+        assert_eq!(opts.endpoint, "http://localhost:4318");
+    }
+
+    /// A missing file, or a file with no endpoint line, is the silent
+    /// JSONL-only fallback (`None`, never an error).
+    #[test]
+    fn missing_or_endpointless_creds_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.env");
+        assert!(OtlpOpts::endpoint_from_creds_file(&missing).is_none());
+
+        let empty = dir.path().join("empty.env");
+        std::fs::write(&empty, "export GRAFANA_API_TOKEN='x'\n").unwrap();
+        assert!(OtlpOpts::endpoint_from_creds_file(&empty).is_none());
+
+        // An empty endpoint value is also None (not a wired empty endpoint).
+        let blank = dir.path().join("blank.env");
+        std::fs::write(&blank, "export OTEL_EXPORTER_OTLP_ENDPOINT=''\n").unwrap();
+        assert!(OtlpOpts::endpoint_from_creds_file(&blank).is_none());
+    }
 }

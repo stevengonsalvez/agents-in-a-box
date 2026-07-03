@@ -21,6 +21,7 @@ pub mod inbox;
 pub mod issue;
 pub mod label;
 pub mod member;
+pub mod run_history;
 pub mod search;
 pub mod skill;
 pub mod squad;

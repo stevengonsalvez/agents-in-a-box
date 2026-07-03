@@ -468,16 +468,19 @@ async fn execute_claimed(
         }
     };
 
+    // P10 / D19: the provider that executed this run, recorded on the run-history
+    // row + the OTLP task->run span.
+    let provider = dispatch.backend.name();
     match outcome {
         RunOutcome::Success(result) => {
             // running -> done: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Complete)?;
-            finalize_success(pool, &task, &env, result, clock, stats, events).await?;
+            finalize_success(pool, &task, &env, result, provider, clock, stats, events).await?;
         }
         RunOutcome::Failed { reason, result } => {
             // running -> failed: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
-            finalize_failure(pool, &task, reason, result, clock, stats, events).await?;
+            finalize_failure(pool, &task, reason, result, provider, clock, stats, events).await?;
         }
     }
     Ok(())
@@ -499,6 +502,7 @@ async fn finalize_success(
     task: &Task,
     env: &crate::execenv::ExecEnv,
     result: crate::runner::RunnerResult,
+    provider: &str,
     clock: &dyn HangarClock,
     stats: &HealthStats,
     events: &EventSink,
@@ -519,6 +523,9 @@ async fn finalize_success(
     // e38.35: capture the run's usage before `result` is partially moved into
     // `CompleteParams` below, so the dashboard rollup sees this run's tokens/cost.
     let usage = result.usage.clone();
+    // P10 / D19: the provider session id is also moved into `CompleteParams`
+    // below; clone it first so the run-history row can record it too.
+    let session_id = result.session_id.clone();
     let task_result =
         ainb_hangar_core::result::TaskResult::new(result.stdout_tail, result.exit_code, pr_url);
     let result_json =
@@ -537,6 +544,10 @@ async fn finalize_success(
     // e38.35: record this run's token/cost usage now the task row is terminal
     // (best-effort; a run that reported no usage records nothing).
     persist_usage(pool, task, usage.as_ref(), clock).await;
+    // P10 / D19: append the durable run-history row (provider / session / outcome
+    // / duration / token-cost) + emit the OTLP task->run span. Best-effort.
+    record_run_history(pool, task, provider, session_id.as_deref(), usage.as_ref(), "success", clock)
+        .await;
     // P8.5: record the successful terminal outcome into the rolling throughput
     // ring so the daemon-health pane's sparkline sees it.
     stats.record_completed(clock.now_ms() / 1_000);
@@ -579,6 +590,7 @@ async fn finalize_failure(
     task: &Task,
     reason: ainb_hangar_store::service::fail::FailureReason,
     result: crate::runner::RunnerResult,
+    provider: &str,
     clock: &dyn HangarClock,
     stats: &HealthStats,
     events: &EventSink,
@@ -590,6 +602,19 @@ async fn finalize_failure(
     // e38.35: a failed/timed-out run can still report partial usage worth
     // accounting; record it now the row is terminal (best-effort).
     persist_usage(pool, task, result.usage.as_ref(), clock).await;
+    // P10 / D19: a failed run still appends a run-history row (outcome=failed) +
+    // emits the OTLP task->run span, so the timeline records the failure and its
+    // partial token-cost. Best-effort.
+    record_run_history(
+        pool,
+        task,
+        provider,
+        result.session_id.as_deref(),
+        result.usage.as_ref(),
+        "failed",
+        clock,
+    )
+    .await;
     // P8.5: record the failed terminal outcome (drives the sparkline's red
     // proportion for this second).
     stats.record_failed(clock.now_ms() / 1_000);
@@ -873,6 +898,20 @@ async fn persist_session_id(
     Ok(())
 }
 
+/// Read the task row's `started_at` (epoch ms) from the DB — the run-start stamp
+/// `StartTaskService::start` wrote, which the claim-time in-memory `Task` predates
+/// (P10 / D19). `None` when the row is missing or never started, or on a read
+/// fault (the run-history duration then degrades to 0 rather than erroring).
+async fn read_started_at(pool: &SqlitePool, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar::<_, Option<i64>>("SELECT started_at FROM agent_task_queue WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
 /// Record the run's token/cost usage into the `task_usage` table (e38.35), so
 /// the usage dashboard can roll it up. Best-effort and only when the provider
 /// actually reported usage — a run with no result-usage records nothing.
@@ -900,6 +939,85 @@ async fn persist_usage(
     };
     if let Err(e) = ainb_hangar_store::repo::usage::UsageRepo::record(pool, &row).await {
         tracing::warn!(error = %e, task_id = %task.id, "usage record failed");
+    }
+}
+
+/// Append a durable `run_history` row for a finished run (P10 / D19) AND emit the
+/// OTLP `task.run` boundary span carrying the run's token / cost / duration
+/// attributes.
+///
+/// Called from both finalize paths (`outcome` = `success` | `failed`). Unlike
+/// [`persist_usage`] (a per-task upsert), this is APPEND-ONLY — a fresh `run_id`
+/// is minted per run, so a retried task appends a second history row rather than
+/// overwriting the first. `diff_add` / `diff_del` are 0 until the runner surfaces
+/// a diff stat.
+///
+/// The `task.run` span is always emitted as a `tracing` span (so it lands in the
+/// JSONL sink); under the `otlp` feature with a configured endpoint it is ALSO
+/// exported over OTLP (T5) — the span's `tokens_in` / `tokens_out` / `cost_usd` /
+/// `duration_ms` fields become OTLP span attributes. It is opened + immediately
+/// closed (entered then dropped) so the batch exporter flushes it. A history
+/// write fault is logged, never propagated — it must never down a finalize that
+/// has already committed the task's terminal state.
+async fn record_run_history(
+    pool: &SqlitePool,
+    task: &Task,
+    provider: &str,
+    session_id: Option<&str>,
+    usage: Option<&crate::runner::ProviderUsage>,
+    outcome: &str,
+    clock: &dyn HangarClock,
+) {
+    let run_id = SystemIdGen.new_ulid();
+    let finished_at = clock.now_ms();
+    let (input_tokens, output_tokens, cost_usd) =
+        usage.map_or((0, 0, 0.0), |u| (u.input_tokens, u.output_tokens, u.cost_usd));
+    // The in-memory `task` was read at claim time (before `StartTaskService::start`
+    // stamped `started_at`), so its `started_at` is stale `None`. Read the live
+    // DB value so the run's duration is real; fall back to the (stale) struct
+    // value, then to `finished_at` (0 duration) if even the row has none.
+    let started_at = read_started_at(pool, &task.id).await.or(task.started_at);
+    // Duration from the run's start (never the queued-at time); 0 when no start
+    // was recorded (defensive — the finalize seam always has one).
+    let duration_ms = started_at.map_or(0, |s| finished_at.saturating_sub(s));
+
+    // OTLP task->run boundary span (T5 / D19). The block scopes the span guard so
+    // it is entered then dropped immediately, closing the span for the batch
+    // exporter. Purely additive to the JSONL sink — a no-op export when OTLP is
+    // unconfigured.
+    {
+        let span = tracing::info_span!(
+            "task.run",
+            task_id = %task.id,
+            run_id = %run_id,
+            provider = provider,
+            outcome = outcome,
+            tokens_in = input_tokens,
+            tokens_out = output_tokens,
+            cost_usd = cost_usd,
+            duration_ms = duration_ms,
+        );
+        let _enter = span.enter();
+    }
+
+    let row = ainb_hangar_store::repo::run_history::NewRunHistory {
+        run_id,
+        task_id: Some(task.id.clone()),
+        workspace_id: task.workspace_id.clone(),
+        session_id: session_id.map(str::to_string),
+        provider: provider.to_string(),
+        profile: None,
+        started_at,
+        finished_at,
+        outcome: outcome.to_string(),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        diff_add: 0,
+        diff_del: 0,
+    };
+    if let Err(e) = ainb_hangar_store::repo::run_history::RunHistoryRepo::record(pool, &row).await {
+        tracing::warn!(error = %e, task_id = %task.id, "run history record failed");
     }
 }
 
