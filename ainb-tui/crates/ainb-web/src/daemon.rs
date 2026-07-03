@@ -258,22 +258,21 @@ pub fn display_kind(wire_kind: &str) -> &'static str {
 
 /// Convert the daemon's open attention rows into the JSON `needs` array the
 /// dashboard renders. Each card carries `attentionId` (the answer RPC target),
-/// its display `kind`, the raising session + cwd, and the parsed request
+/// its display `kind`, the raising session + cwd, and the normalised request
 /// `payload` so the frontend can render the question/options and wire answer
 /// buttons. Ordering is preserved (the daemon returns oldest-first, which is the
 /// urgency order the card shuffle relies on).
 ///
 /// The `payload` field is best-effort JSON: the daemon stores it as a serialised
-/// string, so a parseable payload is embedded as structured JSON and an
-/// unparseable one falls back to the raw string — the card always has something
-/// to show.
+/// string, so a parseable payload is normalised (see [`normalize_payload`]) into
+/// the flat shape the dashboard renders and an unparseable one falls back to the
+/// raw string — the card always has something to show.
 #[must_use]
 pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
     let cards: Vec<Value> = rows
         .iter()
         .map(|row| {
-            let payload =
-                serde_json::from_str::<Value>(&row.payload).unwrap_or_else(|_| json!(row.payload));
+            let payload = normalize_payload(&row.payload);
             json!({
                 "attentionId": row.id,
                 "kind": display_kind(&row.kind),
@@ -288,6 +287,54 @@ pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
         })
         .collect();
     Value::Array(cards)
+}
+
+/// Normalise one stored attention payload into the flat card shape the dashboard
+/// renders (`{ question | marker | snippet | …, options: [String] }`).
+///
+/// The daemon stores the request *context* verbatim, and a real ingest wraps the
+/// request fields under a `context` object with `AskUserQuestion` options as
+/// `{ "label": "…" }` objects (the canonical shape the TUI control centre and the
+/// acceptance fixtures use). The dashboard's card renderer, by contrast, reads
+/// the detail fields (`question`, `marker`, …) and the option *strings* at the
+/// TOP level. Without this bridge a real ASK card renders its title but no
+/// question and — fatally — no answer buttons, because `payload.options` is
+/// absent. So the mapping boundary flattens a `context` wrapper up one level and
+/// converts each option to its label string, while leaving an already-flat
+/// payload (or a raw non-object string) untouched.
+fn normalize_payload(raw: &str) -> Value {
+    let parsed = match serde_json::from_str::<Value>(raw) {
+        Ok(v) => v,
+        // Not JSON — surface the raw string so the card still shows something.
+        Err(_) => return json!(raw),
+    };
+
+    // Unwrap a `context` wrapper when present; otherwise normalise in place.
+    let base = match parsed.get("context") {
+        Some(Value::Object(_)) => parsed.get("context").cloned().unwrap_or(parsed),
+        _ => parsed,
+    };
+
+    // Only object payloads carry render fields; anything else passes through.
+    let Value::Object(mut map) = base else {
+        return base;
+    };
+
+    // Convert `options` to an array of label strings: accept `{ "label": "x" }`
+    // objects (canonical) OR bare strings (already-flat test/legacy payloads).
+    if let Some(Value::Array(opts)) = map.get("options") {
+        let labels: Vec<Value> = opts
+            .iter()
+            .filter_map(|opt| match opt {
+                Value::Object(o) => o.get("label").and_then(Value::as_str).map(|s| json!(s)),
+                Value::String(s) => Some(json!(s)),
+                _ => None,
+            })
+            .collect();
+        map.insert("options".to_string(), Value::Array(labels));
+    }
+
+    Value::Object(map)
 }
 
 // ── answer seam ──────────────────────────────────────────────────────────────
@@ -370,6 +417,40 @@ mod tests {
         assert_eq!(arr[1]["kind"], "ERR");
         // An unparseable payload falls back to the raw string, never dropped.
         assert_eq!(arr[1]["payload"], "boom");
+    }
+
+    #[test]
+    fn attention_to_needs_flattens_canonical_context_ask_payload() {
+        // The canonical stored shape (real ingest + acceptance fixtures): the
+        // request fields nested under `context`, with options as `{label}`
+        // objects. The card renderer reads the detail + option STRINGS at the top
+        // level, so the mapping must flatten the wrapper and unwrap the labels —
+        // otherwise the ASK renders no question and no answer buttons.
+        let payload = r#"{"kind":"ASK","context":{"question":"Ship to which env?","options":[{"label":"staging"},{"label":"prod"},{"label":"canary"}]}}"#;
+        let rows = vec![row("att-ask-1", "ask_user_question", payload)];
+        let needs = attention_to_needs(&rows);
+        let card = &needs.as_array().expect("needs is an array")[0];
+
+        assert_eq!(card["kind"], "ASK");
+        // Detail is lifted out of the `context` wrapper to the top level.
+        assert_eq!(card["payload"]["question"], "Ship to which env?");
+        // Options are flattened to their label strings, in order — this is what
+        // the frontend turns into the "1. staging" / "2. prod" answer buttons.
+        assert_eq!(card["payload"]["options"][0], "staging");
+        assert_eq!(card["payload"]["options"][1], "prod");
+        assert_eq!(card["payload"]["options"][2], "canary");
+    }
+
+    #[test]
+    fn attention_to_needs_flattens_canonical_wait_marker() {
+        // A WAIT row nests its marker the same way; flattening keeps the
+        // dashboard's `needDetail` (which reads `payload.marker`) working.
+        let payload = r#"{"kind":"WAIT","context":{"marker":"WAITING: still idle"}}"#;
+        let rows = vec![row("att-wait-1", "waiting", payload)];
+        let needs = attention_to_needs(&rows);
+        let card = &needs.as_array().expect("needs is an array")[0];
+        assert_eq!(card["kind"], "WAIT");
+        assert_eq!(card["payload"]["marker"], "WAITING: still idle");
     }
 
     #[test]
