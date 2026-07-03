@@ -792,30 +792,18 @@ impl EventHandler {
             && y < rect.y.saturating_add(rect.height)
     }
 
-    /// Fetch `uri` into the cache and open the source-preview picker.
-    /// Blocking (like the pre-existing add-source path — same clone cost);
-    /// nothing is persisted until the picker's import confirms.
+    /// Queue a background fetch of `uri` (git clone off the event loop) that
+    /// opens the source-preview picker on completion. The loading banner
+    /// renders meanwhile; a second request while one is in flight is
+    /// ignored. Nothing is persisted until the picker's import confirms.
     fn open_source_preview(state: &mut AppState, uri: &str) {
-        let ainb_home = ainb_skill_core::default_ainb_home();
-        match ainb_cli::source::preview_source(&ainb_home, uri) {
-            Ok(preview) if preview.units.is_empty() => {
-                state.add_warning_notification(format!(
-                    "{uri}: fetched OK but no skills/agents/commands found"
-                ));
-            }
-            Ok(preview) => {
-                tracing::info!(
-                    uri = %uri, units = preview.units.len(),
-                    "SkillManager: source preview open"
-                );
-                state.skill_manager_state.preview = Some(
-                    crate::components::skill_manager_screen::SourcePreviewViewState::new(preview),
-                );
-            }
-            Err(e) => {
-                state.add_error_notification(format!("preview failed: {e:#}"));
-            }
+        if state.skill_manager_state.preview_loading.is_some() {
+            state.add_warning_notification("a source fetch is already running".to_string());
+            return;
         }
+        state.skill_manager_state.preview_loading = Some(uri.to_string());
+        state.pending_async_action =
+            Some(crate::app::state::AsyncAction::SkillPreviewFetch(uri.to_string()));
     }
 
     /// Map a slash-command name (leading `/` already stripped by the

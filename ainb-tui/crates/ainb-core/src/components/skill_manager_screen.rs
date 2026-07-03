@@ -179,6 +179,10 @@ pub struct SkillsScreenData {
     /// on an existing source row). Multi-select units + target tools;
     /// nothing is persisted until Enter confirms the import.
     pub preview: Option<SourcePreviewViewState>,
+    /// `Some(uri)` while a preview fetch (git clone) runs in the
+    /// background — renders a "fetching…" banner and blocks a second
+    /// concurrent fetch. Cleared when the fetch completes either way.
+    pub preview_loading: Option<String>,
     /// Width (terminal columns) of the left Sources panel. Resizable by
     /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
     /// `ui_preferences.skill_manager_sources_width` on resize-finish and
@@ -226,6 +230,7 @@ impl Default for SkillsScreenData {
             library: None,
             browse: None,
             preview: None,
+            preview_loading: None,
             sources_width: DEFAULT_SOURCES_WIDTH,
             focused_pane: FocusedSkillPane::default(),
             source_selected: 0,
@@ -724,6 +729,28 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     // modal after an add-source fetch or `[p]` on a source row).
     if let Some(preview) = &data.preview {
         render_source_preview(frame, area, preview);
+    }
+
+    // Background fetch in flight — small centered banner so the user
+    // sees progress instead of a frozen screen.
+    if let Some(uri) = &data.preview_loading {
+        let rect = centered_rect(area, (uri.len() as u16 + 20).clamp(30, area.width), 3);
+        frame.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(GOLD));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("⏳ fetching ", Style::default().fg(SOFT_WHITE)),
+                Span::styled(uri.clone(), Style::default().fg(CORNFLOWER_BLUE)),
+                Span::styled(" …", Style::default().fg(MUTED_GRAY)),
+            ]))
+            .alignment(ratatui::layout::Alignment::Center),
+            inner,
+        );
     }
 
     // Input prompt overlay (add-source / search) — drawn on top of
