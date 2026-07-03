@@ -276,6 +276,22 @@ impl Manifest {
         Ok(())
     }
 
+    /// Insert or update a unit declaration, keyed by URI. On update the
+    /// targets are replaced (the latest install's target set wins) while
+    /// `shadowed_by` is preserved. Keeps the declare-on-install invariant
+    /// in one place instead of each caller hand-rolling a push + dedup.
+    pub fn upsert_unit(&mut self, uri: &str, targets: Option<Vec<String>>) {
+        if let Some(entry) = self.units.iter_mut().find(|u| u.uri == uri) {
+            entry.targets = targets;
+        } else {
+            self.units.push(UnitEntry {
+                uri: uri.to_string(),
+                targets,
+                shadowed_by: None,
+            });
+        }
+    }
+
     /// Remove a source by name; returns it on success.
     pub fn remove_source(&mut self, name: &str) -> Result<SourceEntry> {
         let pos = self

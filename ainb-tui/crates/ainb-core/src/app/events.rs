@@ -362,36 +362,47 @@ pub enum AppEvent {
     SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
-    GoToRecovery,               // Navigate to session recovery view
-    GoToInbox,                  // Navigate to ainb-hooks notification inbox
-    GoToDaemons,                // Navigate to the daemon runtime-health view
-    GoToFleetPanel,             // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,           // Fleet panel: move row selection up
-    FleetPanelMoveDown,         // Fleet panel: move row selection down
-    FleetPanelOptionNext,       // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,       // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,           // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,        // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelApprove,          // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,             // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh,          // Fleet panel: force-refresh from current_state (r)
-    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
+    // Source-preview picker (preview-first add flow): multi-select the
+    // units of a fetched source + target tools, then import.
+    SkillManagerPreviewUp,
+    SkillManagerPreviewDown,
+    SkillManagerPreviewToggle,      // Space — toggle the cursor unit
+    SkillManagerPreviewAll,         // a — select every unit
+    SkillManagerPreviewNone,        // n — clear the selection
+    SkillManagerPreviewTool(usize), // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
+    SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
+    SkillManagerPreviewClose,       // Esc — discard, nothing persisted
+    SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
+    GoToRecovery,                   // Navigate to session recovery view
+    GoToInbox,                      // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                    // Navigate to the daemon runtime-health view
+    GoToFleetPanel,                 // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,               // Fleet panel: move row selection up
+    FleetPanelMoveDown,             // Fleet panel: move row selection down
+    FleetPanelOptionNext,           // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,           // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer,               // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast,            // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,    // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
+    FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
-    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                // Inbox: move selection up one row
-    InboxMoveDown,              // Inbox: move selection down one row
-    InboxPageUp,                // Inbox: jump 10 rows up
-    InboxPageDown,              // Inbox: jump 10 rows down
-    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,       // Inbox: dismiss selected row (d)
-    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,            // Inbox: cycle agent filter (p)
-    InboxRefresh,               // Inbox: force-refresh from store (r)
+    FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
+    PanelBack,         // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,        // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,       // Inbox: move selection up one row
+    InboxMoveDown,     // Inbox: move selection down one row
+    InboxPageUp,       // Inbox: jump 10 rows up
+    InboxPageDown,     // Inbox: jump 10 rows down
+    InboxOpenSelected, // Inbox: mark selected row read (Enter)
+    InboxDismissSelected, // Inbox: dismiss selected row (d)
+    InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived, // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,   // Inbox: cycle agent filter (p)
+    InboxRefresh,      // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -722,10 +733,10 @@ impl EventHandler {
     }
 
     /// True when a SkillManager overlay (banner / input prompt / library
-    /// / browse modal) is open OR the help overlay is visible — i.e. the
-    /// underlying Sources/Units panels are NOT the active surface. Mouse
-    /// hit-testing on the panels is suppressed in that case so a click
-    /// meant for the modal doesn't leak through.
+    /// / browse / source-preview modal) is open OR the help overlay is
+    /// visible — i.e. the underlying Sources/Units panels are NOT the
+    /// active surface. Mouse hit-testing on the panels is suppressed in
+    /// that case so a click meant for the modal doesn't leak through.
     fn skill_manager_overlay_open(state: &AppState) -> bool {
         let s = &state.skill_manager_state;
         state.help_visible
@@ -733,6 +744,7 @@ impl EventHandler {
             || s.input.is_some()
             || s.library.is_some()
             || s.browse.is_some()
+            || s.preview.is_some()
     }
 
     /// Recompute the SkillManager top-row rects (Sources panel + Units
@@ -778,6 +790,21 @@ impl EventHandler {
             && x < rect.x.saturating_add(rect.width)
             && y >= rect.y
             && y < rect.y.saturating_add(rect.height)
+    }
+
+    /// Queue a background fetch of `uri` (git clone off the event loop) that
+    /// opens the source-preview picker on completion. The loading banner
+    /// renders meanwhile; a second request while one is in flight is
+    /// ignored. Nothing is persisted until the picker's import confirms.
+    fn open_source_preview(state: &mut AppState, uri: &str) {
+        if state.skill_manager_state.preview_loading.is_some() {
+            state.add_warning_notification("a source fetch is already running".to_string());
+            return;
+        }
+        state.skill_manager_state.preview_loading = Some(uri.to_string());
+        state.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
+            uri.to_string(),
+        ));
     }
 
     /// Map a slash-command name (leading `/` already stripped by the
@@ -1589,6 +1616,26 @@ impl EventHandler {
                 };
             }
 
+            // Source-preview picker: multi-select units + target tools.
+            // Intercepts before browse/library/banner — it's the active
+            // modal whenever open.
+            if state.skill_manager_state.preview.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerPreviewUp),
+                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerPreviewDown),
+                    KeyCode::Char(' ') => Some(AppEvent::SkillManagerPreviewToggle),
+                    KeyCode::Char('a') => Some(AppEvent::SkillManagerPreviewAll),
+                    KeyCode::Char('n') => Some(AppEvent::SkillManagerPreviewNone),
+                    KeyCode::Char('1') => Some(AppEvent::SkillManagerPreviewTool(0)),
+                    KeyCode::Char('2') => Some(AppEvent::SkillManagerPreviewTool(1)),
+                    KeyCode::Char('3') => Some(AppEvent::SkillManagerPreviewTool(2)),
+                    KeyCode::Char('4') => Some(AppEvent::SkillManagerPreviewTool(3)),
+                    KeyCode::Enter => Some(AppEvent::SkillManagerPreviewConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerPreviewClose),
+                    _ => None,
+                };
+            }
+
             // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
             //   * Query mode — every char goes into the query buffer
             //     (so `/`, `:`, spaces all reach it); Enter searches.
@@ -1698,6 +1745,9 @@ impl EventHandler {
                     Some(AppEvent::SkillManagerSourceSelectNext)
                 }
                 KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
+                // `[p]` on a source row — reopen the import picker for it
+                // (preview its units, select, install more).
+                KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -4927,24 +4977,14 @@ impl EventHandler {
                         let uri = crate::components::skill_manager_screen::normalize_source_input(
                             &input.buffer,
                         );
-                        tracing::info!(uri = %uri, "SkillManager: add-source submit");
+                        tracing::info!(uri = %uri, "SkillManager: add-source submit (preview-first)");
                         if uri.is_empty() {
                             return;
                         }
-                        let ainb_home = ainb_skill_core::default_ainb_home();
-                        let cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
-                            uri: uri.clone(),
-                            name: None,
-                            kind: None,
-                        });
-                        let (ok, msg) = run_source_cli(&ainb_home, cmd);
-                        tracing::info!(ok, msg = %msg, "SkillManager: add-source result");
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if ok {
-                            state.add_success_notification(format!("source added: {msg}"));
-                        } else {
-                            state.add_error_notification(format!("add source failed: {msg}"));
-                        }
+                        // Preview-first: fetch + list units WITHOUT persisting;
+                        // the picker that opens decides what (if anything) is
+                        // imported. Cancelling leaves no manifest trace.
+                        Self::open_source_preview(state, &uri);
                     }
                 }
             }
@@ -5219,6 +5259,119 @@ impl EventHandler {
             }
             AppEvent::SkillManagerBrowseClose => {
                 state.skill_manager_state.browse = None;
+            }
+            AppEvent::SkillManagerPreviewUp => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(-1);
+                }
+            }
+            AppEvent::SkillManagerPreviewDown => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(1);
+                }
+            }
+            AppEvent::SkillManagerPreviewToggle => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_current();
+                }
+            }
+            AppEvent::SkillManagerPreviewAll => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(true);
+                }
+            }
+            AppEvent::SkillManagerPreviewNone => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(false);
+                }
+            }
+            AppEvent::SkillManagerPreviewTool(i) => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_tool(i);
+                }
+            }
+            AppEvent::SkillManagerPreviewClose => {
+                // Discard — preview never persisted anything.
+                state.skill_manager_state.preview = None;
+            }
+            AppEvent::SkillManagerPreviewSource => {
+                // `[p]` on a source row — reopen the picker for that source,
+                // at its DECLARED ref (bare uri would default to `main`,
+                // silently swapping the name-keyed cache checkout).
+                let row = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .cloned();
+                if let Some(row) = row {
+                    if !row.enabled {
+                        // install() only matches enabled sources — a preview
+                        // would fetch fine and then fail every unit late.
+                        state.add_warning_notification(format!(
+                            "source `{}` is disabled — enable it before importing",
+                            row.name
+                        ));
+                        return;
+                    }
+                    Self::open_source_preview(state, &format!("{}@{}", row.uri, row.r#ref));
+                }
+            }
+            AppEvent::SkillManagerPreviewConfirm => {
+                // Validate on a borrow (no deep clone of a potentially
+                // 95-unit view); only take() the state once we commit.
+                let (paths, targets) = {
+                    let Some(view) = state.skill_manager_state.preview.as_ref() else {
+                        return;
+                    };
+                    let paths = view.checked_paths();
+                    if paths.is_empty() {
+                        state.add_warning_notification(
+                            "Nothing selected — Space to pick, a for all".to_string(),
+                        );
+                        return;
+                    }
+                    let Some(targets) = view.targets_csv() else {
+                        state.add_warning_notification(
+                            "No target tool — 1/2/3 toggle claude/codex/copilot".to_string(),
+                        );
+                        return;
+                    };
+                    (paths, targets)
+                };
+                let Some(view) = state.skill_manager_state.preview.take() else {
+                    return;
+                };
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                match ainb_cli::source::import_selected(
+                    &ainb_home,
+                    &view.preview,
+                    &paths,
+                    &targets,
+                    &mut buf,
+                ) {
+                    Ok((installed, failed)) => {
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if failed == 0 {
+                            state.add_success_notification(format!(
+                                "imported {installed} unit(s) → {targets}"
+                            ));
+                        } else {
+                            state.add_warning_notification(format!(
+                                "imported {installed}, {failed} failed → {targets} (see logs)"
+                            ));
+                            tracing::warn!(
+                                output = %String::from_utf8_lossy(&buf),
+                                "SkillManager: import finished with failures"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("import failed: {e:#}"));
+                        // Reopen the picker with the user's selection intact.
+                        state.skill_manager_state.preview = Some(view);
+                    }
+                }
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
@@ -6586,9 +6739,10 @@ impl EventHandler {
                 use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
                     o.auth_pane = match &o.auth_pane {
-                        AuthPane::KeyEntry { agent, .. } => {
-                            AuthPane::MethodPicker { agent: *agent, cursor: 1 }
-                        }
+                        AuthPane::KeyEntry { agent, .. } => AuthPane::MethodPicker {
+                            agent: *agent,
+                            cursor: 1,
+                        },
                         _ => AuthPane::AgentList,
                     };
                 }

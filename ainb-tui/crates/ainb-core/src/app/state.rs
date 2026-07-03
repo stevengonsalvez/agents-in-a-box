@@ -3399,6 +3399,9 @@ pub enum AsyncAction {
     // Onboarding actions
     OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
+    /// Fetch + parse a skill source (git clone) off the event loop, then
+    /// open the Skill Manager's source-preview picker with the result.
+    SkillPreviewFetch(String),
 }
 
 impl Default for AppState {
@@ -9395,6 +9398,40 @@ impl AppState {
                             }
                         }
                     }
+                }
+                AsyncAction::SkillPreviewFetch(uri) => {
+                    info!(uri = %uri, "Fetching skill source for preview");
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    let fetch_uri = uri.clone();
+                    // Git clone + adapter scan — blocking I/O off the runtime.
+                    let result = tokio::task::spawn_blocking(move || {
+                        ainb_cli::source::preview_source(&ainb_home, &fetch_uri)
+                    })
+                    .await;
+                    self.skill_manager_state.preview_loading = None;
+                    match result {
+                        Ok(Ok(preview)) if preview.units.is_empty() => {
+                            self.add_warning_notification(format!(
+                                "{uri}: fetched OK but no skills/agents/commands found"
+                            ));
+                        }
+                        Ok(Ok(preview)) => {
+                            info!(uri = %uri, units = preview.units.len(),
+                                  "SkillManager: source preview open");
+                            self.skill_manager_state.preview = Some(
+                                crate::components::skill_manager_screen::SourcePreviewViewState::new(
+                                    preview,
+                                ),
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            self.add_error_notification(format!("preview failed: {e:#}"));
+                        }
+                        Err(e) => {
+                            self.add_error_notification(format!("preview task failed: {e}"));
+                        }
+                    }
+                    self.ui_needs_refresh = true;
                 }
             }
         }

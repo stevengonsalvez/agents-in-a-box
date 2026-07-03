@@ -243,6 +243,24 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         );
     }
 
+    // Record the unit in the manifest too — the manifest is the
+    // declarative intent the Skill Manager's Units table renders;
+    // without this entry an installed unit was lockfile-only and
+    // invisible in the TUI ("imported but nothing shows"). Upsert, not
+    // insert-only: a reinstall with different --targets must refresh
+    // the declared targets or manifest and lockfile drift apart.
+    {
+        let manifest_path = manifest_path_in(home);
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        manifest.upsert_unit(
+            &args.uri,
+            args.targets
+                .as_deref()
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect()),
+        );
+        manifest.save_to(&manifest_path)?;
+    }
+
     // Replace or insert the LockedUnit.
     lockfile.units.retain(|u| u.declared_uri != args.uri);
     lockfile.units.push(LockedUnit {
@@ -329,6 +347,22 @@ fn remove(home: &Path, args: RemoveSkillArgs, out: &mut dyn io::Write) -> Result
             // Skipped / PendingUninstall — drop the entry, no fs op.
             removed_tools.push(tool_name);
         }
+    }
+
+    // Mirror the outcome into the manifest — install declares the unit
+    // there (that's what the Skill Manager renders), so remove must
+    // undeclare it or the next `sync` reinstalls what was just removed.
+    {
+        let manifest_path = manifest_path_in(home);
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        if retained.is_empty() {
+            manifest.units.retain(|u| u.uri != args.uri);
+        } else if let Some(entry) = manifest.units.iter_mut().find(|u| u.uri == args.uri) {
+            // Partial removal: keep the declaration, narrowed to the
+            // tools that still hold a deployment.
+            entry.targets = Some(retained.keys().cloned().collect());
+        }
+        manifest.save_to(&manifest_path)?;
     }
 
     if retained.is_empty() {
