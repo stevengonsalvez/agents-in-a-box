@@ -411,6 +411,37 @@ pub const BOARD_RUN_PROFILE: &str = "claude-agent";
 ///
 /// Panics only after [`can_run_tripwire`] has gated the caller.
 pub fn prepare_pipeline_board_run() -> Pipeline {
+    // A happy fake-claude the claim loop runs the card task through to `done`.
+    prepare_pipeline_board_run_with(
+        "#!/bin/sh\necho '{\"type\":\"system\",\"session_id\":\"board-run-sess\"}'\n\
+         echo '{\"type\":\"result\",\"content\":\"ok\"}'\nexit 0\n",
+    )
+}
+
+/// The sentinel file the interactive stub agent blocks on (under the isolated
+/// `$HOME`) — the tripwire touches it to release the agent AFTER it has observed
+/// the live tmux session, making the "session is real" assertion race-free.
+pub const INTERACTIVE_RELEASE_SENTINEL: &str = "interactive-go";
+
+/// Like [`prepare_pipeline_board_run`], but the fake agent BLOCKS until the
+/// tripwire touches `$HOME/interactive-go`, then exits 0 (ccc / D6 interactive
+/// tripwire). This lets the tripwire observe the REAL `tmux_hangar-<task_id>`
+/// session while it is live before releasing the agent to finish (→ done →
+/// auto-move). The stub self-exits after ~10s if never released, so a wiring bug
+/// can never wedge a session.
+///
+/// Panics only after [`can_run_tripwire`] has gated the caller.
+pub fn prepare_pipeline_board_run_interactive() -> Pipeline {
+    prepare_pipeline_board_run_with(
+        "#!/bin/sh\ni=0\nwhile [ ! -f \"$HOME/interactive-go\" ] && [ \"$i\" -lt 100 ]; do \
+         sleep 0.1; i=$((i+1)); done\nexit 0\n",
+    )
+}
+
+/// Shared body of [`prepare_pipeline_board_run`] and its interactive sibling:
+/// seed the board-run fixture + profile and spawn a CLAIM-ENABLED daemon whose
+/// `HANGAR_CLAUDE_PATH` is a fake agent with `fake_agent_body`.
+fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -421,13 +452,7 @@ pub fn prepare_pipeline_board_run() -> Pipeline {
     seed_notify_prompt_dismissed(home.path());
     seed_board_and_profile(&hangar_dir);
 
-    // A happy fake-claude the claim loop runs the card task through to `done`.
-    let fake_claude = write_executable(
-        home.path(),
-        "fake-claude.sh",
-        "#!/bin/sh\necho '{\"type\":\"system\",\"session_id\":\"board-run-sess\"}'\n\
-         echo '{\"type\":\"result\",\"content\":\"ok\"}'\nexit 0\n",
-    );
+    let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
 
     let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
@@ -481,6 +506,47 @@ pub fn board_card_by_title(home: &Path, title: &str) -> Option<(Option<String>, 
         }
         None
     })
+}
+
+/// Read the `session_name` the interactive runner recorded on the card's latest
+/// task (matched by the card's issue TITLE) from the isolated `$HOME`'s db — the
+/// exact `tmux_hangar-<task_id>` name the ccc / D6 interactive tripwire asserts a
+/// live tmux session under. `None` while no task has been dispatched yet or the
+/// task is headless (NULL `session_name`).
+#[must_use]
+pub fn interactive_session_for_title(home: &Path, title: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("session-name-read runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT t.session_name FROM agent_task_queue t \
+             JOIN issue i ON t.issue_id = i.id \
+             WHERE i.title LIKE ? \
+             ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+    })
+}
+
+/// Whether a tmux session with the EXACT name `name` is live (`tmux has-session`).
+/// Used by the interactive tripwire to prove the runner spawned a REAL session and
+/// later that it was reaped.
+#[must_use]
+pub fn tmux_session_live(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Seed the card-run board (`Todo` manual, `Done`↦`done` auto-move, no cards) into
