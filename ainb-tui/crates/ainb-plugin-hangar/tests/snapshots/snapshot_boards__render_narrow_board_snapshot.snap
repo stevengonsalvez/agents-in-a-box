@@ -1,0 +1,14 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_boards.rs
+expression: map
+---
+Board: Delivery   [1/1]   auto-move ON
+↵:run  a:attach  n:add col  r:rename  x:del col  c:add card
+○ Backlog ⋯1+ ◈ Queued ↦⋯u+u◈ Running ⋯r+n◈ Failed ↦fail⋯d+(
+
+┏━━━━━━━━━━━━┓╭────────────╮╭────────────╮╭────────────────╮
+┃#bk01       ┃│#q002       ││#r003       ││#f004           │
+┃Write the sp┃│Wire the RPC││Build the bo││Flaky migration │
+┃ec          ┃│            ││ard         ││                │
+┃◇ None    ◔W┃│◇ None    ◔W││◇ None    ◔B││◇ None        ◔F│
+┗━━━━━━━━━━━━┛╰────────────╯╰────────────╯╰────────────────╯

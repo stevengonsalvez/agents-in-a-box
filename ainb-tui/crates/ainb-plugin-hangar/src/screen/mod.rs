@@ -17,6 +17,7 @@ pub mod agent_picker;
 pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
+pub mod boards;
 pub mod command_palette;
 pub mod context_menu;
 pub mod control_center;
@@ -33,7 +34,7 @@ pub mod task_detail;
 pub mod usage_dashboard;
 
 pub use app_screens::{
-    render_body, route_key, AttentionAnswerAction, AutopilotAction, IssueAssignAction,
+    render_body, route_key, AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction,
     IssueCommentAction, IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates,
     SkillAction, WorkspaceAction,
 };
@@ -62,6 +63,9 @@ pub enum Screen {
     Autopilots,
     /// Kanban board (hotkey `K`) — the task queue laid out as four columns.
     Kanban,
+    /// User-defined boards (hotkey `B`) — custom columns with FSM-state mapping +
+    /// auto-move (P4 / D8). Additive alongside the fixed [`Screen::Kanban`].
+    Boards,
     /// Daemon health (hotkey `D`) — runtimes, claim cache, concurrency, and the
     /// dual-dim throughput sparkline (P8.5).
     DaemonHealth,
@@ -100,6 +104,7 @@ impl Screen {
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
             Self::Kanban => "Kanban",
+            Self::Boards => "Boards",
             Self::DaemonHealth => "Daemon",
             Self::Usage => "Usage",
             Self::Logs => "Logs",

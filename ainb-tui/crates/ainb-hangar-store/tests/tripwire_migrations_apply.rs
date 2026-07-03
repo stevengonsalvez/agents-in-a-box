@@ -888,7 +888,7 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_twenty_six_tables() {
+async fn all_migrations_create_exactly_twenty_nine_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -912,6 +912,10 @@ async fn all_migrations_create_exactly_twenty_six_tables() {
         "autopilot_run",
         "autopilot_webhook_delivery",
         "beads_mapping",
+        // P4 / D8: user-defined kanban boards (migration 0027).
+        "board",
+        "board_card",
+        "board_column",
         "comment",
         "daemon_socket_token",
         "daemon_token",
@@ -930,7 +934,7 @@ async fn all_migrations_create_exactly_twenty_six_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 26, "expected 26 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 29, "expected 29 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),

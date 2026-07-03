@@ -19,6 +19,10 @@ use crate::run_loop::{DaemonConfig, run};
 /// exactly once (first-answer-wins), into the right session (C1 misroute guard),
 /// via the one verified send path. Backs the `attention/answer` RPC.
 pub mod answer;
+/// The board auto-move dispatch hook (P4 / D8): on every task FSM transition the
+/// claim loop moves the task's issue card to the `fsm_state`-matched auto-move
+/// column of every board carrying it (best-effort, never blocks the FSM).
+pub mod board;
 /// The attention ingest producer (spec P2, D10): the daemon's own tail of the
 /// shared hook `events.jsonl` into the `attention` table — classifies every
 /// qualifying session event and raises an answerable row + an `AttentionRaised`

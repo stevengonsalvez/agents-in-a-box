@@ -401,6 +401,9 @@ async fn execute_claimed(
     // e38.2: announce the start to subscribed plugins (best-effort push; the
     // next snapshot pull reconciles if no subscriber is connected).
     emit_task_started(events, &task, clock);
+    // P4 / D8: auto-move the task's issue card into any board's `running`
+    // auto-move column (best-effort; never blocks the FSM).
+    crate::board::auto_move_after_transition(pool, &task, "running").await;
     // e38.6: write a durable, agent-authored "started" comment to the task's
     // issue so the agent's activity survives beyond the bounded transcript
     // buffer. A NULL-issue chat task writes nothing; a write fault is logged,
@@ -544,6 +547,9 @@ async fn finalize_success(
         ainb_hangar_proto::events::TaskResult::Success,
         clock,
     );
+    // P4 / D8: auto-move the task's issue card into any board's `done` auto-move
+    // column (the card-green-on-success move). Best-effort; never blocks.
+    crate::board::auto_move_after_transition(pool, task, "done").await;
     // e38.6: durable terminal comment on the issue thread (best-effort).
     progress_comment::emit_checkpoint(
         pool,
@@ -594,6 +600,9 @@ async fn finalize_failure(
         ainb_hangar_proto::events::TaskResult::Failure,
         clock,
     );
+    // P4 / D8: auto-move the task's issue card into any board's `failed`
+    // auto-move column. Best-effort; never blocks.
+    crate::board::auto_move_after_transition(pool, task, "failed").await;
     // e38.6: durable blocker comment carrying the failure reason, so the issue
     // thread records WHY the run stopped (best-effort).
     progress_comment::emit_checkpoint(

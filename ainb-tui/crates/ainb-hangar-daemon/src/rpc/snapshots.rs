@@ -366,6 +366,110 @@ pub async fn squads_list(
         .collect())
 }
 
+/// Snapshot a workspace's user-defined kanban boards for
+/// [`HANGAR_BOARDS_LIST`](ainb_hangar_proto::methods::HANGAR_BOARDS_LIST) (P4).
+///
+/// Reads the boards + columns + card placements from [`BoardRepo`], then enriches
+/// each card with its issue title, a short display id, and the issue's LATEST
+/// task status (which drives the card-green-on-`done` render). Cards are bucketed
+/// into their column; a card whose column was deleted lands in the board's
+/// `unmapped` pool (no data loss). A malformed / unknown workspace resolves to no
+/// boards, not an error.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if a query fails.
+pub async fn boards_list(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::BoardWireRow>, sqlx::Error> {
+    use ainb_hangar_proto::snapshots::{BoardColumnWireRow, BoardWireRow};
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(Vec::new());
+    };
+    let boards = BoardRepo::list(pool, &ws).await?;
+    let mut out = Vec::with_capacity(boards.len());
+    for b in boards {
+        let mut columns: Vec<BoardColumnWireRow> = b
+            .columns
+            .iter()
+            .map(|c| BoardColumnWireRow {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                ord: c.ord,
+                fsm_state: c.fsm_state.clone(),
+                auto_move: c.auto_move,
+                cards: Vec::new(),
+            })
+            .collect();
+        let mut unmapped = Vec::new();
+        for card in &b.cards {
+            let wire = enrich_board_card(pool, ws.as_str(), &card.issue_id).await?;
+            match card.column_id.as_deref() {
+                Some(cid) => match columns.iter_mut().find(|c| c.id == cid) {
+                    Some(col) => col.cards.push(wire),
+                    // A dangling column_id (shouldn't happen under the FK) parks
+                    // the card unmapped rather than dropping it.
+                    None => unmapped.push(wire),
+                },
+                None => unmapped.push(wire),
+            }
+        }
+        out.push(BoardWireRow {
+            id: b.id,
+            name: b.name,
+            auto_move: b.auto_move,
+            columns,
+            unmapped,
+        });
+    }
+    Ok(out)
+}
+
+/// Build the render row for one board card: the issue title + a short display id
+/// + the issue's latest task status (`done` turns the card green). A missing
+/// issue title falls back to the raw id so a card never renders blank.
+async fn enrich_board_card(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<ainb_hangar_proto::snapshots::BoardCardWireRow, sqlx::Error> {
+    let title: Option<String> =
+        sqlx::query_scalar("SELECT title FROM issue WHERE id = ? AND workspace_id = ?")
+            .bind(issue_id)
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await?;
+    // The issue's most recent task's status — the card's live state.
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM agent_task_queue \
+         WHERE issue_id = ? AND workspace_id = ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(issue_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(ainb_hangar_proto::snapshots::BoardCardWireRow {
+        issue_id: issue_id.to_string(),
+        title: title.unwrap_or_else(|| issue_id.to_string()),
+        display_id: short_display_id(issue_id),
+        state,
+    })
+}
+
+/// A short, stable card display id: the last 6 chars of the issue id (char-safe),
+/// or the whole id when it is already short.
+fn short_display_id(id: &str) -> String {
+    let n = id.chars().count();
+    if n <= 6 {
+        return id.to_string();
+    }
+    id.chars().skip(n - 6).collect()
+}
+
 /// Snapshot the skills of `workspace_id`, mapped to wire [`SkillRow`]s.
 ///
 /// `used` reflects whether any agent references the skill (via the `agent_skill`

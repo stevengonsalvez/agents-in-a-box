@@ -158,6 +158,11 @@ const ATTENTION_SUBSCRIBE_REQ_ID: i64 = 34;
 /// JSON-RPC id for an `attention/answer` request raised by the control-center's
 /// inline ASK answering (P2).
 const ATTENTION_ANSWER_REQ_ID: i64 = 35;
+/// JSON-RPC id for the `hangar/boards_list` snapshot request (P4 / D8). Every
+/// board read AND mutation reply carries this id — the daemon answers each
+/// `hangar/board_*` with the refreshed `BoardsListResult`, so one `apply_boards`
+/// handler folds them all.
+const BOARDS_REQ_ID: i64 = 36;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -635,6 +640,7 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOTS_REQ_ID) => self.apply_autopilots(resp),
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
+            RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
@@ -774,6 +780,19 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_tasks(&r.tasks);
+            }
+        }
+    }
+
+    /// Populate the user-defined Boards screen from a `hangar/boards_list` result
+    /// (or any `hangar/board_*` mutation reply, which returns the same refreshed
+    /// envelope) (P4 / D8).
+    fn apply_boards(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardsListResult>(
+                result.clone(),
+            ) {
+                self.screens.set_boards(&r);
             }
         }
     }
@@ -992,6 +1011,11 @@ impl HangarPlugin {
                 scoped.clone(),
             ),
             (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARDS_LIST,
+                scoped.clone(),
+            ),
+            (
                 DAEMON_HEALTH_REQ_ID,
                 daemon_methods::HANGAR_DAEMON_HEALTH,
                 scoped.clone(),
@@ -1127,6 +1151,58 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: task transition send failed: {e}")).await;
+        }
+    }
+
+    /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8).
+    ///
+    /// Maps the [`BoardsAction`] onto the matching `hangar/board_*` RPC, framed
+    /// over the socket cap under [`BOARDS_REQ_ID`] so the reply's refreshed
+    /// `BoardsListResult` folds straight back through [`Self::apply_boards`]. A
+    /// send failure is logged but non-fatal — the board simply doesn't change (the
+    /// next `boards_list` pull reconciles).
+    async fn apply_boards_action(&mut self, host: &HostClient, action: crate::screen::BoardsAction) {
+        use crate::screen::BoardsAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let (method, params) = match action {
+            BoardsAction::BoardCreate { name } => (
+                daemon_methods::HANGAR_BOARD_CREATE,
+                serde_json::json!({ "workspace_id": ws, "name": name }),
+            ),
+            BoardsAction::ColumnReorder {
+                board_id,
+                column_ids,
+            } => (
+                daemon_methods::HANGAR_BOARD_COLUMN_REORDER,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_ids": column_ids }),
+            ),
+            BoardsAction::ColumnDelete {
+                board_id,
+                column_id,
+            } => (
+                daemon_methods::HANGAR_BOARD_COLUMN_DELETE,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id }),
+            ),
+            BoardsAction::ColumnAdd { board_id, name } => (
+                daemon_methods::HANGAR_BOARD_COLUMN_ADD,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "name": name }),
+            ),
+            BoardsAction::BoardUpdate {
+                board_id,
+                auto_move,
+            } => (
+                daemon_methods::HANGAR_BOARD_UPDATE,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "auto_move": auto_move }),
+            ),
+        };
+        let Ok(body) = encode_request(BOARDS_REQ_ID, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: board rpc send failed: {e}")).await;
         }
     }
 
@@ -2554,7 +2630,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))
@@ -2680,6 +2756,12 @@ impl Plugin for HangarPlugin {
         // board and fire `hangar/task_transition` over the daemon socket.
         if let Some(action) = self.screens.take_pending_kanban_action() {
             self.apply_kanban_action(host, action).await;
+        }
+        // P4 / D8: drain any deferred board mutation (`⇧←/→`, `x`, `n`, `m`) raised
+        // by the Boards screen and fire the matching `hangar/board_*` over the
+        // daemon socket; the refreshed BoardsListResult reply re-renders the board.
+        if let Some(action) = self.screens.take_pending_boards_action() {
+            self.apply_boards_action(host, action).await;
         }
         // e38.8: drain any deferred issue-assign (Enter in the agent picker)
         // raised by the modal and fire `hangar/issue_update` over the daemon

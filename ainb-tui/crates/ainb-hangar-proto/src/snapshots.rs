@@ -941,6 +941,194 @@ pub struct SquadAssignResult {
     pub runtime_id: String,
 }
 
+// ---------------------------------------------------------------------------
+// P4 — user-defined kanban boards (D8).
+// ---------------------------------------------------------------------------
+
+/// One card on a board: an issue placed in a column, enriched for the render
+/// ([`crate::methods::HANGAR_BOARDS_LIST`], P4).
+///
+/// `issue_id` is the placed issue; `title` + `display_id` are folded in from the
+/// `issue` row so the tile paints without a second lookup; `state` is the issue's
+/// LATEST task status (`queued`/`running`/`done`/…) or `None` when no task has
+/// run yet — the board turns a card green when `state == "done"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardCardWireRow {
+    /// The placed issue's id (`issue.id`).
+    pub issue_id: String,
+    /// The issue title (the card's label).
+    pub title: String,
+    /// The short issue id rendered on the card header (`#<display_id>`).
+    pub display_id: String,
+    /// The issue's latest task status, or `None` when no task has run. `"done"`
+    /// turns the card green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// One user-defined board column with the cards bucketed into it
+/// ([`crate::methods::HANGAR_BOARDS_LIST`], P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardColumnWireRow {
+    /// The column's stable surrogate id (what a reorder / card-move key off).
+    pub id: String,
+    /// The column's display name.
+    pub name: String,
+    /// The column's left-to-right position (contiguous `0..n`).
+    pub ord: i64,
+    /// The task-status this column maps to (the auto-move target key), or `None`
+    /// for a purely manual column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_state: Option<String>,
+    /// Whether a task reaching this column's `fsm_state` auto-moves the card here.
+    pub auto_move: bool,
+    /// The cards currently in this column (in board order).
+    pub cards: Vec<BoardCardWireRow>,
+}
+
+/// One board with its ordered columns and its cards
+/// ([`crate::methods::HANGAR_BOARDS_LIST`], P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardWireRow {
+    /// The board's id.
+    pub id: String,
+    /// The board's name (unique within its workspace).
+    pub name: String,
+    /// The per-board auto-move master toggle.
+    pub auto_move: bool,
+    /// The board's columns, left-to-right.
+    pub columns: Vec<BoardColumnWireRow>,
+    /// Cards whose column was deleted — parked unmapped (no data loss). The board
+    /// renders these in a fallback pool so they never disappear.
+    pub unmapped: Vec<BoardCardWireRow>,
+}
+
+/// Result of [`crate::methods::HANGAR_BOARDS_LIST`] and the refreshed view every
+/// `board_*` mutation answers with (P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardsListResult {
+    /// The workspace's boards, ordered by name.
+    pub boards: Vec<BoardWireRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CREATE`] (P4): create one empty board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCreateParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board name (unique within the workspace).
+    pub name: String,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_UPDATE`] (P4): rename a board and/or
+/// flip its auto-move master toggle. Omitted fields are left unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardUpdateParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board to update.
+    pub board_id: String,
+    /// The new name, or `None` to leave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The new auto-move master toggle, or `None` to leave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_move: Option<bool>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_DELETE`] (P4): a board id in a
+/// workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardIdParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board to delete.
+    pub board_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_COLUMN_ADD`] (P4): append a column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardColumnAddParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board to append the column to.
+    pub board_id: String,
+    /// The new column's display name.
+    pub name: String,
+    /// The task-status the column maps to (the auto-move target key), or `None`
+    /// for a purely manual column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_state: Option<String>,
+    /// Whether the column auto-moves; omitted defaults to `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_move: Option<bool>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_COLUMN_UPDATE`] (P4).
+///
+/// An OMITTED `fsm_state` leaves the mapping unchanged; an EMPTY-STRING
+/// `fsm_state` clears it (a manual column). `name` / `auto_move` omitted are
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardColumnUpdateParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the column belongs to.
+    pub board_id: String,
+    /// The column to update.
+    pub column_id: String,
+    /// The new name, or `None` to leave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `None` leaves the mapping; `Some("")` clears it; `Some(s)` sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_state: Option<String>,
+    /// The new auto-move flag, or `None` to leave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_move: Option<bool>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_COLUMN_DELETE`] (P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardColumnDeleteParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the column belongs to.
+    pub board_id: String,
+    /// The column to delete (its cards park unmapped).
+    pub column_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_COLUMN_REORDER`] (P4): the board's
+/// columns in their new order. `column_ids` must be exactly the current columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardColumnReorderParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board whose columns to reorder.
+    pub board_id: String,
+    /// The column ids in their new left-to-right order (a permutation of the
+    /// board's current columns).
+    pub column_ids: Vec<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_ADD`] and
+/// [`crate::methods::HANGAR_BOARD_CARD_MOVE`] (P4): an issue placement on a board.
+///
+/// Omit `column_id` to place / park the card unmapped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board to place / move the card on.
+    pub board_id: String,
+    /// The issue the card represents.
+    pub issue_id: String,
+    /// The column to place / move the card into, or `None` for unmapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1564,5 +1752,47 @@ mod tests {
         // The serialized form drops the absent optionals entirely.
         let s = serde_json::to_string(&minimal).unwrap();
         assert_eq!(s, r#"{"workspace_id":"ws-1","squad_id":"s1"}"#);
+    }
+
+    /// The P4 board result round-trips, and a column-update's `fsm_state`
+    /// distinguishes OMITTED (unchanged) from EMPTY-STRING (clear).
+    #[test]
+    fn board_envelopes_roundtrip_and_fsm_state_tri_state() {
+        let result = BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Sprint".into(),
+                auto_move: true,
+                columns: vec![BoardColumnWireRow {
+                    id: "c1".into(),
+                    name: "Done".into(),
+                    ord: 0,
+                    fsm_state: Some("done".into()),
+                    auto_move: true,
+                    cards: vec![BoardCardWireRow {
+                        issue_id: "issue-1".into(),
+                        title: "Ship it".into(),
+                        display_id: "sue-1".into(),
+                        state: Some("done".into()),
+                    }],
+                }],
+                unmapped: Vec::new(),
+            }],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(serde_json::from_str::<BoardsListResult>(&s).unwrap(), result);
+
+        // Omitted fsm_state => None (leave the mapping unchanged).
+        let omitted: BoardColumnUpdateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","column_id":"c1","name":"Doing"}"#,
+        )
+        .unwrap();
+        assert_eq!(omitted.fsm_state, None, "omitted = leave unchanged");
+        // Empty-string fsm_state => Some("") (clear to a manual column).
+        let cleared: BoardColumnUpdateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","column_id":"c1","fsm_state":""}"#,
+        )
+        .unwrap();
+        assert_eq!(cleared.fsm_state.as_deref(), Some(""), "empty = clear");
     }
 }

@@ -50,6 +50,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         '4' => switch_tab(state, Screen::Autopilots),
         // `K` (capital) opens the Kanban board from anywhere (P8.4).
         'K' => switch_tab(state, Screen::Kanban),
+        // `B` (capital) opens the user-defined Boards screen from anywhere (P4).
+        'B' => switch_tab(state, Screen::Boards),
         // `D` (capital) opens the daemon-health pane from anywhere (P8.5).
         'D' => switch_tab(state, Screen::DaemonHealth),
         // `U` (capital) opens the usage dashboard from anywhere (e38.35).
