@@ -678,6 +678,7 @@ async fn handle(
         methods::ATC_REGISTER => handle_atc_register(pool, req).await,
         methods::ATC_LIST => handle_atc_list(pool).await,
         methods::ATC_ESCALATE => handle_atc_escalate(pool, req, events).await,
+        methods::ATC_UNREGISTER => handle_atc_unregister(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -2031,6 +2032,39 @@ async fn handle_atc_escalate(
     .await
     .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AtcEscalateResult { attention_id })
+}
+
+/// Dispatch `atc/unregister` (spec P9, D12): disable a registered ATC instance's
+/// heartbeat cron. The daemon-native counterpart to `ainb fleet atc teardown`'s
+/// timer removal — flips `enabled = 0` and clears `next_tick_at` (via
+/// `set_enabled(false, None)`) so `list_schedulable` stops returning it, leaving
+/// the instance's audit + retry-ledger rows intact. A blank name is a client
+/// error; an unknown name is a no-op (`disabled = false`). Idempotent. Split out
+/// of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_atc_unregister(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+
+    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams =
+        parse_params(req, "{ name }")?;
+    let name = params.name.trim();
+    if name.is_empty() {
+        return Err(invalid_params("atc instance name must not be empty"));
+    }
+    // Only a registered instance is disabled; an unknown name is a clean no-op so
+    // teardown is safe to fire unconditionally.
+    let disabled = AtcInstanceRepo::get(pool, name).await.map_err(|e| store_err(&e))?.is_some();
+    if disabled {
+        AtcInstanceRepo::set_enabled(pool, name, false, None)
+            .await
+            .map_err(|e| store_err(&e))?;
+    }
+    to_value(&ainb_hangar_proto::snapshots::AtcUnregisterResult {
+        name: name.to_string(),
+        disabled,
+    })
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).

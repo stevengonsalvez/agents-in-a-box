@@ -515,6 +515,15 @@ pub const ATC_LIST: &str = "atc/list";
 /// `task-log.md`. Mutating.
 pub const ATC_ESCALATE: &str = "atc/escalate";
 
+/// `atc/unregister` — disable a registered ATC instance's heartbeat cron (spec
+/// P9, D12). Params: [`crate::snapshots::AtcUnregisterParams`] (`{ name }`).
+/// Result: [`crate::snapshots::AtcUnregisterResult`]. The daemon-native
+/// counterpart to `ainb fleet atc teardown`'s launchd/systemd timer removal: it
+/// flips `enabled = 0` and clears `next_tick_at` so the heartbeat cron stops
+/// scheduling the instance, without deleting its audit/ledger rows. Mutating +
+/// idempotent (unregistering an unknown or already-disabled instance is a no-op).
+pub const ATC_UNREGISTER: &str = "atc/unregister";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -577,6 +586,7 @@ pub const ALL_METHODS: &[&str] = &[
     ATC_REGISTER,
     ATC_LIST,
     ATC_ESCALATE,
+    ATC_UNREGISTER,
     AUTH_HELLO,
     PING,
 ];
@@ -719,6 +729,7 @@ mod tests {
             ATC_REGISTER,
             ATC_LIST,
             ATC_ESCALATE,
+            ATC_UNREGISTER,
             AUTH_HELLO,
             PING,
         ];

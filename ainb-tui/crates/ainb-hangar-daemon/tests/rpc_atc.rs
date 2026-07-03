@@ -203,6 +203,64 @@ async fn atc_register_list_and_escalate_over_the_socket() {
 }
 
 #[tokio::test]
+async fn atc_unregister_disables_the_heartbeat_cron_over_the_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store) = start_server(dir.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+
+    // Register, then unregister — teardown's daemon-native counterpart.
+    let reg = client
+        .call(
+            methods::ATC_REGISTER,
+            serde_json::json!({ "name": "main", "cwd": "/work/atc", "tmux_session": "atc-main" }),
+        )
+        .await;
+    assert!(reg["error"].is_null(), "atc/register must ack: {reg}");
+
+    let unreg = client
+        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "main" }))
+        .await;
+    assert!(unreg["error"].is_null(), "atc/unregister must ack: {unreg}");
+    assert_eq!(unreg["result"]["name"], "main");
+    assert_eq!(unreg["result"]["disabled"], true, "a registered instance is disabled");
+
+    // The instance row survives (audit) but is now disabled + unscheduled, so the
+    // heartbeat cron no longer considers it.
+    let list = client.call(methods::ATC_LIST, serde_json::json!({})).await;
+    let instances = list["result"]["instances"].as_array().unwrap();
+    assert_eq!(instances.len(), 1, "unregister disables, it does not delete: {list}");
+    assert_eq!(instances[0]["enabled"], false, "heartbeat cron is disabled");
+    assert!(
+        instances[0]["next_tick_at"].is_null(),
+        "next_tick_at is cleared so list_schedulable skips it: {list}"
+    );
+
+    // Idempotent: unregistering an unknown name is a clean no-op.
+    let noop = client
+        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "ghost" }))
+        .await;
+    assert!(noop["error"].is_null(), "unknown-name unregister must ack: {noop}");
+    assert_eq!(noop["result"]["disabled"], false, "unknown name is a no-op");
+}
+
+#[tokio::test]
+async fn atc_unregister_rejects_a_blank_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store) = start_server(dir.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+
+    let resp = client
+        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "  " }))
+        .await;
+    assert!(
+        resp["error"].is_object(),
+        "a blank instance name is a client error: {resp}"
+    );
+}
+
+#[tokio::test]
 async fn atc_register_rejects_a_blank_name() {
     let dir = tempfile::tempdir().unwrap();
     let (socket, _store) = start_server(dir.path()).await;

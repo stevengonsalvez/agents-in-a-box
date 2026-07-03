@@ -584,6 +584,25 @@ pub struct AtcEscalateResult {
     pub attention_id: String,
 }
 
+/// Params for [`crate::methods::ATC_UNREGISTER`] (spec P9, D12): disable a
+/// registered ATC instance's heartbeat cron by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcUnregisterParams {
+    /// The sanitized instance name to disable.
+    pub name: String,
+}
+
+/// Result of [`crate::methods::ATC_UNREGISTER`]: the instance name and whether it
+/// was a registered instance the daemon disabled (`false` = unknown name, a
+/// no-op).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcUnregisterResult {
+    /// The instance name that was targeted.
+    pub name: String,
+    /// `true` when a registered instance was disabled; `false` for an unknown name.
+    pub disabled: bool,
+}
+
 /// One per-agent usage row in the dashboard rollup
 /// ([`crate::methods::HANGAR_USAGE_ROLLUP`], e38.35): an agent's summed tokens +
 /// cost over the runs it executed in the workspace.

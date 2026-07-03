@@ -20,8 +20,8 @@ use std::time::Duration;
 use ainb_hangar_proto::auth;
 use ainb_hangar_proto::events::AttentionRow;
 use ainb_hangar_proto::snapshots::{
-    AnswerParams, AnswerResult, AtcRegisterParams, AtcRegisterResult, AttentionListParams,
-    AttentionListResult,
+    AnswerParams, AnswerResult, AtcRegisterParams, AtcRegisterResult, AtcUnregisterParams,
+    AtcUnregisterResult, AttentionListParams, AttentionListResult,
 };
 use ainb_hangar_proto::{RpcId, RpcRequest, RpcResponse, methods};
 use serde_json::{Value, json};
@@ -137,6 +137,20 @@ impl DaemonClient {
     ) -> Result<AtcRegisterResult, DaemonError> {
         let value = serde_json::to_value(params).expect("AtcRegisterParams serializes");
         let result = self.call(methods::ATC_REGISTER, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Disable a registered ATC instance's heartbeat cron (`atc/unregister`, spec
+    /// P9 D12) — the daemon-native counterpart to `ainb fleet atc teardown`'s
+    /// timer removal. Clears `enabled` + `next_tick_at` so the daemon-owned
+    /// heartbeat cron stops scheduling the instance. Idempotent (an unknown name
+    /// answers `disabled = false`).
+    pub async fn atc_unregister(
+        &self,
+        params: AtcUnregisterParams,
+    ) -> Result<AtcUnregisterResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("AtcUnregisterParams serializes");
+        let result = self.call(methods::ATC_UNREGISTER, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
