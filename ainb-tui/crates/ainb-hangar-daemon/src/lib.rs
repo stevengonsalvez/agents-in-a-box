@@ -163,6 +163,15 @@ pub mod runtime_register;
 /// `autopilot.tick_skipped`), then recomputes the next tick from the fired slot
 /// to avoid drift. A [`tokio_util::sync::CancellationToken`] exits it cleanly.
 pub mod scheduler;
+/// Auto-standup watcher (D13, Stevie's LOCKED override; spec P9 §4.8).
+///
+/// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
+/// `/standup` into a stagnant, idle-at-prompt session via the one verified send
+/// path — behind every guardrail: a global toggle (default ON), a per-session
+/// opt-out, a 60-minute per-session cooldown, and a max-one-concurrent cap. The
+/// pure [`standup::decide_standup`] gate is the exhaustively-tested heart; a busy
+/// / mid-turn session is NEVER written to (hook status, never a pane heuristic).
+pub mod standup;
 /// Deterministic P4 seed fixture for the e2e tripwires (`test-support` only).
 ///
 /// Writes a `default` workspace with issues/agents/skills + a running task into
@@ -400,6 +409,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         tokio::spawn(scheduler.run());
         tracing::info!("autopilot scheduler spawned");
     }
+
+    // Spec P9 (D13): spawn the auto-standup watcher — a daemon-global periodic
+    // scan that WRITES `/standup` into a stagnant, idle-at-prompt session behind
+    // every guardrail (global toggle default ON, per-session opt-out, 60-min
+    // cooldown, max-one concurrent). It writes via the one verified send path
+    // (INV-2) and raises a `waiting` "standup ready" attention row when a fired
+    // standup's turn completes. Non-fatal like the scheduler: a discovery / send /
+    // store fault is warned and degraded, never a daemon-down. The handle is
+    // dropped (process exit tears the task down).
+    let _standup = crate::standup::StandupWatcher::spawn(store.pool().clone(), broker.sink());
+    tracing::info!("auto-standup watcher spawned");
 
     // e38.18: the webhook ingress. OPT-IN — it only binds when
     // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come
