@@ -1056,6 +1056,34 @@ pub struct SquadAssignResult {
     pub runtime_id: String,
 }
 
+/// One fanned-out member task in a [`SquadFanoutResult`] (P7): the enqueued row
+/// plus the member agent / runtime it routed to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SquadMemberDispatchRow {
+    /// The enqueued `agent_task_queue` row id.
+    pub task_id: String,
+    /// The member agent the task was routed to (`agent.id`).
+    pub agent_id: String,
+    /// The runtime the task was keyed to (the member agent's `runtime_id`).
+    pub runtime_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_SQUAD_FANOUT`] (P7): the LEADER's brief task
+/// plus one dispatch per distinct `agent` member, all on the same issue.
+///
+/// The `leader` is identical to a [`SquadAssignResult`]; `members` carries the
+/// fanned-out member dispatches (the leader's agent and any human member
+/// excluded), ordered by member agent id. The per-(issue, agent) claim guard
+/// (migration `0012`) is what lets all of them coexist as pending tasks on the one
+/// issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SquadFanoutResult {
+    /// The leader's brief task (row id + leader agent/runtime).
+    pub leader: SquadAssignResult,
+    /// One dispatch per fanned-out `agent` member, ordered by agent id.
+    pub members: Vec<SquadMemberDispatchRow>,
+}
+
 // ---------------------------------------------------------------------------
 // P4 — user-defined kanban boards (D8).
 // ---------------------------------------------------------------------------
@@ -1853,6 +1881,29 @@ mod tests {
             serde_json::from_str::<SquadAssignResult>(&s).unwrap(),
             assigned
         );
+
+        // P7 — the fan-out envelope round-trips leader + members.
+        let fanout = SquadFanoutResult {
+            leader: SquadAssignResult {
+                task_id: "task-lead".into(),
+                leader_agent_id: "a-lead".into(),
+                runtime_id: "rt-lead".into(),
+            },
+            members: vec![
+                SquadMemberDispatchRow {
+                    task_id: "task-m1".into(),
+                    agent_id: "a-m1".into(),
+                    runtime_id: "rt-m1".into(),
+                },
+                SquadMemberDispatchRow {
+                    task_id: "task-m2".into(),
+                    agent_id: "a-m2".into(),
+                    runtime_id: "rt-m2".into(),
+                },
+            ],
+        };
+        let s = serde_json::to_string(&fanout).unwrap();
+        assert_eq!(serde_json::from_str::<SquadFanoutResult>(&s).unwrap(), fanout);
     }
 
     /// `SquadAssignParams` omits its optional fields on the wire and defaults

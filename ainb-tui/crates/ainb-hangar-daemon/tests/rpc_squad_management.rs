@@ -189,6 +189,50 @@ async fn seed_second_agent(store: &Store) {
     .unwrap();
 }
 
+/// Seed one online `agent_runtime` + `agent` pair (`agent_id` on `runtime_id`),
+/// each runtime carrying a distinct provider so two runtimes in one workspace do
+/// not collide on the `(workspace_id, daemon_id, provider)` index. Used by the
+/// fan-out test to stand up a leader + member agents on their own runtimes.
+async fn seed_agent_on(store: &Store, agent_id: &str, runtime_id: &str) {
+    use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+    use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
+
+    AgentRuntimeRepo::insert(
+        store.pool(),
+        &AgentRuntime {
+            id: runtime_id.into(),
+            workspace_id: WS_ID.into(),
+            daemon_id: "daemon-1".into(),
+            provider: format!("provider-{runtime_id}"),
+            runtime_mode: "local".into(),
+            last_seen_at: Some(1),
+            status: "online".into(),
+        },
+    )
+    .await
+    .unwrap();
+    AgentRepo::insert(
+        store.pool(),
+        &Agent {
+            id: agent_id.into(),
+            workspace_id: WS_ID.into(),
+            name: agent_id.into(),
+            runtime_id: runtime_id.into(),
+            instructions: None,
+            visibility: "workspace".into(),
+            owner_id: "user-1".into(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// Find a squad row in a `squads_list`-shaped result by id.
 fn find_squad<'a>(resp: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
     resp["result"]["squads"]
@@ -447,6 +491,115 @@ async fn squad_assign_rpc_routes_a_task_to_the_leader_agent() {
     assert!(
         other.is_none() || other.as_ref().map(|t| t.id.as_str()) != Some(task_id.as_str()),
         "the squad task must not be claimable by the non-leader runtime"
+    );
+}
+
+/// FAN-OUT THROUGH THE `hangar/squad_fanout` RPC (P7): assigning an issue to a
+/// squad briefs the LEADER *and* enqueues one task per distinct `agent` member,
+/// all on the SAME issue, each claimable in parallel on its own runtime.
+///
+/// The squad's leader is `agent-2` (runtime-2); its members are `agent-3`
+/// (runtime-3), `agent-4` (runtime-4), plus the human `member:user-1` (which must
+/// NOT fan out). The test drives the product RPC naming only the squad + issue;
+/// the daemon resolves the leader + members server-side. It then proves each of
+/// the three agent runtimes claims its own task on `issue-2` via the real
+/// `ClaimTaskService` — three pending tasks coexisting on one issue, the
+/// per-(issue, agent) guard (migration 0012) at work.
+#[tokio::test]
+async fn squad_fanout_rpc_briefs_leader_and_fans_members_claimable_in_parallel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    // Leader + two member agents, each on its own runtime.
+    seed_agent_on(&store, "agent-2", "runtime-2").await;
+    seed_agent_on(&store, "agent-3", "runtime-3").await;
+    seed_agent_on(&store, "agent-4", "runtime-4").await;
+    let pool = store.pool();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // A squad led by agent-2 with two agent members + one human member.
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "shippers", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+    for m in ["agent:agent-3", "agent:agent-4", "member:user-1"] {
+        c.call(
+            methods::HANGAR_SQUAD_MEMBER_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": m }),
+        )
+        .await;
+    }
+
+    // FAN OUT issue-2 across the squad — naming ONLY the squad + issue.
+    let fanned = c
+        .call(
+            methods::HANGAR_SQUAD_FANOUT,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "issue_id": "issue-2" }),
+        )
+        .await;
+    assert!(fanned["error"].is_null(), "squad_fanout must ack: {fanned}");
+    assert_eq!(
+        fanned["result"]["leader"]["leader_agent_id"], "agent-2",
+        "the leader gets the brief: {fanned}"
+    );
+    let members = fanned["result"]["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "two agent members fanned out (human skipped): {fanned}");
+    let member_agents: Vec<&str> = members.iter().map(|m| m["agent_id"].as_str().unwrap()).collect();
+    assert!(member_agents.contains(&"agent-3"), "agent-3 fanned: {fanned}");
+    assert!(member_agents.contains(&"agent-4"), "agent-4 fanned: {fanned}");
+
+    // PARALLEL CLAIM: every runtime claims its own task on issue-2 at once.
+    let clock = FixedClock(10_000);
+    for (runtime, agent) in [
+        ("runtime-2", "agent-2"),
+        ("runtime-3", "agent-3"),
+        ("runtime-4", "agent-4"),
+    ] {
+        let claimed = ClaimTaskService::claim_for_runtime(pool, runtime, &clock)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{runtime} claims its squad task"));
+        assert_eq!(claimed.agent_id, agent, "{runtime} claimed the wrong agent's task");
+        assert_eq!(
+            claimed.issue_id.as_deref(),
+            Some("issue-2"),
+            "the fanned-out task is on issue-2"
+        );
+    }
+}
+
+/// `hangar/squad_fanout` REJECTS a squad with a human-member leader: like
+/// `squad_assign`, there is no agent to brief, so nothing is enqueued.
+#[tokio::test]
+async fn squad_fanout_rpc_rejects_a_human_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "humans", "leader": "member:user-1" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    let fanned = c
+        .call(
+            methods::HANGAR_SQUAD_FANOUT,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "issue_id": "issue-2" }),
+        )
+        .await;
+    assert!(
+        !fanned["error"].is_null(),
+        "fanning out a human-led squad must be rejected: {fanned}"
     );
 }
 

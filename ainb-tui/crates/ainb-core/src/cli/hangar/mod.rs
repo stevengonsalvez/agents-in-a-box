@@ -2125,6 +2125,9 @@ fn squad_assign_cli_err(
         SquadAssignError::LeaderAgentMissing(id) => {
             anyhow::anyhow!("squad leader agent `{id}` not found")
         }
+        SquadAssignError::MemberAgentMissing(id) => {
+            anyhow::anyhow!("squad member agent `{id}` not found")
+        }
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
     }
 }

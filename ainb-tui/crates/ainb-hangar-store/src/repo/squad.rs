@@ -245,6 +245,38 @@ impl SquadRepo {
         }))
     }
 
+    /// List the `agent`-typed members of `squad` (their `agent.id`s), the fan-out
+    /// seam that makes member dispatch real (P7).
+    ///
+    /// Returns only the members whose actor-ref is an `agent` (a human `member`
+    /// carries no runtime to dispatch to and is skipped), ordered by id for a
+    /// stable fan-out. Workspace-scoped: a squad id from another tenant resolves to
+    /// an empty vec (the `JOIN squad ... workspace_id` guard), never another
+    /// tenant's members. The LEADER is *not* excluded here — a squad whose leader
+    /// is also listed as a member yields that agent once in this list; the fan-out
+    /// caller dedupes it against the already-dispatched leader.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn member_agent_ids(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT sm.member_id FROM squad_member sm \
+             JOIN squad s ON s.id = sm.squad_id \
+             WHERE sm.squad_id = ? AND s.workspace_id = ? AND sm.member_type = 'agent' \
+             ORDER BY sm.member_id",
+        )
+        .bind(squad_id)
+        .bind(workspace.as_str())
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     /// Confirm `squad_id` belongs to `workspace` inside `tx`, erroring with
     /// [`SquadRepoError::NotFound`] otherwise (the tenant guard the member
     /// mutations share).
@@ -433,6 +465,32 @@ mod tests {
         SquadRepo::remove_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
         let squads = SquadRepo::list(pool, &ws("ws-a")).await.unwrap();
         assert!(squads[0].members.is_empty());
+    }
+
+    /// `member_agent_ids` returns only the `agent` members (a human `member` is
+    /// skipped), ordered by id, and is workspace-scoped (a foreign tenant sees an
+    /// empty list) — the fan-out seam.
+    #[tokio::test]
+    async fn member_agent_ids_lists_only_agent_members_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-2")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
+        // A human member is not an agent and must be excluded.
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &member("u-1")).await.unwrap();
+
+        let ids = SquadRepo::member_agent_ids(pool, &ws("ws-a"), "s1").await.unwrap();
+        assert_eq!(ids, vec!["a-1".to_string(), "a-2".to_string()], "agent-only, ordered");
+
+        // A foreign tenant resolves to an empty list (tenant guard).
+        seed_ws(pool, "ws-b").await;
+        let foreign = SquadRepo::member_agent_ids(pool, &ws("ws-b"), "s1").await.unwrap();
+        assert!(foreign.is_empty(), "a foreign tenant sees no members");
     }
 
     /// `leader_agent_id` resolves an agent leader to its agent id (the routing
