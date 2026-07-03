@@ -331,7 +331,9 @@ impl LayoutComponent {
             desc(" home"),
         ]);
         frame.render_widget(
-            Paragraph::new(line).alignment(Alignment::Center).style(Style::default().bg(PANEL_BG)),
+            Paragraph::new(line)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(PANEL_BG)),
             area,
         );
     }

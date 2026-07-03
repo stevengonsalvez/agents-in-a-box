@@ -995,8 +995,7 @@ impl AppConfig {
             // New config: respect explicit settings
             self.ui_preferences.show_container_status = other.ui_preferences.show_container_status;
             self.ui_preferences.show_git_status = other.ui_preferences.show_git_status;
-            self.ui_preferences.show_session_menu_bar =
-                other.ui_preferences.show_session_menu_bar;
+            self.ui_preferences.show_session_menu_bar = other.ui_preferences.show_session_menu_bar;
         }
         // Old configs keep the default (true) values
         if other.ui_preferences.preferred_editor.is_some() {
