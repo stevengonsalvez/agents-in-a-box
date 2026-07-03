@@ -55,7 +55,7 @@ ainb fleet standup --no-enrich           # 0-token roster (env AINB_FLEET_ENRICH
 fleet standup` or `ainb fleet --format json standup` both work); the
 global-first form above is the convention across the fleet skills.
 
-The workflow-backed briefing (`/ainb-fleet:hangar` verb=standup) drafts the
+The workflow-backed briefing (`/ainb-fleet:jarvis` verb=standup) drafts the
 per-session "what it's doing" lines in a **single batched agent**, not one per
 session. `--no-enrich` skips that entirely.
 
