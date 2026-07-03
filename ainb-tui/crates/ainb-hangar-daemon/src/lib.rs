@@ -19,6 +19,13 @@ use crate::run_loop::{DaemonConfig, run};
 /// exactly once (first-answer-wins), into the right session (C1 misroute guard),
 /// via the one verified send path. Backs the `attention/answer` RPC.
 pub mod answer;
+/// ATC on the daemon (D12, spec P9 §4.7): the instance registry, the heartbeat
+/// cron (the launchd/systemd timer's daemon-native replacement — reusing the
+/// autopilot scheduler's DB-durable tick loop), the store-backed retry cap, and
+/// [`atc::raise_escalation`] — the path that turns a stuck session into an
+/// `escalation` attention row so it reaches the phone/web push instead of
+/// dead-ending in `task-log.md`.
+pub mod atc;
 /// The attention ingest producer (spec P2, D10): the daemon's own tail of the
 /// shared hook `events.jsonl` into the `attention` table — classifies every
 /// qualifying session event and raises an answerable row + an `AttentionRaised`
@@ -420,6 +427,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // dropped (process exit tears the task down).
     let _standup = crate::standup::StandupWatcher::spawn(store.pool().clone(), broker.sink());
     tracing::info!("auto-standup watcher spawned");
+
+    // Spec P9 (D12): spawn the ATC heartbeat cron — the launchd/systemd timer's
+    // daemon-native replacement. It reuses the autopilot scheduler's DB-durable
+    // tick loop over `atc_instance.next_tick_at`, fires each instance's heartbeat
+    // on its cron (enforcing the store-backed retry cap and escalating exhausted
+    // sessions through the attention pipeline), and reschedules from the fired
+    // slot. Non-fatal like the scheduler; the handle is dropped (process exit
+    // tears the task down).
+    let _atc_heartbeat = crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
+    tracing::info!("ATC heartbeat cron spawned");
 
     // e38.18: the webhook ingress. OPT-IN — it only binds when
     // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come

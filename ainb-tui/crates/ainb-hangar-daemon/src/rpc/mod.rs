@@ -675,6 +675,9 @@ async fn handle(
         // fleet-wide forwarder is the stream side (see `serve_conn`).
         methods::ATTENTION_SUBSCRIBE => handle_attention_subscribe(pool, req).await,
         methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
+        methods::ATC_REGISTER => handle_atc_register(pool, req).await,
+        methods::ATC_LIST => handle_atc_list(pool).await,
+        methods::ATC_ESCALATE => handle_atc_escalate(pool, req, events).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -1925,6 +1928,109 @@ async fn handle_attention_answer(
         .await
         .map_err(|e| store_err(&e))?;
     to_value(&result)
+}
+
+/// Dispatch `atc/register` (spec P9, D12): register (or re-register) an ATC
+/// instance so its heartbeat becomes a daemon cron. The daemon-native
+/// replacement for `ainb fleet atc setup`'s launchd/systemd timer install:
+/// computes the first heartbeat tick from the (defaulted) cron, upserts the
+/// `atc_instance` row, and answers the persisted name + next tick. Idempotent by
+/// name. A blank name is a client error. Split out of [`handle`] to keep that
+/// dispatcher within the line cap.
+async fn handle_atc_register(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, RegisterAtc};
+
+    let params: ainb_hangar_proto::snapshots::AtcRegisterParams = parse_params(
+        req,
+        "{ name, cwd?, tmux_session?, heartbeat_cron?, err_retry_cap?, idle_pause_min? }",
+    )?;
+    if params.name.trim().is_empty() {
+        return Err(invalid_params("atc instance name must not be empty"));
+    }
+    // Default the heartbeat cron to every-2-min (the standalone ATC's default),
+    // validated by the same cron parser the register/reschedule seam uses.
+    let cron = params.heartbeat_cron.clone().unwrap_or_else(|| "*/2 * * * *".to_string());
+    let now_ms = SystemClock.now_ms();
+    let next_tick_at = crate::atc::next_heartbeat_tick(&cron, now_ms);
+    // A cron that does not parse is a client error (never a silently-unscheduled
+    // instance).
+    if next_tick_at.is_none()
+        && ainb_hangar_core::autopilot::cron::parse_cron(&cron).is_err()
+    {
+        return Err(invalid_params(&format!("invalid heartbeat cron: {cron}")));
+    }
+    let reg = RegisterAtc {
+        name: params.name.trim().to_string(),
+        cwd: params.cwd.clone(),
+        tmux_session: params.tmux_session.clone(),
+        heartbeat_cron: cron,
+        err_retry_cap: params.err_retry_cap.unwrap_or(3),
+        idle_pause_min: params.idle_pause_min.unwrap_or(60),
+        next_tick_at,
+    };
+    AtcInstanceRepo::register(pool, &reg, now_ms).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::AtcRegisterResult {
+        name: reg.name,
+        next_tick_at,
+    })
+}
+
+/// Dispatch `atc/list` (spec P9, D12): list every registered ATC instance,
+/// name-ordered. A read (ATC is host-wide, not workspace-partitioned). Split out
+/// of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+
+    let instances = AtcInstanceRepo::list(pool)
+        .await
+        .map_err(|e| store_err(&e))?
+        .into_iter()
+        .map(|r| ainb_hangar_proto::snapshots::AtcInstanceWire {
+            name: r.name,
+            cwd: r.cwd,
+            tmux_session: r.tmux_session,
+            heartbeat_cron: r.heartbeat_cron,
+            err_retry_cap: r.err_retry_cap,
+            idle_pause_min: r.idle_pause_min,
+            next_tick_at: r.next_tick_at,
+            enabled: r.enabled,
+            last_heartbeat_at: r.last_heartbeat_at,
+        })
+        .collect();
+    to_value(&ainb_hangar_proto::snapshots::AtcListResult { instances })
+}
+
+/// Dispatch `atc/escalate` (spec P9, D12): raise an ATC escalation as an
+/// `escalation` attention row through the same pipeline every other input request
+/// uses, so it reaches the phone/web push. Answers the raised attention id. A
+/// blank instance/session/reason is a client error. Split out of [`handle`] to
+/// keep that dispatcher within the line cap.
+async fn handle_atc_escalate(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AtcEscalateParams =
+        parse_params(req, "{ instance_name, session_id, cwd?, workspace_id?, reason }")?;
+    if params.instance_name.trim().is_empty() || params.session_id.trim().is_empty() {
+        return Err(invalid_params("atc escalate requires instance_name and session_id"));
+    }
+    let attention_id = crate::atc::raise_escalation(
+        pool,
+        events,
+        params.instance_name.trim(),
+        params.session_id.trim(),
+        &params.cwd,
+        params.workspace_id.as_deref(),
+        &params.reason,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::AtcEscalateResult { attention_id })
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).
