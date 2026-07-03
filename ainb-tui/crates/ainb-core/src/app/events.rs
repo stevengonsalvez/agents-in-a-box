@@ -366,43 +366,47 @@ pub enum AppEvent {
     // units of a fetched source + target tools, then import.
     SkillManagerPreviewUp,
     SkillManagerPreviewDown,
-    SkillManagerPreviewToggle,      // Space — toggle the cursor unit
-    SkillManagerPreviewAll,         // a — select every unit
-    SkillManagerPreviewNone,        // n — clear the selection
-    SkillManagerPreviewTool(usize), // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
-    SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
-    SkillManagerPreviewClose,       // Esc — discard, nothing persisted
-    SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
-    GoToRecovery,                   // Navigate to session recovery view
-    GoToInbox,                      // Navigate to ainb-hooks notification inbox
-    GoToDaemons,                    // Navigate to the daemon runtime-health view
-    GoToFleetPanel,                 // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,               // Fleet panel: move row selection up
-    FleetPanelMoveDown,             // Fleet panel: move row selection down
-    FleetPanelOptionNext,           // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,           // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,               // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,            // Fleet panel: broadcast a ping to the selected session (B)
+    SkillManagerPreviewToggle,           // Space — toggle the cursor unit
+    SkillManagerPreviewAll,              // a — select every unit
+    SkillManagerPreviewNone,             // n — clear the selection
+    SkillManagerPreviewTool(usize),      // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
+    SkillManagerPreviewConfirm,          // Enter — import selection to chosen tools
+    SkillManagerPreviewClose,            // Esc — discard, nothing persisted
+    SkillManagerPreviewSource,           // p on a source row — reopen the picker for it
+    SkillManagerSourceRemoveOpen,        // r on a source row — open the remove dialog
+    SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
+    SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
+    SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
+    GoToRecovery,                        // Navigate to session recovery view
+    GoToInbox,                           // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                         // Navigate to the daemon runtime-health view
+    GoToFleetPanel,                      // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,                    // Fleet panel: move row selection up
+    FleetPanelMoveDown,                  // Fleet panel: move row selection down
+    FleetPanelOptionNext,                // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,                // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer, // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
     FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,    // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
     FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
     FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
     FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
     FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
     FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
-    PanelBack,         // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,        // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,       // Inbox: move selection up one row
-    InboxMoveDown,     // Inbox: move selection down one row
-    InboxPageUp,       // Inbox: jump 10 rows up
-    InboxPageDown,     // Inbox: jump 10 rows down
+    PanelBack,        // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,       // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,      // Inbox: move selection up one row
+    InboxMoveDown,    // Inbox: move selection down one row
+    InboxPageUp,      // Inbox: jump 10 rows up
+    InboxPageDown,    // Inbox: jump 10 rows down
     InboxOpenSelected, // Inbox: mark selected row read (Enter)
     InboxDismissSelected, // Inbox: dismiss selected row (d)
     InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
     InboxToggleArchived, // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,   // Inbox: cycle agent filter (p)
-    InboxRefresh,      // Inbox: force-refresh from store (r)
+    InboxCycleAgent,  // Inbox: cycle agent filter (p)
+    InboxRefresh,     // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -745,6 +749,7 @@ impl EventHandler {
             || s.library.is_some()
             || s.browse.is_some()
             || s.preview.is_some()
+            || s.source_remove_confirm.is_some()
     }
 
     /// Recompute the SkillManager top-row rects (Sources panel + Units
@@ -1114,6 +1119,29 @@ impl EventHandler {
         None
     }
 
+    /// Generic paste fallback: when any free-form text input has focus
+    /// (per `is_text_input_context`) and no dedicated paste route matched,
+    /// feed the pasted text through the normal key path one character at a
+    /// time. Every field's existing `Char` arm does the insertion, so all
+    /// current AND future text inputs accept paste without a per-field
+    /// route — the fix for "this form doesn't allow pasting".
+    ///
+    /// Control characters are skipped: a `\n` would submit the form and a
+    /// `\t` would jump fields mid-paste. Returns true when the paste was
+    /// consumed.
+    pub fn paste_into_text_input(text: &str, state: &mut AppState) -> bool {
+        if !Self::is_text_input_context(state) {
+            return false;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            if let Some(ev) = Self::handle_key_event(key, state) {
+                Self::process_event(ev, state);
+            }
+        }
+        true
+    }
+
     /// True when the user is currently focused on any free-form text input.
     ///
     /// Single-character global shortcuts (`H`, `W`, future ones) must NOT
@@ -1209,7 +1237,24 @@ impl EventHandler {
                 || state.config_screen_state.api_key_input_mode
                 || state.config_popup_state.is_text_entry());
 
+        // Onboarding wizard text-entry steps: git-directories path input,
+        // the OTEL credential form, and the auth API-key entry pane. These
+        // must accept bracketed paste (endpoints/tokens/paths are exactly
+        // the values users paste).
+        let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
+            && state.onboarding_state.as_ref().is_some_and(|o| {
+                use crate::components::onboarding::{AuthPane, OnboardingStep};
+                match o.current_step {
+                    OnboardingStep::GitDirectories | OnboardingStep::OtelSetup => true,
+                    OnboardingStep::Authentication => {
+                        matches!(o.auth_pane, AuthPane::KeyEntry { .. })
+                    }
+                    _ => false,
+                }
+            });
+
         new_session_text_active
+            || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
@@ -1616,6 +1661,24 @@ impl EventHandler {
                 };
             }
 
+            // Source-removal confirm dialog: arrows pick an option, Enter
+            // confirms, Esc cancels. Intercepts before every other key.
+            if state.skill_manager_state.source_remove_confirm.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(-1))
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(1))
+                    }
+                    KeyCode::Enter => Some(AppEvent::SkillManagerSourceRemoveConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        Some(AppEvent::SkillManagerSourceRemoveCancel)
+                    }
+                    _ => None,
+                };
+            }
+
             // Source-preview picker: multi-select units + target tools.
             // Intercepts before browse/library/banner — it's the active
             // modal whenever open.
@@ -1748,6 +1811,11 @@ impl EventHandler {
                 // `[p]` on a source row — reopen the import picker for it
                 // (preview its units, select, install more).
                 KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                // `[r]` on a source row — remove dialog (skills+source, or
+                // skills-only / keep source). Distinct from unit `[r]`.
+                KeyCode::Char('r') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceRemoveOpen)
+                }
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -5316,6 +5384,80 @@ impl EventHandler {
                     Self::open_source_preview(state, &format!("{}@{}", row.uri, row.r#ref));
                 }
             }
+            AppEvent::SkillManagerSourceRemoveOpen => {
+                use crate::components::skill_manager_screen::SourceRemoveConfirm;
+                let Some(row) = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .cloned()
+                else {
+                    state.add_warning_notification("remove: no source selected".to_string());
+                    return;
+                };
+                let prefix = format!("{}@", row.uri);
+                let unit_count = state
+                    .skill_manager_state
+                    .units
+                    .iter()
+                    .filter(|u| u.declared_uri.starts_with(&prefix))
+                    .count();
+                state.skill_manager_state.source_remove_confirm = Some(SourceRemoveConfirm {
+                    source_name: row.name,
+                    source_uri: row.uri,
+                    unit_count,
+                    cursor: 0,
+                });
+            }
+            AppEvent::SkillManagerSourceRemoveMove(delta) => {
+                if let Some(c) = state.skill_manager_state.source_remove_confirm.as_mut() {
+                    c.move_cursor(delta);
+                }
+            }
+            AppEvent::SkillManagerSourceRemoveCancel => {
+                state.skill_manager_state.source_remove_confirm = None;
+            }
+            AppEvent::SkillManagerSourceRemoveConfirm => {
+                use crate::components::skill_manager_screen::SourceRemoveChoice;
+                let Some(confirm) = state.skill_manager_state.source_remove_confirm.clone() else {
+                    return;
+                };
+                let choice = confirm.choice();
+                if choice == SourceRemoveChoice::Cancel {
+                    state.skill_manager_state.source_remove_confirm = None;
+                    return;
+                }
+                let keep_source = choice.keeps_source();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                let result = ainb_cli::source::remove_source_units(
+                    &ainb_home,
+                    &confirm.source_name,
+                    keep_source,
+                    &mut buf,
+                );
+                state.skill_manager_state.source_remove_confirm = None;
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                match result {
+                    Ok(removed) if keep_source => {
+                        state.add_success_notification(format!(
+                            "removed {removed} skill(s); kept {} (re-import with [p])",
+                            confirm.source_name
+                        ));
+                    }
+                    Ok(removed) => {
+                        state.add_success_notification(format!(
+                            "removed {} + {removed} skill(s)",
+                            confirm.source_name
+                        ));
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("remove failed: {e:#}"));
+                        tracing::warn!(output = %String::from_utf8_lossy(&buf),
+                            "SkillManager: source remove failed");
+                    }
+                }
+            }
             AppEvent::SkillManagerPreviewConfirm => {
                 // Validate on a borrow (no deep clone of a potentially
                 // 95-unit view); only take() the state once we commit.
@@ -8266,6 +8408,44 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
             .expect("paste on PickRepo must dispatch a filter paste");
         assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
+    }
+
+    /// A bracketed paste into the onboarding OTEL form must land in the
+    /// focused field via the generic fallback — the bug where the Grafana
+    /// endpoint/token fields silently dropped Cmd+V. Control characters
+    /// are stripped so a trailing newline can't submit the form.
+    #[test]
+    fn paste_lands_in_onboarding_otel_field() {
+        let mut state = AppState::default();
+        state.start_onboarding(false, None);
+        if let Some(o) = state.onboarding_state.as_mut() {
+            o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+        }
+
+        let consumed = EventHandler::paste_into_text_input(
+            "https://otlp-gateway.grafana.net/otlp\n",
+            &mut state,
+        );
+        assert!(consumed, "OTEL form must be a paste-accepting context");
+        let o = state.onboarding_state.as_ref().unwrap();
+        assert_eq!(
+            o.otel_otlp_endpoint,
+            "https://otlp-gateway.grafana.net/otlp"
+        );
+        // Still on the OTEL step: the stripped \n must not advance.
+        assert_eq!(
+            o.current_step,
+            crate::components::onboarding::OnboardingStep::OtelSetup
+        );
+    }
+
+    /// Paste with no text input focused is refused (not typed into a
+    /// navigation screen as shortcut keystrokes).
+    #[test]
+    fn paste_outside_text_input_is_refused() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::SESSION_LIST.to_string();
+        assert!(!EventHandler::paste_into_text_input("abc", &mut state));
     }
 
     /// Esc inside a text input while help is visible must close help,

@@ -956,9 +956,15 @@ async fn run_tui_loop(
                             );
                         }
                     } else if let Some(app_event) =
-                        EventHandler::handle_paste_event(text, &app.state)
+                        EventHandler::handle_paste_event(text.clone(), &app.state)
                     {
                         EventHandler::process_event(app_event, &mut app.state);
+                    } else {
+                        // Any other focused text input (onboarding fields,
+                        // skill-manager prompts, renames, searches, …):
+                        // feed the paste through the normal key path so
+                        // every field accepts it without a dedicated route.
+                        EventHandler::paste_into_text_input(&text, &mut app.state);
                     }
                 }
             }
