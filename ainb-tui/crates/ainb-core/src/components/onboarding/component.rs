@@ -543,81 +543,78 @@ impl OnboardingComponent {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let content = if state.auth_completed {
-            vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "✅ Authentication configured!",
-                    Style::default().fg(SELECTION_GREEN),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!(
-                        "Method: {}",
-                        state.auth_method.as_deref().unwrap_or("Unknown")
-                    ),
-                    Style::default().fg(MUTED_GRAY),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press Enter to continue",
-                    Style::default().fg(MUTED_GRAY),
-                )),
-            ]
-        } else {
-            let mut lines: Vec<Line> = vec![Line::from("")];
-            if let Some(ref key) = state.auth_api_key_input {
-                // Inline Claude API-key entry.
-                lines.push(Line::from(Span::styled(
-                    "Enter your Anthropic API key",
-                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(Span::styled(
-                    "Stored in the system keychain; switches Claude to API-key mode.",
-                    Style::default().fg(MUTED_GRAY),
-                )));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!("  {}_", key),
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Enter ", Style::default().fg(GOLD)),
-                    Span::styled("save   ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("Esc ", Style::default().fg(GOLD)),
-                    Span::styled("cancel", Style::default().fg(MUTED_GRAY)),
-                ]));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    "Configure auth before first use",
-                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(""));
-                for (i, (agent, method)) in
-                    crate::components::onboarding::state::AUTH_OPTIONS.iter().enumerate()
-                {
-                    let selected = i == state.auth_selected_index;
+        use crate::components::onboarding::state::{AuthMethodKind, AuthPane};
+
+        let content: Vec<Line> = match &state.auth_pane {
+            // ── Inline API-key entry for the chosen agent ────────────────────
+            AuthPane::KeyEntry { agent, buf } => {
+                vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("Enter your {}", agent.key_label()),
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            "Stored in the system keychain; injected as {} when a session starts.",
+                            agent.env_var()
+                        ),
+                        Style::default().fg(MUTED_GRAY),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("  {}_", buf),
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Enter ", Style::default().fg(GOLD)),
+                        Span::styled("save   ", Style::default().fg(MUTED_GRAY)),
+                        Span::styled("Esc ", Style::default().fg(GOLD)),
+                        Span::styled("back", Style::default().fg(MUTED_GRAY)),
+                    ]),
+                ]
+            }
+            // ── Method picker for the chosen agent ───────────────────────────
+            AuthPane::MethodPicker { agent, cursor } => {
+                let mut lines: Vec<Line> = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("{} — choose auth method", agent.label()),
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                ];
+                let rows = [agent.login_label(), "API key", "Back"];
+                for (i, label) in rows.iter().enumerate() {
+                    let selected = i == *cursor;
                     let marker = if selected { "\u{25b6} " } else { "  " };
-                    let agent_style = if selected {
+                    let style = if selected {
                         Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(GOLD)
                     };
                     lines.push(Line::from(vec![
                         Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
-                        Span::styled(format!("{:<8}", agent), agent_style),
-                        Span::styled(*method, Style::default().fg(MUTED_GRAY)),
+                        Span::styled(*label, style),
                     ]));
                 }
                 lines.push(Line::from(""));
+                // What each method actually does + the vendor auth guide.
                 lines.push(Line::from(Span::styled(
-                    "OAuth happens inside the tool - just run /login in Claude or Codex.",
+                    format!("{}: {}", agent.login_label(), agent.login_hint()),
                     Style::default().fg(MUTED_GRAY),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "Gemini uses GEMINI_API_KEY; Copilot uses `copilot login`.",
+                    format!(
+                        "API key: stored in your keychain, injected as {} when a session starts.",
+                        agent.env_var()
+                    ),
                     Style::default().fg(MUTED_GRAY),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("Guide: {}", agent.doc_url()),
+                    Style::default().fg(CORNFLOWER_BLUE),
                 )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
@@ -625,14 +622,72 @@ impl OnboardingComponent {
                     Span::styled("select   ", Style::default().fg(MUTED_GRAY)),
                     Span::styled("Enter ", Style::default().fg(GOLD)),
                     Span::styled("choose   ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("S ", Style::default().fg(GOLD)),
+                    Span::styled("Esc ", Style::default().fg(GOLD)),
+                    Span::styled("back", Style::default().fg(MUTED_GRAY)),
+                ]));
+                lines
+            }
+            // ── Per-agent list (default) ─────────────────────────────────────
+            AuthPane::AgentList => {
+                let mut lines: Vec<Line> = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Configure agent authentication (change anytime)",
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                ];
+                for (i, st) in state.auth_statuses.iter().enumerate() {
+                    let selected = i == state.auth_agent_cursor;
+                    let marker = if selected { "\u{25b6} " } else { "  " };
+                    let agent_style = if selected {
+                        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GOLD)
+                    };
+                    // Login rows show the harness-specific label ("System-wide
+                    // auth", "Sign in with GitHub", …); key rows just say "API key".
+                    let method_label = match st.method {
+                        AuthMethodKind::Login => st.agent.login_label(),
+                        AuthMethodKind::ApiKey => "API key",
+                    };
+                    let mut spans = vec![
+                        Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
+                        Span::styled(format!("{:<9}", st.agent.label()), agent_style),
+                        Span::styled(method_label, Style::default().fg(SOFT_WHITE)),
+                    ];
+                    if let Some(ref masked) = st.key_masked {
+                        spans.push(Span::styled(
+                            format!("  {}", masked),
+                            Style::default().fg(MUTED_GRAY),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "System-wide auth = you set it up outside ainb. API key = ainb stores it \
+                     in your keychain and injects it when a session starts.",
+                    Style::default().fg(MUTED_GRAY),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("\u{2191}\u{2193} ", Style::default().fg(GOLD)),
+                    Span::styled("select   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("Enter ", Style::default().fg(GOLD)),
+                    Span::styled("change   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("\u{2192} ", Style::default().fg(GOLD)),
+                    Span::styled("next   ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("s ", Style::default().fg(GOLD)),
                     Span::styled("skip", Style::default().fg(MUTED_GRAY)),
                 ]));
+                lines
             }
-            lines
         };
 
-        let text = Paragraph::new(content).alignment(Alignment::Center);
+        let text = Paragraph::new(content)
+            .alignment(Alignment::Center)
+            .wrap(ratatui::widgets::Wrap { trim: true });
         frame.render_widget(text, inner);
     }
 
@@ -969,15 +1024,11 @@ impl OnboardingComponent {
             ),
         ]));
 
-        // Auth
-        let auth_status = if state.auth_completed {
-            format!(
-                "configured ({})",
-                state.auth_method.as_deref().unwrap_or("unknown")
-            )
-        } else {
-            "skipped".to_string()
-        };
+        // Auth — per-agent summary (e.g. "Claude login • Codex api key")
+        let auth_status = state
+            .auth_method
+            .clone()
+            .unwrap_or_else(|| "not configured".to_string());
         summary_items.push(Line::from(vec![
             Span::styled(
                 if state.auth_completed {

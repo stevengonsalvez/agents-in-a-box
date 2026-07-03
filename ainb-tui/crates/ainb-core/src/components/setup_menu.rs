@@ -61,7 +61,7 @@ impl SetupMenuItem {
             Self::RerunWizard => "Start the full setup wizard from scratch",
             Self::CheckDependencies => "Verify all required tools are installed",
             Self::ConfigureGitPaths => "Update your project directories",
-            Self::AuthenticationSettings => "Configure Claude authentication",
+            Self::AuthenticationSettings => "Configure auth for Claude, Codex, Gemini, Copilot",
             Self::EditorPreference => "Choose your preferred code editor",
             Self::FactoryReset => "Remove all configuration and start fresh",
         }
