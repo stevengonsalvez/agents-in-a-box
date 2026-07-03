@@ -603,6 +603,120 @@ pub struct AtcUnregisterResult {
     pub disabled: bool,
 }
 
+/// One indexed profile in the [`crate::methods::PROFILE_LIST`] result (spec P5):
+/// the identity fields of a `~/.agents-in-a-box/profiles/<slug>.md` master, projected
+/// from the daemon's fs-watch-maintained index. The body lives on disk, never on
+/// the wire here — fetch it (and its compile previews) via
+/// [`crate::methods::PROFILE_GET`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRow {
+    /// The profile slug (PK) — file stem + board-assignee slug (D16).
+    pub slug: String,
+    /// The logical model tier token (`premium` / `balanced` / `fast`).
+    pub tier: String,
+    /// The master file's last-modified time (epoch milliseconds).
+    pub mtime: i64,
+}
+
+/// Result of [`crate::methods::PROFILE_LIST`] (spec P5): every indexed profile,
+/// slug-ordered.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProfileListResult {
+    /// The indexed profiles, slug-ordered.
+    pub profiles: Vec<ProfileRow>,
+}
+
+/// Params for [`crate::methods::PROFILE_GET`] (spec P5) — fetch one master + its
+/// two compile previews by slug.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileGetParams {
+    /// The profile slug to fetch.
+    pub slug: String,
+}
+
+/// The lossy Codex compile preview carried in a [`ProfileGetResult`] (D14): the
+/// `[profiles.<slug>]` config fragment, the prompt body, and one warning per
+/// dropped Claude-only field.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CodexPreview {
+    /// The `[profiles.<slug>]` fragment appended to `~/.codex/config.toml`.
+    pub config_fragment: String,
+    /// The `~/.codex/prompts/<slug>.md` body.
+    pub prompt: String,
+    /// One human-readable warning per dropped Claude-only field (`tools`,
+    /// `color`); empty when nothing was dropped.
+    pub warnings: Vec<String>,
+}
+
+/// Result of [`crate::methods::PROFILE_GET`] (spec P5): the parsed master fields
+/// plus both compile previews, or `found = false` for an unknown slug.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProfileGetResult {
+    /// `false` when the slug is not indexed / has no master on disk; every other
+    /// field is then at its default. A read, so a miss is not an error.
+    pub found: bool,
+    /// The profile slug.
+    pub slug: String,
+    /// The one-line description.
+    pub description: String,
+    /// The logical model tier token (`premium` / `balanced` / `fast`).
+    pub tier: String,
+    /// The Claude-only tool allowlist (comma-split).
+    pub tools: Vec<String>,
+    /// The Claude-only card color, or empty when unset.
+    pub color: String,
+    /// The system-prompt body.
+    pub body: String,
+    /// The lossless Claude subagent `.md` preview (tier resolved to a Claude
+    /// model, every field preserved).
+    pub claude_preview: String,
+    /// The lossy Codex compile preview + dropped-field warnings.
+    pub codex_preview: CodexPreview,
+}
+
+impl ProfileGetResult {
+    /// The not-found result for an unknown slug (`found = false`, everything else
+    /// default).
+    #[must_use]
+    pub fn not_found() -> Self {
+        Self::default()
+    }
+}
+
+/// Params for [`crate::methods::PROFILE_UPSERT`] (spec P5) — create or replace a
+/// master on disk. The daemon serialises these fields into the canonical
+/// `~/.agents-in-a-box/profiles/<slug>.md` and refreshes the index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileUpsertParams {
+    /// The profile slug (validated kebab-case; rejected otherwise).
+    pub slug: String,
+    /// The one-line description.
+    #[serde(default)]
+    pub description: String,
+    /// The logical model tier token (`premium` / `balanced` / `fast`).
+    pub tier: String,
+    /// The Claude-only tool allowlist.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// The Claude-only card color, or empty for none.
+    #[serde(default)]
+    pub color: String,
+    /// The system-prompt body.
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Result of [`crate::methods::PROFILE_UPSERT`] (spec P5): the written slug and
+/// its resolved absolute master path (echoed so a surface can confirm where the
+/// file landed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileUpsertResult {
+    /// The slug that was written.
+    pub slug: String,
+    /// The absolute path of the master file the daemon wrote.
+    pub path: String,
+}
+
 /// One per-agent usage row in the dashboard rollup
 /// ([`crate::methods::HANGAR_USAGE_ROLLUP`], e38.35): an agent's summed tokens +
 /// cost over the runs it executed in the workspace.

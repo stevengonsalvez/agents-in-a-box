@@ -37,7 +37,7 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
 /// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
 /// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 13] = [
+const PRIMARY_TABS: [(char, &str); 14] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('3', "Skills"),
@@ -50,6 +50,7 @@ const PRIMARY_TABS: [(char, &str); 13] = [
     ('I', "Inbox"),
     ('C', "Control"),
     ('S', "Squads"),
+    ('P', "Profiles"),
     (',', "Settings"),
 ];
 
@@ -181,6 +182,8 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
             ("d", "remove"),
             ("x", "assign"),
         ],
+        // The profile editor: navigate the roster + cycle the selected tier (P5).
+        Screen::Profiles => vec![("j/k", "profiles"), ("t", "cycle tier")],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -217,6 +220,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         'I' => matches!(active, Screen::Inbox),
         'C' => matches!(active, Screen::ControlCenter),
         'S' => matches!(active, Screen::Squads),
+        'P' => matches!(active, Screen::Profiles),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }
@@ -302,14 +306,14 @@ mod tests {
     /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full twelve-tab strip (P4 added the `[B]Boards`
-        // tab, ~131 cols) AND the right-side workspace-slug cluster both fit; the
-        // tabs win width contention, so a narrower buffer drops the slug (covered
-        // by the 80x24 floor smoke).
-        let mut buf = WireBuffer::new(160, 24);
-        render_top_bar(&mut buf, 160, &Screen::IssueList, "acme", Presence::Online);
+        // Wide enough that the full fourteen-tab strip (P4 added `[B]Boards`, P7
+        // `[S]Squads`, P5 `[P]Profiles` — ~155 cols) AND the right-side
+        // workspace-slug cluster both fit; the tabs win width contention, so a
+        // narrower buffer drops the slug (covered by the 80x24 floor smoke).
+        let mut buf = WireBuffer::new(200, 24);
+        render_top_bar(&mut buf, 200, &Screen::IssueList, "acme", Presence::Online);
         // Reconstruct row 0 text from the wire buffer cells.
-        let row0 = row_text(&buf, 0, 160);
+        let row0 = row_text(&buf, 0, 200);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
         assert!(row0.contains("Skills"), "row0 = {row0:?}");
         assert!(row0.contains("Kanban"), "row0 = {row0:?}");

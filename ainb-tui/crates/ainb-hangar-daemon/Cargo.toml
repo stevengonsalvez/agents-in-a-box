@@ -122,6 +122,10 @@ toml = { workspace = true }
 # enforcer; this only types the daemon-side transition sequence so an
 # out-of-order finalize is a typed error, not a silent mis-step.
 statig = { workspace = true }
+# P5 profiles: fs-watch on `{hangar_home}/profiles/` so an edit-on-disk of a
+# profile master is reconciled into the DB index without an RPC (T6 fs-watch
+# refresh). The daemon holds the returned watcher for the process lifetime.
+notify = { workspace = true }
 
 # P8.2 OTLP export (ALL optional, only pulled under `--features otlp`). A plain
 # `cargo build` resolves none of these, so the shipped daemon links zero OTEL

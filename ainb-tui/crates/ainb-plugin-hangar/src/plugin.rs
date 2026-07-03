@@ -176,6 +176,16 @@ const SQUAD_FANOUT_REQ_ID: i64 = 38;
 /// dashboard's recent-runs timeline (P10 / D19). Renumbered to 39 on the wave-C
 /// merge — P7's squad ids (37/38) landed first, so run-history takes the next id.
 const RUN_HISTORY_REQ_ID: i64 = 39;
+/// JSON-RPC id for the `profile/list` snapshot request feeding the profile-editor
+/// roster (P5). Renumbered to 40 on the wave-C merge — boards/squads/run-history
+/// (36-39) landed first, so the profile ids take the next contiguous block.
+const PROFILE_LIST_REQ_ID: i64 = 40;
+/// JSON-RPC id for a `profile/get` request raised when the profile-editor
+/// selection moves to a row whose detail is not loaded (P5).
+const PROFILE_GET_REQ_ID: i64 = 41;
+/// JSON-RPC id for a `profile/upsert` request raised by the profile-editor `t`
+/// tier cycle (P5).
+const PROFILE_UPSERT_REQ_ID: i64 = 42;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -666,6 +676,9 @@ impl HangarPlugin {
             // seeds the control-center board.
             RpcId::Number(ATTENTION_SUBSCRIBE_REQ_ID) => self.apply_attention(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
+            // P5: the profile-editor roster + the per-selection detail/previews.
+            RpcId::Number(PROFILE_LIST_REQ_ID) => self.apply_profiles(resp),
+            RpcId::Number(PROFILE_GET_REQ_ID) => self.apply_profile_detail(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition, issue assign, inbox mark-read) answer with
             // the changed row or `{}`; we re-fetch the relevant lists to refresh
@@ -681,7 +694,11 @@ impl HangarPlugin {
                 | ISSUE_UPDATE_REQ_ID
                 | ISSUE_CREATE_REQ_ID
                 | INBOX_MARK_READ_REQ_ID
-                | ATTENTION_ANSWER_REQ_ID,
+                | ATTENTION_ANSWER_REQ_ID
+                // P5: a profile/upsert reply re-fetches the snapshot batch so the
+                // roster row reflects the new tier; the detail re-fetch is armed
+                // separately in the render drain (both previews re-resolve).
+                | PROFILE_UPSERT_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -748,6 +765,56 @@ impl HangarPlugin {
             >(result.clone())
             {
                 self.screens.set_attention(&r.attention);
+            }
+        }
+    }
+
+    /// Populate the profile-editor roster from a `profile/list` result (P5): the
+    /// indexed profiles (slug + tier), slug-ordered.
+    fn apply_profiles(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::ProfileListResult,
+            >(result.clone())
+            {
+                let rows = r
+                    .profiles
+                    .into_iter()
+                    .map(|p| crate::screen::profiles::ProfileRosterEntry {
+                        slug: p.slug,
+                        tier: p.tier,
+                    })
+                    .collect();
+                self.screens.set_profiles(rows);
+            }
+        }
+    }
+
+    /// Fold a `profile/get` result into the selected profile's detail (P5): the
+    /// parsed fields + BOTH compile previews (Claude lossless, Codex lossy +
+    /// dropped-field warnings). A not-found result (`found = false`) is ignored.
+    fn apply_profile_detail(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) =
+                serde_json::from_value::<ainb_hangar_proto::snapshots::ProfileGetResult>(
+                    result.clone(),
+                )
+            {
+                if !r.found {
+                    return;
+                }
+                self.screens.set_profile_detail(crate::screen::profiles::ProfileDetailView {
+                    slug: r.slug,
+                    description: r.description,
+                    tier: r.tier,
+                    tools: r.tools,
+                    color: r.color,
+                    body: r.body,
+                    claude_preview: r.claude_preview,
+                    codex_fragment: r.codex_preview.config_fragment,
+                    codex_prompt: r.codex_preview.prompt,
+                    codex_warnings: r.codex_preview.warnings,
+                });
             }
         }
     }
@@ -983,6 +1050,65 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a `profile/get` for `slug` (P5) — the profile-editor selection moved to
+    /// a row whose detail + previews are not yet loaded.
+    async fn fetch_profile_detail(&self, host: &HostClient, slug: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Ok(body) = encode_request(
+            PROFILE_GET_REQ_ID,
+            daemon_methods::PROFILE_GET,
+            serde_json::json!({ "slug": slug }),
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: profile get send failed: {e}")).await;
+        }
+    }
+
+    /// Fire a `profile/upsert` persisting the selected profile's new `tier` (P5) —
+    /// raised by the editor `t` cycle. The daemon's `profile/upsert` OVERWRITES
+    /// the master from the params, so the upsert MUST carry every field: the
+    /// editor cycles tier against the ALREADY-LOADED detail and re-sends the full
+    /// master, a lossless round-trip of the current profile.
+    ///
+    /// Safety: if the detail has not loaded (`detail_for_upsert` is `None`), this
+    /// is a NO-OP send — a slug+tier-only upsert would let the daemon default the
+    /// other fields to empty and wipe the master's body. `cycle_tier` already
+    /// refuses to raise the intent in that window; this guard is defence in depth.
+    async fn upsert_profile_tier(&self, host: &HostClient, slug: String, tier: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        // Only persist a full-master round-trip. Without loaded detail we refuse
+        // to send rather than risk overwriting the master with empty fields.
+        let Some(d) = self.screens.profiles.detail_for_upsert(&slug) else {
+            let _ = host
+                .log_info(format!(
+                    "hangar: profile upsert skipped for {slug:?} — detail not loaded (would drop fields)"
+                ))
+                .await;
+            return;
+        };
+        let params = serde_json::json!({
+            "slug": d.slug,
+            "description": d.description,
+            "tier": tier,
+            "tools": d.tools,
+            "color": d.color,
+            "body": d.body,
+        });
+        let Ok(body) = encode_request(PROFILE_UPSERT_REQ_ID, daemon_methods::PROFILE_UPSERT, params)
+        else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: profile upsert send failed: {e}")).await;
+        }
+    }
+
     /// Fire a deferred `hangar/search` raised by the command palette (e38.13):
     /// the ranked cross-entity search for the typed `query`, framed over the
     /// socket cap. The read reply (`apply_search`) folds the entries back into the
@@ -1153,6 +1279,14 @@ impl HangarPlugin {
             (
                 HEALTH_REQ_ID,
                 daemon_methods::HANGAR_HEALTH,
+                serde_json::json!({}),
+            ),
+            // P5: the profile-editor roster is host-scoped (a profile drives runs
+            // in any workspace), so its list is unscoped. The per-selection
+            // `profile/get` fetches detail + previews lazily.
+            (
+                PROFILE_LIST_REQ_ID,
+                daemon_methods::PROFILE_LIST,
                 serde_json::json!({}),
             ),
         ];
@@ -2849,7 +2983,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | 'P' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))
@@ -3041,6 +3175,19 @@ impl Plugin for HangarPlugin {
         // the answered card drops off the board.
         if let Some(action) = self.screens.take_pending_answer_action() {
             self.answer_attention(host, action).await;
+        }
+        // P5: drain a deferred `profile/get` (selection moved to an un-loaded row
+        // in the profile editor) and fire it so the detail + both compile previews
+        // fetch.
+        if let Some(slug) = self.screens.take_pending_profile_detail() {
+            self.fetch_profile_detail(host, slug).await;
+        }
+        // P5: drain a deferred `profile/upsert` (`t` cycled the selected tier) and
+        // fire it, then re-arm a `profile/get` for the same slug so both previews
+        // re-resolve their concrete model from the persisted tier.
+        if let Some((slug, tier)) = self.screens.take_pending_profile_upsert() {
+            self.upsert_profile_tier(host, slug.clone(), tier).await;
+            self.fetch_profile_detail(host, slug).await;
         }
         // e38.36: drain a deferred offline `[s]` daemon-start (armed in
         // `handle_key`). `render` runs on a spawned task, so the host-shell start

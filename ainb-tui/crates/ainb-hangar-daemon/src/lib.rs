@@ -120,6 +120,15 @@ pub mod observability;
 /// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
 /// all-`Unknown` status — never a panic.
 pub mod pr_status;
+/// P5 agent profiles: the on-disk master store, the DB-index reconciler +
+/// fs-watch, and compile-on-dispatch of the tool-native files (D14-D16, T6).
+///
+/// The pure format + the Claude/Codex down-compilers live in
+/// [`ainb_hangar_core::profile`]; this module is the IO around them — read/write
+/// masters under `{hangar_home}/profiles/`, reconcile the
+/// [`ainb_hangar_store::repo::profile`] index against disk, and materialise the
+/// resolved artifacts into a task's execution env at dispatch.
+pub mod profile;
 /// Durable issue-comment emission at run-loop lifecycle checkpoints (e38.6).
 ///
 /// At each FSM checkpoint the claim loop reaches — the task starts running, and
@@ -353,6 +362,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         )
         .spawn();
     }
+
+    // P5 (T6): reconcile the agent-profile index against the on-disk masters and
+    // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`
+    // is picked up into the `profile` index without an RPC. Best-effort — a
+    // watcher-setup fault is logged inside the helper and swallowed (the
+    // `profile/upsert` RPC still refreshes the index directly). The returned
+    // watcher is HELD for the process lifetime; dropping it would stop the watch,
+    // so it lives in `boot`'s scope alongside the other background handles.
+    let _profile_watch = crate::profile::profiles_dir()
+        .and_then(|dir| crate::profile::spawn_index_watch(store.pool().clone(), dir));
 
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the

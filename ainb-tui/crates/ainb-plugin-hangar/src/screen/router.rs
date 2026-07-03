@@ -64,6 +64,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'C' => switch_tab(state, Screen::ControlCenter),
         // `S` (capital) opens the Squads screen from anywhere (P7).
         'S' => switch_tab(state, Screen::Squads),
+        // `P` (capital) opens the profile editor from anywhere (P5).
+        'P' => switch_tab(state, Screen::Profiles),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.

@@ -27,6 +27,7 @@ pub mod issue_list;
 pub mod kanban;
 pub mod list_context_menu;
 pub mod logs;
+pub mod profiles;
 mod router;
 pub mod settings;
 pub mod skill_manager;
@@ -87,6 +88,11 @@ pub enum Screen {
     /// a leader + members, live per-member status, and issue-assign leader-routing
     /// dispatch, backed by `hangar/squads_list` + the squad mutation RPCs (P7).
     Squads,
+    /// Profile editor (hotkey `P`) — the agent-profile roster + a live preview of
+    /// BOTH compile targets (lossless Claude `.md`, lossy Codex fragment/prompt),
+    /// backed by `profile/list` + `profile/get`, with tier editing via
+    /// `profile/upsert` (P5).
+    Profiles,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -116,6 +122,7 @@ impl Screen {
             Self::Inbox => "Inbox",
             Self::ControlCenter => "Control",
             Self::Squads => "Squads",
+            Self::Profiles => "Profiles",
             Self::Settings => "Settings",
             Self::Help => "Help",
             Self::CommandPalette => "Search",

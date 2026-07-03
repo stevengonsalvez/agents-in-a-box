@@ -445,6 +445,18 @@ async fn execute_claimed(
         task_env.insert(key, path.to_string_lossy().into_owned());
     }
 
+    // P5 (D16): compile-on-dispatch — if a profile master matches this task's
+    // agent slug, materialise the resolved tool-native files (Claude `.md` /
+    // Codex config+prompt) into the task's execution env and forward the same
+    // `*_HOME` pointer the skills layout uses (idempotent when both wrote one).
+    // Best-effort: a missing profile or a write fault is logged and skipped — a
+    // task must still dispatch without its profile.
+    if let Some((key, path)) =
+        materialise_agent_profile(pool, &task, &env, dispatch.backend.name()).await
+    {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
+
     // P5.6: warn about `danger-full-access` on the first invocation of this
     // provider in this session. The decision + ack persistence are authoritative
     // here (a task may be dispatched from the CLI with no TUI attached); a
@@ -780,6 +792,64 @@ async fn materialise_skills(
         }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "skill materialise failed; proceeding without skills");
+            None
+        }
+    }
+}
+
+/// Compile-on-dispatch (P5, D16): if a profile master matches this task's agent
+/// slug, materialise its resolved tool-native files into the task's execution env
+/// and return the `*_HOME` env pointer the runner forwards. `None` when the agent
+/// has no matching profile master on disk, the provider has no profile target, or
+/// any read/write faults.
+///
+/// The profile slug is resolved as the agent's name (D16: the board-assignee slug
+/// *is* the profile slug; an agent named for its profile picks that master up).
+/// Best-effort by design — a missing / unparseable master, or a materialise
+/// fault, is logged and swallowed so a task always dispatches.
+async fn materialise_agent_profile(
+    pool: &SqlitePool,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+    provider: &str,
+) -> Option<(String, PathBuf)> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let slug = match AgentRepo::get(pool, &task.agent_id).await {
+        Ok(Some(agent)) => agent.name,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "profile compile: agent resolve failed; skipping");
+            return None;
+        }
+    };
+    let dir = crate::profile::profiles_dir()?;
+    let master = match crate::profile::read_master(&dir, &slug) {
+        Ok(Some(m)) => m,
+        // No master for this agent slug is the common case (not every agent has a
+        // profile) — silently skip.
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, slug = %slug, "profile compile: master unreadable; skipping");
+            return None;
+        }
+    };
+    match crate::profile::materialise_profile(&master, provider, env.root()) {
+        Ok(report) => {
+            if report.files_written > 0 {
+                tracing::info!(
+                    task_id = %task.id,
+                    slug = %report.slug,
+                    provider = %provider,
+                    files = report.files_written,
+                    warnings = report.warnings.len(),
+                    "profile compiled on dispatch"
+                );
+            }
+            report.home_env
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, slug = %slug, "profile compile failed; proceeding without profile");
             None
         }
     }

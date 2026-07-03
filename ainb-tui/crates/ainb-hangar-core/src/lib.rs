@@ -34,6 +34,11 @@ pub mod logs;
 pub mod paths;
 /// Parse the canonical `gh pr create` PR-URL line from agent stdout (P9.1).
 pub mod pr_url;
+/// Agent-profile domain (P5): the canonical Claude-subagent `.md` master format,
+/// the logical [`profile::ModelTier`], and the lossless-Claude / lossy-Codex
+/// down-compilers. Pure + IO-free — the daemon adds disk/DB/watch, the plugin
+/// borrows it for live preview.
+pub mod profile;
 /// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
 pub mod result;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
