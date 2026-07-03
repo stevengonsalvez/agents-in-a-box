@@ -1447,6 +1447,58 @@ pub struct BoardCardParams {
     pub column_id: Option<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_CREATE`] (ccc / D8, D16):
+/// create an issue from a card and place it on a board.
+///
+/// Omit `column_id` to place the card unmapped; omit `assignee_profile` to leave
+/// the issue unassigned (the run then falls back to the workspace's agent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardCreateParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board to place the new card on.
+    pub board_id: String,
+    /// The column to place the card in, or `None` for unmapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<String>,
+    /// The new issue's title (the card label).
+    pub title: String,
+    /// The assignee profile slug (D16: the agent named for it runs the card), or
+    /// `None` to leave the issue unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee_profile: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
+/// card's issue on its assignee profile now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardRunParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the card sits on.
+    pub board_id: String,
+    /// The card's issue to launch.
+    pub issue_id: String,
+    /// The launch mode (`headless` or `interactive`, D6 `Run ▾`). Both dispatch
+    /// through the one provider-runner path today; the value is carried for the D6
+    /// launch surface and echoed in the result.
+    pub mode: String,
+}
+
+/// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
+/// run's identity so the caller can report who the card landed on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardRunResult {
+    /// The enqueued `agent_task_queue` row id.
+    pub task_id: String,
+    /// The agent (`agent.id`) the run routed to.
+    pub agent_id: String,
+    /// The runtime (`agent_runtime.id`) the task was keyed to.
+    pub runtime_id: String,
+    /// The echoed launch mode (`headless` / `interactive`).
+    pub mode: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

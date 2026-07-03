@@ -572,6 +572,36 @@ pub const HANGAR_BOARD_CARD_ADD: &str = "hangar/board_card_add";
 /// workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_MOVE: &str = "hangar/board_card_move";
 
+/// `hangar/board_card_create` — create an issue from a card and place it on a
+/// board in one round-trip (ccc / D8, D16).
+///
+/// Params: [`crate::snapshots::BoardCardCreateParams`]
+/// (`{ workspace_id, board_id, column_id?, title, assignee_profile? }`). Result:
+/// the refreshed [`crate::snapshots::BoardsListResult`]. Creates a fresh issue
+/// with `title`, assigns it to the agent named for `assignee_profile` (the D16
+/// board-assignee slug = profile slug) when one resolves in the workspace, then
+/// places the card in `column_id` (omit for unmapped). Atomic + workspace-scoped:
+/// the interactive `c` card-create the reducer raises lifts to exactly this call,
+/// so the TUI never chains issue-create + assign + card-add over three trips.
+pub const HANGAR_BOARD_CARD_CREATE: &str = "hangar/board_card_create";
+
+/// `hangar/board_card_run` — launch a card's issue on its assignee profile now
+/// (ccc / D6, D16).
+///
+/// Params: [`crate::snapshots::BoardCardRunParams`]
+/// (`{ workspace_id, board_id, issue_id, mode }`). Result:
+/// [`crate::snapshots::BoardCardRunResult`] — the enqueued task id + the agent /
+/// runtime it routed to + the echoed mode. Enqueues one `agent_task_queue` row
+/// for the card's issue keyed to the assignee agent's `(agent_id, runtime_id)` —
+/// the same claim/dispatch path a squad assignment rides — so the daemon's claim
+/// loop runs it and the D8 auto-move hook slides the card on each FSM transition.
+/// `mode` is `headless` or `interactive` (D6 `Run ▾`); both dispatch through the
+/// one provider-runner path the daemon exposes today (the mode is carried for the
+/// D6 launch surface and echoed back). The assignee resolves from the issue's
+/// assignee agent, falling back to the workspace's agent so a card always runs.
+/// Mutating + workspace-scoped.
+pub const HANGAR_BOARD_CARD_RUN: &str = "hangar/board_card_run";
+
 /// `hangar/run_history` — snapshot the workspace's per-run observability timeline
 /// (P10 / D19).
 ///
@@ -766,6 +796,12 @@ pub const ALL_METHODS: &[&str] = &[
     PROFILE_LIST,
     PROFILE_GET,
     PROFILE_UPSERT,
+    // Board card interaction (ccc / D6, D8, D16) is APPENDED at the catalogue
+    // tail — the wire catalogue is append-only, so the card create/run methods
+    // follow every pre-existing entry (boards / squad fan-out / run history /
+    // profiles).
+    HANGAR_BOARD_CARD_CREATE,
+    HANGAR_BOARD_CARD_RUN,
 ];
 
 #[cfg(test)]
@@ -944,6 +980,8 @@ mod tests {
             PROFILE_LIST,
             PROFILE_GET,
             PROFILE_UPSERT,
+            HANGAR_BOARD_CARD_CREATE,
+            HANGAR_BOARD_CARD_RUN,
         ];
         for m in declared {
             assert!(
