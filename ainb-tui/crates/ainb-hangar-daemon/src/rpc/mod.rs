@@ -675,11 +675,138 @@ async fn handle(
         // fleet-wide forwarder is the stream side (see `serve_conn`).
         methods::ATTENTION_SUBSCRIBE => handle_attention_subscribe(pool, req).await,
         methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
+        methods::PROFILE_LIST => handle_profile_list(pool).await,
+        methods::PROFILE_GET => handle_profile_get(pool, req).await,
+        methods::PROFILE_UPSERT => handle_profile_upsert(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
             data: None,
         }),
+    }
+}
+
+/// `profile/list` (P5): the indexed agent profiles, slug-ordered. A read over the
+/// fs-watch-maintained index — the body always lives on disk.
+async fn handle_profile_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::profile::ProfileRepo;
+    let rows = ProfileRepo::list(pool)
+        .await
+        .map_err(|e| internal(&format!("profile list: {e}")))?;
+    let profiles = rows
+        .into_iter()
+        .map(|r| ainb_hangar_proto::snapshots::ProfileRow {
+            slug: r.slug,
+            tier: r.tier,
+            mtime: r.mtime,
+        })
+        .collect();
+    to_value(&ainb_hangar_proto::snapshots::ProfileListResult { profiles })
+}
+
+/// `profile/get` (P5): one master's parsed fields + both compile previews, read
+/// from disk (the source of truth). An unknown slug returns the not-found result
+/// (a read miss, not an error).
+async fn handle_profile_get(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::ProfileGetParams =
+        parse_params(req, "{ slug }")?;
+    // Best-effort: keep the index current so a get after an out-of-band edit
+    // reflects disk (the RPC path does not depend on the watcher being alive).
+    let dir = profiles_dir_or_err()?;
+    let master = match crate::profile::read_master(&dir, &params.slug) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return to_value(&ainb_hangar_proto::snapshots::ProfileGetResult::not_found());
+        }
+        Err(e) => return Err(internal(&format!("profile read: {e}"))),
+    };
+    let _ = pool; // index unaffected by a get; the arg keeps the handler uniform.
+    to_value(&profile_get_result(&master))
+}
+
+/// `profile/upsert` (P5): write the canonical master to disk and refresh the DB
+/// index. Rejects an invalid slug / tier with `INVALID_PARAMS`.
+async fn handle_profile_upsert(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::profile::{is_valid_slug, ModelTier, ProfileMaster};
+    let params: ainb_hangar_proto::snapshots::ProfileUpsertParams =
+        parse_params(req, "{ slug, description, tier, tools, color, body }")?;
+
+    if !is_valid_slug(&params.slug) {
+        return Err(invalid_params(&format!(
+            "invalid profile slug {:?}: must be kebab-case ([a-z0-9-])",
+            params.slug
+        )));
+    }
+    let tier = ModelTier::parse(&params.tier).ok_or_else(|| {
+        invalid_params(&format!(
+            "unknown model tier {:?}: expected premium | balanced | fast",
+            params.tier
+        ))
+    })?;
+
+    let master = ProfileMaster {
+        slug: params.slug.clone(),
+        description: params.description,
+        tier,
+        tools: params.tools,
+        color: if params.color.is_empty() {
+            None
+        } else {
+            Some(params.color)
+        },
+        body: params.body,
+    };
+
+    let dir = profiles_dir_or_err()?;
+    let path = crate::profile::write_master(&dir, &master)
+        .map_err(|e| internal(&format!("profile write: {e}")))?;
+    // Refresh the index directly so `profile/list` reflects the write immediately
+    // (the fs-watch would also catch it; the two converge on the same row).
+    crate::profile::refresh_index(pool, &dir)
+        .await
+        .map_err(|e| internal(&format!("profile index refresh: {e}")))?;
+
+    to_value(&ainb_hangar_proto::snapshots::ProfileUpsertResult {
+        slug: master.slug,
+        path: path.to_string_lossy().into_owned(),
+    })
+}
+
+/// Resolve the profiles directory or fail with an internal error (the Hangar home
+/// could not be resolved — a daemon-environment fault, not a client one).
+fn profiles_dir_or_err() -> Result<PathBuf, RpcError> {
+    crate::profile::profiles_dir()
+        .ok_or_else(|| internal("cannot resolve the Hangar home for the profiles directory"))
+}
+
+/// Build a [`ProfileGetResult`](ainb_hangar_proto::snapshots::ProfileGetResult)
+/// from a parsed master: its fields plus both compile previews (lossless Claude,
+/// lossy Codex + dropped-field warnings).
+fn profile_get_result(
+    master: &ainb_hangar_core::profile::ProfileMaster,
+) -> ainb_hangar_proto::snapshots::ProfileGetResult {
+    let claude = master.compile_claude();
+    let codex = master.compile_codex();
+    ainb_hangar_proto::snapshots::ProfileGetResult {
+        found: true,
+        slug: master.slug.clone(),
+        description: master.description.clone(),
+        tier: master.tier.as_str().to_string(),
+        tools: master.tools.clone(),
+        color: master.color.clone().unwrap_or_default(),
+        body: master.body.clone(),
+        claude_preview: claude.contents,
+        codex_preview: ainb_hangar_proto::snapshots::CodexPreview {
+            config_fragment: codex.config_fragment,
+            prompt: codex.prompt_contents,
+            warnings: codex.warnings,
+        },
     }
 }
 
@@ -2116,6 +2243,141 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, METHOD_NOT_FOUND);
+    }
+
+    /// P5 end-to-end over `dispatch`: `profile/upsert` writes the master + indexes
+    /// it, `profile/get` returns the parsed fields + BOTH compile previews (Claude
+    /// lossless with the tier resolved, Codex lossy with dropped-field warnings),
+    /// and `profile/list` shows the indexed row. Home-isolated so the write lands
+    /// under a tempdir, never the operator's real `~/.agents-in-a-box`.
+    #[test]
+    fn profile_upsert_get_list_over_dispatch() {
+        ainb_hangar_store::test_support::with_isolated_home(|home| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let store = Store::open_in(home).await.unwrap();
+                let pool = store.pool();
+
+                // Upsert a profile with a Codex-incompatible field set.
+                let up = dispatch(
+                    pool,
+                    &req(
+                        methods::PROFILE_UPSERT,
+                        serde_json::json!({
+                            "slug": "code-reviewer",
+                            "description": "Reviews a diff",
+                            "tier": "premium",
+                            "tools": ["Read", "Grep"],
+                            "color": "cyan",
+                            "body": "You are a reviewer."
+                        }),
+                    ),
+                    &health(),
+                    &sink(),
+                )
+                .await;
+                assert!(up.error.is_none(), "upsert must ack: {up:?}");
+                assert!(
+                    up.result.unwrap()["path"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("code-reviewer.md")
+                );
+
+                // Get returns the parsed fields + both previews.
+                let got = dispatch(
+                    pool,
+                    &req(
+                        methods::PROFILE_GET,
+                        serde_json::json!({"slug": "code-reviewer"}),
+                    ),
+                    &health(),
+                    &sink(),
+                )
+                .await;
+                let got = got.result.expect("get result");
+                assert_eq!(got["found"], true);
+                assert_eq!(got["tier"], "premium");
+                assert!(
+                    got["claude_preview"].as_str().unwrap().contains("model: opus"),
+                    "Claude preview resolves the tier"
+                );
+                assert!(
+                    got["codex_preview"]["config_fragment"]
+                        .as_str()
+                        .unwrap()
+                        .contains("model = \"gpt-5\""),
+                    "Codex preview resolves the tier"
+                );
+                assert_eq!(
+                    got["codex_preview"]["warnings"].as_array().unwrap().len(),
+                    2,
+                    "Codex drops tools + color with a warning each"
+                );
+
+                // List shows the indexed row.
+                let list = dispatch(pool, &req(methods::PROFILE_LIST, serde_json::json!({})), &health(), &sink())
+                    .await
+                    .result
+                    .expect("list result");
+                let profiles = list["profiles"].as_array().unwrap();
+                assert_eq!(profiles.len(), 1);
+                assert_eq!(profiles[0]["slug"], "code-reviewer");
+                assert_eq!(profiles[0]["tier"], "premium");
+            });
+        });
+    }
+
+    /// `profile/get` on an unknown slug is a read miss, not an error.
+    #[test]
+    fn profile_get_unknown_slug_is_not_found() {
+        ainb_hangar_store::test_support::with_isolated_home(|home| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let store = Store::open_in(home).await.unwrap();
+                let got = dispatch(
+                    store.pool(),
+                    &req(methods::PROFILE_GET, serde_json::json!({"slug": "ghost"})),
+                    &health(),
+                    &sink(),
+                )
+                .await;
+                assert!(got.error.is_none());
+                assert_eq!(got.result.unwrap()["found"], false);
+            });
+        });
+    }
+
+    /// `profile/upsert` rejects an invalid slug with `INVALID_PARAMS` (never
+    /// writes a malformed master path).
+    #[test]
+    fn profile_upsert_rejects_bad_slug() {
+        ainb_hangar_store::test_support::with_isolated_home(|home| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let store = Store::open_in(home).await.unwrap();
+                let resp = dispatch(
+                    store.pool(),
+                    &req(
+                        methods::PROFILE_UPSERT,
+                        serde_json::json!({"slug": "Bad_Slug", "tier": "fast"}),
+                    ),
+                    &health(),
+                    &sink(),
+                )
+                .await;
+                assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+            });
+        });
     }
 
     #[tokio::test]
