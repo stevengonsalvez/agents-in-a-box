@@ -46,10 +46,15 @@ deadline-bounded poll.
 
 Same as `verify-hangar-goal.md` Phase A, plus:
 
-1. `cargo build -p ainb -p ainb-hangar-daemon` (release not required). Stage the plugin:
-   `scripts/build-plugins.sh` → verify `dist/plugins/hangar-tui/hangar-tui` is executable;
-   on macOS re-`codesign --sign -` + `touch` after any copy so AMFI does not SIGKILL a
-   stale-signed binary (exit 137, no stderr).
+1. The Cargo workspace lives in `ainb-tui/` — **the repo root has no `Cargo.toml`** and the
+   build-plugins script is at `ainb-tui/scripts/build-plugins.sh`, so run every cargo/plugin
+   command from the workspace, not the repo root:
+   `cd ainb-tui && cargo build -p ainb -p ainb-hangar-daemon` (release not required). Stage
+   the plugin with `bash ainb-tui/scripts/build-plugins.sh` (from the repo root) or
+   `./scripts/build-plugins.sh` (from `ainb-tui/`) → verify
+   `ainb-tui/dist/plugins/hangar-tui/hangar-tui` is executable; on macOS re-`codesign
+   --sign -` + `touch` after any copy so AMFI does not SIGKILL a stale-signed binary
+   (exit 137, no stderr).
    - **Shared-target caveat.** The tripwire gate (`can_run_tripwire`) derives
      `dist/plugins` as a sibling of the cargo target dir (from the test binary's own
      path). When `CARGO_TARGET_DIR` points OUTSIDE the workspace, stage the plugin into
@@ -99,7 +104,7 @@ re-run locally on macOS at P11 close.
 | CC14 | J5 | **history rows**: `run_history` per run (tokens/cost/diff/outcome); cost rollup absorbs fleet cost | `rpc_run_history.rs`, `rpc_usage_rollup.rs` | REAL daemon | GREEN |
 | CC15 | J5 | OTLP export: a run's span/metrics reach a local collector when the endpoint is set | `tripwire_otel_export_when_endpoint_set.rs` (`--features otlp`) | REAL exporter → local collector | GREEN (feature-gated) |
 | CC16 | J4 | autopilot cron: fires on schedule; skips when a run is in flight | `tripwire_autopilot_fires_on_schedule.rs`, `tripwire_autopilot_skips_when_running.rs` | REAL scheduler | GREEN |
-| CC17 | J1 | **profile compile — both targets** (Claude `.md` master → Codex `[profiles.<slug>]` + prompt, WARN on dropped tools/color); fs-watch pickup | — | — | **PENDING — P5 (bct.5) still in progress; no profile-compiler module shipped yet. Genuine phase gap, NOT a bug. Add this leg when P5 lands.** |
+| CC17 | J1 | **profile compile — both targets** (Claude `.md` master → Codex `[profiles.<slug>]` + prompt, WARN on dropped tools/color); fs-watch pickup | — | — | **FAIL (P11-blocking) — P5 (bct.5) not landed; no profile-compiler module shipped yet. Un-landed upstream phase, not a product bug, but it blocks P11 completeness (see Reporting). Add + gate this leg when P5 lands.** |
 
 ## Phase E — resilience blind spots (the P11-mandated legs)
 
@@ -122,13 +127,13 @@ column lists the Phase D/E legs that serve it.
 
 | Journey | What it delivers | Served by (legs) | Real providers? | Status |
 |---------|------------------|------------------|-----------------|--------|
-| **J1** | kanban w/ custom columns, task in any column, agent + profile pick | CC06, CC07, CC17 | boards REAL; profile PENDING | PARTIAL — boards green, profile leg pending P5 |
+| **J1** | kanban w/ custom columns, task in any column, agent + profile pick | CC06, CC07, CC17 | boards REAL; profile ABSENT | **BLOCKED — boards green (CC06/CC07); CC17 profile-compile leg absent (P5 not landed) → J1 not fully covered; blocks P11** |
 | **J2** | run headless (`-p`) or interactive YOLO, per provider | CC08 | runner REAL (provider mocked via fake) | GREEN |
 | **J3** | attach from card; tmux always; green on done; auto-move | CC06, F37 (attach), CC02 (event refresh) | REAL | GREEN |
 | **J4** | autopilot cron kept | CC16, F19–F23 | REAL scheduler | GREEN |
 | **J5** | full history / traceability + OTel | CC14, CC15 | REAL daemon + REAL OTLP export | GREEN |
 | **C1** | every input surfaced + answerable, ALL sessions | CC01, CC02, CC03, CC04, CC05 | answer path REAL (incl. tmux last mile) | GREEN |
-| **C2** | web / channels same ecosystem | CC11 (bridge), F-web Playwright (P8 suite) | bridge unit; web Playwright (P8) | GREEN (bridge + web suite) |
+| **C2** | web / channels same ecosystem | CC11 (bridge) green; web answer-button leg (P8 Playwright) ABSENT on this branch | bridge unit REAL; web Playwright NOT PRESENT | **FAIL (P11-blocking) — bridge green (CC11), but no runnable web ASK-answer Playwright suite exists (P8 not landed). Web click-② coverage is UNPROVEN; do not report C2 green until the suite lands + gates.** |
 | **C3** | ATC session notified + broadcast/correct via skills | CC13 | REAL daemon | GREEN |
 | **C4** | agentpeek UX (shuffle, standup) | CC02 (shuffle), CC12 (standup gate) | REAL render + unit gate | GREEN |
 | **C5** | squads / workspaces purposed | CC09, CC10, RB01 | REAL daemon | GREEN |
@@ -140,7 +145,10 @@ session (Jn) is answerable / observable through the converged plane (Cm) — the
 crossings are exercised by CC01 (a launched session's ASK answered from the TUI), CC06+CC02
 (a launched board card that auto-moves on the event bus), CC09+RB01 (a squad-launched
 fan-out scoped to its workspace), and CC14/CC15 (a launched run's history + OTLP span).
-No J×C crossing is left without a green leg except J1×* profile-compile, blocked on P5.
+Two crossings are still uncovered and BLOCK P11 completeness: J1×* profile-compile (CC17,
+P5 not landed) and C2×web ASK-answer (P8 Playwright suite absent). Both are un-landed
+upstream phases, not regressions — but P11 cannot be reported complete or green until both
+legs land and are gated.
 
 ## CI wiring — the non-dispatching legs
 
@@ -191,7 +199,16 @@ disclose per report which legs ran REAL vs seeded-fixture.
   fake (`fake-claude.sh` / seeded fixtures). CC01's provider is not a live `claude` — its
   DELIVERY target is a real tmux shell and its daemon path is fully real; it proves the
   answer FLIP, not a live agent turn.
-- **PENDING is not FAIL.** CC17 (profile compile) is a genuine open phase (P5 / bct.5), not
-  a regression. Report it PENDING with the reason; do not paper over it.
+- **Un-landed matrix legs FAIL the P11 completeness bar — they are not benign PENDINGs.**
+  The validation contract requires the full J1–J5 × C1–C5 matrix to be covered by P11, so
+  a missing acceptance leg counts as a FAIL against P11 sign-off (and toward the exit code),
+  even when its root cause is an un-landed upstream phase rather than a product regression.
+  On this branch two legs have no shipped module/test and therefore **P11 is NOT complete
+  and the harness is NOT green:**
+  - CC17 (profile compile, P5 / bct.5) — no profile-compiler module shipped.
+  - C2 web ASK-answer (P8) — no Playwright web suite present.
+  Disclose the cause honestly (un-landed P5 / P8, not a regression), but do NOT report P11
+  as done and do NOT count these cells as covered. P11 closes green only after both legs
+  land and are gated.
 - Do not modify product code to make a leg pass. If a leg reveals a genuine product bug,
   file the evidence (a bead) — do not "fix" the product mid-run.
