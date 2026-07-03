@@ -212,3 +212,34 @@ fn preview_matches_existing_source_by_uri_not_slug() {
     assert_eq!(manifest.sources.len(), 1, "no duplicate source entry");
     unsafe { std::env::remove_var("AINB_TOOL_HOME_CLAUDE") };
 }
+
+/// A fully-failed import must leave no trace: the source records written
+/// at the start of import_selected are rolled back when zero units land.
+#[test]
+fn fully_failed_import_rolls_back_the_source() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = tmp_home();
+    let (_repo, uri) = fixture_repo();
+
+    let preview = preview_source(home.path(), &uri).expect("preview");
+    // Bogus unit path → every install fails; no tool-home env needed.
+    let mut out = Vec::new();
+    let (installed, failed) = import_selected(
+        home.path(),
+        &preview,
+        &["skills/does-not-exist".to_string()],
+        "claude",
+        &mut out,
+    )
+    .expect("import returns Ok with counts");
+    assert_eq!((installed, failed), (0, 1));
+
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert!(
+        manifest.sources.is_empty(),
+        "failed import must not leave the source behind: {:?}",
+        manifest.sources
+    );
+    let lockfile = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+    assert!(lockfile.sources.is_empty(), "lockfile source rolled back");
+}

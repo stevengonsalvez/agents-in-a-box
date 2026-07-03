@@ -264,6 +264,9 @@ pub fn import_selected(
     let lockfile_path = lockfile_path_in(home);
 
     // Persist the source on first import — same records `add` writes.
+    // Remembered so a fully-failed import can roll it back (the
+    // preview-first contract: no imported units → no trace).
+    let persisted_now = !preview.already_added;
     if !preview.already_added {
         let mut manifest = Manifest::load_from(&manifest_path)?;
         if manifest.source(&preview.name).is_none() {
@@ -313,6 +316,18 @@ pub fn import_selected(
             }
         }
     }
+    // Nothing landed and we created the source in this call → roll the
+    // records back so a failed import leaves no trace, matching cancel.
+    if installed == 0 && persisted_now {
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        let _ = manifest.remove_source(&preview.name);
+        manifest.save_to(&manifest_path)?;
+        let mut lockfile = Lockfile::load_from(&lockfile_path)?;
+        lockfile.sources.retain(|s| s.name != preview.name);
+        lockfile.save_to(&lockfile_path)?;
+        writeln!(out, "# rolled back source `{}` (no unit imported)", preview.name)?;
+    }
+
     writeln!(
         out,
         "imported {installed} unit(s), {failed} failed → {targets}"
