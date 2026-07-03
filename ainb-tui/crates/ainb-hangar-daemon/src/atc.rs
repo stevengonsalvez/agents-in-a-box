@@ -216,36 +216,8 @@ impl AtcHeartbeatScheduler {
         // one unit of continue budget.
         for r in &rows {
             if let NeedsContext::Err(err) = &r.context {
-                let count = AtcInstanceRepo::retry_get(&self.pool, &inst.name, &r.session.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map_or(0, |row| row.continue_count);
-                match err_action(count, inst.err_retry_cap) {
-                    ErrAction::Escalate => {
-                        let reason = format!("retry cap reached: {}", err.pattern);
-                        let _ = raise_escalation(
-                            &self.pool,
-                            &self.events,
-                            &inst.name,
-                            &r.session.id,
-                            &r.session.cwd,
-                            None,
-                            &reason,
-                            now,
-                        )
-                        .await;
-                    }
-                    ErrAction::Continue => {
-                        let _ = AtcInstanceRepo::record_continue(
-                            &self.pool,
-                            &inst.name,
-                            &r.session.id,
-                            now,
-                        )
-                        .await;
-                    }
-                }
+                self.enforce_err_cap(inst, &r.session.id, &r.session.cwd, &err.pattern, now)
+                    .await;
             }
         }
         // Deliver the compact nudge into the ATC session (if it is spawned).
@@ -266,6 +238,57 @@ impl AtcHeartbeatScheduler {
         }
 
         let _ = AtcInstanceRepo::mark_heartbeat(&self.pool, &inst.name, now).await;
+    }
+
+    /// Apply the retry-cap decision for ONE ERR session of an instance.
+    ///
+    /// Reads the durable ledger row ONCE and short-circuits when it is already
+    /// `escalated`: an escalated session is neither continued nor re-escalated
+    /// until it recovers (recovery clears the ledger via `reset_retry`). Without
+    /// this guard a session stuck at/over the cap would re-enter the Escalate
+    /// branch every heartbeat, and [`raise_escalation`] would mint a fresh
+    /// `escalation:{inst}:{sess}:{now_ms}` id each tick — a brand-new attention row
+    /// + `AttentionRaised` push (every 2 min by default) for the same unchanged
+    /// failure. Under the cap and not escalated, one unit of continue budget is
+    /// consumed.
+    async fn enforce_err_cap(
+        &self,
+        inst: &AtcInstanceRow,
+        session_id: &str,
+        session_cwd: &str,
+        pattern: &str,
+        now_ms: i64,
+    ) {
+        let ledger = AtcInstanceRepo::retry_get(&self.pool, &inst.name, session_id)
+            .await
+            .ok()
+            .flatten();
+        // Dedupe: a row already flagged escalated is done — no continue, no re-raise.
+        if ledger.as_ref().is_some_and(|row| row.escalated) {
+            return;
+        }
+        let count = ledger.map_or(0, |row| row.continue_count);
+        match err_action(count, inst.err_retry_cap) {
+            ErrAction::Escalate => {
+                let reason = format!("retry cap reached: {pattern}");
+                let _ = raise_escalation(
+                    &self.pool,
+                    &self.events,
+                    &inst.name,
+                    session_id,
+                    session_cwd,
+                    None,
+                    &reason,
+                    now_ms,
+                )
+                .await;
+            }
+            ErrAction::Continue => {
+                let _ =
+                    AtcInstanceRepo::record_continue(&self.pool, &inst.name, session_id, now_ms)
+                        .await;
+            }
+        }
     }
 
     /// Recompute + persist the instance's next heartbeat tick from the fired slot.
@@ -456,5 +479,49 @@ mod tests {
     #[test]
     fn nudge_summarises_counts_and_is_quiet_when_empty() {
         assert!(build_nudge(&[], NOW).contains("fleet quiet"));
+    }
+
+    #[tokio::test]
+    async fn escalation_is_raised_once_and_not_re_raised_while_escalated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_instance(&store, "main").await;
+        let (_b, sink) = broker();
+        let sched = AtcHeartbeatScheduler::new(
+            store.pool().clone(),
+            sink,
+            Arc::new(ainb_hangar_core::clock::SystemClock),
+            CancellationToken::new(),
+        );
+        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+
+        // Drive the session to its cap (3) so the next decision escalates.
+        for _ in 0..3 {
+            AtcInstanceRepo::record_continue(store.pool(), "main", "sess-1", NOW).await.unwrap();
+        }
+
+        // First heartbeat at cap → escalates exactly once and flags the ledger.
+        sched.enforce_err_cap(&inst, "sess-1", "/work/x", "overloaded_error", NOW).await;
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1,
+            "a cap-reached ERR escalates once"
+        );
+        assert!(
+            AtcInstanceRepo::retry_get(store.pool(), "main", "sess-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .escalated
+        );
+
+        // Second heartbeat two minutes later, session still stuck ERR at cap → the
+        // escalated flag short-circuits: NO brand-new attention row is minted.
+        sched.enforce_err_cap(&inst, "sess-1", "/work/x", "overloaded_error", NOW + 120_000).await;
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1,
+            "an already-escalated session raises no second row on the next heartbeat"
+        );
     }
 }
