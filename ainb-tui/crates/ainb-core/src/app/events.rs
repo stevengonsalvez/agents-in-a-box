@@ -1114,6 +1114,29 @@ impl EventHandler {
         None
     }
 
+    /// Generic paste fallback: when any free-form text input has focus
+    /// (per `is_text_input_context`) and no dedicated paste route matched,
+    /// feed the pasted text through the normal key path one character at a
+    /// time. Every field's existing `Char` arm does the insertion, so all
+    /// current AND future text inputs accept paste without a per-field
+    /// route — the fix for "this form doesn't allow pasting".
+    ///
+    /// Control characters are skipped: a `\n` would submit the form and a
+    /// `\t` would jump fields mid-paste. Returns true when the paste was
+    /// consumed.
+    pub fn paste_into_text_input(text: &str, state: &mut AppState) -> bool {
+        if !Self::is_text_input_context(state) {
+            return false;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            if let Some(ev) = Self::handle_key_event(key, state) {
+                Self::process_event(ev, state);
+            }
+        }
+        true
+    }
+
     /// True when the user is currently focused on any free-form text input.
     ///
     /// Single-character global shortcuts (`H`, `W`, future ones) must NOT
@@ -1209,7 +1232,24 @@ impl EventHandler {
                 || state.config_screen_state.api_key_input_mode
                 || state.config_popup_state.is_text_entry());
 
+        // Onboarding wizard text-entry steps: git-directories path input,
+        // the OTEL credential form, and the auth API-key entry pane. These
+        // must accept bracketed paste (endpoints/tokens/paths are exactly
+        // the values users paste).
+        let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
+            && state.onboarding_state.as_ref().is_some_and(|o| {
+                use crate::components::onboarding::{AuthPane, OnboardingStep};
+                match o.current_step {
+                    OnboardingStep::GitDirectories | OnboardingStep::OtelSetup => true,
+                    OnboardingStep::Authentication => {
+                        matches!(o.auth_pane, AuthPane::KeyEntry { .. })
+                    }
+                    _ => false,
+                }
+            });
+
         new_session_text_active
+            || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
@@ -8266,6 +8306,41 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
             .expect("paste on PickRepo must dispatch a filter paste");
         assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
+    }
+
+    /// A bracketed paste into the onboarding OTEL form must land in the
+    /// focused field via the generic fallback — the bug where the Grafana
+    /// endpoint/token fields silently dropped Cmd+V. Control characters
+    /// are stripped so a trailing newline can't submit the form.
+    #[test]
+    fn paste_lands_in_onboarding_otel_field() {
+        let mut state = AppState::default();
+        state.start_onboarding(false, None);
+        if let Some(o) = state.onboarding_state.as_mut() {
+            o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+        }
+
+        let consumed = EventHandler::paste_into_text_input(
+            "https://otlp-gateway.grafana.net/otlp\n",
+            &mut state,
+        );
+        assert!(consumed, "OTEL form must be a paste-accepting context");
+        let o = state.onboarding_state.as_ref().unwrap();
+        assert_eq!(o.otel_otlp_endpoint, "https://otlp-gateway.grafana.net/otlp");
+        // Still on the OTEL step: the stripped \n must not advance.
+        assert_eq!(
+            o.current_step,
+            crate::components::onboarding::OnboardingStep::OtelSetup
+        );
+    }
+
+    /// Paste with no text input focused is refused (not typed into a
+    /// navigation screen as shortcut keystrokes).
+    #[test]
+    fn paste_outside_text_input_is_refused() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::SESSION_LIST.to_string();
+        assert!(!EventHandler::paste_into_text_input("abc", &mut state));
     }
 
     /// Esc inside a text input while help is visible must close help,
