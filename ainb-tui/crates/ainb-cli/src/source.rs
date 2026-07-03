@@ -200,13 +200,28 @@ pub fn preview_source(home: &Path, uri_str: &str) -> Result<SourcePreview> {
     }
     let stored_uri = format!("{}:{}", uri.source_type, uri.locator);
     let ref_ = uri.ref_.clone().unwrap_or_else(|| "main".to_string());
-    let name = derive_name_slug(&uri.source_type, &uri.locator);
-    if name.is_empty() {
+    let derived = derive_name_slug(&uri.source_type, &uri.locator);
+    if derived.is_empty() {
         bail!("could not derive a source name from `{uri_str}`");
     }
 
+    // Identity is the stored URI, not the derived name — a source added
+    // earlier under a custom --name must be recognised (or import would
+    // persist a duplicate entry for the same repo), and a slug collision
+    // with a DIFFERENT repo must fail here, before the expensive fetch,
+    // not per-unit at install time.
     let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
-    let already_added = manifest.source(&name).is_some();
+    let existing = manifest.sources.iter().find(|s| s.uri == stored_uri);
+    let already_added = existing.is_some();
+    // Reuse the existing entry's name (fetch cache is keyed by name, so
+    // this also re-fetches into the right checkout).
+    let name = existing.map(|s| s.name.clone()).unwrap_or(derived);
+    if !already_added && manifest.source(&name).is_some() {
+        bail!(
+            "source name `{name}` is already taken by a different URI — \
+             add `{stored_uri}` via `ainb source add {stored_uri} --name <other>`"
+        );
+    }
 
     let fetched = run_fetcher(&uri, &name, &cache_dir_in(home))
         .with_context(|| format!("fetching source `{name}`"))?;

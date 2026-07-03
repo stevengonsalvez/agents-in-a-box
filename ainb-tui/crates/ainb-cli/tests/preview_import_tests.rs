@@ -172,3 +172,43 @@ fn reinstall_with_different_targets_refreshes_manifest_entry() {
         std::env::remove_var("AINB_TOOL_HOME_CODEX");
     }
 }
+
+/// Source identity is the URI, not the derived name slug: a source added
+/// earlier under a custom --name is recognised (already_added, name
+/// reused — no duplicate entry), and a slug collision with a different
+/// URI fails fast at preview time.
+#[test]
+fn preview_matches_existing_source_by_uri_not_slug() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = tmp_home();
+    let (_repo, uri) = fixture_repo();
+
+    // Add the repo under a custom name via the normal add path.
+    let mut buf = Vec::new();
+    ainb_cli::dispatch(
+        home.path(),
+        ainb_cli::Command::Source {
+            action: ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
+                uri: uri.clone(),
+                name: Some("mytools".to_string()),
+                kind: None,
+            }),
+        },
+        &mut buf,
+    )
+    .expect("add source");
+
+    let preview = preview_source(home.path(), &uri).expect("preview");
+    assert!(preview.already_added, "same URI under custom name must be recognised");
+    assert_eq!(preview.name, "mytools", "existing entry's name reused");
+
+    // Import must not create a duplicate source.
+    let claude_root = home.path().join("tools/claude");
+    unsafe { std::env::set_var("AINB_TOOL_HOME_CLAUDE", &claude_root) };
+    let paths = unit_paths(&preview);
+    let mut out = Vec::new();
+    import_selected(home.path(), &preview, &paths[..1], "claude", &mut out).expect("import");
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert_eq!(manifest.sources.len(), 1, "no duplicate source entry");
+    unsafe { std::env::remove_var("AINB_TOOL_HOME_CLAUDE") };
+}
