@@ -733,10 +733,10 @@ impl EventHandler {
     }
 
     /// True when a SkillManager overlay (banner / input prompt / library
-    /// / browse modal) is open OR the help overlay is visible — i.e. the
-    /// underlying Sources/Units panels are NOT the active surface. Mouse
-    /// hit-testing on the panels is suppressed in that case so a click
-    /// meant for the modal doesn't leak through.
+    /// / browse / source-preview modal) is open OR the help overlay is
+    /// visible — i.e. the underlying Sources/Units panels are NOT the
+    /// active surface. Mouse hit-testing on the panels is suppressed in
+    /// that case so a click meant for the modal doesn't leak through.
     fn skill_manager_overlay_open(state: &AppState) -> bool {
         let s = &state.skill_manager_state;
         state.help_visible
@@ -744,6 +744,7 @@ impl EventHandler {
             || s.input.is_some()
             || s.library.is_some()
             || s.browse.is_some()
+            || s.preview.is_some()
     }
 
     /// Recompute the SkillManager top-row rects (Sources panel + Units
