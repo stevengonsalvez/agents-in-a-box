@@ -12,7 +12,7 @@
 use ainb_hangar_proto::snapshots::{
     BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult,
 };
-use ainb_plugin_hangar::{render_boards, BoardsState};
+use ainb_plugin_hangar::{render_boards, BoardsState, BoardsStatus};
 use ainb_plugin_sdk::WireBuffer;
 
 fn card(issue: &str, title: &str, state: Option<&str>) -> BoardCardWireRow {
@@ -88,6 +88,36 @@ fn render_empty_board_snapshot() {
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
     assert!(map.contains("No boards yet"), "empty prompt:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// Loading state: the fetch has not answered — a "Loading boards…" line renders,
+/// NOT the empty-workspace create prompt (a never-fetched state must not read as
+/// empty).
+#[test]
+fn render_loading_board_snapshot() {
+    let state = BoardsState::default();
+    assert_eq!(state.status(), &BoardsStatus::Loading);
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("Loading boards"), "loading line:\n{map}");
+    assert!(!map.contains("No boards yet"), "not the empty prompt:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// Error state: a failed fetch renders a distinct "Couldn't load boards" banner
+/// with the daemon error, never the create prompt — a daemon failure must not
+/// read as an invitation to create a board (P4 / D8).
+#[test]
+fn render_error_board_snapshot() {
+    let mut state = BoardsState::default();
+    state.set_error("daemon error: workspace/subscribe rejected");
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("Couldn't load boards"), "error banner:\n{map}");
+    assert!(!map.contains("No boards yet"), "not the empty prompt:\n{map}");
     insta::assert_snapshot!(map);
 }
 

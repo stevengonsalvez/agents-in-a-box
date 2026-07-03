@@ -39,6 +39,29 @@ const GOLD: Color = Color::rgb(255, 215, 0);
 const MUTED: Color = Color::rgb(120, 120, 140);
 /// Green for the "auto-move ON" indicator.
 const GREEN: Color = Color::rgb(100, 200, 120);
+/// Amber-red for the "couldn't load boards" error state.
+const ERROR_RED: Color = Color::rgb(235, 90, 90);
+
+/// The load state of the Boards screen.
+///
+/// Lets [`render_boards`] tell a genuinely-empty workspace (offer to create a
+/// board) apart from a fetch that has not answered yet (loading) or has failed
+/// (error) — the daemon owns the data, this only reflects its load state
+/// (`project_ainb_plugin_owns_data_plane`). Without it a daemon error reads as an
+/// invitation to create a board.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BoardsStatus {
+    /// The `hangar/boards_list` fetch is in flight (or has not fired yet). The
+    /// default, so a fresh state before the first reply reads as "loading", not
+    /// "empty".
+    #[default]
+    Loading,
+    /// A snapshot has been applied — the board list (possibly empty) is current.
+    Loaded,
+    /// The fetch (or a mutation reply) failed; carries the daemon/parse error for
+    /// the render.
+    Error(String),
+}
 
 /// A card flattened for the Boards render (derived from a [`BoardCardWireRow`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +133,8 @@ pub struct BoardsState {
     focused_board: usize,
     focused_col: usize,
     focused_card: usize,
+    /// The fetch load state — distinguishes empty from loading/error at render.
+    status: BoardsStatus,
 }
 
 impl BoardsState {
@@ -143,9 +168,23 @@ impl BoardsState {
             focused_board: 0,
             focused_col: 0,
             focused_card: 0,
+            status: BoardsStatus::Loaded,
         };
         state.clamp();
         state
+    }
+
+    /// The current load status (loading / loaded / error) the render branches on.
+    #[must_use]
+    pub const fn status(&self) -> &BoardsStatus {
+        &self.status
+    }
+
+    /// Mark the boards fetch (or a mutation reply) as failed, preserving any board
+    /// already shown — the error only surfaces when the list is empty (an initial
+    /// or failed fetch), so a transient mutation error never blanks a live board.
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.status = BoardsStatus::Error(message.into());
     }
 
     /// The boards, in list order.
@@ -514,9 +553,7 @@ fn unchanged(state: &BoardsState) -> BoardsReduction {
 /// paints a prompt to create one.
 pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, state: &BoardsState) {
     let Some(board) = state.focused_board() else {
-        put_str(buf, 2, top, "No boards yet — press", MUTED, area_w);
-        put_str(buf, 24, top, " b ", GOLD, area_w);
-        put_str(buf, 27, top, "to create one.", MUTED, area_w);
+        render_no_board(buf, area_w, top, state.status());
         return;
     };
 
@@ -556,6 +593,29 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
         None
     };
     let _ = card_board::render_card_board(buf, area_w, body_top, bottom, &columns, selected);
+}
+
+/// Render the no-board state on row `top`, branching on the load `status` so an
+/// empty workspace (create prompt), an in-flight fetch (loading), and a failed
+/// fetch (error) never read as one another.
+fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsStatus) {
+    match status {
+        // A failed fetch is an error, never an invitation to create a board.
+        BoardsStatus::Error(msg) => {
+            let x = put_str(buf, 2, top, "Couldn't load boards — ", ERROR_RED, area_w);
+            put_str(buf, x, top, msg, MUTED, area_w);
+        }
+        // The fetch has not answered yet.
+        BoardsStatus::Loading => {
+            put_str(buf, 2, top, "Loading boards…", MUTED, area_w);
+        }
+        // Genuinely empty: offer the create affordance.
+        BoardsStatus::Loaded => {
+            put_str(buf, 2, top, "No boards yet — press", MUTED, area_w);
+            put_str(buf, 24, top, " b ", GOLD, area_w);
+            put_str(buf, 27, top, "to create one.", MUTED, area_w);
+        }
+    }
 }
 
 /// The key-hint band rendered under the board title — the column/card bindings
@@ -760,6 +820,68 @@ mod tests {
                 board_id: "b1".into(),
                 column_id: "c1".into()
             })
+        );
+    }
+
+    /// Flatten the buffer into `\n`-joined rows for a substring assertion.
+    fn painted(buf: &WireBuffer) -> String {
+        let mut grid = vec![vec![' '; buf.width as usize]; buf.height as usize];
+        for (coord, cell) in &buf.cells {
+            if coord.y < buf.height && coord.x < buf.width {
+                if let Some(ch) = cell.symbol.chars().next() {
+                    grid[coord.y as usize][coord.x as usize] = ch;
+                }
+            }
+        }
+        grid.into_iter()
+            .map(|r| r.into_iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A LOADED but empty board list renders the create prompt (the genuine
+    /// empty-workspace affordance).
+    #[test]
+    fn loaded_empty_renders_create_prompt() {
+        let state = BoardsState::from_snapshot(&BoardsListResult { boards: Vec::new() });
+        assert_eq!(state.status(), &BoardsStatus::Loaded);
+        let mut buf = WireBuffer::new(80, 10);
+        render_boards(&mut buf, 80, 0, 10, &state);
+        let map = painted(&buf);
+        assert!(map.contains("No boards yet"), "create prompt:\n{map}");
+    }
+
+    /// A default (never-fetched) state is LOADING — it must NOT read as an empty
+    /// workspace inviting a create.
+    #[test]
+    fn default_state_renders_loading_not_create_prompt() {
+        let state = BoardsState::default();
+        assert_eq!(state.status(), &BoardsStatus::Loading);
+        let mut buf = WireBuffer::new(80, 10);
+        render_boards(&mut buf, 80, 0, 10, &state);
+        let map = painted(&buf);
+        assert!(map.contains("Loading boards"), "loading state:\n{map}");
+        assert!(
+            !map.contains("No boards yet"),
+            "loading must not read as empty:\n{map}"
+        );
+    }
+
+    /// A FAILED fetch renders a distinct error, never the create prompt — a daemon
+    /// failure must not read as an invitation to create a board (P4 / D8).
+    #[test]
+    fn error_state_renders_error_not_create_prompt() {
+        let mut state = BoardsState::default();
+        state.set_error("connection refused");
+        assert!(matches!(state.status(), BoardsStatus::Error(_)));
+        let mut buf = WireBuffer::new(80, 10);
+        render_boards(&mut buf, 80, 0, 10, &state);
+        let map = painted(&buf);
+        assert!(map.contains("Couldn't load boards"), "error banner:\n{map}");
+        assert!(map.contains("connection refused"), "error detail:\n{map}");
+        assert!(
+            !map.contains("No boards yet"),
+            "an error must not read as an empty workspace:\n{map}"
         );
     }
 

@@ -788,12 +788,27 @@ impl HangarPlugin {
     /// (or any `hangar/board_*` mutation reply, which returns the same refreshed
     /// envelope) (P4 / D8).
     fn apply_boards(&mut self, resp: &RpcResponse) {
-        if let Some(result) = &resp.result {
-            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardsListResult>(
-                result.clone(),
-            ) {
-                self.screens.set_boards(&r);
+        // A rejected fetch/mutation is an error state, not "no boards" — surface it
+        // so the render never invites a create over a daemon failure (P4 / D8).
+        if let Some(err) = &resp.error {
+            self.screens
+                .set_boards_error(format!("daemon error: {}", err.message));
+            return;
+        }
+        match resp.result.as_ref() {
+            Some(result) => {
+                match serde_json::from_value::<ainb_hangar_proto::snapshots::BoardsListResult>(
+                    result.clone(),
+                ) {
+                    Ok(r) => self.screens.set_boards(&r),
+                    Err(e) => self
+                        .screens
+                        .set_boards_error(format!("malformed boards payload: {e}")),
+                }
             }
+            None => self
+                .screens
+                .set_boards_error("empty boards reply".to_string()),
         }
     }
 

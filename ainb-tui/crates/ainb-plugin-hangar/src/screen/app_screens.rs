@@ -379,6 +379,13 @@ impl ScreenStates {
         self.boards = BoardsState::from_snapshot(snapshot);
     }
 
+    /// Mark the Boards fetch as failed so the render shows the error rather than
+    /// the "no boards yet" create prompt (P4 / D8). Preserves any board already
+    /// loaded — a transient mutation error never blanks a live board.
+    pub fn set_boards_error(&mut self, message: impl Into<String>) {
+        self.boards.set_error(message);
+    }
+
     /// Take the pending board mutation RPC raised by the Boards screen, if any
     /// (P4).
     pub const fn take_pending_boards_action(&mut self) -> Option<BoardsAction> {

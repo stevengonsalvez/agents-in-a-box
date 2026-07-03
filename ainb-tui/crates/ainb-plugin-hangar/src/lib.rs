@@ -34,7 +34,7 @@ pub use screen::issue_list::{
 };
 pub use screen::boards::{
     reduce_boards, render_boards, BoardView, BoardsEvent, BoardsIntent, BoardsReduction,
-    BoardsState, CardView, ColumnView,
+    BoardsState, BoardsStatus, CardView, ColumnView,
 };
 pub use screen::kanban::{
     reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,
