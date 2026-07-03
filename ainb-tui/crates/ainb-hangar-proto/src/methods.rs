@@ -643,6 +643,14 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_PR_STATUS_REFRESH,
     HANGAR_INBOX_LIST,
     HANGAR_INBOX_MARK_READ,
+    ATTENTION_LIST,
+    ATTENTION_SUBSCRIBE,
+    ATTENTION_ANSWER,
+    AUTH_HELLO,
+    PING,
+    // Board methods (P4 / D8) are APPENDED at the catalogue tail — the wire
+    // catalogue is append-only, so new methods must follow every pre-existing
+    // entry (attention/auth/ping) rather than being spliced ahead of them.
     HANGAR_BOARDS_LIST,
     HANGAR_BOARD_CREATE,
     HANGAR_BOARD_UPDATE,
@@ -653,11 +661,6 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_BOARD_COLUMN_REORDER,
     HANGAR_BOARD_CARD_ADD,
     HANGAR_BOARD_CARD_MOVE,
-    ATTENTION_LIST,
-    ATTENTION_SUBSCRIBE,
-    ATTENTION_ANSWER,
-    AUTH_HELLO,
-    PING,
 ];
 
 #[cfg(test)]
@@ -802,6 +805,11 @@ mod tests {
             HANGAR_PR_STATUS_REFRESH,
             HANGAR_INBOX_LIST,
             HANGAR_INBOX_MARK_READ,
+            ATTENTION_LIST,
+            ATTENTION_SUBSCRIBE,
+            ATTENTION_ANSWER,
+            AUTH_HELLO,
+            PING,
             HANGAR_BOARDS_LIST,
             HANGAR_BOARD_CREATE,
             HANGAR_BOARD_UPDATE,
@@ -812,11 +820,6 @@ mod tests {
             HANGAR_BOARD_COLUMN_REORDER,
             HANGAR_BOARD_CARD_ADD,
             HANGAR_BOARD_CARD_MOVE,
-            ATTENTION_LIST,
-            ATTENTION_SUBSCRIBE,
-            ATTENTION_ANSWER,
-            AUTH_HELLO,
-            PING,
         ];
         for m in declared {
             assert!(
