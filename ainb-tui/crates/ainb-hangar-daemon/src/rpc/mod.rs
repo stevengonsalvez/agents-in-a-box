@@ -664,6 +664,7 @@ async fn handle(
         methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
         methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
+        methods::HANGAR_SQUAD_FANOUT => handle_squad_fanout(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         methods::HANGAR_USAGE_ROLLUP => handle_usage_rollup(pool, req).await,
@@ -1613,6 +1614,65 @@ async fn handle_squad_assign(
     })
 }
 
+/// Dispatch `hangar/squad_fanout` (P7): fan an issue out across the WHOLE squad —
+/// brief the LEADER *and* enqueue one task per distinct `agent` member, all on the
+/// same issue.
+///
+/// Mirrors [`handle_squad_assign`]'s contract (same params, same workspace
+/// resolve-or-reject, same human-leader / unknown-squad rejection), but calls
+/// [`SquadAssignService::assign_fanout`], which additionally resolves the squad's
+/// `agent` members and enqueues a task per member keyed to that member's runtime.
+/// The per-(issue, agent) claim guard (migration `0012`) lets the leader and every
+/// member hold their own pending task on the one issue. Answers with the leader's
+/// brief task plus one dispatch per fanned-out member.
+///
+/// [`SquadAssignService::assign_fanout`]: ainb_hangar_store::service::squad_assign::SquadAssignService::assign_fanout
+async fn handle_squad_fanout(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_store::service::squad_assign::{
+        SquadAssignRequest, SquadAssignService, SquadFanout,
+    };
+
+    let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
+        req,
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let request = SquadAssignRequest {
+        issue_id: params.issue_id.as_deref(),
+        work_dir: params.work_dir.as_deref(),
+        priority: params.priority.unwrap_or(0),
+    };
+    let SquadFanout { leader, members } = SquadAssignService::assign_fanout(
+        pool,
+        &ws,
+        &params.squad_id,
+        &request,
+        &SystemIdGen,
+        &SystemClock,
+    )
+    .await
+    .map_err(|e| squad_assign_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::SquadFanoutResult {
+        leader: ainb_hangar_proto::snapshots::SquadAssignResult {
+            task_id: leader.task_id,
+            leader_agent_id: leader.leader_agent_id,
+            runtime_id: leader.runtime_id,
+        },
+        members: members
+            .into_iter()
+            .map(|m| ainb_hangar_proto::snapshots::SquadMemberDispatchRow {
+                task_id: m.task_id,
+                agent_id: m.agent_id,
+                runtime_id: m.runtime_id,
+            })
+            .collect(),
+    })
+}
+
 /// Map a [`SquadAssignError`] onto an RPC error: a no-agent-leader / missing-leader
 /// rejection is a client error (`INVALID_PARAMS`), every store fault an internal
 /// error.
@@ -1626,6 +1686,9 @@ fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignErr
         ),
         SquadAssignError::LeaderAgentMissing(id) => {
             invalid_params(&format!("squad leader agent `{id}` not found"))
+        }
+        SquadAssignError::MemberAgentMissing(id) => {
+            invalid_params(&format!("squad member agent `{id}` not found"))
         }
         SquadAssignError::Db(db) => store_err(db),
     }
