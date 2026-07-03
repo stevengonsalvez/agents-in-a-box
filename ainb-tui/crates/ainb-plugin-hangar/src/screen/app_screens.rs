@@ -24,6 +24,7 @@ use super::agent_picker::{
     reduce_agent_picker, AgentPickerEvent, AgentPickerIntent, AgentPickerState,
 };
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
+use super::boards::{reduce_boards, BoardsEvent, BoardsIntent, BoardsState};
 use super::command_palette::{
     reduce_command_palette, CommandPaletteEvent, CommandPaletteIntent, CommandPaletteState,
 };
@@ -112,6 +113,46 @@ pub enum KanbanAction {
         task_id: String,
         /// The target status wire token (the destination column's drop status).
         to_status: String,
+    },
+}
+
+/// A deferred daemon RPC raised by the user-defined Boards screen (P4 / D8).
+///
+/// Like [`KanbanAction`], the sync key router can't `await`; it stashes the
+/// action on [`ScreenStates::pending_boards_action`] and the plugin's `render`
+/// pass drains it and fires the matching `hangar/board_*` RPC over the daemon
+/// socket, then re-pulls `hangar/boards_list`. Only the self-contained (no
+/// text-input) mutations are lifted here; run-a-card / rename / add-card are
+/// raised as intents but need a dispatch/prompt seam wired in a follow-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardsAction {
+    /// Reorder a board's columns (`⇧←/→`) — `hangar/board_column_reorder`.
+    ColumnReorder {
+        /// The board to reorder.
+        board_id: String,
+        /// The columns in their new left-to-right order.
+        column_ids: Vec<String>,
+    },
+    /// Delete the focused column (`x`) — `hangar/board_column_delete`.
+    ColumnDelete {
+        /// The board the column belongs to.
+        board_id: String,
+        /// The column to delete (its cards park unmapped).
+        column_id: String,
+    },
+    /// Append a column with a default name (`n`) — `hangar/board_column_add`.
+    ColumnAdd {
+        /// The board to append a column to.
+        board_id: String,
+        /// The new column's name.
+        name: String,
+    },
+    /// Flip the board's auto-move master toggle (`m`) — `hangar/board_update`.
+    BoardUpdate {
+        /// The board to retune.
+        board_id: String,
+        /// The new auto-move value.
+        auto_move: bool,
     },
 }
 
@@ -211,6 +252,8 @@ pub struct ScreenStates {
     pub autopilots: AutopilotsState,
     /// Kanban board screen cache (P8.4).
     pub kanban: KanbanState,
+    /// User-defined Boards screen cache (P4 / D8), built from `hangar/boards_list`.
+    pub boards: BoardsState,
     /// Daemon-health screen cache (P8.5), built from `hangar/daemon_health`.
     pub daemon_health: DaemonHealthState,
     /// Usage-dashboard screen cache (e38.35), built from `hangar/usage_rollup`.
@@ -287,6 +330,10 @@ pub struct ScreenStates {
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
     pub pending_answer_action: Option<AttentionAnswerAction>,
+    /// A board mutation RPC raised by the Boards screen (`⇧←/→`, `x`, `n`, `m`),
+    /// awaiting the `render` pass to fire the matching `hangar/board_*` over the
+    /// daemon socket (P4). `None` when idle.
+    pub pending_boards_action: Option<BoardsAction>,
 }
 
 impl Default for SkillManagerState {
@@ -317,6 +364,18 @@ impl ScreenStates {
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
         self.kanban = KanbanState::from_tasks(tasks, 0);
+    }
+
+    /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
+    /// snapshot (P4 / D8).
+    pub fn set_boards(&mut self, snapshot: &ainb_hangar_proto::snapshots::BoardsListResult) {
+        self.boards = BoardsState::from_snapshot(snapshot);
+    }
+
+    /// Take the pending board mutation RPC raised by the Boards screen, if any
+    /// (P4).
+    pub const fn take_pending_boards_action(&mut self) -> Option<BoardsAction> {
+        self.pending_boards_action.take()
     }
 
     /// Rebuild the daemon-health pane from a `hangar/daemon_health` snapshot
@@ -573,6 +632,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         Screen::Kanban => {
             super::kanban::render_kanban(buf, w, top, bottom, &states.kanban, now_ms());
         }
+        Screen::Boards => {
+            super::boards::render_boards(buf, w, top, bottom, &states.boards);
+        }
         Screen::DaemonHealth => {
             super::daemon_health::render_daemon_health(buf, w, top, bottom, &states.daemon_health);
         }
@@ -748,6 +810,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::Kanban => {
             route_kanban(states, key);
+            None
+        }
+        Screen::Boards => {
+            route_boards(states, key);
             None
         }
         Screen::Settings => {
@@ -928,6 +994,88 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
     if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
         states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
     }
+}
+
+/// Boards screen key routing (P4 / D8): map the arrow keys (plus Shift) and the
+/// column/card verbs into the boards reducer, lifting the self-contained mutation
+/// intents into a deferred [`BoardsAction`] the `render` pass fires over the
+/// daemon socket (the sync key router can't `await`). `←/→/↑/↓` (and `h/j/k/l`)
+/// move focus; `[`/`]` switch boards; `⇧←/→` reorder the focused column; `x`
+/// deletes it; `n` appends a default-named column; `m` toggles the board's
+/// auto-move; `enter` runs the card and `a` attaches (raised as intents; the
+/// dispatch/attach seam is wired in a follow-up).
+fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
+    let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
+    let ev = match &key.code {
+        KeyCode::Left => Some(if shift {
+            BoardsEvent::ReorderColumnLeft
+        } else {
+            BoardsEvent::FocusLeft
+        }),
+        KeyCode::Right => Some(if shift {
+            BoardsEvent::ReorderColumnRight
+        } else {
+            BoardsEvent::FocusRight
+        }),
+        KeyCode::Up => Some(BoardsEvent::FocusUp),
+        KeyCode::Down => Some(BoardsEvent::FocusDown),
+        KeyCode::Enter => Some(BoardsEvent::RunFocusedCard),
+        KeyCode::Char { ch } => match ch {
+            'h' => Some(BoardsEvent::FocusLeft),
+            'l' => Some(BoardsEvent::FocusRight),
+            'k' => Some(BoardsEvent::FocusUp),
+            'j' => Some(BoardsEvent::FocusDown),
+            'H' => Some(BoardsEvent::ReorderColumnLeft),
+            'L' => Some(BoardsEvent::ReorderColumnRight),
+            '[' => Some(BoardsEvent::PrevBoard),
+            ']' => Some(BoardsEvent::NextBoard),
+            'a' => Some(BoardsEvent::AttachFocusedCard),
+            'n' => Some(BoardsEvent::AddColumn),
+            'r' => Some(BoardsEvent::RenameColumn),
+            'x' => Some(BoardsEvent::DeleteColumn),
+            'c' => Some(BoardsEvent::AddCard),
+            'm' => Some(BoardsEvent::ToggleAutoMove),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(ev) = ev else {
+        return;
+    };
+    let out = reduce_boards(&states.boards, ev);
+    states.boards = out.state;
+    // Lift the self-contained mutation intents into a deferred board RPC. The
+    // text-input intents (rename column, add card) and the dispatch/attach intents
+    // (run/attach a card) are raised by the reducer but not yet wired to an RPC —
+    // they fold as no-ops here, mirroring the Kanban `Add`/`Edit` precedent.
+    states.pending_boards_action = match out.intent {
+        Some(BoardsIntent::ReorderColumns {
+            board_id,
+            column_ids,
+        }) => Some(BoardsAction::ColumnReorder {
+            board_id,
+            column_ids,
+        }),
+        Some(BoardsIntent::DeleteColumn {
+            board_id,
+            column_id,
+        }) => Some(BoardsAction::ColumnDelete {
+            board_id,
+            column_id,
+        }),
+        Some(BoardsIntent::AddColumn { board_id }) => Some(BoardsAction::ColumnAdd {
+            board_id,
+            name: "New Column".to_string(),
+        }),
+        Some(BoardsIntent::ToggleAutoMove {
+            board_id,
+            auto_move,
+        }) => Some(BoardsAction::BoardUpdate {
+            board_id,
+            auto_move,
+        }),
+        _ => None,
+    };
 }
 
 /// Control-center key routing (P2): map the navigation keys into the board

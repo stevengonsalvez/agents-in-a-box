@@ -37,12 +37,13 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
 /// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
 /// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 11] = [
+const PRIMARY_TABS: [(char, &str); 12] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('3', "Skills"),
     ('4', "Autopilots"),
     ('K', "Kanban"),
+    ('B', "Boards"),
     ('D', "Daemon"),
     ('U', "Usage"),
     ('L', "Logs"),
@@ -154,6 +155,13 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
         Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move")],
+        Screen::Boards => vec![
+            ("↵", "run"),
+            ("a", "attach"),
+            ("n", "add col"),
+            ("x", "del col"),
+            ("m", "auto-move"),
+        ],
         // Read-only panes with no footer hints: the daemon-health pane, the usage
         // dashboard (e38.35), and the logs pane (its level-filter chips
         // `a`/`i`/`w`/`e` carry their hints in the body next to each chip, not in
@@ -193,6 +201,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         '3' => matches!(active, Screen::SkillManager),
         '4' => matches!(active, Screen::Autopilots),
         'K' => matches!(active, Screen::Kanban),
+        'B' => matches!(active, Screen::Boards),
         'D' => matches!(active, Screen::DaemonHealth),
         'U' => matches!(active, Screen::Usage),
         'L' => matches!(active, Screen::Logs),
@@ -283,14 +292,14 @@ mod tests {
     /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full ten-tab strip (e38.35 added the `[U]Usage`
-        // tab, ~108 cols) AND the right-side workspace-slug cluster both fit; the
+        // Wide enough that the full twelve-tab strip (P4 added the `[B]Boards`
+        // tab, ~131 cols) AND the right-side workspace-slug cluster both fit; the
         // tabs win width contention, so a narrower buffer drops the slug (covered
         // by the 80x24 floor smoke).
-        let mut buf = WireBuffer::new(140, 24);
-        render_top_bar(&mut buf, 140, &Screen::IssueList, "acme", Presence::Online);
+        let mut buf = WireBuffer::new(160, 24);
+        render_top_bar(&mut buf, 160, &Screen::IssueList, "acme", Presence::Online);
         // Reconstruct row 0 text from the wire buffer cells.
-        let row0 = row_text(&buf, 0, 140);
+        let row0 = row_text(&buf, 0, 160);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
         assert!(row0.contains("Skills"), "row0 = {row0:?}");
         assert!(row0.contains("Kanban"), "row0 = {row0:?}");
