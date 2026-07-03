@@ -1282,6 +1282,13 @@ pub struct BoardCardWireRow {
     /// turns the card green.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The exact tmux session name the issue's latest task spawned when launched
+    /// in `interactive` mode (`tmux_hangar-<task_id>`, ccc / D6), or `None` for a
+    /// headless task / no run. Append-only field: surfaced by the attach-from-card
+    /// affordance as a copyable `tmux attach -t <session_name>` — the honest
+    /// contract, since a plugin cannot drive a host terminal attach directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
 }
 
 /// One user-defined board column with the cards bucketed into it
@@ -2167,6 +2174,7 @@ mod tests {
                         title: "Ship it".into(),
                         display_id: "sue-1".into(),
                         state: Some("done".into()),
+                        session_name: None,
                     }],
                 }],
                 unmapped: Vec::new(),
