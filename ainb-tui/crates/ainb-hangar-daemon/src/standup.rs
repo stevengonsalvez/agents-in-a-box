@@ -77,6 +77,15 @@ pub const DEFAULT_MAX_CONCURRENT: i64 = 1;
 /// How often the watcher scans the fleet for standup candidates.
 const TICK: Duration = Duration::from_secs(60);
 
+/// Stale-slot reclaim bound, in cooldown windows. A fired standup whose
+/// completion is never observed (a crash between `mark_fired` and the turn, a
+/// session that took the keystrokes but never produced a fresh end-turn, or a
+/// peer/unhooked session `classify` can no longer return as Idle) would pin the
+/// single concurrency slot forever and wedge auto-standup fleet-wide. Once the
+/// fire is older than this many cooldown windows we release the slot even with no
+/// completion turn, so the fleet always recovers.
+const STALE_INFLIGHT_COOLDOWN_MULTIPLE: i64 = 3;
+
 /// The message written into a stagnant session — a bare `/standup` slash command.
 const STANDUP_COMMAND: &str = "/standup";
 
@@ -411,6 +420,15 @@ impl StandupWatcher {
                 return;
             }
         };
+        // The stale-slot bound: a few cooldown windows past the fire. Loaded from
+        // config so an operator-tuned cooldown scales the reclaim window with it;
+        // a config-load fault degrades to the coded default cooldown.
+        let cooldown_min = StandupConfig::load(&self.pool)
+            .await
+            .map_or(DEFAULT_COOLDOWN_MIN, |c| c.cooldown_minutes);
+        let stale_ms = cooldown_min
+            .saturating_mul(60_000)
+            .saturating_mul(STALE_INFLIGHT_COOLDOWN_MULTIPLE);
         for row in in_flight {
             // Completion = the session ended a turn AFTER the standup fired. Anchor
             // on last_turn_end_ms > last_standup_at so we never mistake the pre-fire
@@ -421,14 +439,27 @@ impl StandupWatcher {
             let completed = observations.iter().find(|o| o.session.id == row.session_id).is_some_and(
                 |o| o.idle_at_prompt && o.last_turn_end_ms.is_some_and(|t| t > fire_at),
             );
-            if !completed {
+            // Stale-slot reclaim: if completion is never observed, release the slot
+            // once the fire is older than the bound so one missed completion cannot
+            // wedge auto-standup fleet-wide (DEFAULT_MAX_CONCURRENT = 1).
+            let stale = now_ms.saturating_sub(fire_at) >= stale_ms;
+            if !completed && !stale {
                 continue;
             }
             if let Err(e) = StandupRepo::clear_in_flight(&self.pool, &row.session_id, now_ms).await {
                 tracing::warn!(error = %e, session = %row.session_id, "auto-standup: clear in-flight failed");
                 continue;
             }
-            self.raise_standup_ready(&row.session_id, observations, now_ms).await;
+            // Only a genuinely-observed completion surfaces a "standup ready" row;
+            // a stale reclaim saw no finished turn, so it silently frees the slot.
+            if completed {
+                self.raise_standup_ready(&row.session_id, observations, now_ms).await;
+            } else {
+                tracing::warn!(
+                    session = %row.session_id,
+                    "auto-standup: reclaimed a stale in-flight slot (completion never observed)"
+                );
+            }
         }
     }
 
@@ -793,6 +824,51 @@ mod tests {
         assert_eq!(rows[0].kind, AttentionKind::Waiting);
         assert!(rows[0].payload.contains("standup_ready"));
         assert_eq!(rows[0].session_id, "s1");
+    }
+
+    #[tokio::test]
+    async fn close_completed_reclaims_a_stale_in_flight_slot() {
+        // A fired standup whose completion is NEVER observed must not pin the single
+        // concurrency slot forever: a later tick past the stale bound reclaims it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let broker = crate::events::EventBroker::new();
+        let watcher = StandupWatcher::new(
+            store.pool().clone(),
+            broker.sink(),
+            Arc::new(SystemClock),
+            CancellationToken::new(),
+        );
+        // Fire at NOW, then the session vanishes — no observation ever reports a
+        // fresh end-turn (peer/unhooked session, or a crash before the turn).
+        StandupRepo::mark_fired(store.pool(), "s1", NOW).await.unwrap();
+        // A tick just past 3× the 60-min cooldown, with NO observation of s1.
+        let stale_after = NOW + (STALE_INFLIGHT_COOLDOWN_MULTIPLE * DEFAULT_COOLDOWN_MIN + 1) * MIN_MS;
+        watcher.close_completed(&[], stale_after).await;
+
+        // The slot is reclaimed even though completion was never seen…
+        assert!(!StandupRepo::get(store.pool(), "s1").await.unwrap().unwrap().in_flight);
+        // …and NO "standup ready" row is raised (we never observed it finish).
+        assert!(AttentionRepo::list_fleet(store.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_completed_keeps_a_fresh_in_flight_slot_before_the_stale_bound() {
+        // Before the stale bound an un-completed in-flight standup stays in flight
+        // (the reclaim must not fire early and step on a still-running standup).
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let broker = crate::events::EventBroker::new();
+        let watcher = StandupWatcher::new(
+            store.pool().clone(),
+            broker.sink(),
+            Arc::new(SystemClock),
+            CancellationToken::new(),
+        );
+        StandupRepo::mark_fired(store.pool(), "s1", NOW).await.unwrap();
+        // One cooldown window in — well short of the 3× stale bound — no observation.
+        watcher.close_completed(&[], NOW + DEFAULT_COOLDOWN_MIN * MIN_MS).await;
+        assert!(StandupRepo::get(store.pool(), "s1").await.unwrap().unwrap().in_flight);
     }
 
     #[tokio::test]
