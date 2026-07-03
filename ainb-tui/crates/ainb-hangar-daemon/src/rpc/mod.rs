@@ -682,6 +682,8 @@ async fn handle(
         methods::HANGAR_BOARD_COLUMN_REORDER => handle_board_column_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_ADD => handle_board_card(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
+        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
+        methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -2147,6 +2149,198 @@ fn normalise_fsm_state<'a>(raw: Option<&'a str>) -> Result<Option<&'a str>, RpcE
             }
         }
     }
+}
+
+/// `hangar/board_card_create` (ccc / D8, D16): create an issue from a card and
+/// place it on a board in one atomic round-trip.
+///
+/// Creates a fresh `open` issue titled `title`, assigns it to the agent named for
+/// `assignee_profile` (D16: the board-assignee slug is the profile slug) when one
+/// resolves in the workspace — else leaves it unassigned — then places the card in
+/// `column_id` (omit for unmapped). The creator is the TUI author (`member:me`,
+/// mirroring the plugin's `SELF_AUTHOR_REF`). Answers with the refreshed
+/// `BoardsListResult`, exactly like every other `board_*` mutation.
+async fn handle_board_card_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::board::BoardRepo;
+    use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+    let params: ainb_hangar_proto::snapshots::BoardCardCreateParams =
+        parse_params(req, "{ workspace_id, board_id, column_id?, title, assignee_profile? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.title.trim().is_empty() {
+        return Err(invalid_params("card title must not be empty"));
+    }
+
+    // D16: the assignee profile slug names the agent that runs the card. Resolve
+    // it to an in-workspace agent so the later `board_card_run` routes to a real
+    // runtime; an unresolved profile leaves the issue unassigned (the run then
+    // falls back to the workspace's agent).
+    let assignee = match params.assignee_profile.as_deref().map(str::trim) {
+        Some(slug) if !slug.is_empty() => resolve_agent_by_name(pool, &ws, slug)
+            .await?
+            .map(|agent| ActorRef::new(ActorKind::Agent, agent.id))
+            .transpose()
+            .map_err(|e| internal(&format!("build assignee ref: {e}")))?,
+        _ => None,
+    };
+
+    // The TUI user owns cards it creates — mirror the plugin's `SELF_AUTHOR_REF`.
+    let creator = ActorRef::new(ActorKind::Member, "me")
+        .map_err(|e| internal(&format!("build creator ref: {e}")))?;
+    let issue_id = SystemIdGen.new_ulid();
+    IssueRepo::insert(
+        pool,
+        &NewIssue {
+            id: issue_id.clone(),
+            workspace_id: ws.as_str().to_string(),
+            title: params.title.clone(),
+            description: None,
+            state: "open".to_string(),
+            assignee,
+            creator,
+            created_at: SystemClock.now_ms(),
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+        },
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+
+    BoardRepo::card_add(
+        pool,
+        &ws,
+        &params.board_id,
+        &issue_id,
+        params.column_id.as_deref(),
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// `hangar/board_card_run` (ccc / D6, D16): launch a card's issue on its assignee
+/// profile now.
+///
+/// Enqueues one `agent_task_queue` row for the card's issue keyed to the assignee
+/// agent's `(agent_id, runtime_id)` — the same claim/dispatch path a squad
+/// assignment rides ([`SquadAssignService`]) — so the claim loop runs it and the
+/// D8 auto-move hook slides the card on each FSM transition. The agent resolves
+/// from the issue's assignee (D16), falling back to the workspace's agent so a
+/// card always runs. `mode` (`headless` / `interactive`, D6 `Run ▾`) is validated
+/// and echoed; both dispatch through the one provider-runner path today.
+///
+/// [`SquadAssignService`]: ainb_hangar_store::service::squad_assign::SquadAssignService
+async fn handle_board_card_run(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::issue::IssueRepo;
+    use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+    let params: ainb_hangar_proto::snapshots::BoardCardRunParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id, mode }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let mode = match params.mode.trim() {
+        "" | "headless" => "headless",
+        "interactive" => "interactive",
+        other => {
+            return Err(invalid_params(&format!(
+                "mode must be `headless` or `interactive`, got `{other}`"
+            )));
+        }
+    };
+
+    // The card's issue must exist in this workspace (a tenant guard + a real card).
+    let issue = IssueRepo::get_by_id(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .filter(|i| i.workspace_id == ws.as_str())
+        .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
+
+    // Resolve the run's agent: the issue's assignee agent (D16) when it is an
+    // in-workspace agent, else the workspace's agent — so a card whose profile
+    // never resolved still runs rather than dead-ending.
+    let agent = resolve_run_agent(pool, &ws, issue.assignee.as_ref()).await?;
+
+    let task_id = SystemIdGen.new_ulid();
+    TaskRepo::insert(
+        pool,
+        &NewTask {
+            id: task_id.clone(),
+            workspace_id: ws.as_str().to_string(),
+            runtime_id: agent.runtime_id.clone(),
+            agent_id: agent.id.clone(),
+            issue_id: Some(params.issue_id.clone()),
+            work_dir: None,
+            priority: 0,
+            created_at: SystemClock.now_ms(),
+            autopilot_run_id: None,
+        },
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+
+    to_value(&ainb_hangar_proto::snapshots::BoardCardRunResult {
+        task_id,
+        agent_id: agent.id,
+        runtime_id: agent.runtime_id,
+        mode: mode.to_string(),
+    })
+}
+
+/// Resolve `slug` to a non-archived agent in `ws` by NAME (D16: the assignee
+/// profile slug is the agent's name). Returns `None` when no such agent exists.
+async fn resolve_agent_by_name(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    slug: &str,
+) -> Result<Option<ainb_hangar_store::repo::agent::Agent>, RpcError> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    let agents = AgentRepo::list_by_workspace(pool, ws.as_str())
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(agents.into_iter().find(|a| a.name == slug))
+}
+
+/// Resolve the agent a card run routes to: the issue's assignee agent (D16) when
+/// it names an in-workspace agent, else the workspace's first agent. Errors with
+/// `INVALID_PARAMS` when the workspace has no agent to run on.
+async fn resolve_run_agent(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    assignee: Option<&ainb_hangar_core::actor::ActorRef>,
+) -> Result<ainb_hangar_store::repo::agent::Agent, RpcError> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    // Prefer the issue's assignee agent when it resolves inside this workspace.
+    if let Some(actor) = assignee {
+        if actor.kind() == ActorKind::Agent {
+            if let Some(agent) = AgentRepo::get(pool, actor.id())
+                .await
+                .map_err(|e| store_err(&e))?
+                .filter(|a| a.workspace_id == ws.as_str() && !a.archived)
+            {
+                return Ok(agent);
+            }
+        }
+    }
+
+    // Fall back to the workspace's first non-archived agent so a card always runs.
+    AgentRepo::list_by_workspace(pool, ws.as_str())
+        .await
+        .map_err(|e| store_err(&e))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid_params("this workspace has no agent to run the card on"))
 }
 
 /// Re-read `ws`'s boards and serialize them as a

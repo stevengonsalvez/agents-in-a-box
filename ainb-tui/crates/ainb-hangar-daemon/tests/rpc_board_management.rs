@@ -303,6 +303,129 @@ async fn column_reorder_and_delete_preserve_cards() {
     assert_eq!(unmapped[0]["issue_id"], "issue-2");
 }
 
+/// `board_card_create` mints an issue titled by the card + assigned to the agent
+/// named for the profile (D16), places it, and `board_card_run` enqueues a task
+/// routed to that agent's runtime (ccc / D6). A run with no resolvable assignee
+/// still falls back to the workspace's agent, and a bad mode is rejected.
+#[tokio::test]
+async fn card_create_assigns_profile_then_run_enqueues() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Delivery" }),
+        )
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create a card assigning the profile `claude-agent` — the seeded agent's name
+    // (D16: the assignee slug is the profile slug = the agent name).
+    let with_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "board_id": board_id,
+                "column_id": todo_id,
+                "title": "Ship the boards",
+                "assignee_profile": "claude-agent",
+            }),
+        )
+        .await;
+    assert!(with_card["error"].is_null(), "card_create must ack: {with_card}");
+    let card = &only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()[0];
+    assert_eq!(card["title"], "Ship the boards", "card carries the typed title");
+    let issue_id = card["issue_id"].as_str().unwrap().to_string();
+
+    // Run the card headless → routed to the assignee agent's runtime.
+    let run = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
+        )
+        .await;
+    assert!(run["error"].is_null(), "card_run must ack: {run}");
+    assert_eq!(run["result"]["agent_id"], "agent-1", "routed to the assignee agent: {run}");
+    assert_eq!(run["result"]["runtime_id"], "runtime-1", "keyed to the agent's runtime: {run}");
+    assert_eq!(run["result"]["mode"], "headless", "the launch mode is echoed: {run}");
+    let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
+
+    // A queued task row exists for the card's issue, routed to agent-1/runtime-1.
+    let row: (String, String, Option<String>, String) = sqlx::query_as(
+        "SELECT agent_id, runtime_id, issue_id, status FROM agent_task_queue WHERE id = ?",
+    )
+    .bind(&task_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("the run enqueued a task row");
+    assert_eq!(row.0, "agent-1");
+    assert_eq!(row.1, "runtime-1");
+    assert_eq!(row.2.as_deref(), Some(issue_id.as_str()));
+    assert_eq!(row.3, "queued", "the run task starts queued for the claim loop");
+
+    // A card whose profile never resolves still runs — the workspace agent is the
+    // fallback so a card is never a dead end.
+    let orphan = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "board_id": board_id,
+                "column_id": todo_id,
+                "title": "No such profile",
+                "assignee_profile": "ghost-profile",
+            }),
+        )
+        .await;
+    let orphan_issue = {
+        let cards = only_board(&orphan)["columns"].as_array().unwrap()[0]["cards"]
+            .as_array()
+            .unwrap();
+        cards
+            .iter()
+            .find(|c| c["title"] == "No such profile")
+            .unwrap()["issue_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let orphan_run = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": orphan_issue, "mode": "interactive" }),
+        )
+        .await;
+    assert!(orphan_run["error"].is_null(), "an unassigned card still runs: {orphan_run}");
+    assert_eq!(orphan_run["result"]["agent_id"], "agent-1", "fell back to the workspace agent");
+    assert_eq!(orphan_run["result"]["mode"], "interactive", "interactive mode echoed");
+
+    // A bad mode is a client error, never a silent default.
+    let bad = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "yolo" }),
+        )
+        .await;
+    assert!(!bad["error"].is_null(), "an unknown run mode must be rejected: {bad}");
+}
+
 /// Board mutations are workspace-scoped: a sibling tenant cannot see the board,
 /// and cannot mutate it (a foreign-workspace column-add is a not-found error).
 #[tokio::test]
