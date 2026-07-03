@@ -279,7 +279,12 @@ the instance row is left as-is"
             return false;
         }
     };
-    match client.atc_unregister(AtcUnregisterParams { name: name.to_string() }).await {
+    match client
+        .atc_unregister(AtcUnregisterParams {
+            name: name.to_string(),
+        })
+        .await
+    {
         Ok(res) => res.disabled,
         Err(e) => {
             tracing::warn!("ATC daemon unregister failed ({e}); the instance row is left as-is");
@@ -1092,11 +1097,18 @@ fn inbox_commit(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
 }
 
 /// Read all of stdin to a string (best-effort; empty on any error). The hook
-/// payload is piped in by `notify.sh`.
+/// payload is piped in by `notify.sh` — it never arrives on a terminal, so a
+/// TTY stdin (a human ran the verb by hand, or a test binary inherited the
+/// shell's terminal) is skipped rather than blocking forever on `read_to_string`
+/// waiting for input that will never come.
 fn read_stdin_to_string() -> String {
-    use std::io::Read;
+    use std::io::{IsTerminal, Read};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return String::new();
+    }
     let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
+    let _ = stdin.lock().read_to_string(&mut buf);
     buf
 }
 
