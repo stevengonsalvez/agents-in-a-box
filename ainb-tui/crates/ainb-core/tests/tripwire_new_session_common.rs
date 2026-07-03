@@ -60,6 +60,12 @@ git_directories = []
         env!("CARGO_PKG_VERSION")
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).unwrap();
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 /// Seed `favorites.yaml` with a single `ainb-tui` GithubShorthand entry so
