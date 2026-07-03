@@ -373,6 +373,10 @@ pub enum AppEvent {
     SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
     SkillManagerPreviewClose,       // Esc — discard, nothing persisted
     SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
+    SkillManagerSourceRemoveOpen,     // r on a source row — open the remove dialog
+    SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
+    SkillManagerSourceRemoveConfirm,  // Enter — execute the chosen removal
+    SkillManagerSourceRemoveCancel,   // Esc — dismiss, remove nothing
     GoToRecovery,                   // Navigate to session recovery view
     GoToInbox,                      // Navigate to ainb-hooks notification inbox
     GoToDaemons,                    // Navigate to the daemon runtime-health view
@@ -745,6 +749,7 @@ impl EventHandler {
             || s.library.is_some()
             || s.browse.is_some()
             || s.preview.is_some()
+            || s.source_remove_confirm.is_some()
     }
 
     /// Recompute the SkillManager top-row rects (Sources panel + Units
@@ -1656,6 +1661,24 @@ impl EventHandler {
                 };
             }
 
+            // Source-removal confirm dialog: arrows pick an option, Enter
+            // confirms, Esc cancels. Intercepts before every other key.
+            if state.skill_manager_state.source_remove_confirm.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(-1))
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(1))
+                    }
+                    KeyCode::Enter => Some(AppEvent::SkillManagerSourceRemoveConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        Some(AppEvent::SkillManagerSourceRemoveCancel)
+                    }
+                    _ => None,
+                };
+            }
+
             // Source-preview picker: multi-select units + target tools.
             // Intercepts before browse/library/banner — it's the active
             // modal whenever open.
@@ -1788,6 +1811,11 @@ impl EventHandler {
                 // `[p]` on a source row — reopen the import picker for it
                 // (preview its units, select, install more).
                 KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                // `[r]` on a source row — remove dialog (skills+source, or
+                // skills-only / keep source). Distinct from unit `[r]`.
+                KeyCode::Char('r') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceRemoveOpen)
+                }
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -5354,6 +5382,79 @@ impl EventHandler {
                         return;
                     }
                     Self::open_source_preview(state, &format!("{}@{}", row.uri, row.r#ref));
+                }
+            }
+            AppEvent::SkillManagerSourceRemoveOpen => {
+                use crate::components::skill_manager_screen::SourceRemoveConfirm;
+                let Some(row) = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .cloned()
+                else {
+                    state.add_warning_notification("remove: no source selected".to_string());
+                    return;
+                };
+                let prefix = format!("{}@", row.uri);
+                let unit_count = state
+                    .skill_manager_state
+                    .units
+                    .iter()
+                    .filter(|u| u.declared_uri.starts_with(&prefix))
+                    .count();
+                state.skill_manager_state.source_remove_confirm = Some(SourceRemoveConfirm {
+                    source_name: row.name,
+                    source_uri: row.uri,
+                    unit_count,
+                    cursor: 0,
+                });
+            }
+            AppEvent::SkillManagerSourceRemoveMove(delta) => {
+                if let Some(c) = state.skill_manager_state.source_remove_confirm.as_mut() {
+                    c.move_cursor(delta);
+                }
+            }
+            AppEvent::SkillManagerSourceRemoveCancel => {
+                state.skill_manager_state.source_remove_confirm = None;
+            }
+            AppEvent::SkillManagerSourceRemoveConfirm => {
+                let Some(confirm) = state.skill_manager_state.source_remove_confirm.clone() else {
+                    return;
+                };
+                // 0 = remove skills + source, 1 = keep source, 2 = cancel.
+                if confirm.cursor == 2 {
+                    state.skill_manager_state.source_remove_confirm = None;
+                    return;
+                }
+                let keep_source = confirm.cursor == 1;
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                let result = ainb_cli::source::remove_source_units(
+                    &ainb_home,
+                    &confirm.source_name,
+                    keep_source,
+                    &mut buf,
+                );
+                state.skill_manager_state.source_remove_confirm = None;
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                match result {
+                    Ok(removed) if keep_source => {
+                        state.add_success_notification(format!(
+                            "removed {removed} skill(s); kept {} (re-import with [p])",
+                            confirm.source_name
+                        ));
+                    }
+                    Ok(removed) => {
+                        state.add_success_notification(format!(
+                            "removed {} + {removed} skill(s)",
+                            confirm.source_name
+                        ));
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("remove failed: {e:#}"));
+                        tracing::warn!(output = %String::from_utf8_lossy(&buf),
+                            "SkillManager: source remove failed");
+                    }
                 }
             }
             AppEvent::SkillManagerPreviewConfirm => {

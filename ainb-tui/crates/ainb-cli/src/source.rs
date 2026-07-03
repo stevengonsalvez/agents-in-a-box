@@ -320,6 +320,71 @@ pub fn import_selected(
     Ok((installed, failed))
 }
 
+/// Uninstall every installed unit of a source (immediate file teardown +
+/// manifest/lockfile cleanup via the standard `skill remove` path), then
+/// optionally drop the source itself.
+///
+/// `keep_source = true` leaves the `SourceEntry` + `LockedSource` in place
+/// so the repo stays browsable/importable (it drops back to "preview"
+/// state — no installed units, but the dependency is remembered).
+/// `keep_source = false` removes the source records too.
+///
+/// Returns the number of units uninstalled.
+pub fn remove_source_units(
+    home: &Path,
+    name: &str,
+    keep_source: bool,
+    out: &mut dyn io::Write,
+) -> Result<usize> {
+    let manifest_path = manifest_path_in(home);
+    let lockfile_path = lockfile_path_in(home);
+
+    let manifest = Manifest::load_from(&manifest_path)?;
+    let source = manifest
+        .source(name)
+        .ok_or_else(|| ainb_skill_core::CoreError::SourceNotFound(name.to_string()))?;
+    // Units of this source: their URI is `<source-uri>@<ref>/<path>`.
+    let prefix = format!("{}@", source.uri);
+    let unit_uris: Vec<String> = manifest
+        .units
+        .iter()
+        .filter(|u| u.uri.starts_with(&prefix))
+        .map(|u| u.uri.clone())
+        .collect();
+
+    // Uninstall each unit — `skill remove` tears down deployed files and
+    // clears the manifest + lockfile records (per-file, never wipes config).
+    let mut removed = 0usize;
+    for uri in &unit_uris {
+        let args = crate::RemoveSkillArgs {
+            uri: uri.clone(),
+            targets: None,
+            yes: true,
+            dry_run: false,
+        };
+        match crate::skill::dispatch(home, crate::SkillCommand::Remove(args), out) {
+            Ok(()) => removed += 1,
+            Err(e) => writeln!(out, "# failed to remove {uri}: {e:#}")?,
+        }
+    }
+
+    if !keep_source {
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        let _ = manifest.remove_source(name);
+        manifest.save_to(&manifest_path)?;
+        let mut lockfile = Lockfile::load_from(&lockfile_path)?;
+        lockfile.sources.retain(|s| s.name != name);
+        lockfile.save_to(&lockfile_path)?;
+        writeln!(out, "removed source {name} + {removed} unit(s)")?;
+    } else {
+        writeln!(
+            out,
+            "removed {removed} unit(s); kept source {name} (re-import via [p])"
+        )?;
+    }
+    Ok(removed)
+}
+
 fn list(manifest_path: &Path, out: &mut dyn io::Write) -> Result<()> {
     let manifest = Manifest::load_from(manifest_path)?;
     if manifest.sources.is_empty() {

@@ -251,3 +251,42 @@ fn fully_failed_import_rolls_back_the_source() {
     let lockfile = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
     assert!(lockfile.sources.is_empty(), "lockfile source rolled back");
 }
+
+/// remove_source_units: keep_source leaves the source registered (back to
+/// preview) with its units gone; without keep_source the source is dropped
+/// entirely. Files are torn down either way.
+#[test]
+fn remove_source_units_keep_vs_drop() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = tmp_home();
+    let (_repo, uri) = fixture_repo();
+    let claude_root = home.path().join("tools/claude");
+    unsafe { std::env::set_var("AINB_TOOL_HOME_CLAUDE", &claude_root) };
+
+    // Import both units.
+    let preview = preview_source(home.path(), &uri).expect("preview");
+    let paths = unit_paths(&preview);
+    let mut out = Vec::new();
+    import_selected(home.path(), &preview, &paths, "claude", &mut out).expect("import");
+    let name = preview.name.clone();
+
+    // Keep-source removal: units + files gone, source remains.
+    let removed =
+        ainb_cli::source::remove_source_units(home.path(), &name, true, &mut out).expect("remove");
+    assert_eq!(removed, 2);
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert!(manifest.units.is_empty(), "units removed");
+    assert_eq!(manifest.sources.len(), 1, "source kept for re-import");
+    assert!(!claude_root.join("skills/commit/SKILL.md").exists(), "files torn down");
+
+    // Re-import, then drop the source entirely.
+    let preview = preview_source(home.path(), &uri).expect("re-preview");
+    import_selected(home.path(), &preview, &unit_paths(&preview), "claude", &mut out)
+        .expect("re-import");
+    ainb_cli::source::remove_source_units(home.path(), &name, false, &mut out).expect("drop");
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert!(manifest.sources.is_empty(), "source dropped");
+    assert!(manifest.units.is_empty());
+
+    unsafe { std::env::remove_var("AINB_TOOL_HOME_CLAUDE") };
+}

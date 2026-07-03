@@ -183,6 +183,10 @@ pub struct SkillsScreenData {
     /// background — renders a "fetching…" banner and blocks a second
     /// concurrent fetch. Cleared when the fetch completes either way.
     pub preview_loading: Option<String>,
+    /// Source-removal confirm dialog: `Some` after `[r]` on a source row.
+    /// Offers "remove skills + source", "remove skills, keep source", and
+    /// cancel — nothing is removed until a choice is confirmed.
+    pub source_remove_confirm: Option<SourceRemoveConfirm>,
     /// Width (terminal columns) of the left Sources panel. Resizable by
     /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
     /// `ui_preferences.skill_manager_sources_width` on resize-finish and
@@ -231,6 +235,7 @@ impl Default for SkillsScreenData {
             browse: None,
             preview: None,
             preview_loading: None,
+            source_remove_confirm: None,
             sources_width: DEFAULT_SOURCES_WIDTH,
             focused_pane: FocusedSkillPane::default(),
             source_selected: 0,
@@ -476,6 +481,27 @@ impl SourcePreviewViewState {
         } else {
             Some(picked.join(","))
         }
+    }
+}
+
+/// Confirm dialog shown by `[r]` on a source row. `cursor`: 0 = remove
+/// skills + source, 1 = remove skills / keep source (back to preview),
+/// 2 = cancel.
+#[derive(Debug, Clone)]
+pub struct SourceRemoveConfirm {
+    pub source_name: String,
+    pub source_uri: String,
+    /// Installed units belonging to this source (for the count shown).
+    pub unit_count: usize,
+    pub cursor: usize,
+}
+
+impl SourceRemoveConfirm {
+    pub const OPTIONS: usize = 3;
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        let max = (Self::OPTIONS - 1) as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
     }
 }
 
@@ -729,6 +755,11 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     // modal after an add-source fetch or `[p]` on a source row).
     if let Some(preview) = &data.preview {
         render_source_preview(frame, area, preview);
+    }
+
+    // Source-removal confirm — drawn above everything (active modal).
+    if let Some(confirm) = &data.source_remove_confirm {
+        render_source_remove_confirm(frame, area, confirm);
     }
 
     // Background fetch in flight — small centered banner so the user
@@ -1013,6 +1044,63 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
         Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
     ]);
     frame.render_widget(Paragraph::new(hints), rows[2]);
+}
+
+/// Confirm dialog for `[r]` on a source: remove skills + source, remove
+/// skills but keep the source (back to preview), or cancel.
+fn render_source_remove_confirm(frame: &mut Frame, area: Rect, c: &SourceRemoveConfirm) {
+    let width = (c.source_uri.len() as u16 + 20).clamp(52, area.width.saturating_sub(4));
+    let rect = centered_rect(area, width, 11);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ERROR_RED))
+        .title(Span::styled(
+            " Remove source ",
+            Style::default().fg(ERROR_RED).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let rows = [
+        format!("Remove skills + source  ({} unit(s), drops the dependency)", c.unit_count),
+        "Remove skills, keep source  (back to preview — re-import via [p])".to_string(),
+        "Cancel".to_string(),
+    ];
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("{}  ({})", c.source_name, c.source_uri),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (i, label) in rows.iter().enumerate() {
+        let on = i == c.cursor;
+        let marker = if on { "\u{25b6} " } else { "  " };
+        let style = if on {
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(SOFT_WHITE)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
+            Span::styled(label.clone(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("\u{2191}\u{2193}", Style::default().fg(GOLD)),
+        Span::styled(" move \u{b7} ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Enter", Style::default().fg(GOLD)),
+        Span::styled(" confirm \u{b7} ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Esc", Style::default().fg(GOLD)),
+        Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
+    ]));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
