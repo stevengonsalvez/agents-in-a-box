@@ -95,41 +95,60 @@
     }
   }
 
-  // Fleet needs (`ainb fleet needs --format json`) is an array of NeedsRow.
-  // Each row has a flattened { kind: "ASK|ERR|WAIT|IDLE", context: {...} }
-  // plus a nested `session` with `cwd` etc.
+  // Needs come from the daemon attention inbox (`attention/list`, spec P8/D18),
+  // mapped in crates/ainb-web/src/daemon.rs to cards of shape:
+  //   { attentionId, kind: "ASK|ERR|WAIT", wireKind, sessionId, cwd,
+  //     workspaceId, degraded, createdAt, payload }
+  // `payload` is the parsed request context (ASK → { question, options }) or the
+  // raw string when it did not parse. An ASK card with an `attentionId` is
+  // answerable inline via POST /api/answer.
   function needKind(row) {
-    return (row.kind || row.context_kind || "").toUpperCase() || "IDLE";
+    return (row.kind || "").toUpperCase() || "ASK";
   }
 
   function needTitle(row) {
-    const s = row.session || {};
-    return s.workspace_name || s.summary || s.cwd || s.tmux_session || "session";
+    return row.cwd || row.workspaceId || row.sessionId || "session";
   }
 
   function needDetail(row) {
-    const ctx = row.context || {};
-    // NeedsContext is internally-tagged ({kind, context}); the payload shape
-    // differs per kind (see crates/ainb-core/src/fleet/read/needs.rs):
-    //   ASK  → { question, options, ... }
-    //   ERR  → { pattern, snippet }
-    //   WAIT → { marker, text }
-    //   IDLE → { idle_minutes, last_assistant_text? }
-    // Read the right field per kind so the detail line never renders blank.
-    switch (needKind(row)) {
-      case "ASK":
-        return ctx.question || "";
-      case "ERR":
-        return ctx.snippet || ctx.pattern || "";
-      case "WAIT":
-        return ctx.text || ctx.marker || "";
-      case "IDLE":
-        return (
-          ctx.last_assistant_text ||
-          (ctx.idle_minutes != null ? `idle ${ctx.idle_minutes}m` : "")
-        );
-      default:
-        return row.enriched || "";
+    const p = row.payload;
+    if (p && typeof p === "object") {
+      return (
+        p.question || p.snippet || p.pattern || p.text || p.marker || p.message || ""
+      );
+    }
+    return typeof p === "string" ? p : "";
+  }
+
+  // The option list an ASK card offers, if any. `payload.options` is an array of
+  // option strings (AskUserQuestion); we answer with the option's 1-based number
+  // to match the session picker + the bridge "reply N" contract.
+  function needOptions(row) {
+    const p = row.payload;
+    const opts = p && typeof p === "object" ? p.options : null;
+    return Array.isArray(opts) ? opts : [];
+  }
+
+  // POST an answer for one attention row through the daemon (D18). The daemon
+  // runs the first-answer-wins + C1 guards and performs the ONE verified send;
+  // on any resolution the row leaves the open inbox, so we re-pull the snapshot
+  // to reconcile. Never touches tmux from the browser.
+  async function postAnswer(attentionId, answer, card) {
+    if (!attentionId) return;
+    card.classList.add("answering");
+    try {
+      const res = await fetch("/api/answer", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ attentionId, answer }),
+      });
+      const data = await res.json().catch(() => ({}));
+      card.dataset.outcome = (data && data.outcome) || (res.ok ? "sent" : "failed");
+      // Reconcile from the source of truth (an answered row drops from the inbox).
+      loadOnce().then(render).catch(() => {});
+    } catch (_) {
+      card.classList.remove("answering");
+      card.dataset.outcome = "failed";
     }
   }
 
@@ -155,10 +174,40 @@
       const kind = needKind(row);
       const card = el("div", "need");
       card.appendChild(el("span", `need-kind kind-${kind}`, kind));
+      if (row.degraded) card.appendChild(el("span", "need-badge", "degraded"));
       const body = el("div", "need-body");
       body.appendChild(el("div", "need-title", needTitle(row)));
       const detail = needDetail(row);
       if (detail) body.appendChild(el("div", "need-detail", detail));
+
+      // Answer affordances: only for answerable ASK cards carrying an id.
+      if (kind === "ASK" && row.attentionId) {
+        const actions = el("div", "need-actions");
+        needOptions(row).forEach((opt, i) => {
+          const n = String(i + 1);
+          const b = el("button", "need-answer", `${n}. ${opt}`);
+          b.type = "button";
+          b.addEventListener("click", () => postAnswer(row.attentionId, n, card));
+          actions.appendChild(b);
+        });
+        // Free-text reply (Codex request-user / anything without options).
+        const form = el("form", "need-reply");
+        const input = el("input", "need-reply-input");
+        input.type = "text";
+        input.placeholder = "type a reply…";
+        const send = el("button", "need-answer", "Send");
+        send.type = "submit";
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          const v = input.value.trim();
+          if (v) postAnswer(row.attentionId, v, card);
+        });
+        form.appendChild(input);
+        form.appendChild(send);
+        actions.appendChild(form);
+        body.appendChild(actions);
+      }
+
       card.appendChild(body);
       host.appendChild(card);
     }
