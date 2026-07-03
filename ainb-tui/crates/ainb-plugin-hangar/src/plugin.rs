@@ -1168,6 +1168,10 @@ impl HangarPlugin {
         };
         let ws = self.app_state().ws_id.as_str().to_string();
         let (method, params) = match action {
+            BoardsAction::BoardCreate { name } => (
+                daemon_methods::HANGAR_BOARD_CREATE,
+                serde_json::json!({ "workspace_id": ws, "name": name }),
+            ),
             BoardsAction::ColumnReorder {
                 board_id,
                 column_ids,
@@ -2626,7 +2630,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))

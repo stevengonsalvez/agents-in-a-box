@@ -126,6 +126,13 @@ pub enum KanbanAction {
 /// raised as intents but need a dispatch/prompt seam wired in a follow-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardsAction {
+    /// Create a new board (`b`) — `hangar/board_create`. The empty-state
+    /// affordance: fires with no board focused so a fresh workspace can bootstrap
+    /// its first board from the TUI.
+    BoardCreate {
+        /// The new board's name.
+        name: String,
+    },
     /// Reorder a board's columns (`⇧←/→`) — `hangar/board_column_reorder`.
     ColumnReorder {
         /// The board to reorder.
@@ -1029,6 +1036,7 @@ fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
             'L' => Some(BoardsEvent::ReorderColumnRight),
             '[' => Some(BoardsEvent::PrevBoard),
             ']' => Some(BoardsEvent::NextBoard),
+            'b' => Some(BoardsEvent::CreateBoard),
             'a' => Some(BoardsEvent::AttachFocusedCard),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
@@ -1049,6 +1057,9 @@ fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
     // (run/attach a card) are raised by the reducer but not yet wired to an RPC —
     // they fold as no-ops here, mirroring the Kanban `Add`/`Edit` precedent.
     states.pending_boards_action = match out.intent {
+        Some(BoardsIntent::CreateBoard) => Some(BoardsAction::BoardCreate {
+            name: "New Board".to_string(),
+        }),
         Some(BoardsIntent::ReorderColumns {
             board_id,
             column_ids,

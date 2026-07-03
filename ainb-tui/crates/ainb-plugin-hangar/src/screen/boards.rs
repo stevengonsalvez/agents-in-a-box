@@ -222,6 +222,10 @@ pub enum BoardsEvent {
     NextBoard,
     /// Switch to the previous board (`[`).
     PrevBoard,
+    /// Create a new board (`b`) — the glue names it and fires `board_create`. The
+    /// only board mutation that works with NO board focused (the empty-state
+    /// affordance), so a fresh workspace is never a dead end.
+    CreateBoard,
     /// Run the focused card via the existing dispatch (`enter`).
     RunFocusedCard,
     /// Attach to the focused card's session (`a`).
@@ -246,6 +250,9 @@ pub enum BoardsEvent {
 /// into a `hangar/board_*` RPC (the daemon owns the real mutation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardsIntent {
+    /// Create a new board (`hangar/board_create`). Raised unconditionally — it is
+    /// the empty-state affordance, so it must fire even with no board focused.
+    CreateBoard,
     /// Run the card's issue via the existing dispatch with the assignee profile
     /// (`hangar/task_transition` / dispatch path). Card = issue.
     RunCard {
@@ -326,6 +333,11 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         BoardsEvent::FocusDown => nav_card(state, 1),
         BoardsEvent::NextBoard => nav_board(state, 1),
         BoardsEvent::PrevBoard => nav_board(state, -1),
+        // Create works with no board focused — the empty-state escape hatch.
+        BoardsEvent::CreateBoard => BoardsReduction {
+            state: state.clone(),
+            intent: Some(BoardsIntent::CreateBoard),
+        },
         BoardsEvent::RunFocusedCard => card_intent(state, |b, c| BoardsIntent::RunCard {
             board_id: b.id.clone(),
             issue_id: c.issue_id.clone(),
@@ -752,12 +764,19 @@ mod tests {
     }
 
     /// An empty snapshot leaves no focused board and every card intent is a
-    /// no-op.
+    /// no-op — but CreateBoard still fires (the empty-state escape hatch).
     #[test]
     fn empty_snapshot_is_inert() {
         let state = BoardsState::from_snapshot(&BoardsListResult { boards: Vec::new() });
         assert!(state.focused_board().is_none());
         assert_eq!(reduce_boards(&state, BoardsEvent::RunFocusedCard).intent, None);
         assert_eq!(reduce_boards(&state, BoardsEvent::ToggleAutoMove).intent, None);
+        // CreateBoard is the one mutation that works with no board focused, so the
+        // empty state is never a dead end.
+        assert_eq!(
+            reduce_boards(&state, BoardsEvent::CreateBoard).intent,
+            Some(BoardsIntent::CreateBoard),
+            "create-board fires even on an empty board list"
+        );
     }
 }
