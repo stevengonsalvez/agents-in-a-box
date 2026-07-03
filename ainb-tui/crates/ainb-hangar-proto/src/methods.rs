@@ -384,6 +384,25 @@ pub const HANGAR_SQUAD_MEMBER_REMOVE: &str = "hangar/squad_member_remove";
 /// or an unknown squad is rejected (`INVALID_PARAMS`).
 pub const HANGAR_SQUAD_ASSIGN: &str = "hangar/squad_assign";
 
+/// `hangar/squad_fanout` — fan an issue out across the WHOLE squad: brief the
+/// LEADER *and* enqueue one task per distinct `agent` member, all on the same
+/// issue (P7).
+///
+/// Params: [`crate::snapshots::SquadAssignParams`] (the same
+/// `{ workspace_id, squad_id, issue_id?, work_dir?, priority? }` as
+/// [`HANGAR_SQUAD_ASSIGN`]). Result: a [`crate::snapshots::SquadFanoutResult`]
+/// carrying the leader's brief task plus one dispatch per fanned-out member, or an
+/// error.
+///
+/// This is the seam the P7 acceptance turns on — "issue assigned to a squad →
+/// leader + ≥2 member tasks claimable in parallel". It works because migration
+/// `0012` scoped the pending-task guard to `(issue, agent)`: the leader and every
+/// member each hold their own pending task on the one issue. Mutating +
+/// workspace-scoped like [`HANGAR_SQUAD_ASSIGN`]: a human-member leader / unknown
+/// squad is rejected (`INVALID_PARAMS`); a human `member` and the leader's own
+/// agent are never double-dispatched.
+pub const HANGAR_SQUAD_FANOUT: &str = "hangar/squad_fanout";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -695,6 +714,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_BOARD_COLUMN_REORDER,
     HANGAR_BOARD_CARD_ADD,
     HANGAR_BOARD_CARD_MOVE,
+    // P7 squad fan-out is appended at the tail (append-only wire catalogue).
+    HANGAR_SQUAD_FANOUT,
 ];
 
 #[cfg(test)]
@@ -787,6 +808,7 @@ mod tests {
             HANGAR_BOARD_COLUMN_REORDER,
             HANGAR_BOARD_CARD_ADD,
             HANGAR_BOARD_CARD_MOVE,
+            HANGAR_SQUAD_FANOUT,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -858,6 +880,7 @@ mod tests {
             HANGAR_BOARD_COLUMN_REORDER,
             HANGAR_BOARD_CARD_ADD,
             HANGAR_BOARD_CARD_MOVE,
+            HANGAR_SQUAD_FANOUT,
         ];
         for m in declared {
             assert!(
