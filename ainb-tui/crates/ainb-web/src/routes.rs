@@ -1,8 +1,12 @@
 //! Axum router, API handlers, and the SSE live-update stream.
 //!
-//! All routes are read-only. The data layer ([`crate::data::DataSource`])
-//! proxies the existing `ainb --format json` commands, so the dashboard never
-//! duplicates data access. Live updates are delivered via Server-Sent Events:
+//! The read surfaces proxy the existing `ainb --format json` commands via the
+//! data layer ([`crate::data::DataSource`]), so the dashboard never duplicates
+//! data access. The two write surfaces — the WS terminal and `POST /api/answer`
+//! (the daemon send seam) — are each gated by
+//! [`crate::terminal::read_only_gate`], so `--read-only` refuses them with
+//! `403 READ_ONLY` and the dashboard is viewer-only. Live updates are delivered
+//! via Server-Sent Events:
 //! a background poller refreshes the snapshot and pushes to subscribers only
 //! when the content fingerprint changes.
 
@@ -232,14 +236,32 @@ pub fn router(state: AppState) -> Router {
         middleware::from_fn_with_state(state.clone(), crate::terminal::read_only_gate),
     );
 
+    // `POST /api/answer` is the *second* fleet-state write surface: it drives the
+    // daemon's verified last-mile send into a live session (approvals, ASK
+    // answers, free-text into the picker). It must carry the SAME posture gate as
+    // the WS terminal — `read_only_gate` refuses it with `403 READ_ONLY` in
+    // `--read-only` mode — so the read-only dashboard truly never mutates fleet
+    // state and the `--insecure-bind + --read-only` bind exemption
+    // ([`WebConfig::check_bind_security`]) stays sound (it exists only because no
+    // write surface is reachable in that posture). Both write surfaces sit under
+    // the shared bearer auth below, so the refusal order matches the terminal:
+    // auth first (401), then read-only (403).
+    let answer_route =
+        Router::new()
+            .route("/api/answer", post(answer))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::terminal::read_only_gate,
+            ));
+
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions", get(sessions))
         .route("/api/needs", get(needs))
-        .route("/api/answer", post(answer))
         .route("/api/cost", get(cost))
         .route("/api/events", get(events))
+        .merge(answer_route)
         .merge(terminal)
         .merge(crate::push::router())
         .layer(middleware::from_fn_with_state(

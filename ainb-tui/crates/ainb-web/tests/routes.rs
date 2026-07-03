@@ -102,12 +102,16 @@ impl Answerer for FakeAnswerer {
     }
 }
 
-fn app_with_answerer(token: Option<&str>, answerer: Arc<dyn Answerer>) -> axum::Router {
+fn app_with_answerer(
+    token: Option<&str>,
+    answerer: Arc<dyn Answerer>,
+    read_only: bool,
+) -> axum::Router {
     let config = WebConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         token: token.map(str::to_string),
         insecure_bind: false,
-        read_only: true,
+        read_only,
     };
     let state = AppState::with_answerer(config, Arc::new(FakeSource), answerer);
     router(state)
@@ -119,7 +123,10 @@ async fn post(
     bearer: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
-    let mut req = Request::builder().method("POST").uri(path).header("content-type", "application/json");
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
     if let Some(t) = bearer {
         req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
     }
@@ -291,7 +298,8 @@ async fn answer_delivers_through_daemon_seam() {
     let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered {
         via: "tmux (demo)".to_string(),
     });
-    let app = app_with_answerer(None, answerer);
+    // Control mode (not --read-only): the write surface is live.
+    let app = app_with_answerer(None, answerer, false);
 
     let (status, body) = post(
         &app,
@@ -321,7 +329,7 @@ async fn answer_reports_already_answered_outcome() {
     let (answerer, _last) = FakeAnswerer::new(AnswerResult::AlreadyAnswered {
         by: "atc".to_string(),
     });
-    let app = app_with_answerer(None, answerer);
+    let app = app_with_answerer(None, answerer, false);
 
     let (status, body) = post(
         &app,
@@ -339,10 +347,15 @@ async fn answer_reports_already_answered_outcome() {
 #[tokio::test]
 async fn answer_rejects_empty_attention_id() {
     let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
-    let app = app_with_answerer(None, answerer);
+    let app = app_with_answerer(None, answerer, false);
 
-    let (status, body) =
-        post(&app, "/api/answer", None, json!({ "attentionId": "", "answer": "2" })).await;
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "", "answer": "2" }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "INVALID_BODY");
@@ -355,14 +368,22 @@ async fn answer_rejects_empty_attention_id() {
 #[tokio::test]
 async fn answer_requires_bearer_when_token_configured() {
     let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
-    let app = app_with_answerer(Some("s3cret"), answerer);
+    let app = app_with_answerer(Some("s3cret"), answerer, false);
 
     // No bearer → 401, and the answer never reaches the daemon seam.
-    let (status, body) =
-        post(&app, "/api/answer", None, json!({ "attentionId": "att-1", "answer": "2" })).await;
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "UNAUTHORIZED");
-    assert!(last.lock().unwrap().is_none(), "unauth answer must not dispatch");
+    assert!(
+        last.lock().unwrap().is_none(),
+        "unauth answer must not dispatch"
+    );
 
     // Correct bearer → delivered.
     let (status, body) = post(
@@ -374,4 +395,31 @@ async fn answer_requires_bearer_when_token_configured() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["outcome"], "delivered");
+}
+
+#[tokio::test]
+async fn answer_refused_in_read_only_mode() {
+    // `/api/answer` is a fleet-state write surface (it drives the daemon's
+    // verified last-mile send into a live session), so `--read-only` must refuse
+    // it exactly like the WS terminal — `403 READ_ONLY`, and the daemon seam is
+    // never touched. This is the invariant that keeps the `--insecure-bind +
+    // --read-only` bind exemption sound: in read-only mode NO write surface is
+    // reachable, so an unauthenticated public bind cannot inject answers.
+    let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
+    let app = app_with_answerer(None, answerer, true);
+
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "READ_ONLY");
+    assert!(
+        last.lock().unwrap().is_none(),
+        "read-only mode must refuse the answer before it reaches the daemon"
+    );
 }
