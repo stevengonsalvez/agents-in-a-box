@@ -249,6 +249,16 @@ fn cycle_tier(state: &ProfilesState) -> ProfilesReduction {
     let Some(entry) = state.selected_entry() else {
         return no_change(state);
     };
+    // A tier cycle re-sends the FULL master (the glue's `upsert_profile_tier`
+    // reads the loaded detail). If the detail has NOT loaded yet — the roster
+    // just loaded, or `j`/`k` cleared it and the `profile/get` is still in
+    // flight — a persisted upsert would carry only slug+tier and the daemon,
+    // which OVERWRITES the master from the params (description/tools/color/body
+    // serde-default to empty), would wipe the master's body. Refuse the cycle
+    // until the master is loaded; the user retries once the preview fills.
+    if state.detail_for_upsert(&entry.slug).is_none() {
+        return no_change(state);
+    }
     let next = next_tier(&entry.tier).to_string();
     let slug = entry.slug.clone();
     // Optimistically reflect the new tier in the roster row AND the loaded detail
@@ -619,6 +629,9 @@ mod tests {
     fn t_cycles_tier_and_raises_upsert() {
         let mut s = ProfilesState::default();
         s.set_roster(roster3()); // author = balanced
+        // Detail must be loaded for a tier cycle to persist (a partial upsert
+        // would wipe the master), so load it before pressing `t`.
+        s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
         let out = reduce_profiles(&s, ProfilesEvent::Key('t'));
         // balanced → fast, reflected optimistically + persisted.
         assert_eq!(out.state.roster[0].tier, "fast");
@@ -626,6 +639,18 @@ mod tests {
             out.intent,
             Some(ProfilesIntent::CycleTier { slug: "author".into(), tier: "fast".into() })
         );
+    }
+
+    #[test]
+    fn t_is_noop_until_detail_loaded() {
+        // Pressing `t` before the selected master's detail loads must NOT raise a
+        // CycleTier intent — a slug+tier-only upsert would overwrite the master
+        // with empty description/tools/color/body on the daemon.
+        let mut s = ProfilesState::default();
+        s.set_roster(roster3()); // author = balanced, no detail loaded
+        let out = reduce_profiles(&s, ProfilesEvent::Key('t'));
+        assert_eq!(out.intent, None, "no upsert without loaded detail");
+        assert_eq!(out.state.roster[0].tier, "balanced", "tier not mutated");
     }
 
     #[test]

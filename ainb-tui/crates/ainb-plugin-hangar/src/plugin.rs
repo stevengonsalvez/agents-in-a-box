@@ -958,33 +958,37 @@ impl HangarPlugin {
     }
 
     /// Fire a `profile/upsert` persisting the selected profile's new `tier` (P5) —
-    /// raised by the editor `t` cycle. Sends only the slug + tier; the daemon
-    /// preserves the rest of the master (the other fields round-trip unchanged
-    /// because the editor cycles ONLY the tier in v1).
+    /// raised by the editor `t` cycle. The daemon's `profile/upsert` OVERWRITES
+    /// the master from the params, so the upsert MUST carry every field: the
+    /// editor cycles tier against the ALREADY-LOADED detail and re-sends the full
+    /// master, a lossless round-trip of the current profile.
     ///
-    /// NOTE: v1 upsert carries only slug + tier, so a tier cycle on a rich master
-    /// would drop its description/tools/color/body. To avoid that data loss the
-    /// editor cycles tier against the ALREADY-LOADED detail and re-sends every
-    /// field it holds, so the write is a full round-trip of the current master.
+    /// Safety: if the detail has not loaded (`detail_for_upsert` is `None`), this
+    /// is a NO-OP send — a slug+tier-only upsert would let the daemon default the
+    /// other fields to empty and wipe the master's body. `cycle_tier` already
+    /// refuses to raise the intent in that window; this guard is defence in depth.
     async fn upsert_profile_tier(&self, host: &HostClient, slug: String, tier: String) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
-        // Re-send the full master from the loaded detail (guarding against field
-        // loss); fall back to a minimal body when detail has not loaded yet.
-        let params = self.screens.profiles.detail_for_upsert(&slug).map_or_else(
-            || serde_json::json!({ "slug": slug, "tier": tier }),
-            |d| {
-                serde_json::json!({
-                    "slug": d.slug,
-                    "description": d.description,
-                    "tier": tier,
-                    "tools": d.tools,
-                    "color": d.color,
-                    "body": d.body,
-                })
-            },
-        );
+        // Only persist a full-master round-trip. Without loaded detail we refuse
+        // to send rather than risk overwriting the master with empty fields.
+        let Some(d) = self.screens.profiles.detail_for_upsert(&slug) else {
+            let _ = host
+                .log_info(format!(
+                    "hangar: profile upsert skipped for {slug:?} — detail not loaded (would drop fields)"
+                ))
+                .await;
+            return;
+        };
+        let params = serde_json::json!({
+            "slug": d.slug,
+            "description": d.description,
+            "tier": tier,
+            "tools": d.tools,
+            "color": d.color,
+            "body": d.body,
+        });
         let Ok(body) = encode_request(PROFILE_UPSERT_REQ_ID, daemon_methods::PROFILE_UPSERT, params)
         else {
             return;
