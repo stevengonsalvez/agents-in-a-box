@@ -31,12 +31,35 @@ use crate::widgets::presence_dot::presence_dot;
 
 /// Title / accent gold.
 const GOLD: Color = Color::rgb(255, 215, 0);
-/// Selected-row marker + leader-tag green.
+/// Selected-row marker + leader-tag green (also the OK-note color).
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 /// Primary row text.
 const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
 /// Muted text (headers, hints, empty state, member indent guides).
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
+/// Error-note red — shared convention with `boards.rs` so a rejection never reads
+/// as a success confirmation.
+const ERROR_RED: Color = Color::rgb(235, 90, 90);
+
+/// Whether a transient note reports a success or a failure. Drives the note color
+/// so an error (`squad error: …`, `assign failed: …`, `no agent available …`) is
+/// never painted the same green as a success confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// A success confirmation (rendered green).
+    Ok,
+    /// A rejection / failure (rendered red).
+    Err,
+}
+
+/// A transient status note: its kind (drives the color) plus the message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// Whether the note is a success or a failure.
+    pub kind: NoteKind,
+    /// The message rendered above the list.
+    pub text: String,
+}
 
 /// One actor (leader or member) resolved for render: its canonical ref, a display
 /// name, live presence, and whether it is an agent (a human `member` carries no
@@ -78,9 +101,11 @@ enum Row {
 /// The render-state cache for the Squads screen.
 ///
 /// Holds the resolved squads, the flat-list selection, an optional create-name
-/// input buffer (present only while creating), the vertical scroll offset, and a
-/// transient note (e.g. the last assignment confirmation). All fields private;
-/// tests and the renderer read through accessors.
+/// input buffer (present only while creating), and a transient note (e.g. the last
+/// assignment confirmation). All fields private; tests and the renderer read
+/// through accessors. The vertical scroll offset is NOT held here — it is derived
+/// per render from the selection + viewport height (see [`render_squads`]), the
+/// same viewport-blind convention as `control_center.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SquadsState {
     squads: Vec<SquadView>,
@@ -88,10 +113,9 @@ pub struct SquadsState {
     selected: usize,
     /// The create-squad name buffer — `Some` only while the create input is open.
     create_input: Option<String>,
-    /// First visible row — the list's vertical scroll offset.
-    scroll_offset: usize,
-    /// A transient status note (last assignment / add), rendered above the list.
-    note: Option<String>,
+    /// A transient status note (last assignment / add / error), rendered above the
+    /// list; its kind drives the color (green = ok, red = error).
+    note: Option<Note>,
 }
 
 impl SquadsState {
@@ -102,7 +126,6 @@ impl SquadsState {
             squads,
             selected: 0,
             create_input: None,
-            scroll_offset: 0,
             note: None,
         }
     }
@@ -113,11 +136,7 @@ impl SquadsState {
     /// to the raw ref with an offline dot (never silently dropped).
     #[must_use]
     pub fn from_snapshot(snapshot: &SquadsListResult, actors: &[ActorRow]) -> Self {
-        let squads = snapshot
-            .squads
-            .iter()
-            .map(|s| resolve_squad(s, actors))
-            .collect();
+        let squads = snapshot.squads.iter().map(|s| resolve_squad(s, actors)).collect();
         Self::new(squads)
     }
 
@@ -146,8 +165,31 @@ impl SquadsState {
     }
 
     /// Set (or clear) the transient status note the render shows above the list.
-    pub fn set_note(&mut self, note: Option<String>) {
+    /// Used to preserve the note across a snapshot refresh; call [`Self::note_ok`]
+    /// / [`Self::note_err`] to raise a fresh one.
+    pub fn set_note(&mut self, note: Option<Note>) {
         self.note = note;
+    }
+
+    /// Raise a success note (rendered green).
+    pub fn note_ok(&mut self, text: impl Into<String>) {
+        self.note = Some(Note {
+            kind: NoteKind::Ok,
+            text: text.into(),
+        });
+    }
+
+    /// Raise an error note (rendered red) — a rejection never reads as a success.
+    pub fn note_err(&mut self, text: impl Into<String>) {
+        self.note = Some(Note {
+            kind: NoteKind::Err,
+            text: text.into(),
+        });
+    }
+
+    /// Clear the transient note.
+    pub fn clear_note(&mut self) {
+        self.note = None;
     }
 
     /// Restore the flat-list selection after a snapshot refresh, clamped to the
@@ -164,10 +206,10 @@ impl SquadsState {
         self.create_input = buf;
     }
 
-    /// The transient status note, if any.
+    /// The transient status note, if any (its kind drives the render color).
     #[must_use]
-    pub fn note(&self) -> Option<&str> {
-        self.note.as_deref()
+    pub fn note(&self) -> Option<&Note> {
+        self.note.as_ref()
     }
 
     /// The flattened, navigable rows: each squad's header followed by its members.
@@ -236,11 +278,7 @@ fn resolve_squad(row: &SquadWireRow, actors: &[ActorRow]) -> SquadView {
         id: row.id.clone(),
         name: row.name.clone(),
         leader: resolve_actor(&row.leader, actors),
-        members: row
-            .members
-            .iter()
-            .map(|m| resolve_actor(m, actors))
-            .collect(),
+        members: row.members.iter().map(|m| resolve_actor(m, actors)).collect(),
     }
 }
 
@@ -249,23 +287,20 @@ fn resolve_squad(row: &SquadWireRow, actors: &[ActorRow]) -> SquadView {
 /// with an offline dot (its kind still read from the `agent:` / `member:` prefix).
 fn resolve_actor(actor_ref: &str, actors: &[ActorRow]) -> SquadActor {
     let is_agent = actor_ref.starts_with("agent:");
-    actors
-        .iter()
-        .find(|a| a.actor_ref == actor_ref)
-        .map_or_else(
-            || SquadActor {
-                actor_ref: actor_ref.to_string(),
-                display: actor_ref.to_string(),
-                presence: PresenceState::Offline,
-                is_agent,
-            },
-            |a| SquadActor {
-                actor_ref: actor_ref.to_string(),
-                display: a.display_name.clone(),
-                presence: a.presence,
-                is_agent: a.is_agent,
-            },
-        )
+    actors.iter().find(|a| a.actor_ref == actor_ref).map_or_else(
+        || SquadActor {
+            actor_ref: actor_ref.to_string(),
+            display: actor_ref.to_string(),
+            presence: PresenceState::Offline,
+            is_agent,
+        },
+        |a| SquadActor {
+            actor_ref: actor_ref.to_string(),
+            display: a.display_name.clone(),
+            presence: a.presence,
+            is_agent: a.is_agent,
+        },
+    )
 }
 
 /// An input the squads reducer folds into [`SquadsState`].
@@ -479,16 +514,29 @@ pub fn render_squads(
     render_action_hints(buf, top, area_w);
     let mut row = top + 1;
 
-    // Transient note (assignment / add confirmation), if any.
+    // Transient note (assignment / add confirmation or a rejection), if any. Its
+    // kind drives the color: green for a success, red for an error — so a rejection
+    // is never painted the same as a confirmation.
     if let Some(note) = state.note() {
-        put_str(buf, 0, row, note, SELECTION_GREEN, area_w);
+        let color = match note.kind {
+            NoteKind::Ok => SELECTION_GREEN,
+            NoteKind::Err => ERROR_RED,
+        };
+        put_str(buf, 0, row, &note.text, color, area_w);
         row = row.saturating_add(1);
     }
 
     // Create-name input takes over the body while open.
     if let Some(buffer) = state.create_buffer() {
         let line = format!("New squad name: {buffer}▏");
-        put_str(buf, 0, row, "Enter a squad name, Esc to cancel", MUTED_GRAY, area_w);
+        put_str(
+            buf,
+            0,
+            row,
+            "Enter a squad name, Esc to cancel",
+            MUTED_GRAY,
+            area_w,
+        );
         put_str(buf, 0, row.saturating_add(1), &line, GOLD, area_w);
         return;
     }
@@ -506,7 +554,12 @@ pub fn render_squads(
     }
 
     let rows = state.rows();
-    let visible_from = state.scroll_offset.min(rows.len().saturating_sub(1));
+    // Follow the selection: derive the first-visible offset from the selection +
+    // remaining viewport height so the `▶` cursor stays on-screen even when the
+    // squads + members overflow the pane (state stays viewport-blind, the same
+    // convention as `control_center.rs`).
+    let visible_rows = usize::from(bottom.saturating_sub(row));
+    let visible_from = first_visible(state.selected, visible_rows);
     for (idx, r) in rows.iter().enumerate().skip(visible_from) {
         if row >= bottom {
             break;
@@ -520,6 +573,18 @@ pub fn render_squads(
         }
         row = row.saturating_add(1);
     }
+}
+
+/// The first-visible row index for a viewport of `visible_rows` rows that must
+/// keep `selected` on-screen. While the selection sits within the first
+/// `visible_rows` rows the list is top-anchored (offset `0`); past that the offset
+/// tracks so `selected` lands on the last visible row (never below it). A
+/// zero-height viewport pins the offset to the selection.
+const fn first_visible(selected: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 {
+        return selected;
+    }
+    selected.saturating_sub(visible_rows - 1)
 }
 
 /// Paint the action-key hints on the top row, right-aligned so each key sits
@@ -537,14 +602,32 @@ fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
 /// Render one squad header row: `▶ <name>  leader: <dot> <leader>  (N members)`.
 fn render_header(buf: &mut WireBuffer, row: u16, area_w: u16, squad: &SquadView, selected: bool) {
     let mut x = 0u16;
-    x = put_str(buf, x, row, if selected { "▶ " } else { "  " }, SELECTION_GREEN, area_w);
-    x = put_str(buf, x, row, &squad.name, if selected { GOLD } else { SOFT_WHITE }, area_w);
+    x = put_str(
+        buf,
+        x,
+        row,
+        if selected { "▶ " } else { "  " },
+        SELECTION_GREEN,
+        area_w,
+    );
+    x = put_str(
+        buf,
+        x,
+        row,
+        &squad.name,
+        if selected { GOLD } else { SOFT_WHITE },
+        area_w,
+    );
     x = put_str(buf, x, row, "  leader: ", MUTED_GRAY, area_w);
     let (glyph, color) = presence_dot(squad.leader.presence);
     x = put_cell(buf, x, row, glyph, color, area_w);
     x = put_str(buf, x, row, " ", MUTED_GRAY, area_w);
     x = put_str(buf, x, row, &squad.leader.display, SOFT_WHITE, area_w);
-    let count = format!("  ({} member{})", squad.members.len(), plural(squad.members.len()));
+    let count = format!(
+        "  ({} member{})",
+        squad.members.len(),
+        plural(squad.members.len())
+    );
     put_str(buf, x, row, &count, MUTED_GRAY, area_w);
 }
 
@@ -552,23 +635,30 @@ fn render_header(buf: &mut WireBuffer, row: u16, area_w: u16, squad: &SquadView,
 /// squad, the `▶` marker when selected.
 fn render_member(buf: &mut WireBuffer, row: u16, area_w: u16, member: &SquadActor, selected: bool) {
     let mut x = 0u16;
-    x = put_str(buf, x, row, if selected { "  ▶ " } else { "    " }, SELECTION_GREEN, area_w);
+    x = put_str(
+        buf,
+        x,
+        row,
+        if selected { "  ▶ " } else { "    " },
+        SELECTION_GREEN,
+        area_w,
+    );
     x = put_str(buf, x, row, "└ ", MUTED_GRAY, area_w);
     let (glyph, color) = presence_dot(member.presence);
     x = put_cell(buf, x, row, glyph, color, area_w);
     x = put_str(buf, x, row, " ", MUTED_GRAY, area_w);
     x = put_str(buf, x, row, &member.display, SOFT_WHITE, area_w);
-    let tag = if member.is_agent { "  · agent" } else { "  · human" };
+    let tag = if member.is_agent {
+        "  · agent"
+    } else {
+        "  · human"
+    };
     put_str(buf, x, row, tag, MUTED_GRAY, area_w);
 }
 
 /// The plural suffix for a count (`""` at 1, else `"s"`).
 const fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 /// Write a single glyph at `(x, row)` in `color`, clipping at `area_w`. Returns
@@ -626,7 +716,12 @@ mod tests {
     fn snapshot() -> SquadsListResult {
         SquadsListResult {
             squads: vec![
-                wire_squad("s1", "shippers", "agent:a-lead", &["agent:a-1", "member:u-1"]),
+                wire_squad(
+                    "s1",
+                    "shippers",
+                    "agent:a-lead",
+                    &["agent:a-1", "member:u-1"],
+                ),
                 wire_squad("s2", "reviewers", "agent:a-rev", &[]),
             ],
         }
@@ -740,12 +835,16 @@ mod tests {
         let add = reduce_squads(&state, SquadsEvent::Key('a'));
         assert_eq!(
             add.intent,
-            Some(SquadsIntent::AddMember { squad_id: "s1".into() })
+            Some(SquadsIntent::AddMember {
+                squad_id: "s1".into()
+            })
         );
         let assign = reduce_squads(&state, SquadsEvent::Key('x'));
         assert_eq!(
             assign.intent,
-            Some(SquadsIntent::AssignIssue { squad_id: "s1".into() })
+            Some(SquadsIntent::AssignIssue {
+                squad_id: "s1".into()
+            })
         );
     }
 
@@ -765,6 +864,39 @@ mod tests {
                 member_ref: "agent:a-1".into(),
             })
         );
+    }
+
+    /// `note_ok` / `note_err` carry the kind so the render can distinguish a
+    /// success confirmation from a rejection (they are NOT the same color).
+    #[test]
+    fn note_kind_distinguishes_ok_from_err() {
+        let mut state = SquadsState::from_snapshot(&snapshot(), &actors());
+        state.note_ok("briefed lead-bot + 2 members");
+        assert_eq!(
+            state.note(),
+            Some(&Note {
+                kind: NoteKind::Ok,
+                text: "briefed lead-bot + 2 members".into(),
+            })
+        );
+        state.note_err("squad error: duplicate name");
+        assert_eq!(state.note().map(|n| n.kind), Some(NoteKind::Err));
+        state.clear_note();
+        assert!(state.note().is_none());
+    }
+
+    /// The derived scroll offset follows the selection: top-anchored while it fits,
+    /// then tracking so the selected row lands on the last visible row.
+    #[test]
+    fn first_visible_follows_the_selection_past_the_fold() {
+        // Selection within the first `visible` rows → top-anchored.
+        assert_eq!(first_visible(0, 5), 0);
+        assert_eq!(first_visible(4, 5), 0);
+        // Past the fold: the selected row pins to the last visible row.
+        assert_eq!(first_visible(5, 5), 1);
+        assert_eq!(first_visible(20, 5), 16);
+        // A zero-height viewport pins the offset to the selection (no underflow).
+        assert_eq!(first_visible(7, 0), 7);
     }
 
     /// `select_squad_by_id` lands the selection on the squad's header row.

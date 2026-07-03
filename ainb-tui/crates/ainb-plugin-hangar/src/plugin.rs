@@ -833,9 +833,7 @@ impl HangarPlugin {
         // A rejected mutation (e.g. a duplicate squad name) surfaces as a note
         // above the list rather than blanking the last-good rows.
         if let Some(err) = &resp.error {
-            self.screens
-                .squads
-                .set_note(Some(format!("squad error: {}", err.message)));
+            self.screens.squads.note_err(format!("squad error: {}", err.message));
             return;
         }
         if let Some(result) = resp.result.as_ref() {
@@ -852,9 +850,7 @@ impl HangarPlugin {
     /// error surfaces the rejection reason. Non-fatal either way.
     fn apply_squad_fanout(&mut self, resp: &RpcResponse) {
         if let Some(err) = &resp.error {
-            self.screens
-                .squads
-                .set_note(Some(format!("assign failed: {}", err.message)));
+            self.screens.squads.note_err(format!("assign failed: {}", err.message));
             return;
         }
         if let Some(result) = resp.result.as_ref() {
@@ -862,11 +858,11 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 let n = r.members.len();
-                self.screens.squads.set_note(Some(format!(
+                self.screens.squads.note_ok(format!(
                     "briefed {} + {n} member{}",
                     r.leader.leader_agent_id,
                     if n == 1 { "" } else { "s" }
-                )));
+                ));
             }
         }
     }
@@ -1332,14 +1328,12 @@ impl HangarPlugin {
         };
         let ws = self.app_state().ws_id.as_str().to_string();
         // A fresh action clears any stale transient note; the reply sets a new one.
-        self.screens.squads.set_note(None);
+        self.screens.squads.clear_note();
 
         let (id, method, params) = match action {
             SquadAction::Create { name } => {
                 let Some(agent_id) = self.first_agent_ref() else {
-                    self.screens
-                        .squads
-                        .set_note(Some("no agent available to lead a squad".into()));
+                    self.screens.squads.note_err("no agent available to lead a squad");
                     return;
                 };
                 (
@@ -1354,9 +1348,7 @@ impl HangarPlugin {
             }
             SquadAction::AddMember { squad_id } => {
                 let Some(member) = self.next_squad_member_ref(&squad_id) else {
-                    self.screens
-                        .squads
-                        .set_note(Some("no more agents to add".into()));
+                    self.screens.squads.note_err("no more agents to add");
                     return;
                 };
                 (
@@ -1375,9 +1367,7 @@ impl HangarPlugin {
             ),
             SquadAction::Assign { squad_id } => {
                 let Some(issue_id) = self.first_assignable_issue() else {
-                    self.screens
-                        .squads
-                        .set_note(Some("no issue available to assign".into()));
+                    self.screens.squads.note_err("no issue available to assign");
                     return;
                 };
                 (

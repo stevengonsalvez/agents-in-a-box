@@ -8,13 +8,13 @@
 
 use ainb_hangar_proto::events::{ActorRow, PresenceState};
 use ainb_hangar_proto::snapshots::{SquadWireRow, SquadsListResult};
-use ainb_plugin_hangar::screen::squads::{
-    reduce_squads, render_squads, SquadsEvent, SquadsState,
-};
+use ainb_plugin_hangar::screen::squads::{SquadsEvent, SquadsState, reduce_squads, render_squads};
 use ainb_plugin_sdk::{Color, WireBuffer};
 
-/// Online-green — the leader/member online presence dot colour.
+/// Online-green — the leader/member online presence dot colour (also the OK-note).
 const ONLINE_GREEN: Color = Color::rgb(100, 200, 100);
+/// Error-red — the rejection-note colour (shared with `boards.rs`).
+const ERROR_RED: Color = Color::rgb(235, 90, 90);
 
 fn actor(actor_ref: &str, name: &str, presence: PresenceState, is_agent: bool) -> ActorRow {
     ActorRow {
@@ -115,8 +115,14 @@ fn render_loaded_lists_squads_leaders_and_members() {
         assert!(full.contains(marker), "missing {marker:?}:\n{full}");
     }
     // The human member is tagged distinctly from an agent.
-    assert!(full.contains("· human"), "human member tag missing:\n{full}");
-    assert!(full.contains("· agent"), "agent member tag missing:\n{full}");
+    assert!(
+        full.contains("· human"),
+        "human member tag missing:\n{full}"
+    );
+    assert!(
+        full.contains("· agent"),
+        "agent member tag missing:\n{full}"
+    );
     // The selection marker sits on the first (header) row.
     assert!(full.contains('▶'), "selection marker missing:\n{full}");
 
@@ -160,6 +166,99 @@ fn render_create_input_shows_prompt_and_buffer() {
     );
 }
 
+/// The colour at buffer coordinate `(x, y)`, if any cell is painted there.
+fn color_at(buf: &WireBuffer, x: u16, y: u16) -> Option<Color> {
+    buf.cells
+        .iter()
+        .find(|(coord, _)| coord.x == x && coord.y == y)
+        .and_then(|(_, cell)| cell.fg)
+}
+
+/// A rejection note (`squad error: …`, `assign failed: …`, `no agent …`) must be
+/// painted in ERROR_RED, never the green of a success confirmation — the two
+/// states are visually distinct.
+#[test]
+fn error_note_renders_red_not_green() {
+    // Success note → green.
+    let mut ok = loaded_state();
+    ok.note_ok("briefed lead-bot + 2 members");
+    let mut buf = WireBuffer::new(100, 14);
+    render_squads(&mut buf, 100, 0, 14, &ok);
+    assert_eq!(
+        color_at(&buf, 0, 1),
+        Some(ONLINE_GREEN),
+        "a success confirmation must be painted green"
+    );
+
+    // Rejection note → red, at the same position, so it can never be mistaken for
+    // the success above.
+    let mut err = loaded_state();
+    err.note_err("squad error: duplicate name");
+    let mut buf = WireBuffer::new(100, 14);
+    render_squads(&mut buf, 100, 0, 14, &err);
+    let note_color = color_at(&buf, 0, 1);
+    assert_eq!(
+        note_color,
+        Some(ERROR_RED),
+        "a rejection must be painted red, not green"
+    );
+    assert_ne!(
+        note_color,
+        Some(ONLINE_GREEN),
+        "an error must NOT read as a success confirmation"
+    );
+}
+
+/// When the squads + members overflow the pane, the render follows the selection:
+/// the selected row stays on-screen and the top rows scroll off.
+#[test]
+fn overflow_follows_the_selection_off_the_fold() {
+    // 30 single-line squads → 30 rows, far more than a 8-row pane holds.
+    let squads: Vec<_> = (0..30)
+        .map(|i| {
+            wire_squad(
+                &format!("s{i}"),
+                &format!("squad-{i:02}"),
+                "agent:a-lead",
+                &[],
+            )
+        })
+        .collect();
+    let actors = vec![actor(
+        "agent:a-lead",
+        "lead-bot",
+        PresenceState::Online,
+        true,
+    )];
+    let mut state = SquadsState::from_snapshot(&SquadsListResult { squads }, &actors);
+
+    // Drive the selection to the last row.
+    for _ in 0..29 {
+        state = reduce_squads(&state, SquadsEvent::Key('j')).state;
+    }
+    assert_eq!(state.selected_index(), 29);
+
+    let mut buf = WireBuffer::new(100, 8);
+    render_squads(&mut buf, 100, 0, 8, &state);
+    let full = glyph_map(&buf, 100);
+
+    // The selected (last) squad is on-screen, carrying the ▶ marker…
+    assert!(
+        full.contains("squad-29"),
+        "the selected row must scroll into view:\n{full}"
+    );
+    assert!(
+        full.contains('▶'),
+        "the selection marker must be visible:\n{full}"
+    );
+    // …and the top rows have scrolled off (no scroll-follow would strand them on
+    // screen and push the selection past the fold).
+    assert!(
+        !full.contains("squad-00"),
+        "the top rows must scroll off when the selection is past the fold:\n{full}"
+    );
+}
+
 /// Narrow-width floor (design gate c overflow leg): the body still renders squad
 /// names without writing a single cell outside the area.
 #[test]
@@ -171,7 +270,10 @@ fn render_narrow_width_stays_in_bounds() {
     let full = glyph_map(&buf, W);
     insta::assert_snapshot!(full);
 
-    assert!(full.contains("shippers"), "squad name missing at narrow width:\n{full}");
+    assert!(
+        full.contains("shippers"),
+        "squad name missing at narrow width:\n{full}"
+    );
     for (coord, _) in &buf.cells {
         assert!(
             coord.x < W,

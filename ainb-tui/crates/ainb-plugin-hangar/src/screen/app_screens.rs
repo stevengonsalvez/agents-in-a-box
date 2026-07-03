@@ -514,7 +514,7 @@ impl ScreenStates {
     pub fn set_squads(&mut self, snapshot: &ainb_hangar_proto::snapshots::SquadsListResult) {
         let selected = self.squads.selected_index();
         let creating = self.squads.create_buffer().map(str::to_string);
-        let note = self.squads.note().map(str::to_string);
+        let note = self.squads.note().cloned();
         let mut next = SquadsState::from_snapshot(snapshot, &self.actors);
         next.set_selected(selected);
         next.set_create_buffer(creating);
