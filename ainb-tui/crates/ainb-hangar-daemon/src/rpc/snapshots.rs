@@ -35,6 +35,7 @@ use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
+use ainb_hangar_store::repo::run_history::RunHistoryRepo;
 use ainb_hangar_store::repo::usage::UsageRepo;
 use ainb_hangar_store::repo::workspace::{apply_issue_prefix, issue_display_id};
 use sqlx::{Row, SqlitePool};
@@ -1010,6 +1011,45 @@ pub async fn usage_rollup(
                 output_tokens: a.output_tokens,
                 cost_usd: a.cost_usd,
                 runs: a.runs,
+            })
+            .collect(),
+    })
+}
+
+/// Snapshot a workspace's per-run observability timeline (`hangar/run_history`,
+/// P10 / D19).
+///
+/// Reads the durable `run_history` rows the daemon's run loop appends at each
+/// run's finalize seam: the newest `limit` finished runs, each carrying provider
+/// / session / profile / outcome / duration and token-cost. Workspace-scoped: a
+/// foreign / unknown workspace yields an empty timeline.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the timeline query fails.
+pub async fn run_history(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    limit: i64,
+) -> Result<ainb_hangar_proto::snapshots::RunHistoryResult, sqlx::Error> {
+    let rows = RunHistoryRepo::list_by_workspace(pool, workspace_id, limit).await?;
+    Ok(ainb_hangar_proto::snapshots::RunHistoryResult {
+        runs: rows
+            .into_iter()
+            .map(|r| ainb_hangar_proto::snapshots::RunHistoryRow {
+                run_id: r.run_id,
+                task_id: r.task_id,
+                session_id: r.session_id,
+                provider: r.provider,
+                profile: r.profile,
+                started_at: r.started_at,
+                finished_at: r.finished_at,
+                outcome: r.outcome,
+                input_tokens: r.input_tokens,
+                output_tokens: r.output_tokens,
+                cost_usd: r.cost_usd,
+                diff_add: r.diff_add,
+                diff_del: r.diff_del,
             })
             .collect(),
     })

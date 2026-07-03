@@ -667,6 +667,7 @@ async fn handle(
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         methods::HANGAR_USAGE_ROLLUP => handle_usage_rollup(pool, req).await,
+        methods::HANGAR_RUN_HISTORY => handle_run_history(pool, req).await,
         methods::HANGAR_PR_STATUS_REFRESH => handle_pr_status_refresh(pool, req, events).await,
         methods::HANGAR_INBOX_LIST => handle_inbox_list(pool, req).await,
         methods::HANGAR_INBOX_MARK_READ => handle_inbox_mark_read(pool, req).await,
@@ -936,6 +937,42 @@ async fn handle_usage_rollup(
         None => ainb_hangar_proto::snapshots::UsageRollupResult::default(),
     };
     to_value(&rollup)
+}
+
+/// Default row cap for `hangar/run_history` when the caller omits `limit`.
+const RUN_HISTORY_DEFAULT_LIMIT: i64 = 100;
+/// Hard ceiling on `hangar/run_history` rows — a caller cannot ask for an
+/// unbounded scan (a huge or negative limit is clamped into `1..=MAX`).
+const RUN_HISTORY_MAX_LIMIT: i64 = 500;
+
+/// Dispatch `hangar/run_history` (P10 / D19): snapshot the workspace's per-run
+/// observability timeline (newest finished first) off the durable `run_history`
+/// rows the run loop appends at each finalize seam. An unknown workspace yields an
+/// empty timeline (a read). The optional `limit` is clamped to
+/// `1..=RUN_HISTORY_MAX_LIMIT`. Split out of [`handle`] to keep that dispatcher
+/// within the line cap.
+async fn handle_run_history(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::RunHistoryParams =
+        serde_json::from_value(req.params.clone()).map_err(|e| RpcError {
+            code: INVALID_PARAMS,
+            message: format!("expected {{ workspace_id, limit? }}: {e}"),
+            data: None,
+        })?;
+    let limit = params
+        .limit
+        .unwrap_or(RUN_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, RUN_HISTORY_MAX_LIMIT);
+    let history = match resolve_workspace_id(pool, &params.workspace_id)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        Some(ws) => snapshots::run_history(pool, &ws, limit).await.map_err(|e| store_err(&e))?,
+        None => ainb_hangar_proto::snapshots::RunHistoryResult::default(),
+    };
+    to_value(&history)
 }
 
 /// Dispatch `hangar/pr_status_refresh` (e38.34): fetch the CI + merge status of
