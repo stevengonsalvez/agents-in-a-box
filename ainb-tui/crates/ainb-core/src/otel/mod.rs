@@ -127,14 +127,22 @@ pub fn read_grafana_creds() -> Option<GrafanaCloudCreds> {
     creds.is_complete().then_some(creds)
 }
 
-/// Shell `export … && ` prefix that points an agent's OTLP exporter at the
-/// local Alloy collector, for injection into a spawned session's command.
-/// Empty when OTEL isn't configured. Only the non-secret `OTEL_*` vars are
-/// injected (the `GRAFANA_*` creds are Alloy's, not the agent's). Combined
-/// with `CLAUDE_CODE_ENABLE_TELEMETRY` (Claude reads that from
-/// settings.json), this makes telemetry flow from a non-interactive
-/// `sh -c` pane that never sourced the shell rc.
+/// Shell `export … && ` prefix that gives a spawned agent the FULL OTEL
+/// config, for injection into a non-interactive `sh -c` pane that never
+/// sourced the shell rc. Empty unless OTEL is configured (creds present).
+///
+/// Emits the same generic `SETTINGS_ENV` block that `~/.claude/settings.json`
+/// carries (exporter/protocol/enable/log flags) PLUS the machine-specific
+/// endpoint + host resource attr — so telemetry actually flows for ANY
+/// OTel-capable agent, not just Claude (which alone reads settings.json). The
+/// secret `GRAFANA_*` creds are NOT injected — those belong to Alloy, and the
+/// agent only needs to reach the local collector.
+///
+/// All values are static config or quote-free (endpoint URL, `host.name=<h>`),
+/// so plain single-quoting is shell-safe.
 pub fn session_otlp_exports() -> String {
+    // Configured ⇔ the creds file exists with a token. Cheap gate; no need to
+    // parse for the endpoint (it's the fixed `LOCAL_OTLP_ENDPOINT` const).
     let Ok(path) = env_file_path() else {
         return String::new();
     };
@@ -142,12 +150,19 @@ pub fn session_otlp_exports() -> String {
         return String::new();
     };
     let map = parse_env_exports(&text);
+    if map.get("GRAFANA_API_TOKEN").map(String::is_empty).unwrap_or(true) {
+        return String::new();
+    }
+
     let mut prefix = String::new();
-    for key in ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"] {
-        if let Some(val) = map.get(key).filter(|v| !v.is_empty()) {
-            // Values are URLs / host attrs — no embedded single quotes.
-            prefix.push_str(&format!("export {key}='{val}' && "));
-        }
+    for (k, v) in SETTINGS_ENV {
+        prefix.push_str(&format!("export {k}='{v}' && "));
+    }
+    prefix.push_str(&format!(
+        "export OTEL_EXPORTER_OTLP_ENDPOINT='{LOCAL_OTLP_ENDPOINT}' && "
+    ));
+    if let Some(attrs) = map.get("OTEL_RESOURCE_ATTRIBUTES").filter(|v| !v.is_empty()) {
+        prefix.push_str(&format!("export OTEL_RESOURCE_ATTRIBUTES='{attrs}' && "));
     }
     prefix
 }
@@ -670,17 +685,25 @@ mod tests {
             "http://localhost:4318"
         );
 
-        // Session exports carry the OTEL_* vars (never the GRAFANA_* creds).
+        // Session exports carry the FULL generic config + endpoint + host attr,
+        // and never the GRAFANA_* creds — built like session_otlp_exports.
+        assert!(!map.get("GRAFANA_API_TOKEN").unwrap().is_empty());
         let exports = {
-            // Exercise the same extraction session_otlp_exports uses.
             let mut p = String::new();
-            for key in ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_RESOURCE_ATTRIBUTES"] {
-                if let Some(v) = map.get(key).filter(|v| !v.is_empty()) {
-                    p.push_str(&format!("export {key}='{v}' && "));
-                }
+            for (k, v) in SETTINGS_ENV {
+                p.push_str(&format!("export {k}='{v}' && "));
+            }
+            p.push_str(&format!(
+                "export OTEL_EXPORTER_OTLP_ENDPOINT='{LOCAL_OTLP_ENDPOINT}' && "
+            ));
+            if let Some(a) = map.get("OTEL_RESOURCE_ATTRIBUTES").filter(|v| !v.is_empty()) {
+                p.push_str(&format!("export OTEL_RESOURCE_ATTRIBUTES='{a}' && "));
             }
             p
         };
+        // Generic enable/exporter config so non-Claude agents export too.
+        assert!(exports.contains("export CLAUDE_CODE_ENABLE_TELEMETRY='1'"));
+        assert!(exports.contains("export OTEL_METRICS_EXPORTER='otlp'"));
         assert!(exports.contains("export OTEL_EXPORTER_OTLP_ENDPOINT='http://localhost:4318'"));
         assert!(exports.contains("host.name=my-host"));
         assert!(
