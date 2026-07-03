@@ -580,11 +580,11 @@ pub const ALL_METHODS: &[&str] = &[
     ATTENTION_LIST,
     ATTENTION_SUBSCRIBE,
     ATTENTION_ANSWER,
+    AUTH_HELLO,
+    PING,
     PROFILE_LIST,
     PROFILE_GET,
     PROFILE_UPSERT,
-    AUTH_HELLO,
-    PING,
 ];
 
 #[cfg(test)]
@@ -730,11 +730,11 @@ mod tests {
             ATTENTION_LIST,
             ATTENTION_SUBSCRIBE,
             ATTENTION_ANSWER,
+            AUTH_HELLO,
+            PING,
             PROFILE_LIST,
             PROFILE_GET,
             PROFILE_UPSERT,
-            AUTH_HELLO,
-            PING,
         ];
         for m in declared {
             assert!(
