@@ -373,36 +373,36 @@ pub enum AppEvent {
     SkillManagerPreviewConfirm,     // Enter — import selection to chosen tools
     SkillManagerPreviewClose,       // Esc — discard, nothing persisted
     SkillManagerPreviewSource,      // p on a source row — reopen the picker for it
-    GoToRecovery,               // Navigate to session recovery view
-    GoToInbox,                  // Navigate to ainb-hooks notification inbox
-    GoToDaemons,                // Navigate to the daemon runtime-health view
-    GoToFleetPanel,             // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,           // Fleet panel: move row selection up
-    FleetPanelMoveDown,         // Fleet panel: move row selection down
-    FleetPanelOptionNext,       // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,       // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,           // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,        // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelApprove,          // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,             // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh,          // Fleet panel: force-refresh from current_state (r)
-    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
+    GoToRecovery,                   // Navigate to session recovery view
+    GoToInbox,                      // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                    // Navigate to the daemon runtime-health view
+    GoToFleetPanel,                 // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,               // Fleet panel: move row selection up
+    FleetPanelMoveDown,             // Fleet panel: move row selection down
+    FleetPanelOptionNext,           // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,           // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer,               // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast,            // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,    // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
+    FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
-    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                // Inbox: move selection up one row
-    InboxMoveDown,              // Inbox: move selection down one row
-    InboxPageUp,                // Inbox: jump 10 rows up
-    InboxPageDown,              // Inbox: jump 10 rows down
-    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,       // Inbox: dismiss selected row (d)
-    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,            // Inbox: cycle agent filter (p)
-    InboxRefresh,               // Inbox: force-refresh from store (r)
+    FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
+    PanelBack,         // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,        // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,       // Inbox: move selection up one row
+    InboxMoveDown,     // Inbox: move selection down one row
+    InboxPageUp,       // Inbox: jump 10 rows up
+    InboxPageDown,     // Inbox: jump 10 rows down
+    InboxOpenSelected, // Inbox: mark selected row read (Enter)
+    InboxDismissSelected, // Inbox: dismiss selected row (d)
+    InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived, // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,   // Inbox: cycle agent filter (p)
+    InboxRefresh,      // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -1757,9 +1757,7 @@ impl EventHandler {
                 KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
                 // `[p]` on a source row — reopen the import picker for it
                 // (preview its units, select, install more).
-                KeyCode::Char('p') if sources_focused => {
-                    Some(AppEvent::SkillManagerPreviewSource)
-                }
+                KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -6731,9 +6729,10 @@ impl EventHandler {
                 use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
                     o.auth_pane = match &o.auth_pane {
-                        AuthPane::KeyEntry { agent, .. } => {
-                            AuthPane::MethodPicker { agent: *agent, cursor: 1 }
-                        }
+                        AuthPane::KeyEntry { agent, .. } => AuthPane::MethodPicker {
+                            agent: *agent,
+                            cursor: 1,
+                        },
                         _ => AuthPane::AgentList,
                     };
                 }

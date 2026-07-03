@@ -521,8 +521,7 @@ impl OnboardingState {
             return;
         }
         let max = (self.auth_statuses.len() - 1) as isize;
-        self.auth_agent_cursor =
-            (self.auth_agent_cursor as isize + delta).clamp(0, max) as usize;
+        self.auth_agent_cursor = (self.auth_agent_cursor as isize + delta).clamp(0, max) as usize;
     }
 
     /// The agent under the list cursor, if any.
@@ -555,11 +554,18 @@ impl OnboardingState {
                     credentials::has_credential(key)
                 };
                 let (method, key_masked) = if is_api {
-                    (AuthMethodKind::ApiKey, Some(credentials::get_credential_masked(key)))
+                    (
+                        AuthMethodKind::ApiKey,
+                        Some(credentials::get_credential_masked(key)),
+                    )
                 } else {
                     (AuthMethodKind::Login, None)
                 };
-                AgentAuthStatus { agent, method, key_masked }
+                AgentAuthStatus {
+                    agent,
+                    method,
+                    key_masked,
+                }
             })
             .collect();
 
@@ -732,11 +738,8 @@ impl OnboardingState {
         if paths.is_empty() {
             return;
         }
-        self.git_directories_input = paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        self.git_directories_input =
+            paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
         self.cursor_position = self.git_directories_input.len();
         self.validate_git_directories();
     }
@@ -933,7 +936,11 @@ mod tests {
         assert_eq!(AuthAgent::all().len(), 4);
         for (agent, env) in expected {
             assert_eq!(agent.env_var(), env, "{} env var drift", agent.label());
-            assert!(agent.doc_url().starts_with("https://"), "{} missing doc url", agent.label());
+            assert!(
+                agent.doc_url().starts_with("https://"),
+                "{} missing doc url",
+                agent.label()
+            );
             assert!(!agent.login_label().is_empty());
         }
     }

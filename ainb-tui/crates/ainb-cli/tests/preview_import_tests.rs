@@ -13,17 +13,26 @@ use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new().prefix("ainb-preview-test-").tempdir().expect("tempdir")
+    tempfile::Builder::new()
+        .prefix("ainb-preview-test-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 /// Two-skill local fixture repo.
 fn fixture_repo() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
-    for (name, desc) in [("commit", "well-formed commits"), ("review", "review diffs")] {
+    for (name, desc) in [
+        ("commit", "well-formed commits"),
+        ("review", "review diffs"),
+    ] {
         let p: PathBuf = dir.path().join(format!("skills/{name}/SKILL.md"));
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, format!("---\nname: {name}\ndescription: {desc}\n---\nbody\n"))
-            .unwrap();
+        std::fs::write(
+            &p,
+            format!("---\nname: {name}\ndescription: {desc}\n---\nbody\n"),
+        )
+        .unwrap();
     }
     let uri = format!("local:{}", dir.path().display());
     (dir, uri)
@@ -48,8 +57,14 @@ fn preview_lists_units_without_persisting() {
     assert_eq!(commit.description.as_deref(), Some("well-formed commits"));
 
     // No manifest / lockfile writes on preview.
-    assert!(!manifest_path_in(home.path()).exists(), "preview must not write the manifest");
-    assert!(!lockfile_path_in(home.path()).exists(), "preview must not write the lockfile");
+    assert!(
+        !manifest_path_in(home.path()).exists(),
+        "preview must not write the manifest"
+    );
+    assert!(
+        !lockfile_path_in(home.path()).exists(),
+        "preview must not write the lockfile"
+    );
 }
 
 #[test]
@@ -71,9 +86,13 @@ fn import_persists_source_and_installs_selection() {
 
     let mut out = Vec::new();
     let (installed, failed) =
-        import_selected(home.path(), &preview, &[commit_path], "claude", &mut out)
-            .expect("import");
-    assert_eq!((installed, failed), (1, 0), "{}", String::from_utf8_lossy(&out));
+        import_selected(home.path(), &preview, &[commit_path], "claude", &mut out).expect("import");
+    assert_eq!(
+        (installed, failed),
+        (1, 0),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
 
     // Source persisted once; selected unit locked; unselected one absent.
     let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();

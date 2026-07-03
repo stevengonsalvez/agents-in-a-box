@@ -30,8 +30,7 @@ pub const AUTH_CODEX: &str = "https://developers.openai.com/codex/auth";
 pub const AUTH_GEMINI: &str =
     "https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html";
 /// GitHub Copilot CLI authentication guide.
-pub const AUTH_COPILOT: &str =
-    "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli";
+pub const AUTH_COPILOT: &str = "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli";
 
 /// Docsite page for a setup-catalog dep id, if one exists. Used by the deps
 /// screen to show "what you get" on the focused row.

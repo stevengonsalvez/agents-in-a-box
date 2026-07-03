@@ -463,7 +463,11 @@ impl SourcePreviewViewState {
             .filter(|(_, on)| **on)
             .map(|(t, _)| *t)
             .collect();
-        if picked.is_empty() { None } else { Some(picked.join(",")) }
+        if picked.is_empty() {
+            None
+        } else {
+            Some(picked.join(","))
+        }
     }
 }
 
@@ -886,7 +890,10 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
                 box_glyph,
                 Style::default().fg(if checked { SELECTION_GREEN } else { MUTED_GRAY }),
             ),
-            Span::styled(format!("{:<8}", unit.kind), Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                format!("{:<8}", unit.kind),
+                Style::default().fg(CORNFLOWER_BLUE),
+            ),
             Span::styled(unit.name.clone(), name_style),
         ]));
     }
@@ -953,7 +960,10 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
             Style::default().fg(if *on { SELECTION_GREEN } else { MUTED_GRAY }),
         ));
     }
-    tool_spans.push(Span::styled("4 ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    tool_spans.push(Span::styled(
+        "4 ",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
     tool_spans.push(Span::styled("all", Style::default().fg(MUTED_GRAY)));
     frame.render_widget(Paragraph::new(Line::from(tool_spans)), rows[1]);
 
@@ -2413,10 +2423,7 @@ mod tests {
             fetched_path: PathBuf::from("/tmp/x"),
             resolved_sha: "abc".to_string(),
             fetched_at: "now".to_string(),
-            units: unit_names
-                .iter()
-                .map(|n| ainb_adapters_source_unit(n))
-                .collect(),
+            units: unit_names.iter().map(|n| ainb_adapters_source_unit(n)).collect(),
             already_added: false,
         })
     }

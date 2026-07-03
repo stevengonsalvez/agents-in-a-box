@@ -298,7 +298,10 @@ pub fn import_selected(
             }
         }
     }
-    writeln!(out, "imported {installed} unit(s), {failed} failed → {targets}")?;
+    writeln!(
+        out,
+        "imported {installed} unit(s), {failed} failed → {targets}"
+    )?;
     Ok((installed, failed))
 }
 

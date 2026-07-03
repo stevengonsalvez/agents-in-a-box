@@ -1047,10 +1047,7 @@ impl OnboardingComponent {
         ]));
 
         // Auth — per-agent summary (e.g. "Claude login • Codex api key")
-        let auth_status = state
-            .auth_method
-            .clone()
-            .unwrap_or_else(|| "not configured".to_string());
+        let auth_status = state.auth_method.clone().unwrap_or_else(|| "not configured".to_string());
         summary_items.push(Line::from(vec![
             Span::styled(
                 if state.auth_completed {
