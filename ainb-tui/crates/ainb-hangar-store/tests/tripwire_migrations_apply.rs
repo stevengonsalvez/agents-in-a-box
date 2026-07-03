@@ -888,7 +888,7 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_twenty_six_tables() {
+async fn all_migrations_create_exactly_thirty_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -907,12 +907,15 @@ async fn all_migrations_create_exactly_twenty_six_tables() {
         "agent_runtime",
         "agent_skill",
         "agent_task_queue",
+        "atc_instance",
+        "atc_retry",
         "attention",
         "autopilot",
         "autopilot_run",
         "autopilot_webhook_delivery",
         "beads_mapping",
         "comment",
+        "daemon_config",
         "daemon_socket_token",
         "daemon_token",
         "event_log",
@@ -926,11 +929,12 @@ async fn all_migrations_create_exactly_twenty_six_tables() {
         "skill_file",
         "squad",
         "squad_member",
+        "standup_session",
         "task_usage",
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 26, "expected 26 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 30, "expected 30 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
@@ -1031,6 +1035,52 @@ async fn migration_0025_creates_attention_with_kind_state_checks_and_open_index(
         open_idx.contains("WHERE") && open_idx.contains("state = 'open'"),
         "idx_attention_open is partial over open rows: {open_idx}"
     );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0027_creates_atc_standup_and_daemon_config_tables() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    // atc_instance: name PK + heartbeat_cron + the retry cap moved off the JSON.
+    let atc = table_sql(&pool, "atc_instance").await;
+    assert!(atc.contains("name TEXT PRIMARY KEY"), "atc_instance.name PK: {atc}");
+    assert!(atc.contains("heartbeat_cron TEXT NOT NULL"), "heartbeat_cron: {atc}");
+    assert!(atc.contains("err_retry_cap INTEGER NOT NULL DEFAULT 3"), "err_retry_cap: {atc}");
+    assert!(atc.contains("enabled IN (0, 1)"), "atc_instance.enabled CHECK: {atc}");
+    // The heartbeat cron's hot path is a PARTIAL index over enabled rows.
+    let idx = index_sql(&pool, "idx_atc_instance_next_tick").await;
+    assert!(
+        idx.contains("WHERE") && idx.contains("enabled = 1"),
+        "idx_atc_instance_next_tick is partial over enabled rows: {idx}"
+    );
+
+    // atc_retry: composite (instance, session) PK + escalated CHECK.
+    let retry = table_sql(&pool, "atc_retry").await;
+    assert!(
+        retry.contains("PRIMARY KEY (instance_name, session_id)"),
+        "atc_retry composite PK: {retry}"
+    );
+    assert!(retry.contains("escalated IN (0, 1)"), "atc_retry.escalated CHECK: {retry}");
+
+    // standup_session: per-session opt-out + cooldown anchor + in-flight marker.
+    let su = table_sql(&pool, "standup_session").await;
+    assert!(su.contains("session_id TEXT PRIMARY KEY"), "standup_session.session_id PK: {su}");
+    assert!(su.contains("opted_out INTEGER NOT NULL DEFAULT 0"), "opted_out default: {su}");
+    assert!(su.contains("in_flight INTEGER NOT NULL DEFAULT 0"), "in_flight default: {su}");
+    // The max-concurrent guardrail counts in-flight rows — a PARTIAL index serves it.
+    let su_idx = index_sql(&pool, "idx_standup_in_flight").await;
+    assert!(
+        su_idx.contains("WHERE") && su_idx.contains("in_flight = 1"),
+        "idx_standup_in_flight is partial over in-flight rows: {su_idx}"
+    );
+
+    // daemon_config: a generic string kv for host-wide daemon knobs.
+    let cfg = table_sql(&pool, "daemon_config").await;
+    assert!(cfg.contains("key TEXT PRIMARY KEY"), "daemon_config.key PK: {cfg}");
+    assert!(cfg.contains("value TEXT NOT NULL"), "daemon_config.value: {cfg}");
 
     pool.close().await;
 }
