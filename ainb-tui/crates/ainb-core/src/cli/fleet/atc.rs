@@ -83,6 +83,17 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
     }
 
+    // D12: provision the heartbeat as a DAEMON cron by registering the instance
+    // in the daemon store — the daemon-native replacement for the launchd/systemd
+    // timer above. Best-effort: when the daemon is down we warn and keep the local
+    // timer as the fallback (external-dep rule — never hard-fail on a missing
+    // daemon). The UX (`atc setup <name>`) is unchanged.
+    let daemon_registered = if meta.heartbeat_enabled {
+        register_heartbeat_with_daemon(&meta, &paths).await
+    } else {
+        false
+    };
+
     // Install the event-driven lifecycle hooks into Claude's settings.json
     // (read-preserve-modify-write: keeps reflect/notifyd/user hooks). This is
     // what upgrades managed sessions from poll-mode to event-driven — a child's
@@ -122,6 +133,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         "timer_units": timer_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "session_spawned": spawned,
         "lifecycle_hooks_installed": hooks_installed,
+        "daemon_registered": daemon_registered,
     });
 
     if matches!(format, OutputFormat::Text) {
@@ -131,10 +143,14 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
         println!("  hooks:     lifecycle hooks installed: {hooks_installed}");
         if meta.heartbeat_enabled {
+            let via = if daemon_registered {
+                "daemon cron".to_string()
+            } else {
+                format!("{} local timer unit(s)", timer_paths.len())
+            };
             println!(
-                "  heartbeat: every {}m via {} unit(s)",
-                meta.heartbeat_interval_min,
-                timer_paths.len()
+                "  heartbeat: every {}m via {via}",
+                meta.heartbeat_interval_min
             );
         } else {
             println!("  heartbeat: disabled");
@@ -185,6 +201,62 @@ task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
         bail!("`ainb run` exited {status} — ATC session not spawned");
     }
     Ok(true)
+}
+
+/// Register the ATC instance's heartbeat as a daemon cron (D12), returning
+/// whether the daemon accepted the registration.
+///
+/// Best-effort by design: a missing / unreachable daemon (no token file, dial
+/// refused, timeout) is warned and returns `false`, and the caller keeps the
+/// local launchd/systemd timer as the fallback. This is the external-dep rule —
+/// `atc setup` must never hard-fail just because the daemon is not up.
+async fn register_heartbeat_with_daemon(meta: &AtcMeta, paths: &AtcPaths) -> bool {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcRegisterParams;
+
+    let client = match DaemonClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration skipped (daemon not reachable: {e}); \
+heartbeat falls back to the local timer"
+            );
+            return false;
+        }
+    };
+    let params = AtcRegisterParams {
+        name: meta.name.clone(),
+        cwd: paths.dir.display().to_string(),
+        tmux_session: Some(meta.tmux_session()),
+        heartbeat_cron: Some(heartbeat_cron_for_interval(meta.heartbeat_interval_min)),
+        err_retry_cap: None,
+        idle_pause_min: Some(i64::from(meta.idle_pause_min)),
+    };
+    match client.atc_register(params).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration failed ({e}); heartbeat falls back to the local timer"
+            );
+            false
+        }
+    }
+}
+
+/// Convert a heartbeat interval in minutes to a UTC 5-field cron expression the
+/// daemon heartbeat scheduler fires on.
+///
+/// An interval under an hour maps to `*/N * * * *` (every N minutes); an interval
+/// of 60+ minutes maps to hourly `0 * * * *` (a `*/N` minute field only spans
+/// 0–59). `0` is clamped to 1 so a degenerate config still yields a valid cron.
+#[must_use]
+fn heartbeat_cron_for_interval(interval_min: u32) -> String {
+    let n = interval_min.max(1);
+    if n >= 60 {
+        "0 * * * *".to_string()
+    } else {
+        format!("*/{n} * * * *")
+    }
 }
 
 // --- teardown ---------------------------------------------------------------
@@ -1167,6 +1239,18 @@ This is ATC's durable, human-readable memory. Append one dated line per action\n
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn heartbeat_cron_maps_interval_to_a_valid_cron() {
+        // Sub-hour intervals map to an every-N-minute cron.
+        assert_eq!(heartbeat_cron_for_interval(2), "*/2 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(15), "*/15 * * * *");
+        // 0 is clamped to 1 (still a valid cron, never a panic / empty field).
+        assert_eq!(heartbeat_cron_for_interval(0), "*/1 * * * *");
+        // 60+ minutes maps to hourly (a `*/N` minute field only spans 0-59).
+        assert_eq!(heartbeat_cron_for_interval(60), "0 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(120), "0 * * * *");
+    }
 
     /// Provision a minimal ATC instance dir (just meta.json) under
     /// `<home>/atc/<name>` and return its path — the cwd an ATC session runs in.
