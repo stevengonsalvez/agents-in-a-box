@@ -1933,6 +1933,17 @@ impl HangarPlugin {
             }
             return;
         }
+        // The Squads screen's create-name input is a text-capture surface too (P7):
+        // while it is open, every key — including the tab-switch chars and `q` — is
+        // typed text, not a nav key. Route straight to the screen reducer (which
+        // owns Esc-to-cancel), mirroring the issue-list capture guard so typing a
+        // squad name like `qa` inserts instead of quitting / switching tabs.
+        if matches!(app.screen, Screen::Squads) && self.screens.squads.is_creating() {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
 
         // e38.13: `Ctrl+P` opens the global command palette from any non-modal
         // screen. It is a modifier chord, so it never shadows a per-screen `p`
@@ -2812,7 +2823,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))
