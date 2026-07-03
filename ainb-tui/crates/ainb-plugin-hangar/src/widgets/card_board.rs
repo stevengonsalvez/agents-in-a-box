@@ -313,6 +313,13 @@ const CARD_ROWS: u16 = 6;
 /// board from feeling cramped).
 const HEADER_ROWS: u16 = 2;
 
+/// Cells the right-aligned header affordances (`⋯` + `+`) reserve at the column's
+/// right edge. The header title is clipped to stop before the `⋯` (painted at
+/// `right-4` by [`render_header_affordances`]) so a long FSM-mapped title never
+/// garbles into the glyphs — while a title that already fits ahead of the zone is
+/// left untouched (only the overrun is trimmed).
+const HEADER_AFFORDANCE_W: u16 = 4;
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -383,8 +390,16 @@ fn render_column(
     // Header: `◔ In Progress (12)` in gold, with the context `⋯` and create `+`
     // affordances right-aligned (rendered now, hit-test wired in P0.2).
     let header = format!("{} {} ({})", column.glyph, column.name, column.count());
-    put_str(buf, x0, header_y, &header, GOLD, right);
     let create_affordance_x = render_header_affordances(buf, x0, header_y, col_w);
+    // Clip the title so it never runs into the right-aligned `⋯ +` affordances:
+    // when they paint (`⋯` at right-4, `+` at right-2) the title stops before the
+    // `⋯`, so an FSM-mapped header (`Queued ↦queued`) stays legible in a narrow
+    // column instead of garbling into the glyphs.
+    let header_right = match create_affordance_x {
+        Some(_) => right.saturating_sub(HEADER_AFFORDANCE_W).max(x0),
+        None => right,
+    };
+    put_str(buf, x0, header_y, &header, GOLD, header_right);
 
     let body_top = header_y.saturating_add(HEADER_ROWS);
     let mut cards = Vec::new();
@@ -1047,6 +1062,47 @@ mod tests {
                 coord.x
             );
         }
+    }
+
+    /// A long FSM-mapped header in a narrow column is clipped short of the
+    /// right-aligned `⋯ +` affordances, so the title never garbles into them
+    /// (the P4 narrow-Boards regression). The `⋯`/`+` glyphs paint cleanly and no
+    /// header char bleeds through the cells between and after them.
+    #[test]
+    fn narrow_header_does_not_collide_with_affordances() {
+        // One 14-wide (MIN_COL_W) column with an over-long, FSM-suffixed header.
+        let columns = vec![column(
+            '◈',
+            "Queued ↦queued",
+            vec![card("HGR-1", "Wire the RPC", PriorityChip::None, None)],
+        )];
+        let mut buf = WireBuffer::new(MIN_COL_W, 24);
+        let _ = render_card_board(&mut buf, MIN_COL_W, 0, 23, &columns, None);
+
+        // The affordances sit cleanly at their slots (`⋯` right-4, `+` right-2)…
+        let right = MIN_COL_W;
+        let ctx_x = right - 4;
+        let plus_x = right - 2;
+        let row0 = row_text(&buf, 0, MIN_COL_W);
+        let cells: Vec<char> = row0.chars().collect();
+        assert_eq!(cells[ctx_x as usize], '⋯', "the ⋯ affordance paints: {row0:?}");
+        assert_eq!(cells[plus_x as usize], '+', "the + affordance paints: {row0:?}");
+        // …and the header no longer bleeds THROUGH them: the cell between `⋯` and
+        // `+`, and the inset cell past `+`, stay blank. In the garbled original a
+        // clipped-but-unbounded header painted characters into exactly these cells
+        // (`↦⋯u+u`), interleaving with the glyphs.
+        assert_eq!(
+            cells[(ctx_x + 1) as usize],
+            ' ',
+            "no header char may sit between ⋯ and +: {row0:?}"
+        );
+        assert_eq!(
+            cells[(right - 1) as usize],
+            ' ',
+            "the inset past + stays blank: {row0:?}"
+        );
+        // And the leading title still reads (clipped, not truncated into nothing).
+        assert!(row0.starts_with("◈ Queued"), "clipped header stays legible: {row0:?}");
     }
 
     /// A multi-byte title wraps without panicking on a byte split

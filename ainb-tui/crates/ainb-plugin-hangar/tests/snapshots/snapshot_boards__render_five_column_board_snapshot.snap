@@ -4,7 +4,7 @@ expression: map
 ---
 Board: Delivery   [1/1]   auto-move ON
 ↵:run  a:attach  n:add col  r:rename  x:del col  c:add card  ⇧←→:reorder  m:auto-move
-○ Backlog (1)       ⋯ + ◈ Queued ↦queued (1)⋯ + ◈ Running ↦running (⋯)+ ◈ Failed ↦failed (1)⋯ + ◈ Done ↦done (1)    ⋯ +
+○ Backlog (1)       ⋯ + ◈ Queued ↦queued (1)⋯ + ◈ Running ↦running (⋯ + ◈ Failed ↦failed (1)⋯ + ◈ Done ↦done (1)    ⋯ +
 
 ┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮
 ┃#bk01                 ┃│#q002                 ││#r003                 ││#f004                 ││✓ #d005               │
