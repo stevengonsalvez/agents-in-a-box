@@ -5418,15 +5418,16 @@ impl EventHandler {
                 state.skill_manager_state.source_remove_confirm = None;
             }
             AppEvent::SkillManagerSourceRemoveConfirm => {
+                use crate::components::skill_manager_screen::SourceRemoveChoice;
                 let Some(confirm) = state.skill_manager_state.source_remove_confirm.clone() else {
                     return;
                 };
-                // 0 = remove skills + source, 1 = keep source, 2 = cancel.
-                if confirm.cursor == 2 {
+                let choice = confirm.choice();
+                if choice == SourceRemoveChoice::Cancel {
                     state.skill_manager_state.source_remove_confirm = None;
                     return;
                 }
-                let keep_source = confirm.cursor == 1;
+                let keep_source = choice.keeps_source();
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let mut buf: Vec<u8> = Vec::new();
                 let result = ainb_cli::source::remove_source_units(

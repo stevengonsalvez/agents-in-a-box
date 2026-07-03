@@ -484,24 +484,53 @@ impl SourcePreviewViewState {
     }
 }
 
-/// Confirm dialog shown by `[r]` on a source row. `cursor`: 0 = remove
-/// skills + source, 1 = remove skills / keep source (back to preview),
-/// 2 = cancel.
+/// The choice a `[r]` source-remove dialog is currently on. Ordered — the
+/// render draws the options in `ALL` order and the cursor indexes into it,
+/// so the picker labels and the handler both go through this one type
+/// rather than agreeing on bare 0/1/2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRemoveChoice {
+    /// Uninstall every unit AND drop the source (loses the dependency).
+    RemoveSkillsAndSource,
+    /// Uninstall units but keep the source registered (back to preview).
+    RemoveSkillsKeepSource,
+    Cancel,
+}
+
+impl SourceRemoveChoice {
+    /// Draw / index order.
+    pub const ALL: [SourceRemoveChoice; 3] = [
+        Self::RemoveSkillsAndSource,
+        Self::RemoveSkillsKeepSource,
+        Self::Cancel,
+    ];
+
+    /// Whether choosing this keeps the source records (units still removed).
+    pub fn keeps_source(self) -> bool {
+        matches!(self, Self::RemoveSkillsKeepSource)
+    }
+}
+
+/// Confirm dialog shown by `[r]` on a source row.
 #[derive(Debug, Clone)]
 pub struct SourceRemoveConfirm {
     pub source_name: String,
     pub source_uri: String,
     /// Installed units belonging to this source (for the count shown).
     pub unit_count: usize,
+    /// Index into [`SourceRemoveChoice::ALL`].
     pub cursor: usize,
 }
 
 impl SourceRemoveConfirm {
-    pub const OPTIONS: usize = 3;
-
     pub fn move_cursor(&mut self, delta: isize) {
-        let max = (Self::OPTIONS - 1) as isize;
+        let max = (SourceRemoveChoice::ALL.len() - 1) as isize;
         self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// The currently-highlighted choice.
+    pub fn choice(&self) -> SourceRemoveChoice {
+        SourceRemoveChoice::ALL[self.cursor.min(SourceRemoveChoice::ALL.len() - 1)]
     }
 }
 
@@ -1063,14 +1092,21 @@ fn render_source_remove_confirm(frame: &mut Frame, area: Rect, c: &SourceRemoveC
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let rows = [
-        format!(
-            "Remove skills + source  ({} unit(s), drops the dependency)",
-            c.unit_count
-        ),
-        "Remove skills, keep source  (back to preview — re-import via [p])".to_string(),
-        "Cancel".to_string(),
-    ];
+    // One label per SourceRemoveChoice, in ALL order — the cursor and the
+    // handler both index this same list, so they can't drift.
+    let rows: Vec<String> = SourceRemoveChoice::ALL
+        .iter()
+        .map(|choice| match choice {
+            SourceRemoveChoice::RemoveSkillsAndSource => format!(
+                "Remove skills + source  ({} unit(s), drops the dependency)",
+                c.unit_count
+            ),
+            SourceRemoveChoice::RemoveSkillsKeepSource => {
+                "Remove skills, keep source  (back to preview — re-import via [p])".to_string()
+            }
+            SourceRemoveChoice::Cancel => "Cancel".to_string(),
+        })
+        .collect();
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!("{}  ({})", c.source_name, c.source_uri),
