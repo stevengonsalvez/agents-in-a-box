@@ -19,7 +19,9 @@
 //! `data` is `UsageData::default()` and `version == WIRE_VERSION`.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use ainb_plugin_protocol::{
@@ -72,6 +74,64 @@ fn read_frame<R: BufRead>(r: &mut R) -> Option<Value> {
     }
 }
 
+/// A frame delivered off the reader thread, or the terminal EOF marker.
+enum FrameMsg {
+    Frame(Value),
+    Eof,
+}
+
+/// Spawn a thread that reads Content-Length frames off the child's stdout
+/// and forwards them over a channel. This is what makes the read path
+/// *bounded*: the blocking `read_frame` (blocking `read_line`/`read_exact`)
+/// lives on the thread, and the test polls with `recv_timeout` so a silent
+/// plugin surfaces as a timeout instead of wedging the test forever.
+fn spawn_frame_reader(stdout: ChildStdout) -> Receiver<FrameMsg> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_frame(&mut reader) {
+                Some(frame) => {
+                    if tx.send(FrameMsg::Frame(frame)).is_err() {
+                        break; // receiver gone — test finished
+                    }
+                }
+                None => {
+                    let _ = tx.send(FrameMsg::Eof);
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Wait for the next frame, bounded by `deadline`. `None` means the plugin
+/// closed stdout (clean EOF). A timeout or a dead reader thread panics with a
+/// clear message rather than hanging.
+fn next_frame(rx: &Receiver<FrameMsg>, deadline: Instant) -> Option<Value> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(timeout) {
+        Ok(FrameMsg::Frame(frame)) => Some(frame),
+        Ok(FrameMsg::Eof) => None,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!(
+                "timed out waiting for a plugin frame after {:?} — the plugin is \
+                 silent (never emitted host/snapshot/subscribe, the init response, \
+                 or a publish). Check the child's stderr for a panic or a stalled \
+                 handshake.",
+                timeout
+            )
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!(
+                "plugin stdout reader thread ended before EOF — a frame failed to \
+                 parse (see the panic on the reader thread) or the pipe broke"
+            )
+        }
+    }
+}
+
 #[test]
 fn subprocess_init_publishes_snapshot_then_responds_ok() {
     // Empty HOME so ProviderRoots::defaults() points at non-existent
@@ -89,7 +149,7 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
         .expect("spawn session-reader binary");
 
     let mut stdin = child.stdin.take().expect("stdin");
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let frames = spawn_frame_reader(child.stdout.take().expect("stdout"));
 
     // 1) Send plugin/init.
     write_frame(
@@ -111,18 +171,20 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
         }),
     );
 
-    // 2) The plugin's on_init issues host/snapshot/subscribe before
-    //    returning. Drain frames until we see it; publish frames in
-    //    between are fine. Bound the loop so a hang fails the test
-    //    rather than wedging CI.
+    // 2) During on_init the plugin issues one host/snapshot/subscribe per
+    //    topic it wants (currently sessions.refresh_request and
+    //    sessions.flush_cache_request) and AWAITS each reply before moving
+    //    on, so we must answer every subscribe to let on_init finish and
+    //    return the plugin/init response. It must NOT publish during init —
+    //    publishing is gated on refresh_request.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut publish_seen: Option<SnapshotPublishParams> = None;
-    let mut subscribe_id: Option<i64> = None;
+    let mut subscribed_topics: Vec<String> = Vec::new();
+    let mut init_response: Option<Value> = None;
 
-    while Instant::now() < deadline {
-        let frame = match read_frame(&mut stdout) {
+    while init_response.is_none() && Instant::now() < deadline {
+        let frame = match next_frame(&frames, deadline) {
             Some(v) => v,
-            None => panic!("plugin closed stdout before subscribe"),
+            None => panic!("plugin closed stdout before init response"),
         };
 
         if let Some(method) = frame.get("method").and_then(Value::as_str) {
@@ -136,60 +198,37 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
                         .get("params")
                         .and_then(|p| p.get("topic"))
                         .and_then(Value::as_str)
-                        .unwrap_or("");
-                    assert_eq!(topic, "sessions.refresh_request");
-                    subscribe_id = Some(id);
-                    break;
+                        .unwrap_or("")
+                        .to_string();
+                    subscribed_topics.push(topic);
+                    // Reply so the awaiting on_init can proceed to the next
+                    // subscribe (and eventually return the init response).
+                    write_frame(
+                        &mut stdin,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": SnapshotSubscribeResult {},
+                        }),
+                    );
                 }
                 m if m == methods::HOST_SNAPSHOT_PUBLISH => {
-                    let params: SnapshotPublishParams =
-                        serde_json::from_value(frame.get("params").cloned().unwrap_or(Value::Null))
-                            .expect("decode snapshot/publish params");
-                    publish_seen = Some(params);
+                    panic!("plugin published during init — gated on refresh_request");
                 }
                 m if m == methods::HOST_LOG => { /* ignore log notifications */ }
                 other => panic!("unexpected outbound method during init: {other}"),
             }
-        } else if frame.get("id").is_some() {
-            panic!("unexpected response frame before subscribe: {frame}");
-        }
-    }
-
-    let subscribe_id = subscribe_id.expect("plugin never issued snapshot/subscribe");
-
-    // 3) Reply to subscribe so on_init can finish. The plugin should
-    //    NOT publish anything during init — publishing is gated on
-    //    refresh_request (asserted below).
-    let subscribe_result = SnapshotSubscribeResult {};
-    write_frame(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": subscribe_id,
-            "result": subscribe_result,
-        }),
-    );
-    assert!(
-        publish_seen.is_none(),
-        "plugin must not publish during init — gated on refresh_request"
-    );
-
-    // 4) Drain outbound frames until we see the plugin/init response.
-    //    No snapshot/publish should arrive in this window.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut init_response: Option<Value> = None;
-    while Instant::now() < deadline {
-        let frame = read_frame(&mut stdout).expect("plugin closed stdout before init response");
-        if let Some(method) = frame.get("method").and_then(Value::as_str) {
-            if method == methods::HOST_SNAPSHOT_PUBLISH {
-                panic!("plugin published during init — expected refresh-gated publish only");
-            }
-            // ignore other notifications (logs, etc.)
         } else if frame.get("id").and_then(Value::as_i64) == Some(1) {
             init_response = Some(frame);
-            break;
+        } else if frame.get("id").is_some() {
+            panic!("unexpected response frame during init: {frame}");
         }
     }
+
+    assert!(
+        subscribed_topics.iter().any(|t| t == "sessions.refresh_request"),
+        "plugin never subscribed to sessions.refresh_request; saw {subscribed_topics:?}"
+    );
 
     let init_response = init_response.expect("no plugin/init response within deadline");
     assert!(
@@ -219,7 +258,7 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut got_refresh_publish = false;
     while Instant::now() < deadline {
-        let frame = match read_frame(&mut stdout) {
+        let frame = match next_frame(&frames, deadline) {
             Some(v) => v,
             None => break,
         };
@@ -258,7 +297,7 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut shutdown_ok = false;
     while Instant::now() < deadline {
-        let frame = match read_frame(&mut stdout) {
+        let frame = match next_frame(&frames, deadline) {
             Some(v) => v,
             None => break,
         };
