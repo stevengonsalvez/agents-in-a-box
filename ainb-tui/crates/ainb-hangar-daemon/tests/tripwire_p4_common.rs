@@ -391,6 +391,148 @@ pub fn prepare_pipeline_answer_flip(target_tmux: &str) -> Pipeline {
     Pipeline { home, daemon }
 }
 
+/// The board the card-run tripwire seeds (Todo manual + Done↦done auto-move),
+/// with NO cards — the TUI creates the card interactively.
+pub const BOARD_RUN_BOARD: &str = "board-run-1";
+/// The card-run board's manual `Todo` column id (the create lands the card here).
+pub const BOARD_RUN_TODO_COL: &str = "board-run-todo";
+/// The card-run board's `done`-mapped auto-move `Done` column id.
+pub const BOARD_RUN_DONE_COL: &str = "board-run-done";
+/// The assignee profile the card-run tripwire seeds — its slug matches the P4
+/// fixture agent's NAME (`claude-agent`, D16) so the create resolves the assignee
+/// to a runnable agent + runtime.
+pub const BOARD_RUN_PROFILE: &str = "claude-agent";
+
+/// Seed the P4 fixture + a board (`Todo` manual, `Done`↦`done` auto-move) + a
+/// `claude-agent` profile, write a happy fake-claude, and spawn a CLAIM-ENABLED
+/// daemon so a card run enqueued from the TUI actually executes to `done` and the
+/// D8 auto-move hook slides the card into `Done`. NO cards are pre-seeded — the
+/// tripwire creates the card interactively, which is the whole point.
+///
+/// Panics only after [`can_run_tripwire`] has gated the caller.
+pub fn prepare_pipeline_board_run() -> Pipeline {
+    let home = tempfile::tempdir().expect("isolated HOME tempdir");
+    let hangar_dir = home.path().join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
+
+    seed_onboarding(home.path());
+    seed_database(&hangar_dir);
+    seed_first_run_ack(home.path());
+    seed_notify_prompt_dismissed(home.path());
+    seed_board_and_profile(&hangar_dir);
+
+    // A happy fake-claude the claim loop runs the card task through to `done`.
+    let fake_claude = write_executable(
+        home.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\necho '{\"type\":\"system\",\"session_id\":\"board-run-sess\"}'\n\
+         echo '{\"type\":\"result\",\"content\":\"ok\"}'\nexit 0\n",
+    );
+
+    let bin = daemon_bin().expect("gated by can_run_tripwire");
+    let mut cmd = Command::new(bin);
+    cmd.env("HOME", home.path())
+        .env_remove("AINB_HANGAR_HOME")
+        // Claim-enabled on the fixture's runtime, with a fast poll so the enqueued
+        // card task claims + runs promptly.
+        .env("HANGAR_DAEMON_RUNTIME_ID", "runtime-1")
+        .env("HANGAR_CLAUDE_PATH", fake_claude.to_str().unwrap())
+        .env("HANGAR_DAEMON_POLL_MS", "200")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let daemon = cmd.spawn().expect("spawn ainb-hangar-daemon");
+
+    let socket = hangar_dir.join("hangar.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Pipeline { home, daemon }
+}
+
+/// Read a board card's `(column_id, state)` from the isolated `$HOME`'s db by the
+/// card's issue TITLE — the card-run tripwire's DB-level proof the interactively
+/// created card auto-moved to `Done` and reads `state = done` (the green signal).
+/// `None` when no card with that title exists yet.
+#[must_use]
+pub fn board_card_by_title(home: &Path, title: &str) -> Option<(Option<String>, Option<String>)> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("board-read runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let ws = ainb_hangar_daemon::seed::WS_ID;
+        let boards = ainb_hangar_daemon::rpc::snapshots::boards_list(store.pool(), ws).await.ok()?;
+        // Match by substring so a rare retry-dropped keystroke that prepends a
+        // stray char to the typed title never breaks the lookup (there is only
+        // one card in play).
+        for board in &boards {
+            for col in &board.columns {
+                if let Some(card) = col.cards.iter().find(|c| c.title.contains(title)) {
+                    return Some((Some(col.id.clone()), card.state.clone()));
+                }
+            }
+            if let Some(card) = board.unmapped.iter().find(|c| c.title.contains(title)) {
+                return Some((None, card.state.clone()));
+            }
+        }
+        None
+    })
+}
+
+/// Seed the card-run board (`Todo` manual, `Done`↦`done` auto-move, no cards) into
+/// the about-to-open `hangar.db`, plus the `claude-agent` assignee profile MASTER
+/// on disk so the daemon's profile reconciler indexes it (a bare DB index row is
+/// pruned on startup for having no master file — D14/T6).
+fn seed_board_and_profile(hangar_dir: &Path) {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    // The assignee profile master — the daemon's fs-watch reconciler indexes it on
+    // startup, so `profile/list` offers `claude-agent` in the card-create picker.
+    // Its slug matches the seeded agent NAME (D16) so the run routes to a runtime.
+    let profiles_dir = hangar_dir.join("profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+    std::fs::write(
+        profiles_dir.join(format!("{BOARD_RUN_PROFILE}.md")),
+        "---\nname: claude-agent\ndescription: Board card runner\nmodel: balanced\n---\nRun the card's issue.\n",
+    )
+    .expect("write assignee profile master");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("board-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(hangar_dir)
+            .await
+            .expect("open board-seed store");
+        let pool = store.pool();
+        let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("non-empty ws id");
+        let now = 1_700_000_000_000_i64;
+        BoardRepo::create(pool, &ws, BOARD_RUN_BOARD, "Delivery", now)
+            .await
+            .expect("seed board");
+        BoardRepo::column_add(pool, &ws, BOARD_RUN_BOARD, BOARD_RUN_TODO_COL, "Todo", None, false)
+            .await
+            .expect("seed Todo column");
+        BoardRepo::column_add(
+            pool,
+            &ws,
+            BOARD_RUN_BOARD,
+            BOARD_RUN_DONE_COL,
+            "Done",
+            Some("done"),
+            true,
+        )
+        .await
+        .expect("seed auto-move Done column");
+    });
+}
+
 /// Seed one NEWER WAIT row + one OLDER **three-option** ASK raised from
 /// [`ATTENTION_ASK_SESSION`] into an about-to-open `hangar.db`. Distinct from
 /// [`seed_attention_pair`] only in the ASK's third option + raising session
@@ -735,6 +877,20 @@ pub fn seed_kanban_spread(home: &Path) {
             .unwrap_or_else(|e| panic!("seed kanban {status} task: {e}"));
         }
     });
+}
+
+/// Write `body` to `dir/name`, chmod `0o755`, and return its path — the shared
+/// executable-script writer the fake-provider helpers use.
+fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, body).expect("write executable script");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod script");
+    }
+    path
 }
 
 /// Write an executable fake-`claude` under `dir` that drives a deterministic
