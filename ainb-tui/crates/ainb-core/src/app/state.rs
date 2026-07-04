@@ -10569,9 +10569,7 @@ impl AppState {
         // healthy. Injecting a dead-port URL would brick the restarted CLI on
         // connection-refused. Ensure the proxy first; degrade to direct on
         // failure rather than pointing the session at a closed port.
-        let mut headroom_active = metadata
-            .map(|m| m.headroom_enabled)
-            .unwrap_or(false)
+        let mut headroom_active = metadata.map(|m| m.headroom_enabled).unwrap_or(false)
             && matches!(
                 agent_type,
                 SessionAgentType::Claude | SessionAgentType::Codex
