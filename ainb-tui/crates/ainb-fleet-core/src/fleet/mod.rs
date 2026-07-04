@@ -11,6 +11,7 @@
 pub mod discover;
 pub mod enrich_cache;
 pub mod read;
+pub mod repo_roster;
 pub mod send;
 pub mod session_registry;
 pub mod types;

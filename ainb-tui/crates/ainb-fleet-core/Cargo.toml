@@ -16,6 +16,9 @@ path = "src/lib.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Deserialize the New-Session favorites store (`~/.agents-in-a-box/favorites.yaml`,
+# YAML) for the card-create repo roster (spec F3) — read as-is, no scan.
+serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 # Async process spawning (tmux send-keys / has-session, `ainb list`) + timers
 # for the multi-line submit-verify backoff. Workspace `tokio` ships full
