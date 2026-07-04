@@ -299,3 +299,56 @@ fn remove_source_units_keep_vs_drop() {
 
     unsafe { std::env::remove_var("AINB_TOOL_HOME_CLAUDE") };
 }
+
+/// remove_source_units must drop DISCOVERED units (manifest-declared but
+/// never installed by ainb, so no lockfile entry) — `skill remove` bails
+/// on those, so the manifest teardown must not depend on it. Regression:
+/// source-remove reported success while the units stayed.
+#[test]
+fn remove_source_units_drops_discovered_units_without_lockfile() {
+    use ainb_skill_core::manifest::{SourceEntry, UnitEntry};
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = tmp_home();
+
+    // Hand-author a source + two units with NO lockfile (the discovery /
+    // adopt shape). std::fs so no install path runs.
+    std::fs::create_dir_all(manifest_path_in(home.path()).parent().unwrap()).unwrap();
+    let mut manifest = Manifest::default();
+    manifest
+        .add_source(SourceEntry {
+            name: "mkt".into(),
+            kind: Some("marketplace".into()),
+            uri: "marketplace:caveman".into(),
+            r#ref: "caveman".into(),
+            enabled: true,
+            read_only: false,
+            target_layout: Vec::new(),
+        })
+        .unwrap();
+    for path in ["skills/a", "skills/b"] {
+        manifest.units.push(UnitEntry {
+            uri: format!("marketplace:caveman@caveman/{path}"),
+            targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
+        });
+    }
+    manifest.save_to(&manifest_path_in(home.path())).unwrap();
+
+    let mut out = Vec::new();
+    let removed =
+        ainb_cli::source::remove_source_units(home.path(), "mkt", false, &mut out).unwrap();
+    assert_eq!(
+        removed,
+        2,
+        "both discovered units dropped: {}",
+        String::from_utf8_lossy(&out)
+    );
+
+    let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    assert!(
+        manifest.units.is_empty(),
+        "units gone: {:?}",
+        manifest.units
+    );
+    assert!(manifest.sources.is_empty(), "source gone");
+}

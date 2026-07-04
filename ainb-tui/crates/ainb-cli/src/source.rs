@@ -352,9 +352,12 @@ pub fn remove_source_units(
         .map(|u| u.uri.clone())
         .collect();
 
-    // Uninstall each unit — `skill remove` tears down deployed files and
-    // clears the manifest + lockfile records (per-file, never wipes config).
-    let mut removed = 0usize;
+    // Tear down each unit's deployed tool files. `skill remove` handles
+    // units ainb actually installed; a *discovered* unit (adopted from
+    // ~/.claude, never installed by ainb) has no lockfile entry, so
+    // `skill remove` bails "not in the lockfile" WITHOUT touching the
+    // manifest — the "removed but not removed" bug. So the file teardown is
+    // best-effort and the manifest teardown below does NOT depend on it.
     for uri in &unit_uris {
         let args = crate::RemoveSkillArgs {
             uri: uri.clone(),
@@ -362,16 +365,33 @@ pub fn remove_source_units(
             yes: true,
             dry_run: false,
         };
-        match crate::skill::dispatch(home, crate::SkillCommand::Remove(args), out) {
-            Ok(()) => removed += 1,
-            Err(e) => writeln!(out, "# failed to remove {uri}: {e:#}")?,
+        if let Err(e) = crate::skill::dispatch(home, crate::SkillCommand::Remove(args), out) {
+            // A "not in the lockfile" bail is expected for discovered units —
+            // stay quiet. Surface any OTHER failure (e.g. a real file teardown
+            // error) so a lingering deployment isn't hidden behind "removed".
+            let msg = e.to_string();
+            if !msg.contains("not in the lockfile") {
+                writeln!(out, "# {uri}: {msg}")?;
+            }
         }
     }
 
-    if !keep_source {
+    // Authoritatively drop every one of this source's units from the
+    // manifest — `skill remove` already cleared the installed ones (#382),
+    // this sweeps up the discovered ones it bailed on. Count from the
+    // pre-teardown set so the total is right regardless of which path each
+    // unit took.
+    let removed = unit_uris.len();
+    {
         let mut manifest = Manifest::load_from(&manifest_path)?;
-        let _ = manifest.remove_source(name);
+        manifest.units.retain(|u| !u.uri.starts_with(&prefix));
+        if !keep_source {
+            let _ = manifest.remove_source(name);
+        }
         manifest.save_to(&manifest_path)?;
+    }
+
+    if !keep_source {
         let mut lockfile = Lockfile::load_from(&lockfile_path)?;
         lockfile.sources.retain(|s| s.name != name);
         lockfile.save_to(&lockfile_path)?;
