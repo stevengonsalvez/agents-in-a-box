@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, BOARD_RUN_TODO_COL, INTERACTIVE_RELEASE_SENTINEL,
-    TuiSession, board_card_by_title, budget_scale, can_run_tripwire, interactive_session_for_title,
-    prepare_pipeline_board_run_interactive, skip, tmux_session_live,
+    TuiSession, board_card_by_title, budget_scale, can_run_tripwire, drive_card_create_to_profile,
+    interactive_session_for_title, prepare_pipeline_board_run_interactive, skip, tmux_session_live,
 };
 
 /// The distinctive card title the tripwire types — greppable on the pane and in
@@ -74,30 +74,9 @@ fn running_a_card_interactively_spawns_a_real_tmux_session_then_reaps_and_greens
         "the card must not exist before the tripwire creates it:\n{board}"
     );
 
-    // `c` opens the title input (re-sent until it opens — the first frames after a
-    // tab switch can drop a lone keystroke).
-    let title_deadline = Instant::now() + Duration::from_secs(20 * scale);
-    let opened = press_until(&sess, "c", title_deadline, |c| c.contains("New card title"))
-        .unwrap_or_else(|| panic!("card-title input never opened after `c`:\n{}", sess.capture()));
-    assert!(
-        opened.contains("New card title"),
-        "the `c` key must open the card-title input:\n{opened}"
-    );
-
-    // Type the title (single literal run so tmux never coalesces / drops a char).
-    sess.type_literal(CARD_TITLE);
-    sess.poll_capture(Instant::now() + Duration::from_secs(10 * scale), |c| {
-        c.contains(CARD_TITLE)
-    })
-    .unwrap_or_else(|| panic!("typed title never echoed:\n{}", sess.capture()));
-
-    // Enter → assignee-profile pick; the seeded `claude-agent` profile is offered.
-    sess.send_enter();
-    let picker = sess
-        .poll_capture(Instant::now() + Duration::from_secs(15 * scale), |c| {
-            c.contains("Assignee profile") && c.contains(BOARD_RUN_PROFILE)
-        })
-        .unwrap_or_else(|| panic!("profile picker never offered the profile:\n{}", sess.capture()));
+    // Drive the FULL F1-F4 overlay: title → @-pick scratch (repo_down = 0, always
+    // first) → agent (claude cascade default) → the assignee-profile picker.
+    let picker = drive_card_create_to_profile(&sess, CARD_TITLE, 0, scale);
     assert!(
         picker.contains(BOARD_RUN_PROFILE),
         "the picker must offer the seeded assignee profile:\n{picker}"
@@ -231,24 +210,4 @@ fn running_a_card_interactively_spawns_a_real_tmux_session_then_reaps_and_greens
         reaped,
         "the interactive tmux session `{session_name}` must be reaped after the agent exits"
     );
-}
-
-/// Re-send single-char `key` every ~1.5s until `pred` holds on the pane or
-/// `deadline` passes (the first frames after a tab switch can drop a lone
-/// keystroke). Returns the matching capture, or `None` on timeout.
-fn press_until(
-    sess: &TuiSession,
-    key: &str,
-    deadline: Instant,
-    pred: impl Fn(&str) -> bool,
-) -> Option<String> {
-    loop {
-        sess.send_key(key);
-        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), &pred) {
-            return Some(c);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-    }
 }

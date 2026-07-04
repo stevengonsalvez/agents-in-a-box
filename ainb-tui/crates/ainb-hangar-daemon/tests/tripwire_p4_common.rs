@@ -49,6 +49,12 @@ pub fn tmux_available() -> bool {
     Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
 }
 
+/// `true` when the `git` binary is usable — the F5 worktree tripwires seed a real
+/// repo + provision worktrees through it.
+pub fn git_available() -> bool {
+    Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+}
+
 /// Best-effort locate the built `ainb` binary the tripwire drives.
 ///
 /// `CARGO_BIN_EXE_ainb` is only defined for tests of the `ainb` crate itself;
@@ -465,6 +471,18 @@ pub fn prepare_pipeline_board_run_interactive() -> Pipeline {
 /// seed the board-run fixture + profile and spawn a CLAIM-ENABLED daemon whose
 /// `HANGAR_CLAUDE_PATH` is a fake agent with `fake_agent_body`.
 fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
+    prepare_pipeline_board_run_seeded(fake_agent_body, |_| {}, &[])
+}
+
+/// [`prepare_pipeline_board_run_with`], plus a `pre_spawn(home)` hook run while no
+/// daemon is attached (to add repo/scan-cache fixture rows) and `extra_env`
+/// layered onto the daemon (e.g. `HANGAR_DAEMON_DISABLE_SANDBOX`). The F5 worktree
+/// tripwires use this to seed a real git repo + widen the daemon env.
+fn prepare_pipeline_board_run_seeded(
+    fake_agent_body: &str,
+    pre_spawn: impl FnOnce(&Path),
+    extra_env: &[(&str, &str)],
+) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -474,6 +492,7 @@ fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
     seed_first_run_ack(home.path());
     seed_notify_prompt_dismissed(home.path());
     seed_board_and_profile(&hangar_dir);
+    pre_spawn(home.path());
 
     let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
 
@@ -489,6 +508,9 @@ fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     let daemon = cmd.spawn().expect("spawn ainb-hangar-daemon");
 
     let socket = hangar_dir.join("hangar.sock");
@@ -497,6 +519,219 @@ fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
         std::thread::sleep(Duration::from_millis(50));
     }
     Pipeline { home, daemon }
+}
+
+// ---------------------------------------------------------------------------
+// F5 worktree-provisioning tripwire fixtures + helpers (spec F5 / tcp T1).
+// ---------------------------------------------------------------------------
+
+/// The scan-cache name of the real git repo the worktree tripwires seed under the
+/// isolated `$HOME` — the card-create `@` dropdown offers it WITH a local path,
+/// so a run provisions a real volatile worktree (favorites carry no local path).
+pub const WORKTREE_REPO_NAME: &str = "testrepo";
+
+/// A headless fake-claude that BLOCKS until the tripwire touches
+/// `$HOME/interactive-go`, then emits a success result and exits 0 — so the
+/// tripwire can observe the LIVE worktree before releasing the run to finalize +
+/// tear down. Self-exits after ~30s so a wiring bug can never wedge a run.
+///
+/// The worktree fixtures run this HEADLESS with the OS sandbox DISABLED
+/// (`HANGAR_DAEMON_DISABLE_SANDBOX=1`) so the agent can read the `$HOME` sentinel
+/// (which lives outside the sandbox's task-root + worktree write roots). The
+/// sandbox WIDENING to the worktree is a unit/code concern (`runner.rs`); these
+/// tripwires target the worktree LIFECYCLE (provision on `ainb/<slug>` → clean
+/// teardown), so disabling the sandbox isolates that behaviour.
+const BLOCKING_FAKE_AGENT: &str = "#!/bin/sh\ni=0\nwhile [ ! -f \"$HOME/interactive-go\" ] && \
+     [ \"$i\" -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n\
+     echo '{\"type\":\"system\",\"session_id\":\"worktree-sess\"}'\n\
+     echo '{\"type\":\"result\",\"content\":\"ok\"}'\nexit 0\n";
+
+/// Seed a real git repo at `$HOME/<name>` (one commit, so `git worktree add -b`
+/// has a HEAD to branch from) + a `cache/repositories.json` scan cache pointing at
+/// it, so the daemon's `hangar/repo_list` offers it in the card-create `@` roster
+/// with a local checkout path (→ a run provisions a real worktree).
+pub fn seed_scanned_repo(home: &Path, name: &str) {
+    let repo = home.join(name);
+    std::fs::create_dir_all(&repo).expect("create scanned repo dir");
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "t@e.com"],
+        &["config", "user.name", "t"],
+    ] {
+        let ok = Command::new("git").args(args).current_dir(&repo).status();
+        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+    }
+    std::fs::write(repo.join("README.md"), "seed").expect("write scanned repo README");
+    for args in [&["add", "."][..], &["commit", "--quiet", "-m", "seed"]] {
+        let ok = Command::new("git").args(args).current_dir(&repo).status();
+        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+    }
+
+    let cache_dir = home.join(".agents-in-a-box").join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create scan-cache dir");
+    let json = format!(
+        "{{\"version\":1,\"repositories\":[{{\"path\":\"{}\",\"name\":\"{name}\"}}]}}",
+        repo.display()
+    );
+    std::fs::write(cache_dir.join("repositories.json"), json).expect("write scan cache");
+}
+
+/// Like [`prepare_pipeline_board_run_interactive`], but ALSO seeds a real git repo
+/// (`$HOME/testrepo`) into the `@` scan cache and disables the daemon sandbox, so
+/// a card RUN provisions a real volatile worktree on `ainb/<slug>` the tripwire
+/// can observe live, then finalises + tears it down (spec F5). The fake agent
+/// BLOCKS on the release sentinel so the live-worktree assertion is race-free.
+pub fn prepare_pipeline_worktree_run() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        BLOCKING_FAKE_AGENT,
+        |home| seed_scanned_repo(home, WORKTREE_REPO_NAME),
+        &[("HANGAR_DAEMON_DISABLE_SANDBOX", "1")],
+    )
+}
+
+/// Like [`prepare_pipeline_worktree_run`], but raises the fixture agent's
+/// concurrency cap to 2 (and frees the fixture's running slot) so TWO tasks on the
+/// SAME repo run concurrently — the a54 "N tasks on one repo never collide"
+/// guarantee (spec F5): each provisions its own distinct `ainb/<slug>` worktree.
+pub fn prepare_pipeline_worktree_concurrent() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        BLOCKING_FAKE_AGENT,
+        |home| {
+            seed_scanned_repo(home, WORKTREE_REPO_NAME);
+            raise_agent_cap(home, 2);
+        },
+        &[("HANGAR_DAEMON_DISABLE_SANDBOX", "1")],
+    )
+}
+
+/// Raise the seeded `agent-1`'s `max_concurrent_tasks` to `cap` and free the
+/// fixture's `running` `task-1`, so the claim loop actually runs `cap` tasks at
+/// once. A pre-spawn variant of [`set_agent_concurrency`] (which needs a spawned
+/// pipeline's `$HOME`); here it runs while no daemon is attached.
+fn raise_agent_cap(home: &Path, cap: u32) {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("cap runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open cap store");
+        sqlx::query("UPDATE agent SET max_concurrent_tasks = ? WHERE id = 'agent-1'")
+            .bind(i64::from(cap))
+            .execute(store.pool())
+            .await
+            .expect("raise agent cap");
+        sqlx::query(
+            "UPDATE agent_task_queue SET status = 'done', finished_at = created_at \
+             WHERE id = 'task-1'",
+        )
+        .execute(store.pool())
+        .await
+        .expect("free fixture running slot");
+    });
+}
+
+/// Enqueue a `queued` task (id `wt-<suffix>`, NO issue) on the seeded
+/// `runtime-1`/`agent-1`/`default` workspace carrying `repo_ref`, so a
+/// claim-enabled daemon claims it and provisions a worktree from that repo. Used
+/// by the concurrency tripwire (two tasks, one repo). Returns the task id.
+pub fn enqueue_task_with_repo(home: &Path, suffix: &str, repo_ref: &str) -> String {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let id = format!("wt-{suffix}");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("enqueue-repo runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open enqueue-repo store");
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, repo_ref, created_at) \
+             VALUES (?, ?, ?, ?, NULL, 'queued', ?, ?)",
+        )
+        .bind(&id)
+        .bind(ainb_hangar_daemon::seed::WS_ID)
+        .bind("runtime-1")
+        .bind("agent-1")
+        .bind(repo_ref)
+        .bind(now_ms)
+        .execute(store.pool())
+        .await
+        .unwrap_or_else(|e| panic!("enqueue repo task {id}: {e}"));
+    });
+    id
+}
+
+/// The daemon's short-id form of a task id (first 8 chars) — the worktree /
+/// scratch dir name and the `ainb/<slug>` branch suffix (`execenv::short_id`).
+#[must_use]
+pub fn task_short_id(task_id: &str) -> &str {
+    task_id.get(..8).unwrap_or(task_id)
+}
+
+/// Read the short-id of the latest task on the card with issue TITLE `title`, the
+/// slug the worktree/scratch dir + `ainb/<slug>` branch are keyed on. `None` until
+/// a task has been dispatched for that card.
+#[must_use]
+pub fn task_short_id_by_title(home: &Path, title: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("short-id runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT t.id FROM agent_task_queue t JOIN issue i ON t.issue_id = i.id \
+             WHERE i.title LIKE ? ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten();
+        id.map(|id| task_short_id(&id).to_string())
+    })
+}
+
+/// The volatile-worktree checkout dir the daemon provisions for `slug`:
+/// `$HOME/.agents-in-a-box/worktrees/<slug>`.
+#[must_use]
+pub fn worktree_dir(home: &Path, slug: &str) -> PathBuf {
+    home.join(".agents-in-a-box").join("worktrees").join(slug)
+}
+
+/// The scratch repo dir the daemon provisions for `slug`:
+/// `$HOME/.agents-in-a-box/scratch/<slug>`.
+#[must_use]
+pub fn scratch_dir(home: &Path, slug: &str) -> PathBuf {
+    home.join(".agents-in-a-box").join("scratch").join(slug)
+}
+
+/// The branch a worktree run checks out for `slug` (`ainb/<slug>`).
+#[must_use]
+pub fn worktree_branch(slug: &str) -> String {
+    format!("ainb/{slug}")
+}
+
+/// Whether `branch` exists in the git `repo` (`git branch --list <branch>` is
+/// non-empty) — the proof a run provisioned an `ainb/<slug>` branch on the repo.
+#[must_use]
+pub fn git_branch_exists(repo: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(repo)
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
 }
 
 /// Read a board card's `(column_id, state)` from the isolated `$HOME`'s db by the
@@ -1590,6 +1825,107 @@ impl Drop for TuiSession {
 /// snapshot rows arrive — distinct from the host home screen.
 pub fn hangar_chrome_visible(capture: &str) -> bool {
     capture.contains("Issues") && capture.contains("Skills") && capture.contains("Settings")
+}
+
+/// Re-send single-char `key` every ~1.5s until `pred` holds on the pane or
+/// `deadline` passes (the first frames after a state change can drop a lone
+/// keystroke). Returns the matching capture, or `None` on timeout.
+pub fn press_until(
+    sess: &TuiSession,
+    key: &str,
+    deadline: Instant,
+    pred: impl Fn(&str) -> bool,
+) -> Option<String> {
+    loop {
+        sess.send_key(key);
+        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), &pred) {
+            return Some(c);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+    }
+}
+
+/// Drive the card-create overlay (spec F1-F4) from a fresh Boards screen through
+/// title → repo (`@`-pick) → agent, stopping once the assignee-profile picker is
+/// on screen. `repo_down` is how many ↓ to move in the `@` dropdown before Enter
+/// (0 = `scratch`, always first; 1 = the first roster repo, …). Enter on the agent
+/// stage takes the cascade-default chip (claude). Returns the profile-picker
+/// capture; panics with the pane on any stage timeout.
+///
+/// Shared by the headless / interactive card-run tripwires (which pick `scratch`,
+/// `repo_down = 0`) and the F5 worktree tripwire (which picks the scanned repo,
+/// `repo_down = 1`).
+pub fn drive_card_create_to_profile(
+    sess: &TuiSession,
+    title: &str,
+    repo_down: u32,
+    scale: u64,
+) -> String {
+    let secs = |n: u64| Instant::now() + Duration::from_secs(n * scale);
+
+    // `c` opens the title input (re-sent — a lone key can drop after a tab switch).
+    press_until(sess, "c", secs(20), |c| c.contains("New card title"))
+        .unwrap_or_else(|| panic!("card-title input never opened:\n{}", sess.capture()));
+    sess.type_literal(title);
+    sess.poll_capture(secs(10), |c| c.contains(title))
+        .unwrap_or_else(|| panic!("typed title never echoed:\n{}", sess.capture()));
+
+    // Enter → repo stage (F1 order: title → repo → agent → profile).
+    sess.send_enter();
+    sess.poll_capture(secs(15), |c| c.contains("Repo for"))
+        .unwrap_or_else(|| panic!("repo stage never opened:\n{}", sess.capture()));
+
+    // `@` opens the fuzzy dropdown (scratch always first). Check-then-send so a
+    // late-observed open never fires a SECOND `@` (which would push `@` into the
+    // fuzzy query and filter the roster repo out).
+    let at_deadline = secs(15);
+    loop {
+        if sess.capture().contains("[scratch]") {
+            break;
+        }
+        sess.send_key("@");
+        if sess
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("[scratch]"))
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= at_deadline {
+            panic!("`@` dropdown never opened:\n{}", sess.capture());
+        }
+    }
+
+    // Move to the desired repo, then Enter picks it → agent stage. `Down` re-sent
+    // until the highlight leaves `scratch` (its `[scratch]` brackets clear), so a
+    // dropped key never leaves the pick on scratch when a roster repo was wanted.
+    if repo_down > 0 {
+        let move_deadline = secs(10);
+        loop {
+            if !sess.capture().contains("[scratch]") {
+                break;
+            }
+            sess.send_key("Down");
+            std::thread::sleep(Duration::from_millis(250));
+            if Instant::now() >= move_deadline {
+                panic!("repo highlight never moved off scratch:\n{}", sess.capture());
+            }
+        }
+        // Any further steps (repo_down > 1) move deeper into the roster.
+        for _ in 1..repo_down {
+            sess.send_key("Down");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    sess.send_enter();
+    sess.poll_capture(secs(15), |c| c.contains("Agent for"))
+        .unwrap_or_else(|| panic!("agent stage never opened:\n{}", sess.capture()));
+
+    // Enter takes the cascade-default agent (claude) → profile stage.
+    sess.send_enter();
+    sess.poll_capture(secs(15), |c| c.contains("Assignee profile"))
+        .unwrap_or_else(|| panic!("profile stage never opened:\n{}", sess.capture()))
 }
 
 /// Print the canonical SKIP line and return — keeps every tripwire's skip path

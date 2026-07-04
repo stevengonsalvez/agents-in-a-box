@@ -6,24 +6,26 @@
 //! card) was untested and, as bead `lu5` found, entirely inert: the reducer
 //! raised card intents the key router dropped. This tripwire closes that gap by
 //! driving the REAL `ainb tui` binary through the whole J1–J3 card journey with
-//! NO pre-seeded card:
+//! NO pre-seeded card, now through the FULL F1-F4 parity overlay:
 //!
 //! ```text
-//!  open Boards (B) ─▶ c: type title ─▶ Enter: pick profile ─▶ Enter: create
+//!  Boards (B) ─▶ c: title ─▶ @: pick scratch ─▶ agent: claude ─▶ profile ─▶ create
 //!         │
 //!         ▼
 //!  Enter: Run ▾ ─▶ Enter: headless ─▶ hangar/board_card_run enqueues a task
 //!         │
 //!         ▼
-//!  daemon claim loop runs fake-claude ─▶ done ─▶ D8 auto-move
+//!  daemon claim loop runs fake-claude IN A SCRATCH REPO ─▶ done ─▶ D8 auto-move
 //!         │
 //!         ▼
-//!  card auto-moved Todo → Done + state=done (card-green)
+//!  card auto-moved Todo → Done + state=done (card-green) + scratch git repo on disk
 //! ```
 //!
-//! The card is created INTERACTIVELY (typed title + picked assignee profile), so
-//! a green regression here means the card layer went inert again. SKIPs cleanly
-//! when tmux / the binaries / the staged plugin are absent.
+//! The card is created INTERACTIVELY (title + @-picked scratch repo + agent chip +
+//! assignee profile), so a green regression here means the card layer went inert
+//! again. The F5 scratch-path assertion proves the run provisioned a real git repo
+//! under `~/.agents-in-a-box/scratch/<slug>`. SKIPs cleanly when tmux / the
+//! binaries / the staged plugin are absent.
 
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,8 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, BOARD_RUN_TODO_COL, TuiSession, board_card_by_title,
-    budget_scale, can_run_tripwire, prepare_pipeline_board_run, skip,
+    budget_scale, can_run_tripwire, drive_card_create_to_profile, prepare_pipeline_board_run,
+    scratch_dir, skip, task_short_id_by_title,
 };
 
 /// The distinctive card title the tripwire types — greppable on the pane and in
@@ -64,30 +67,9 @@ fn creating_a_card_and_running_it_auto_moves_and_greens() {
         "the card must not exist before the tripwire creates it:\n{board}"
     );
 
-    // `c` opens the title input. The first frames after a tab switch can race the
-    // pane, dropping a lone keystroke, so re-send `c` until the input opens.
-    let title_deadline = Instant::now() + Duration::from_secs(20 * scale);
-    let opened = press_until(&sess, "c", title_deadline, |c| c.contains("New card title"))
-        .unwrap_or_else(|| panic!("card-title input never opened after `c`:\n{}", sess.capture()));
-    assert!(
-        opened.contains("New card title"),
-        "the `c` key must open the card-title input:\n{opened}"
-    );
-
-    // Type the title (single literal run so tmux never coalesces / drops a char).
-    sess.type_literal(CARD_TITLE);
-    sess.poll_capture(Instant::now() + Duration::from_secs(10 * scale), |c| {
-        c.contains(CARD_TITLE)
-    })
-    .unwrap_or_else(|| panic!("typed title never echoed:\n{}", sess.capture()));
-
-    // Enter → assignee-profile pick; the seeded `claude-agent` profile is offered.
-    sess.send_enter();
-    let picker = sess
-        .poll_capture(Instant::now() + Duration::from_secs(15 * scale), |c| {
-            c.contains("Assignee profile") && c.contains(BOARD_RUN_PROFILE)
-        })
-        .unwrap_or_else(|| panic!("profile picker never offered the profile:\n{}", sess.capture()));
+    // Drive the FULL F1-F4 overlay: title → @-pick scratch (repo_down = 0, always
+    // first) → agent (claude cascade default) → the assignee-profile picker.
+    let picker = drive_card_create_to_profile(&sess, CARD_TITLE, 0, scale);
     assert!(
         picker.contains(BOARD_RUN_PROFILE),
         "the picker must offer the seeded assignee profile:\n{picker}"
@@ -138,6 +120,14 @@ fn creating_a_card_and_running_it_auto_moves_and_greens() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+
+    // F5 POSITIVE (filesystem truth): the scratch-repo run provisioned a REAL git
+    // repo under `~/.agents-in-a-box/scratch/<slug>` (slug = the task short-id).
+    // Scratch is durable (never torn down), so it is still on disk here.
+    let slug = task_short_id_by_title(pipe.home(), CARD_TITLE)
+        .unwrap_or_else(|| panic!("no task dispatched for the card `{CARD_TITLE}`"));
+    let scratch = scratch_dir(pipe.home(), &slug);
+
     // Kill the tmux session by exact name before the assertions.
     drop(sess);
 
@@ -160,25 +150,11 @@ fn creating_a_card_and_running_it_auto_moves_and_greens() {
         Some(BOARD_RUN_TODO_COL),
         "the card must not remain in Todo after the run"
     );
-}
 
-/// Re-send single-char `key` every ~1.5s until `pred` holds on the pane or
-/// `deadline` passes (the first frames after a tab switch can drop a lone
-/// keystroke). Returns the matching capture, or `None` on timeout. Mirrors the
-/// harness's own `switch_tab_until` retry shape for a verb key.
-fn press_until(
-    sess: &TuiSession,
-    key: &str,
-    deadline: Instant,
-    pred: impl Fn(&str) -> bool,
-) -> Option<String> {
-    loop {
-        sess.send_key(key);
-        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), &pred) {
-            return Some(c);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-    }
+    // F5: the scratch repo is a real, durable git checkout under the fixture HOME.
+    assert!(
+        scratch.join(".git").exists(),
+        "the scratch run must provision a git repo at {}",
+        scratch.display()
+    );
 }
