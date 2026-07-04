@@ -159,6 +159,23 @@ pub trait Plugin: Send + 'static {
         false
     }
 
+    /// Whether the plugin's focused surface is currently capturing free text —
+    /// a title/filter/compose/search/API-key input where every printable key is
+    /// typed content, not a shortcut. Queried by the [`Server`] right after each
+    /// [`render`](Self::render) call and reported to the host via
+    /// `RenderResult.captures_text`.
+    ///
+    /// The host uses it to suppress its own global single-character shortcuts
+    /// (`H`/`?`/`W`) and to forward `?`/`H` to the plugin instead of eating them
+    /// as help/wire toggles, so a user typing `H` into a card title gets an `H`.
+    /// `Ctrl+C` (host quit) is never relaxed.
+    ///
+    /// Default is `false` — a plugin with no text-entry surface never suppresses
+    /// host shortcuts, exactly as before this hook existed.
+    fn captures_text(&self) -> bool {
+        false
+    }
+
     /// Dispatch a CLI subcommand the plugin advertised in its manifest's
     /// `[provides] cli_namespaces` list. Default implementation returns
     /// exit-2 (`unknown command`).
