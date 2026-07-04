@@ -31,7 +31,7 @@
 //! - deadline exceeded → kill   → [`RunOutcome::Failed`] with
 //!   [`FailureReason::Timeout`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -41,6 +41,37 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::execenv::ExecEnv;
+
+/// Where a provider run executes (spec F5).
+///
+/// The pre-F5 run always executed in the task's own `ExecEnv::workdir`, which
+/// lives *under* `ExecEnv::root()` — the base the OS sandbox confines writes to.
+/// F5 lets a run execute in a provisioned git worktree / scratch repo that lives
+/// OUTSIDE that tree (`~/.agents-in-a-box/worktrees/<slug>` etc.), so the run's
+/// cwd must be pointed there AND the sandbox must be widened to allow writes into
+/// it — otherwise the confinement would block the very checkout the agent is
+/// supposed to work in.
+///
+/// [`RunLocation::in_task_tree`] is the pre-F5 default (cwd = the task workdir,
+/// no extra root — the workdir is already inside the sandbox base).
+#[derive(Debug, Clone)]
+pub struct RunLocation {
+    /// The provider subprocess's working directory.
+    pub cwd: PathBuf,
+    /// A FS root beyond `ExecEnv::root()` the sandbox must additionally allow the
+    /// provider to read+write — the provisioned worktree / scratch dir — or
+    /// `None` when the cwd is the in-tree fallback workdir (already covered).
+    pub extra_root: Option<PathBuf>,
+}
+
+impl RunLocation {
+    /// The pre-F5 default: run in the task's own `workdir` with no extra sandbox
+    /// root (the workdir is already under the sandbox's write base).
+    #[must_use]
+    pub fn in_task_tree(env: &ExecEnv) -> Self {
+        Self { cwd: env.workdir.clone(), extra_root: None }
+    }
+}
 
 /// The env vars a provider subprocess is allowed to inherit.
 ///
@@ -353,13 +384,24 @@ impl Runner {
     /// Returns an [`std::io::Error`] only if a *supported* sandbox primitive is
     /// expected but unavailable, or a sandbox setup IO fault occurs. An
     /// unsupported platform is NOT an error — it degrades to a passthrough.
-    fn build_command(&self, program: &std::path::Path, env: &ExecEnv) -> std::io::Result<Command> {
+    fn build_command(
+        &self,
+        program: &std::path::Path,
+        env: &ExecEnv,
+        extra_root: Option<&Path>,
+    ) -> std::io::Result<Command> {
         if !self.cfg.sandbox {
             let cmd = ainb_hangar_sandbox::SandboxedCommand::passthrough(program).into_inner();
             return Ok(Command::from(cmd));
         }
 
-        let policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
+        // F5: when the run executes in a provisioned worktree / scratch repo that
+        // lives outside the task tree, widen the confinement to read+write it —
+        // else the sandbox would block the agent from touching its own checkout.
+        let mut policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
+        if let Some(root) = extra_root {
+            policy = policy.allow_read(root).allow_write(root);
+        }
         let sandboxed = ainb_hangar_sandbox::sandboxed_command(program, &policy)
             .map_err(|e| std::io::Error::other(format!("sandbox setup: {e}")))?;
         if sandboxed.enforcement() == ainb_hangar_sandbox::Enforcement::None {
@@ -393,6 +435,26 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        self.run_claude_in(env, source_env, &RunLocation::in_task_tree(env)).await
+    }
+
+    /// [`Self::run_claude`], but executing in an explicit [`RunLocation`] (F5) —
+    /// a provisioned worktree / scratch repo rather than the in-tree workdir. The
+    /// sandbox is widened to the location's extra root so the agent can write its
+    /// checkout.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_claude_in<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         // claude takes no extra argv at v1 (the task is handed to it via its
         // materialised home + workdir, not the command line), so the spec argv is
         // empty and there is no per-agent env beyond the allowlisted source env.
@@ -403,6 +465,7 @@ impl Runner {
             source_env,
             std::iter::empty(),
             spec,
+            location,
         )
         .await
     }
@@ -460,8 +523,30 @@ impl Runner {
         I: IntoIterator<Item = (String, String)>,
         E: IntoIterator<Item = (String, String)>,
     {
+        self.run_codex_in(env, source_env, extra_env, invocation, &RunLocation::in_task_tree(env))
+            .await
+    }
+
+    /// [`Self::run_codex_with_env`], but executing in an explicit [`RunLocation`]
+    /// (F5) — the codex counterpart of [`Self::run_claude_in`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex_in<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
         let spec = Self::codex_spec(invocation);
-        self.run_provider(&self.cfg.codex_path, env, source_env, extra_env, spec).await
+        self.run_provider(&self.cfg.codex_path, env, source_env, extra_env, spec, location).await
     }
 
     /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
@@ -524,6 +609,7 @@ impl Runner {
         source_env: I,
         extra_env: E,
         spec: ProviderSpec,
+        location: &RunLocation,
     ) -> std::io::Result<RunOutcome>
     where
         I: IntoIterator<Item = (String, String)>,
@@ -546,10 +632,10 @@ impl Runner {
         // The env allowlist + process-group kill below are unchanged — the
         // sandbox is an *additional* FS-confinement layer, not a replacement for
         // the secret-leak env boundary.
-        let mut command = self.build_command(program, env)?;
+        let mut command = self.build_command(program, env, location.extra_root.as_deref())?;
         let mut child = command
             .args(&spec.argv)
-            .current_dir(&env.workdir)
+            .current_dir(&location.cwd)
             .env_clear()
             .envs(child_env)
             .stdin(Stdio::null())

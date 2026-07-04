@@ -540,6 +540,30 @@ async fn execute_claimed(
     // agent still runs rather than stranding the task.
     let dispatch = resolve_dispatch(pool, &task.agent_id).await.unwrap_or_default();
 
+    // F5: provision the run's working directory from the card's `repo_ref`.
+    //
+    // A card task carries `scratch` or an absolute repo path (rpc `card_run`
+    // enforces F2 — a repo is always set), so it runs in a volatile git worktree
+    // (`~/.agents-in-a-box/worktrees/<shortID>` on branch `ainb/<shortID>`) or the
+    // scratch repo; a chat / autopilot task has no `repo_ref` and runs in the
+    // in-tree fallback workdir (the pre-F5 behaviour). The short-id slug is unique
+    // per task, so N cards on ONE repo provision N distinct worktrees that never
+    // collide (the F5 concurrency guarantee). A provision fault is treated like
+    // any other setup fault (`prepare_env` above): it propagates so the row stays
+    // `dispatched` and the stale-dispatch sweeper reclaims + re-queues it, rather
+    // than dispatching a run into an unprovisioned dir. The injected `CLAUDE.md`
+    // (above) + skills stay in the task tree, NOT the worktree, so teardown's
+    // keep-if-dirty check sees only genuine agent work.
+    let repo_ref = read_repo_ref(pool, &task.id).await;
+    let run_wd = crate::workdir_provision::provision(
+        repo_ref.as_deref(),
+        crate::execenv::short_id(&task.id),
+        &home,
+        &env.workdir,
+    )?;
+    let location = run_location_for(&run_wd);
+    tracing::info!(task_id = %task.id, cwd = %run_wd.path().display(), "run workdir provisioned");
+
     // T8: the typed in-process lifecycle guard. It begins at `dispatched` (the
     // `queued -> dispatched` claim already committed via `ClaimTaskService`,
     // arbitrated by the migration-0012 SQL index) and types every remaining edge
@@ -661,17 +685,27 @@ async fn execute_claimed(
             &task,
             &ws_slug,
             &env,
+            run_wd.path(),
             task_env,
             &dispatch,
             interactive,
         )
         .await?
     } else {
+        // F5: run in the provisioned worktree / scratch dir (`location.cwd`),
+        // widening the sandbox to it (`location.extra_root`) so the confined
+        // agent can write its own checkout.
         match dispatch.backend {
-            Backend::Claude => runner.run_claude(&env, task_env).await?,
+            Backend::Claude => runner.run_claude_in(&env, task_env, &location).await?,
             Backend::Codex => {
                 runner
-                    .run_codex_with_env(&env, task_env, dispatch.agent_env, &dispatch.invocation)
+                    .run_codex_in(
+                        &env,
+                        task_env,
+                        dispatch.agent_env,
+                        &dispatch.invocation,
+                        &location,
+                    )
                     .await?
             }
         }
@@ -684,12 +718,13 @@ async fn execute_claimed(
         RunOutcome::Success(result) => {
             // running -> done: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Complete)?;
-            finalize_success(pool, &task, &env, result, provider, clock, stats, events).await?;
+            finalize_success(pool, &task, &run_wd, result, provider, clock, stats, events).await?;
         }
         RunOutcome::Failed { reason, result } => {
             // running -> failed: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
-            finalize_failure(pool, &task, reason, result, provider, clock, stats, events).await?;
+            finalize_failure(pool, &task, &run_wd, reason, result, provider, clock, stats, events)
+                .await?;
         }
     }
     Ok(())
@@ -718,6 +753,7 @@ async fn run_interactive(
     task: &Task,
     ws_slug: &str,
     env: &crate::execenv::ExecEnv,
+    cwd: &std::path::Path,
     task_env: std::collections::HashMap<String, String>,
     dispatch: &ResolvedDispatch,
     interactive: &InteractiveSessions,
@@ -737,9 +773,11 @@ async fn run_interactive(
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
 
+    // F5: the attachable tmux session runs in the provisioned worktree / scratch
+    // dir (`cwd`), not the in-tree workdir; logs still stream to the task tree.
     let run = crate::interactive::spawn(
         &program,
-        &env.workdir,
+        cwd,
         &argv,
         &child_env,
         &session_name,
@@ -795,7 +833,7 @@ async fn run_interactive(
     // than failing the run (the external-dep / degrade rule).
     let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
         session_name.clone(),
-        env.workdir.clone(),
+        cwd.to_path_buf(),
         ws_slug.to_string(),
     );
     if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
@@ -825,7 +863,7 @@ async fn run_interactive(
 async fn finalize_success(
     pool: &SqlitePool,
     task: &Task,
-    env: &crate::execenv::ExecEnv,
+    run_wd: &crate::workdir_provision::RunWorkdir,
     result: crate::runner::RunnerResult,
     provider: &str,
     clock: &dyn HangarClock,
@@ -861,7 +899,9 @@ async fn finalize_success(
         CompleteParams {
             result: result_json,
             session_id: result.session_id,
-            work_dir: env.workdir.to_str().map(str::to_string),
+            // F5: the dir the run actually executed in (the provisioned worktree /
+            // scratch, or the in-tree fallback), not the always-empty task workdir.
+            work_dir: run_wd.path().to_str().map(str::to_string),
         },
         clock,
     )
@@ -903,6 +943,10 @@ async fn finalize_success(
         progress_comment::Checkpoint::Succeeded,
     )
     .await;
+    // F5: tear down the run's provisioned worktree (keep-if-dirty). A clean
+    // checkout is removed + deregistered; a dirty one is kept so the agent's
+    // uncommitted work survives; scratch + fallback are no-ops.
+    teardown_workdir(run_wd, &task.id);
     tracing::info!(task_id = %task.id, "task done");
     Ok(())
 }
@@ -922,6 +966,7 @@ async fn finalize_success(
 async fn finalize_failure(
     pool: &SqlitePool,
     task: &Task,
+    run_wd: &crate::workdir_provision::RunWorkdir,
     reason: ainb_hangar_store::service::fail::FailureReason,
     result: crate::runner::RunnerResult,
     provider: &str,
@@ -973,6 +1018,12 @@ async fn finalize_failure(
     )
     .await;
     tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
+    // F5: tear down the run's provisioned worktree (keep-if-dirty). A failed run
+    // that left a dirty checkout keeps it (the partial work is preserved for a
+    // rerun / inspection); a clean one is removed. Done BEFORE the retry spawn so
+    // a retryable failure's fresh child re-provisions a clean worktree rather than
+    // resuming into this run's residue.
+    teardown_workdir(run_wd, &task.id);
     // F06 retry chain: a retryable (infra) failure with attempts remaining
     // spawns a fresh `queued` child carrying `parent_task_id`, which the next
     // claim pass re-dispatches. A terminal reason (`agent_error` / `user_cancel`
@@ -1241,6 +1292,55 @@ async fn resolve_provider_and_workspace(
         .await?
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
     Ok((runtime.provider, workspace))
+}
+
+/// Read a task's persisted `repo_ref` (spec F5), or `None`.
+///
+/// A card task carries `scratch` or an absolute repo path (rpc `card_run` sets
+/// it); a chat / autopilot task has none. A read fault is logged and treated as
+/// `None` (run in-tree) — a `repo_ref` lookup must never strand a claimed run.
+async fn read_repo_ref(pool: &SqlitePool, task_id: &str) -> Option<String> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    match CardParityRepo::get_task_repo_agent(pool, task_id).await {
+        Ok(Some((repo_ref, _agent))) => repo_ref,
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task_id, "repo_ref read failed; running in-tree");
+            None
+        }
+    }
+}
+
+/// Build the provider [`RunLocation`](crate::runner::RunLocation) for a
+/// provisioned run workdir (F5).
+///
+/// A worktree / scratch run executes OUTSIDE the task tree, so its dir is both
+/// the cwd and an extra sandbox write-root (the confinement must be widened to
+/// it); the in-tree fallback needs no widening (it is already under the sandbox
+/// base).
+fn run_location_for(run_wd: &crate::workdir_provision::RunWorkdir) -> crate::runner::RunLocation {
+    use crate::workdir_provision::RunWorkdir;
+    match run_wd {
+        RunWorkdir::Worktree { path, .. } | RunWorkdir::Scratch { path } => {
+            crate::runner::RunLocation { cwd: path.clone(), extra_root: Some(path.clone()) }
+        }
+        RunWorkdir::Fallback { path } => {
+            crate::runner::RunLocation { cwd: path.clone(), extra_root: None }
+        }
+    }
+}
+
+/// Tear down a run's provisioned worktree after the task finalises (F5
+/// keep-if-dirty): a clean worktree is removed + deregistered, a dirty one is
+/// kept (uncommitted agent work preserved), scratch + fallback are no-ops.
+///
+/// Best-effort — a teardown fault is logged, never propagated onto a finalize
+/// that has already committed the task's terminal state.
+fn teardown_workdir(run_wd: &crate::workdir_provision::RunWorkdir, task_id: &str) {
+    match crate::workdir_provision::teardown(run_wd) {
+        Ok(outcome) => tracing::info!(task_id = %task_id, ?outcome, "run workdir torn down"),
+        Err(e) => tracing::warn!(task_id = %task_id, error = %e, "run workdir teardown failed"),
+    }
 }
 
 /// Look up a workspace's slug by id.
