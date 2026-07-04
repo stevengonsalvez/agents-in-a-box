@@ -592,4 +592,62 @@ mod tests {
         });
         assert!(r.is_none(), "max_tokens is not a turn-end");
     }
+
+    #[test]
+    fn answered_ask_falls_through_to_idle_not_sticky_ask() {
+        // LIFECYCLE raised → answered → idle: a session that RAISED an ask, had
+        // it ANSWERED (a paired `tool_result`), then produced a finished
+        // assistant turn 10 min ago must classify IDLE — NOT a sticky ASK. This
+        // is the sticky-ASK-forever fix exercised end-to-end through classify().
+        let now_ms = 1_700_000_000_000;
+        let old_ms = now_ms - 10 * 60_000;
+        let fx = plant_transcript(
+            "answered-then-idle",
+            &[
+                format!(
+                    r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_x","name":"AskUserQuestion","input":{{"questions":[{{"question":"Scope?","options":[{{"label":"a"}}]}}]}}}}]}},"timestamp":"{}"}}"#,
+                    iso(old_ms - 3000)
+                ),
+                format!(
+                    r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_x","content":"Your questions have been answered: \"Scope?\"=\"a\"."}}]}},"timestamp":"{}"}}"#,
+                    iso(old_ms - 2000)
+                ),
+                format!(
+                    r#"{{"type":"assistant","message":{{"stop_reason":null,"content":[{{"type":"text","text":"All done."}}]}},"timestamp":"{}"}}"#,
+                    iso(old_ms)
+                ),
+            ],
+        );
+        let row = classify(ClassifyInput {
+            session: mk_session(&fx.cwd),
+            pane_text: None,
+            idle_threshold_min: 5,
+            now_ms,
+        })
+        .expect("an answered ask + finished turn classifies IDLE");
+        assert!(
+            matches!(row.context, NeedsContext::Idle(_)),
+            "answered ask must not stick as ASK; got {:?}",
+            row.context
+        );
+    }
+
+    #[test]
+    fn open_ask_still_classifies_ask() {
+        // The complement: an UNANSWERED ask (no paired tool_result) is still the
+        // strongest signal and classifies ASK, so the closure fix does not
+        // regress live-open detection on the JSONL path.
+        let fx = plant_transcript(
+            "open-ask",
+            &[r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_open","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it?","options":[{"label":"yes"},{"label":"no"}]}]}}]},"timestamp":"2026-01-01T00:00:00Z"}"#.to_string()],
+        );
+        let row = classify(ClassifyInput {
+            session: mk_session(&fx.cwd),
+            pane_text: None,
+            idle_threshold_min: 5,
+            now_ms: 1_700_000_000_000,
+        })
+        .expect("an unanswered ask classifies ASK");
+        assert!(matches!(row.context, NeedsContext::Ask(_)));
+    }
 }

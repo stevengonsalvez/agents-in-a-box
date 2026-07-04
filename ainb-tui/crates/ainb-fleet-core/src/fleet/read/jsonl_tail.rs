@@ -32,13 +32,32 @@ pub fn cwd_to_project_slug(cwd: &str) -> String {
         .collect()
 }
 
+/// Canonicalize `cwd` so a symlinked working directory resolves to the SAME
+/// slug Claude derives from its real cwd. On macOS Claude runs under the
+/// resolved `/private/tmp/…` (or `/private/var/…`) path, so a caller that only
+/// knows the `/tmp/…` (or `/var/…`) symlink would otherwise slug to a DIFFERENT
+/// project dir and never find the transcript. `std::fs::canonicalize` resolves
+/// the symlinks; when the path does not exist (a synthetic/test cwd) or cannot
+/// be canonicalized we fall back to the literal input, so a non-existent cwd
+/// keeps its verbatim slug.
+#[must_use]
+pub fn canonical_cwd(cwd: &str) -> String {
+    std::fs::canonicalize(cwd)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cwd.to_string())
+}
+
 /// Locate the most recently modified `.jsonl` file under
 /// `~/.claude/projects/<cwd-slug>/`. Returns `None` if no transcripts exist.
+///
+/// The cwd is canonicalized first ([`canonical_cwd`]) so a `/tmp`-rooted
+/// workdir matches Claude's `/private/tmp`-rooted transcript dir on macOS.
 pub fn latest_transcript_for_cwd(cwd: &str) -> Option<PathBuf> {
     let mut home = dirs::home_dir()?;
     home.push(".claude");
     home.push("projects");
-    home.push(cwd_to_project_slug(cwd));
+    home.push(cwd_to_project_slug(&canonical_cwd(cwd)));
 
     let entries = std::fs::read_dir(&home).ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -246,10 +265,28 @@ pub struct LastAssistantInfo {
     pub has_user_follow_up: bool,
 }
 
-/// Scan the transcript for the most recent AskUserQuestion tool_use call.
-/// Returns None if the session has no such call within the lookback window.
+/// Scan the transcript for the most recent OPEN AskUserQuestion — a picker that
+/// has been raised but NOT yet resolved. Returns None if the session has no
+/// OPEN ask within the lookback window (including the case where every ask it
+/// raised has since been answered).
+///
+/// STICKY-ASK FIX: the previous version returned the last AskUserQuestion
+/// tool_use *regardless of whether it was answered*, so a single interview
+/// pinned the session to `ASK` forever — it could never go IDLE and auto-standup
+/// never became eligible. An ask is a live need only while it is UNANSWERED.
+///
+/// CLOSING SIGNAL (verified against real `~/.claude/projects` transcripts):
+/// Claude closes EVERY tool call — AskUserQuestion included — with a
+/// `tool_result` block on a later `user`-role row whose `tool_use_id` matches
+/// the original `tool_use` block's `id`. This holds identically for a real
+/// answer (`"Your questions have been answered: …"`), a 60s AFK timeout
+/// (`"No response after 60s …"`), and an interrupt — all three emit the paired
+/// `tool_result`. So an ask is OPEN iff no such `tool_result` follows it.
 ///
 /// Walks the same exponential lookback as `last_narrative_snapshot` (20 → 320).
+/// A tool_result always trails its tool_use, so any window that contains an ask
+/// also contains that ask's result (if it was answered) — the per-window
+/// closure check is therefore complete.
 pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
     let lines = read_lines(path)?;
     if lines.is_empty() {
@@ -257,7 +294,7 @@ pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
     }
     for window in [20usize, 40, 80, 160, 320] {
         let start = lines.len().saturating_sub(window);
-        if let Some(aq) = find_ask_user_question(&lines[start..]) {
+        if let Some(aq) = find_open_ask_user_question(&lines[start..]) {
             return Some(aq);
         }
         if start == 0 {
@@ -267,7 +304,38 @@ pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
     None
 }
 
-fn find_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
+/// Collect the set of `tool_use` ids that have a matching `tool_result` in
+/// `rows` — i.e. tool calls that have been RESOLVED. Claude emits a
+/// `tool_result` block (on a `user`-role row) carrying the original call's
+/// `tool_use_id` for every completed tool call, so membership here means that
+/// call is closed. Used to tell an OPEN AskUserQuestion from an answered one.
+fn resolved_tool_use_ids(rows: &[String]) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        let Ok(v) = serde_json::from_str::<Value>(row) else {
+            continue;
+        };
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// The newest UNANSWERED AskUserQuestion in `rows`, or None. Walks assistant
+/// rows newest-first and returns the first AskUserQuestion `tool_use` block
+/// whose `id` has NO matching `tool_result` (see [`resolved_tool_use_ids`]). An
+/// ask block with no `id` (older/edge transcript shapes) is treated as open,
+/// preserving the pre-closure behaviour for transcripts that never carried ids.
+fn find_open_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
+    let resolved = resolved_tool_use_ids(rows);
     for row in rows.iter().rev() {
         let Ok(v) = serde_json::from_str::<Value>(row) else {
             continue;
@@ -275,47 +343,64 @@ fn find_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let content = v.pointer("/message/content").and_then(Value::as_array)?;
-        // Walk content backward — last tool_use wins.
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        // Walk content backward — last tool_use wins within a row.
         for block in content.iter().rev() {
             let is_tool = block.get("type").and_then(Value::as_str) == Some("tool_use");
             let name = block.get("name").and_then(Value::as_str);
             if !is_tool || name != Some("AskUserQuestion") {
                 continue;
             }
-            let input = block.get("input")?;
-            let questions = input.get("questions").and_then(Value::as_array)?;
-            let first = questions.first()?;
-            return Some(AskUserQuestionData {
-                question: first
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or("(no question text)")
-                    .to_string(),
-                header: first.get("header").and_then(Value::as_str).map(str::to_string),
-                options: first
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|o| {
-                                Some(AskOption {
-                                    label: o.get("label").and_then(Value::as_str)?.to_string(),
-                                    description: o
-                                        .get("description")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_string),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                multi_select: first.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
-            });
+            // OPEN-ASK GATE: skip an ask that already has a paired tool_result —
+            // it was answered / timed out / interrupted, so it is no longer a
+            // live need. Keep walking to an older ask (there normally isn't one:
+            // Claude cannot raise a new ask while a prior one is unanswered).
+            if let Some(id) = block.get("id").and_then(Value::as_str) {
+                if resolved.contains(id) {
+                    continue;
+                }
+            }
+            return parse_ask_data(block);
         }
-        // No tool_use in this assistant row — keep searching older rows.
+        // No open AskUserQuestion in this assistant row — keep searching older rows.
     }
     None
+}
+
+/// Extract [`AskUserQuestionData`] from an AskUserQuestion `tool_use` block's
+/// `input`. Returns None if the block is malformed (no `questions` array).
+fn parse_ask_data(block: &Value) -> Option<AskUserQuestionData> {
+    let input = block.get("input")?;
+    let questions = input.get("questions").and_then(Value::as_array)?;
+    let first = questions.first()?;
+    Some(AskUserQuestionData {
+        question: first
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or("(no question text)")
+            .to_string(),
+        header: first.get("header").and_then(Value::as_str).map(str::to_string),
+        options: first
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| {
+                        Some(AskOption {
+                            label: o.get("label").and_then(Value::as_str)?.to_string(),
+                            description: o
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        multi_select: first.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 /// Probe the transcript for the last assistant turn's timing + stop reason.
@@ -685,5 +770,113 @@ mod tests {
         let hit = last_api_error_from_jsonl(&path, 40, 0);
         let _ = std::fs::remove_file(&path);
         assert!(hit.is_none());
+    }
+
+    // --- open-ask lifecycle (the sticky-ASK-forever fix) -----------------
+
+    /// Write `rows` to a fresh temp transcript and run `last_ask_user_question`.
+    fn ask_for_rows(rows: &[&str]) -> Option<AskUserQuestionData> {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "ainb-openask-{}-{:p}.jsonl",
+            std::process::id(),
+            rows
+        ));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for r in rows {
+                writeln!(f, "{r}").unwrap();
+            }
+        }
+        let out = last_ask_user_question(&path);
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    #[test]
+    fn open_ask_with_no_result_is_returned() {
+        let aq = ask_for_rows(&[
+            r#"{"type":"user","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_open","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it?","options":[{"label":"yes"},{"label":"no"}]}]}}]}}"#,
+        ])
+        .expect("an unanswered ask is an open need");
+        assert_eq!(aq.question, "Ship it?");
+        assert_eq!(aq.options.len(), 2);
+    }
+
+    #[test]
+    fn answered_ask_is_not_returned() {
+        // The ask's tool_use id is closed by a later user `tool_result` → the ask
+        // is no longer open. Before the fix this returned ASK forever.
+        let aq = ask_for_rows(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"a"}]}]}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Your questions have been answered: \"Scope?\"=\"a\"."}]}}"#,
+        ]);
+        assert!(aq.is_none(), "an answered ask must fall through, not stick as ASK");
+    }
+
+    #[test]
+    fn afk_timeout_result_closes_ask() {
+        // A 60s AFK timeout also emits the paired tool_result → the ask is closed.
+        let aq = ask_for_rows(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_t","name":"AskUserQuestion","input":{"questions":[{"question":"Pick?","options":[{"label":"a"}]}]}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_t","content":"No response after 60s — the user may be away from keyboard."}]}}"#,
+        ]);
+        assert!(aq.is_none(), "an AFK-timed-out ask is closed, not an open need");
+    }
+
+    #[test]
+    fn newest_open_ask_wins_over_older_answered() {
+        // An older ask was answered; a newer ask is still open → the open one wins.
+        let aq = ask_for_rows(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_old","name":"AskUserQuestion","input":{"questions":[{"question":"First?","options":[{"label":"a"}]}]}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_old","content":"answered"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_new","name":"AskUserQuestion","input":{"questions":[{"question":"Second?","options":[{"label":"b"}]}]}}]}}"#,
+        ])
+        .expect("the newer, unanswered ask is the live need");
+        assert_eq!(aq.question, "Second?");
+    }
+
+    #[test]
+    fn ask_without_id_is_treated_as_open() {
+        // Older transcripts carried no tool_use id; without one we cannot prove
+        // closure, so the ask stays open (prior behaviour preserved).
+        let aq = ask_for_rows(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"NoId?","options":[{"label":"a"}]}]}}]}}"#,
+        ]);
+        assert!(aq.is_some(), "an id-less ask is treated as open");
+    }
+
+    // --- cwd canonicalization (/tmp vs /private/tmp transcript matching) --
+
+    #[test]
+    fn canonical_cwd_resolves_symlinks_to_the_same_slug() {
+        // A symlinked cwd must canonicalize to its real dir so it slugs
+        // identically — the macOS /tmp vs /private/tmp mismatch that broke
+        // transcript matching.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-workdir");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link-workdir");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let via_link = canonical_cwd(link.to_str().unwrap());
+        let via_real = canonical_cwd(real.to_str().unwrap());
+        assert_eq!(via_link, via_real, "a symlinked cwd canonicalizes to its real dir");
+        assert_eq!(
+            cwd_to_project_slug(&via_link),
+            cwd_to_project_slug(&via_real),
+            "canonicalized symlink + real dir yield the same project slug"
+        );
+    }
+
+    #[test]
+    fn canonical_cwd_falls_back_for_nonexistent_path() {
+        let missing = "/no/such/dir/ainb-canon-xyz-12345";
+        assert_eq!(
+            canonical_cwd(missing),
+            missing,
+            "a non-existent cwd keeps its literal path (graceful fallback)"
+        );
     }
 }

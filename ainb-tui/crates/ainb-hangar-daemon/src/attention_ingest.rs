@@ -196,16 +196,29 @@ impl AttentionIngest {
         // Classify off the async runtime: `classify` reads the JSONL transcript +
         // does blocking fs I/O, so it must not run inline on a tokio worker.
         let session = session_from(&line);
-        let Some(row) =
-            tokio::task::spawn_blocking(move || classify(ClassifyInput::from_env(session, None, now_ms)))
-                .await
-                .ok()
-                .flatten()
-        else {
+        let Some(row) = tokio::task::spawn_blocking(move || {
+            classify(ClassifyInput::from_env(session, None, now_ms))
+        })
+        .await
+        .ok()
+        .flatten() else {
             return false;
         };
 
         let kind = kind_of(&row.context);
+
+        // Stale-ASK reconcile (spec P2 open/close ordering). A session that is no
+        // longer asking (the classifier returned anything but Ask) may still carry
+        // an OPEN ASK row from an earlier Notification: the question was answered /
+        // timed out / interrupted IN the live session, which never routes through
+        // the hangar answer router, so nothing ever closed that row. Close it
+        // BEFORE raising this follow-on card, or the stale ASK sits open + answerable
+        // beside the new Waiting/Idle/Err card, duplicating the session's attention
+        // signal (and a hangar surface could try to answer an already-answered ask).
+        if kind != AttentionKind::AskUserQuestion {
+            self.reconcile_stale_asks(&line.session_id, now_ms).await;
+        }
+
         // Offset-keyed id: the SAME hook line (a replay / re-read) → same offset →
         // same id → the insert is skipped (idempotent). A NEW hook line → a new
         // offset → a fresh row, even if its request context is identical. Keying
@@ -254,6 +267,51 @@ impl AttentionIngest {
             created_at: now_ms,
         });
         true
+    }
+
+    /// Close any OPEN ASK rows a session still carries once a later hook shows it
+    /// is no longer asking. The live AskUserQuestion was answered / timed out /
+    /// interrupted in the session (never through the hangar answer router), so no
+    /// [`AttentionRepo::mark_answered_if_open`] ever fired for it. Each close goes
+    /// through that SAME first-answer-wins flip — so a concurrent human answer
+    /// racing on the row is never clobbered — and emits an `AttentionAnswered`
+    /// nudge so live surfaces drop the stale card without waiting for a re-pull.
+    /// Best-effort: a lookup / close fault is logged and skipped, never fatal.
+    async fn reconcile_stale_asks(&self, session_id: &str, now_ms: i64) {
+        if session_id.is_empty() {
+            return;
+        }
+        let ids = match AttentionRepo::open_ask_ids_for_session(&self.pool, session_id).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "attention ingest: stale-ASK lookup failed");
+                return;
+            }
+        };
+        for id in ids {
+            match AttentionRepo::mark_answered_if_open(
+                &self.pool,
+                &id,
+                "resolved:session",
+                "answered in session",
+                now_ms,
+            )
+            .await
+            {
+                // We flipped it: the ASK was still open and is now closed.
+                Ok(1) => {
+                    self.events.emit_attention(HangarEvent::AttentionAnswered {
+                        attention_id: id,
+                        by: "resolved:session".to_string(),
+                    });
+                }
+                // A surface won the answer race first — already closed, nothing to do.
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "attention ingest: stale-ASK close failed");
+                }
+            }
+        }
     }
 
     /// Spawn the tail loop: tick every [`TICK`], ingesting each pass. Mirrors the
@@ -308,7 +366,10 @@ fn kind_of(ctx: &NeedsContext) -> AttentionKind {
 /// Read the durable byte cursor; `0` when the file is missing or unparseable
 /// (a fresh producer, or a corrupt cursor — re-reading from 0 is idempotent).
 fn read_cursor(path: &Path) -> u64 {
-    std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Persist the byte cursor atomically (temp + rename). Best-effort — a write
@@ -394,6 +455,73 @@ mod tests {
         TranscriptFixture { cwd, dir }
     }
 
+    /// Plant a transcript where an AskUserQuestion was RAISED then ANSWERED (a
+    /// paired `tool_result`), followed by a finished `end_turn` assistant turn
+    /// at `ts_ms`. After the sticky-ASK fix this classifies IDLE (not ASK), so a
+    /// `Stop` hook over it raises a Waiting row — never a stale AskUserQuestion.
+    fn plant_answered_ask_then_idle_transcript(tag: &str, ts_ms: i64) -> TranscriptFixture {
+        let cwd = format!(
+            "/ainb-test-att-ingest/{tag}/{}/{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut dir = dirs::home_dir().expect("home dir");
+        dir.push(".claude");
+        dir.push("projects");
+        let slug = ainb_fleet_core::read::jsonl_tail::cwd_to_project_slug(&cwd);
+        dir.push(&slug);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let iso = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().to_rfc3339();
+        let mut f = std::fs::File::create(dir.join("session.jsonl")).expect("create transcript");
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_ans","name":"AskUserQuestion","input":{{"questions":[{{"question":"Scope?","options":[{{"label":"a"}}]}}]}}}}]}},"timestamp":"2026-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_ans","content":"Your questions have been answered."}}]}},"timestamp":"2026-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"All done."}}]}},"timestamp":"{iso}"}}"#
+        )
+        .unwrap();
+        TranscriptFixture { cwd, dir }
+    }
+
+    /// Plant a transcript with a single OPEN AskUserQuestion that carries a
+    /// tool_use `id` (so a later paired `tool_result` can close it). The stale-ASK
+    /// reconcile regression appends the answer + a finished turn to this file
+    /// between ingest passes to drive the classifier from ASK to IDLE.
+    fn plant_open_ask_with_id_transcript(tag: &str) -> TranscriptFixture {
+        let cwd = format!(
+            "/ainb-test-att-ingest/{tag}/{}/{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut dir = dirs::home_dir().expect("home dir");
+        dir.push(".claude");
+        dir.push("projects");
+        let slug = ainb_fleet_core::read::jsonl_tail::cwd_to_project_slug(&cwd);
+        dir.push(&slug);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let mut f = std::fs::File::create(dir.join("session.jsonl")).expect("create transcript");
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_rec","name":"AskUserQuestion","input":{{"questions":[{{"question":"Ship it?","options":[{{"label":"yes"}}]}}]}}}}]}},"timestamp":"2026-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        TranscriptFixture { cwd, dir }
+    }
+
     fn hook_line(session: &str, cwd: &str, event_type: &str) -> String {
         format!(
             r#"{{"ts":1700000000000,"session_id":"{session}","cwd":"{cwd}","transcript_path":"","agent":"claude","event_type":"{event_type}"}}"#
@@ -439,7 +567,10 @@ mod tests {
         // cursor advanced AND the offset-keyed id dedups.
         let again = ingest.ingest_once(6000).await;
         assert_eq!(again, 0, "no duplicate row on a re-tail");
-        assert_eq!(AttentionRepo::list_fleet(store.pool()).await.unwrap().len(), 1);
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -466,14 +597,20 @@ mod tests {
         // First read, 10 min after the turn ended → IDLE(idle_minutes=10).
         let raised = ingest.ingest_once(base_ms + 10 * 60_000).await;
         assert_eq!(raised, 1, "the Stop line classifies to one IDLE row");
-        assert_eq!(AttentionRepo::list_fleet(store.pool()).await.unwrap().len(), 1);
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1
+        );
 
         // Simulate a lost cursor: re-read from 0, now 20 min after the turn end →
         // IDLE(idle_minutes=20). A time-varying context hash would differ; the
         // offset key does not, so no duplicate row is raised.
         std::fs::remove_file(&cursor).ok();
         let again = ingest.ingest_once(base_ms + 20 * 60_000).await;
-        assert_eq!(again, 0, "a later-clock re-read of the same line raises no duplicate");
+        assert_eq!(
+            again, 0,
+            "a later-clock re-read of the same line raises no duplicate"
+        );
         assert_eq!(
             AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
             1,
@@ -516,8 +653,132 @@ mod tests {
         std::fs::write(&events_jsonl, format!("{complete}\n{{\"partial\":")).unwrap();
 
         let ingest = ingest_for(&store, &events_jsonl, &cursor);
-        assert_eq!(ingest.ingest_once(5000).await, 1, "only the complete line ingests");
+        assert_eq!(
+            ingest.ingest_once(5000).await,
+            1,
+            "only the complete line ingests"
+        );
         // The cursor stopped at the newline; it did not consume the partial tail.
         assert_eq!(read_cursor(&cursor), (complete.len() + 1) as u64);
+    }
+
+    #[tokio::test]
+    async fn answered_ask_then_stop_raises_waiting_not_sticky_ask() {
+        // Regression for the sticky-ASK-forever bug at the daemon-ingest seam: a
+        // session that ANSWERED its interview and then finished a turn must NOT be
+        // re-raised as an AskUserQuestion. classify() now sees the paired
+        // tool_result → falls through to IDLE → the ingest raises a Waiting row.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        let fx = plant_answered_ask_then_idle_transcript("answered", base_ms);
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!("{}\n", hook_line("sid-answered", &fx.cwd, "Stop")),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        // 10 min after the finished turn → IDLE (> the 5-min default threshold).
+        let raised = ingest.ingest_once(base_ms + 10 * 60_000).await;
+        assert_eq!(
+            raised, 1,
+            "the Stop line classifies to one IDLE→Waiting row"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].kind,
+            AttentionKind::Waiting,
+            "an answered ask must not re-raise as AskUserQuestion (sticky-ASK fix)"
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_then_answer_then_stop_closes_stale_ask_no_duplicate_card() {
+        // W1 open/close-ordering regression. The sticky-ASK classifier fix stops a
+        // NEW ASK being re-raised, but the ASK row raised while the question was
+        // genuinely open is never closed when the human answers IN the session (no
+        // hangar answer router runs). Sequence: Notification raises an open ASK →
+        // the human answers in-session (a tool_result + a finished turn land in the
+        // transcript) → a later Stop classifies IDLE. The ingest must close the
+        // stale ASK as it raises the Waiting card, so the session shows exactly ONE
+        // open card, never a stale-ASK-beside-Waiting duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        let fx = plant_open_ask_with_id_transcript("reconcile");
+        let transcript = fx.dir.join("session.jsonl");
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+
+        // Pass 1 — a Notification over the OPEN-ask transcript raises the ASK row.
+        std::fs::write(
+            &events_jsonl,
+            format!("{}\n", hook_line("sid-rec", &fx.cwd, "Notification")),
+        )
+        .unwrap();
+        assert_eq!(
+            ingest.ingest_once(base_ms).await,
+            1,
+            "Notification raises the ASK"
+        );
+        let raised = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].kind, AttentionKind::AskUserQuestion);
+        let ask_id = raised[0].id.clone();
+
+        // The human answers IN the session: a paired tool_result closes the ask in
+        // the transcript and a finished end_turn follows. No hangar answer router
+        // ran, so the ASK attention row is STILL open in the store.
+        let iso = chrono::DateTime::from_timestamp_millis(base_ms).unwrap().to_rfc3339();
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_rec","content":"Your questions have been answered."}}]}},"timestamp":"2026-01-01T00:00:01Z"}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"All done."}}]}},"timestamp":"{iso}"}}"#
+            )
+            .unwrap();
+        }
+
+        // Pass 2 — a Stop over the now-idle transcript (10 min later, past the IDLE
+        // threshold). The classifier reads IDLE (the ask has a paired tool_result),
+        // so the ingest raises a Waiting card AND reconciles the stale ASK closed.
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&events_jsonl).unwrap();
+            writeln!(f, "{}", hook_line("sid-rec", &fx.cwd, "Stop")).unwrap();
+        }
+        assert_eq!(
+            ingest.ingest_once(base_ms + 10 * 60_000).await,
+            1,
+            "the Stop line raises exactly one Waiting card"
+        );
+
+        // Exactly ONE open card, and it is the Waiting card — the stale ASK is gone.
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(
+            open.len(),
+            1,
+            "no duplicate open card — the stale ASK was closed"
+        );
+        assert_eq!(open[0].kind, AttentionKind::Waiting);
+
+        // The original ASK row is answered (closed) with the reconcile marker.
+        let closed = AttentionRepo::get(store.pool(), &ask_id).await.unwrap().unwrap();
+        assert_eq!(
+            closed.state, "answered",
+            "the stale ASK is closed, not open"
+        );
+        assert_eq!(closed.answered_by.as_deref(), Some("resolved:session"));
     }
 }
