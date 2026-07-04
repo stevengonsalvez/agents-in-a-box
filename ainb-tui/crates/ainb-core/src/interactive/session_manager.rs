@@ -2194,7 +2194,10 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(p, vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]);
+        assert_eq!(
+            p,
+            vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        );
     }
 
     #[test]

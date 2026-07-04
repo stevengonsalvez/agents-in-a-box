@@ -140,7 +140,10 @@ async fn copilot_resume_launches_continue() {
         cmd.contains("copilot") && cmd.contains("--continue"),
         "copilot resume must use --continue, got: {cmd}"
     );
-    assert!(cmd.contains("--yolo"), "copilot yolo flag must survive, got: {cmd}");
+    assert!(
+        cmd.contains("--yolo"),
+        "copilot yolo flag must survive, got: {cmd}"
+    );
 }
 
 #[tokio::test]
