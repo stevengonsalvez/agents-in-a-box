@@ -255,6 +255,12 @@ pub enum AppEvent {
     /// conflict pair — otherwise [`Self::SkillManagerConflictFlip`]
     /// fires instead.
     SkillManagerSync,
+    /// Sync assess popup: apply the previewed plan (Enter).
+    SkillManagerSyncConfirm,
+    /// Sync assess popup: dismiss without applying (Esc).
+    SkillManagerSyncCancel,
+    /// Sync assess popup: scroll the plan/diff (isize rows).
+    SkillManagerSyncScroll(isize),
     /// Units panel: move selection up one row (k / Up arrow). Wraps
     /// to last row when at top. Recomputes detail pane on move.
     SkillManagerSelectPrev,
@@ -375,6 +381,8 @@ pub enum AppEvent {
     SkillManagerPreviewSource,           // p on a source row — reopen the picker for it
     SkillManagerApplySourceFilterKey,    // f on a source row — filter the Units table to it
     SkillManagerOpenUnitInEditor,        // o on a unit — open its deployed dir in $EDITOR
+    SkillManagerToggleLibrarySource,     // L on a source row — mark/unmark it as my library
+    SkillManagerCopyToLibrary,           // y on a unit — copy it into my library
     SkillManagerSourceRemoveOpen,        // r on a source row — open the remove dialog
     SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
     SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
@@ -1663,6 +1671,19 @@ impl EventHandler {
                 };
             }
 
+            // Sync assess-then-apply dialog: shows the dry-run plan as a
+            // git-style diff. Enter applies, Esc cancels, arrows scroll.
+            // Intercepts before every other key while open.
+            if state.skill_manager_state.sync_confirm.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSyncScroll(-1)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSyncScroll(1)),
+                    KeyCode::Enter => Some(AppEvent::SkillManagerSyncConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerSyncCancel),
+                    _ => None,
+                };
+            }
+
             // Source-removal confirm dialog: arrows pick an option, Enter
             // confirms, Esc cancels. Intercepts before every other key.
             if state.skill_manager_state.source_remove_confirm.is_some() {
@@ -1828,6 +1849,16 @@ impl EventHandler {
                 KeyCode::Char('r') if sources_focused => {
                     Some(AppEvent::SkillManagerSourceRemoveOpen)
                 }
+                // `[s]` on a source row — sync the whole source (all its
+                // units, both directions). Same assess popup as unit sync.
+                KeyCode::Char('s') if sources_focused => Some(AppEvent::SkillManagerSync),
+                // `[L]` on a source row — toggle "my library" mark. Capital
+                // L so lowercase `l` stays the Library overlay.
+                KeyCode::Char('L') if sources_focused => {
+                    Some(AppEvent::SkillManagerToggleLibrarySource)
+                }
+                // `[y]` on a unit — copy it into my library (yank).
+                KeyCode::Char('y') if !sources_focused => Some(AppEvent::SkillManagerCopyToLibrary),
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -4824,29 +4855,148 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerSync => {
-                // Phase D (v12.D.5): run `ainb skill sync` for the
-                // selected unit. The actual sync runs out-of-band via
-                // the CLI surface; here we only fire-and-forget the
-                // intent + reload the screen state so a successful
-                // sync surfaces fresh deployed paths / usage on next
-                // paint. Tests assert routing-only behaviour against
-                // the dispatch table; integration tests for the CLI
-                // path live in `ainb-cli/tests/skill_sync_*`.
-                //
-                // Surface a `sync: <unit>` info notification so the user
-                // sees that `[s]` routed to Sync (not ConflictFlip) and
-                // so the live tmux tripwire (v12.1.T3) can observe the
-                // routing decision in the captured pane.
-                tracing::info!("Units panel: sync selected unit");
-                let unit_name = state
+                // `[s]` — assess-then-apply sync. Run a dry-run first to
+                // compute the plan (bidirectional content diff + manifest
+                // reconciliation), then show it as a git-style diff popup;
+                // the user applies with Enter (see SkillManagerSyncConfirm).
+                // Scope: the focused source (all its units) or the selected
+                // unit. `source_or_unit` accepts a source name OR a unit URI.
+                let sources_focused = state.skill_manager_state.focused_pane
+                    == crate::components::skill_manager_screen::FocusedSkillPane::Sources;
+                let (target, label) = if sources_focused {
+                    match state
+                        .skill_manager_state
+                        .sources
+                        .get(state.skill_manager_state.source_selected)
+                    {
+                        Some(s) => (s.name.clone(), format!("source {}", s.name)),
+                        None => {
+                            state.add_warning_notification("sync: no source selected".to_string());
+                            return;
+                        }
+                    }
+                } else {
+                    match state.skill_manager_state.units.get(state.skill_manager_state.selected) {
+                        Some(u) => (u.declared_uri.clone(), format!("unit {}", u.name)),
+                        None => {
+                            state.add_warning_notification("sync: no unit selected".to_string());
+                            return;
+                        }
+                    }
+                };
+                tracing::info!(%target, "SkillManager: sync assess (dry-run)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let cmd = ainb_cli::SkillCommand::Sync(ainb_cli::SyncArgs {
+                    source_or_unit: Some(target.clone()),
+                    yes: false,
+                    dry_run: true,
+                    to_home: false,
+                    to_repo: false,
+                });
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                if !ok {
+                    state.add_error_notification(format!("sync assess failed: {msg}"));
+                    return;
+                }
+                if msg.contains("already in sync") {
+                    state.add_info_notification(format!("{label}: already in sync"));
+                    return;
+                }
+                let plan: Vec<String> = msg.lines().map(|l| l.to_string()).collect();
+                state.skill_manager_state.sync_confirm =
+                    Some(crate::components::skill_manager_screen::SyncConfirmState {
+                        target,
+                        label,
+                        plan,
+                        scroll: 0,
+                    });
+            }
+            AppEvent::SkillManagerSyncScroll(delta) => {
+                if let Some(sc) = state.skill_manager_state.sync_confirm.as_mut() {
+                    sc.scroll_by(delta);
+                }
+            }
+            AppEvent::SkillManagerSyncCancel => {
+                state.skill_manager_state.sync_confirm = None;
+            }
+            AppEvent::SkillManagerSyncConfirm => {
+                // Apply the previewed plan: re-run the identical scope with
+                // `--yes`. Then reload so fresh deployed paths / usage paint.
+                let Some(sc) = state.skill_manager_state.sync_confirm.take() else {
+                    return;
+                };
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let cmd = ainb_cli::SkillCommand::Sync(ainb_cli::SyncArgs {
+                    source_or_unit: Some(sc.target.clone()),
+                    yes: true,
+                    dry_run: false,
+                    to_home: false,
+                    to_repo: false,
+                });
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                if ok {
+                    state.add_success_notification(format!("synced {}", sc.label));
+                } else {
+                    state.add_error_notification(format!("sync failed: {msg}"));
+                }
+            }
+            AppEvent::SkillManagerToggleLibrarySource => {
+                // `[L]` — mark/unmark the focused source as my library.
+                // Toggle by the row's current `is_library` flag.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let src = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .map(|s| (s.name.clone(), s.is_library));
+                let Some((name, was_library)) = src else {
+                    state.add_warning_notification("library: no source selected".to_string());
+                    return;
+                };
+                let cmd = if was_library {
+                    ainb_cli::SkillCommand::Library {
+                        cmd: ainb_cli::LibraryCmd::UnmarkSource { name: name.clone() },
+                    }
+                } else {
+                    ainb_cli::SkillCommand::Library {
+                        cmd: ainb_cli::LibraryCmd::MarkSource { name: name.clone() },
+                    }
+                };
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                if ok {
+                    let verb = if was_library { "unmarked" } else { "marked" };
+                    state.add_success_notification(format!("{verb} library: {name}"));
+                } else {
+                    state.add_error_notification(format!("library toggle failed: {msg}"));
+                }
+            }
+            AppEvent::SkillManagerCopyToLibrary => {
+                // `[y]` — copy the selected unit into my library (deploy to
+                // the claude tool home + register in library.yaml).
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let uri = state
                     .skill_manager_state
                     .units
                     .get(state.skill_manager_state.selected)
-                    .map(|u| u.name.clone());
-                let ainb_home = ainb_skill_core::default_ainb_home();
+                    .map(|u| u.declared_uri.clone());
+                let Some(uri) = uri else {
+                    state.add_warning_notification("copy: no unit selected".to_string());
+                    return;
+                };
+                let cmd = ainb_cli::SkillCommand::Library {
+                    cmd: ainb_cli::LibraryCmd::Copy {
+                        uri: uri.clone(),
+                        tool: None,
+                    },
+                };
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
                 state.skill_manager_state.reload_from_disk(&ainb_home);
-                if let Some(name) = unit_name {
-                    state.add_info_notification(format!("sync: {name}"));
+                if ok {
+                    state.add_success_notification(format!("copied to library: {msg}"));
+                } else {
+                    state.add_error_notification(format!("copy failed: {msg}"));
                 }
             }
             AppEvent::SkillManagerConflictFlip => {
@@ -7951,6 +8101,7 @@ mod panel_back_tests {
             uri: "gh:o/toolkit".to_string(),
             r#ref: "main".to_string(),
             enabled: true,
+            is_library: false,
         }];
         state.skill_manager_state.units = vec![UnitRow {
             idx: 0,
