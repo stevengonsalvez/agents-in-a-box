@@ -1133,14 +1133,17 @@ impl EventHandler {
                 .map(|s| matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure))
                 .unwrap_or(false);
 
-        // Analytics is plugin-owned post-Phase 7; the host can't
-        // introspect the burndown plugin's input modes (zoom search,
-        // custom-period input). The plugin's own handle_key path
-        // consumes character keystrokes before they reach this
-        // helper, so we treat the analytics screen as always-non-text
-        // here. If a plugin ever needs the host to suppress global
-        // shortcuts while it's in text-entry mode, add a wire signal
-        // (e.g. publish on `host.input_mode`) and read it here.
+        // Plugin-owned screens (Analytics/burndown, Hangar, …) now DO signal
+        // their text-entry modes to the host: each frame's
+        // `RenderResult.captures_text` is stashed per screen in
+        // `plugin_captures_text` (refreshed by `tick_plugin_renders`), and
+        // `focused_plugin_captures_text` reads it for the focused screen. When
+        // it's true the plugin's input owns every printable key, so this helper
+        // reports text-input and the global `H`/`?`/`W` shortcuts below are
+        // suppressed — the general fix for host shortcuts swallowing keystrokes
+        // typed into a plugin overlay (8hx), not just the boards card title.
+        let plugin_capturing_text =
+            crate::app::screens::builtin::focused_plugin_captures_text(state);
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
         // SkillManager add-source / search prompt — when its input
@@ -1172,6 +1175,7 @@ impl EventHandler {
                 || state.config_popup_state.is_text_entry());
 
         new_session_text_active
+            || plugin_capturing_text
             || matches!(
                 state.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
@@ -1409,14 +1413,15 @@ impl EventHandler {
             // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
             // rename, onboarding/setup menus, quick-commit) don't reach
             // this block, so they don't need entries here.
-            // Analytics is plugin-owned now; host can't introspect the
-            // burndown plugin's input modes. The plugin must handle its
-            // own W-suppression by intercepting key events before they
-            // reach this global handler. Until plugin key forwarding is
-            // wired (Phase 4+), `W` on the analytics screen does fire the
-            // host install path — the plugin's input modes don't conflict
-            // with it because they're modal and consume Escape/Enter, not
-            // capital W.
+            // Plugin text-entry modes (burndown zoom search / custom period,
+            // Hangar's card-title / compose / API-key inputs, …) are now covered
+            // generically: the plugin reports `captures_text` on every frame and
+            // `is_text_input_context` folds it into `in_text_input` via
+            // `plugin_capturing_text`. That gates this ENTIRE `!in_text_input`
+            // block — including the `W` handler below — so a `W` typed into a
+            // plugin input is suppressed here and forwarded to the plugin
+            // instead. No per-plugin W-suppression list is needed (8hx). This
+            // local stays `false` because the generic gate already handles it.
             let analytics_text_active = false;
             let skills_text_active =
                 state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
@@ -8129,6 +8134,61 @@ mod text_input_guard_tests {
         assert!(
             !EventHandler::is_text_input_context(&state),
             "HomeScreen with no modal flags must NOT be treated as text input"
+        );
+    }
+
+    /// 8hx: a plugin-owned screen that declares text-capture on its last frame
+    /// (stashed in `plugin_captures_text`) must be treated as a text-input
+    /// context, so the host's global single-character shortcuts (`H`/`?`/`W`)
+    /// are suppressed and the keystrokes reach the plugin's input verbatim
+    /// instead of toggling help / wiring the statusline. This is the general
+    /// fix — it applies to every plugin screen (the boards card-title overlay
+    /// that motivated it, plus burndown's zoom search, etc.), not a
+    /// boards-specific special case.
+    #[test]
+    fn plugin_text_capture_flag_flips_text_input_context() {
+        // Baseline: a focused plugin screen with NO capture flag is navigable —
+        // `H`/`?` still toggle help (this is the pre-fix behaviour that swallowed
+        // characters typed into a plugin overlay).
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HANGAR.to_string();
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "plugin screen without the capture flag must NOT be text-input"
+        );
+        // The host would eat `H` as the help toggle here — the 8hx bug.
+        assert!(
+            matches!(
+                EventHandler::handle_key_event(char_key('H'), &mut state),
+                Some(AppEvent::ToggleHelp)
+            ),
+            "precondition: without capture, H toggles help on a plugin screen"
+        );
+
+        // Declare text-capture (as the plugin's frame would via
+        // `RenderResult.captures_text`): now the host must treat it as
+        // text-input and NOT convert `H` into a help toggle.
+        state.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "plugin screen WITH the capture flag must be treated as text-input"
+        );
+        assert!(
+            !matches!(
+                EventHandler::handle_key_event(char_key('H'), &mut state),
+                Some(AppEvent::ToggleHelp)
+            ),
+            "H must not toggle help while the plugin captures text (8hx)"
+        );
+
+        // The flag is scoped to the focused plugin screen: an unrelated
+        // non-plugin screen with a stale entry is unaffected.
+        let mut other = AppState::default();
+        other.current_screen = screen_ids::HOME.to_string();
+        other.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        assert!(
+            !EventHandler::is_text_input_context(&other),
+            "capture flag for a background screen must not leak into HOME"
         );
     }
 

@@ -2985,6 +2985,19 @@ pub struct AppState {
     pub plugin_last_render_viewport:
         std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Whether each plugin-owned screen's focused surface is currently capturing
+    /// free text (a title/filter/compose/search/API-key input), as reported by
+    /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
+    /// `tick_plugin_renders` from `RuntimeHandle::captures_text`.
+    ///
+    /// While the entry for `current_screen` is `true`, the host key dispatch
+    /// (`is_text_input_context` + the plugin key-forwarder) suppresses its own
+    /// global single-character shortcuts (`H`/`?`/`W`) and forwards `?`/`H` to
+    /// the plugin so keystrokes land in the input verbatim instead of toggling
+    /// help / wiring the statusline (8hx). Absent entry (never painted, or not a
+    /// plugin screen) reads as `false`.
+    pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
+
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
     /// installs that haven't completed bundled-plugin discovery yet).
@@ -3492,6 +3505,7 @@ impl Default for AppState {
             plugin_render_areas: std::collections::HashMap::new(),
             plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
+            plugin_captures_text: std::collections::HashMap::new(),
             plugin_runtime: None,
 
             statusline_status_cache: None,
@@ -10757,6 +10771,16 @@ impl App {
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
+
+            // Refresh the text-capture flag from the plugin's last frame every
+            // tick (one atomic load; `false` for an unregistered plugin). The
+            // host key dispatch reads this for the focused screen to suppress
+            // its global single-char shortcuts while a plugin input is focused
+            // (8hx). Done before the lifecycle skip so an unregistered plugin's
+            // stale flag is cleared to false rather than lingering true.
+            self.state
+                .plugin_captures_text
+                .insert((*screen_id).to_string(), handle.captures_text(&pid));
 
             // Skip plugins the runtime doesn't know about — keeps the
             // loop cheap and resilient when discovery comes up empty.
