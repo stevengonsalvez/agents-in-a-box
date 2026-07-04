@@ -8195,10 +8195,13 @@ mod skill_manager_sync_keybind_tests {
     /// few code paths that has to read the on-disk manifest, so we
     /// pin the env to a tempdir to keep the test hermetic.
     fn with_ainb_home<R>(dir: &std::path::Path, body: impl FnOnce() -> R) -> R {
-        // The lock keeps parallel-running tests in the same process
-        // from clobbering each other's AINB_HOME.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The lock keeps parallel-running tests in the same process from
+        // clobbering each other's AINB_HOME. Use the crate-wide env lock (not a
+        // private one) so this serialises against EVERY AINB_HOME-mutating test —
+        // e.g. the session-store concurrent/headroom tests in
+        // `interactive::session_manager` — not just other `with_ainb_home`
+        // callers.
+        let _g = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("AINB_HOME").ok();
         std::env::set_var("AINB_HOME", dir);
         let r = body();

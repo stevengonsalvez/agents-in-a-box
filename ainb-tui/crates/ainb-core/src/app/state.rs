@@ -10453,33 +10453,46 @@ impl AppState {
             }
         };
 
-        // --- 2. Check and flip headroom_enabled in SessionStore ---
-        let mut store = crate::interactive::SessionStore::load();
-        match store.sessions.get(&tmux_session_name) {
-            None => {
-                self.add_warning_notification(
-                    "Session not found in store — Headroom state unknown".to_string(),
-                );
-                return Ok(());
+        // --- 2 + 3. Check and flip headroom_enabled in SessionStore ---
+        //
+        // Scoped block so the cross-process lock (pu4) is held ONLY across the
+        // load-inspect-mutate-save window and released before the slow tmux
+        // respawn below — never hold the sessions.json lock across async IO.
+        // The lock is best-effort: on failure we proceed unlocked rather than
+        // abort the downgrade. The early-return paths drop the guard (unlock)
+        // as they leave the block.
+        {
+            let _lock = crate::interactive::SessionStore::lock()
+                .map_err(|e| warn!("Failed to lock sessions.json for Headroom flip: {e}"))
+                .ok();
+            let mut store = crate::interactive::SessionStore::load();
+            match store.sessions.get(&tmux_session_name) {
+                None => {
+                    self.add_warning_notification(
+                        "Session not found in store — Headroom state unknown".to_string(),
+                    );
+                    return Ok(());
+                }
+                Some(meta) if !meta.headroom_enabled => {
+                    self.add_info_notification(
+                        "Session is already direct (Headroom off)".to_string(),
+                    );
+                    return Ok(());
+                }
+                _ => {}
             }
-            Some(meta) if !meta.headroom_enabled => {
-                self.add_info_notification("Session is already direct (Headroom off)".to_string());
-                return Ok(());
-            }
-            _ => {}
-        }
 
-        // --- 3. Persist headroom_enabled = false ---
-        if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
-            meta.headroom_enabled = false;
-        }
-        if let Err(e) = store.save() {
-            // Non-fatal: we still attempt the respawn; the flag will be
-            // re-read from a stale store on the next restart, so log clearly.
-            warn!(
-                "Failed to persist headroom_enabled=false for {}: {}",
-                tmux_session_name, e
-            );
+            if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
+                meta.headroom_enabled = false;
+            }
+            if let Err(e) = store.save() {
+                // Non-fatal: we still attempt the respawn; the flag will be
+                // re-read from a stale store on the next restart, so log clearly.
+                warn!(
+                    "Failed to persist headroom_enabled=false for {}: {}",
+                    tmux_session_name, e
+                );
+            }
         }
 
         // --- 4. Build the resume command (no env prefix — headroom is off) ---
@@ -10537,12 +10550,12 @@ impl AppState {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Restore the headroom flag in the store so the next manual
-            // restart picks it back up (best-effort).
-            let mut store2 = crate::interactive::SessionStore::load();
-            if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
-                meta.headroom_enabled = true;
-            }
-            let _ = store2.save();
+            // restart picks it back up (best-effort, locked RMW — pu4).
+            let _ = crate::interactive::SessionStore::mutate(|store2| {
+                if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
+                    meta.headroom_enabled = true;
+                }
+            });
             anyhow::bail!(
                 "tmux respawn-pane failed for {}: {}",
                 tmux_session_name,

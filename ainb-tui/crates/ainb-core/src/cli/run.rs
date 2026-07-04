@@ -143,9 +143,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         rtk_enabled: false,
     };
 
-    let mut store = SessionStore::load();
-    store.upsert(metadata);
-    store.save().context("Failed to save session metadata")?;
+    // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
+    // this write must not lost-update the store.
+    SessionStore::mutate(|store| store.upsert(metadata))
+        .context("Failed to save session metadata")?;
 
     info!("Saved session metadata for TUI discovery");
 
