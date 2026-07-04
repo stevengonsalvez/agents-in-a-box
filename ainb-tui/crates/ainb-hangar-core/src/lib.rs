@@ -10,6 +10,9 @@
 
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// The card provider-agent kind (`claude`/`codex`/`copilot`) + the task-create
+/// default cascade (spec F4).
+pub mod agent_kind;
 /// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
 pub mod assignee_crosswalk;
 /// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
