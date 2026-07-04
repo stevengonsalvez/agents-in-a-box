@@ -225,6 +225,21 @@ impl RuntimeHandle {
         self.lookup(plugin_id).and_then(|p| p.cache.try_take())
     }
 
+    /// Whether `plugin_id`'s focused surface was capturing free text as of its
+    /// last painted frame (a title/filter/compose/search/API-key input).
+    ///
+    /// Read by the host on key dispatch: while `true` for the plugin owning the
+    /// focused screen, the host suppresses its global single-character shortcuts
+    /// (`H`/`?`/`W`) and forwards `?`/`H` to the plugin instead of eating them,
+    /// so keystrokes land in the input verbatim (8hx). Unknown plugin → `false`.
+    ///
+    /// Synchronous and lock-cheap (one atomic load behind the plugins map read),
+    /// safe on the TUI key-dispatch path.
+    #[must_use]
+    pub fn captures_text(&self, plugin_id: &PluginId) -> bool {
+        self.lookup(plugin_id).is_some_and(|p| p.cache.captures_text())
+    }
+
     /// Atomically check-and-clear the render-dirty flag for a plugin.
     /// Returns `true` iff the host should kick a fresh `plugin/render`
     /// this tick because state may have changed since the last paint.

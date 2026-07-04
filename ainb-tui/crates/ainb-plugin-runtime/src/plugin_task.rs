@@ -62,9 +62,17 @@ const ABI_VERSION: u32 = 2;
 
 /// Cached render output kept alive between async response and the
 /// next `try_recv_render` poll on the TUI thread.
+///
+/// `captures_text` is a PERSISTENT latch (not consumed by `try_take`, unlike the
+/// buffer): the host reads the focused plugin's current text-capture state on
+/// every keystroke, not just when a fresh frame is drained. The per-plugin task
+/// refreshes it from each `RenderResult.captures_text` — so it always reflects
+/// the last painted frame — and the host reads it via
+/// [`RuntimeHandle::captures_text`](crate::RuntimeHandle::captures_text).
 #[derive(Debug, Default, Clone)]
 pub struct RenderCache {
     inner: Arc<parking_lot::Mutex<Option<WireBuffer>>>,
+    captures_text: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RenderCache {
@@ -82,6 +90,18 @@ impl RenderCache {
     /// Pop the cached buffer (returns `None` if nothing cached).
     pub fn try_take(&self) -> Option<WireBuffer> {
         self.inner.lock().take()
+    }
+
+    /// Latch the plugin's text-capture state from its latest frame. Persistent:
+    /// survives `try_take` so the host can read it on any keystroke.
+    pub fn set_captures_text(&self, capturing: bool) {
+        self.captures_text.store(capturing, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Read the plugin's text-capture state as of its last painted frame.
+    #[must_use]
+    pub fn captures_text(&self) -> bool {
+        self.captures_text.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -788,6 +808,11 @@ impl PluginTask {
                                 // active self-animation streak.
                                 self.redraw_governor.reset();
                             }
+                            // Latch the plugin's text-capture state from this
+                            // frame so the host can suppress its global
+                            // single-char shortcuts while the plugin's input is
+                            // focused (8hx). Persistent — survives try_take.
+                            self.cache.set_captures_text(rr.captures_text);
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
                         }

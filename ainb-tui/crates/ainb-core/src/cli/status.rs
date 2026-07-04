@@ -128,10 +128,9 @@ pub async fn kill(args: KillArgs) -> Result<()> {
         );
         println!("Removing from session store...");
 
-        // Still remove from store
-        let mut store = SessionStore::load();
-        store.remove_by_session_id(session.session_id);
-        store.save().context("Failed to save session store")?;
+        // Still remove from store (locked RMW — pu4)
+        SessionStore::mutate(|store| store.remove_by_session_id(session.session_id))
+            .context("Failed to save session store")?;
 
         println!("Session removed.");
         return Ok(());
@@ -167,10 +166,9 @@ pub async fn kill(args: KillArgs) -> Result<()> {
         println!("Tmux session killed.");
     }
 
-    // Remove from session store
-    let mut store = SessionStore::load();
-    store.remove_by_session_id(session.session_id);
-    store.save().context("Failed to save session store")?;
+    // Remove from session store (locked RMW — pu4)
+    SessionStore::mutate(|store| store.remove_by_session_id(session.session_id))
+        .context("Failed to save session store")?;
 
     println!("Session '{}' removed.", session.workspace_name);
 

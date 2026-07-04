@@ -821,9 +821,9 @@ impl SessionRecoveryState {
             rtk_enabled: false,
         };
 
-        let mut store = SessionStore::load();
-        store.upsert(metadata);
-        if let Err(e) = store.save() {
+        // Locked RMW (pu4): serialise this recovery re-register against live
+        // create/kill writers so neither lost-updates the other.
+        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
             // Log warning but continue - session still works, just won't show as Workspace
             tracing::warn!("Failed to persist session metadata: {}", e);
         }
@@ -1362,19 +1362,21 @@ impl SessionRecoveryState {
             }
         }
 
-        // Remove from sessions.json
-        let mut store = SessionStore::load();
-        // Find and remove by worktree path
-        let keys_to_remove: Vec<String> = store
-            .sessions()
-            .iter()
-            .filter(|(_, m)| m.worktree_path == worktree.path)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &keys_to_remove {
-            store.remove_by_tmux_name(key);
-        }
-        store.save().ok();
+        // Remove from sessions.json (locked RMW — pu4). The path-match +
+        // removal runs inside the lock so a concurrent writer can't re-add the
+        // worktree between our load and save.
+        let worktree_path = worktree.path.clone();
+        let _ = SessionStore::mutate(|store| {
+            let keys_to_remove: Vec<String> = store
+                .sessions()
+                .iter()
+                .filter(|(_, m)| m.worktree_path == worktree_path)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in &keys_to_remove {
+                store.remove_by_tmux_name(key);
+            }
+        });
 
         Ok(())
     }

@@ -396,9 +396,9 @@ fn execute_resume(session: &str) -> Result<()> {
         rtk_enabled: false,
     };
 
-    let mut store = SessionStore::load();
-    store.upsert(metadata);
-    store.save().context("Failed to save session store")?;
+    // Locked RMW (pu4): serialise recovery's re-register against live writers.
+    SessionStore::mutate(|store| store.upsert(metadata))
+        .context("Failed to save session store")?;
 
     let short_id = &matched.id[..8.min(matched.id.len())];
     println!("Resumed session '{workspace}' (tmux: {tmux_name}).");
@@ -507,7 +507,13 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
         }
     }
 
-    // 4. Remove from session store if present
+    // 4. Remove from session store if present, under the cross-process lock
+    // (pu4) so a concurrent create/register can't race this removal. Best-effort
+    // lock (proceed unlocked on failure); the guard spans load → save and drops
+    // at end of scope.
+    let lock_guard = SessionStore::lock()
+        .map_err(|e| eprintln!("  Warning: could not lock sessions.json: {e}; proceeding unlocked"))
+        .ok();
     let mut store = SessionStore::load();
     let mut changed = false;
 
@@ -526,6 +532,7 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
     if changed {
         store.save().context("Failed to save session store")?;
     }
+    drop(lock_guard);
 
     Ok(())
 }

@@ -133,15 +133,33 @@ pub fn crossterm_to_protocol_key(
     Some(ProtocolEvent { code, mods, kind })
 }
 
+/// `true` when the plugin owning `current_screen` reported (on its last frame)
+/// that its focused surface is capturing free text — a title/filter/compose/
+/// search/API-key input where every printable key is typed content.
+///
+/// Read on the host key-dispatch path so `?`/`H`/`W` reach the plugin's input
+/// verbatim instead of toggling help / wiring the statusline (8hx). The flag is
+/// refreshed every tick by `AppState::tick_plugin_renders` from the plugin's
+/// `RenderResult.captures_text`. Non-plugin screens (and screens whose plugin
+/// has never painted) read `false`.
+#[must_use]
+pub fn focused_plugin_captures_text(state: &AppState) -> bool {
+    plugin_id_for_screen(&state.current_screen).is_some()
+        && state.plugin_captures_text.get(&state.current_screen).copied().unwrap_or(false)
+}
+
 /// `true` if the host reserves this key — it MUST NOT be forwarded to
 /// the plugin and MUST fall through to the central dispatch.
 ///
 /// The reservation list is deliberately small:
 ///
-/// - `Ctrl+C` → host quit (always).
-/// - `?` / `H` → help toggle (already short-circuited above
-///   `handle_key_event`'s plugin branch, but listed here for parity in
-///   the `PluginScreen` trait impl path).
+/// - `Ctrl+C` → host quit (ALWAYS reserved — never relaxed).
+/// - `?` / `H` → help toggle — reserved UNLESS the focused plugin surface is
+///   capturing text (`capturing == true`), in which case they are typed content
+///   and must reach the plugin's input rather than toggle help. This is the
+///   general fix for the class of bug where typing `H`/`?` into a plugin overlay
+///   (e.g. the boards card-title input) was swallowed by the host help toggle
+///   (8hx); it applies to every plugin screen, not just boards.
 ///
 /// `Esc` is plugin-owned (it used to be host-reserved): it pops one
 /// internal level (detail drawer, search overlay, zoom, filter chip)
@@ -161,11 +179,13 @@ pub fn crossterm_to_protocol_key(
 /// toggles. Letting the host swallow them would make the screen
 /// uninteractive.
 #[must_use]
-pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
+pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent, capturing: bool) -> bool {
     use crossterm::event::{KeyCode as CtKey, KeyModifiers as CtMods};
     match key.code {
         CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
-        CtKey::Char('?' | 'H') => true,
+        // `?`/`H` are reserved (help toggle) only while the plugin is NOT
+        // capturing text; while it is, they're typed into the plugin's input.
+        CtKey::Char('?' | 'H') => !capturing,
         _ => false,
     }
 }
@@ -182,7 +202,10 @@ pub fn forward_key_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
         return EventOutcome::NotHandled;
     };
-    if is_host_reserved_key(key) {
+    // While the focused plugin surface captures text, `?`/`H` are typed content
+    // and must be forwarded, not reserved for the host help toggle (8hx).
+    let capturing = focused_plugin_captures_text(state);
+    if is_host_reserved_key(key, capturing) {
         // Host claims this key — let the central dispatch in
         // `events.rs` resolve it to Quit / ToggleHelp / etc.
         return EventOutcome::NotHandled;
@@ -1089,23 +1112,26 @@ mod tests {
             state: KeyEventState::empty(),
         };
 
-        // Reserved.
-        assert!(is_host_reserved_key(&mk(
-            CtKey::Char('c'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_host_reserved_key(&mk(
-            CtKey::Char('?'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_host_reserved_key(&mk(
-            CtKey::Char('H'),
-            KeyModifiers::NONE
-        )));
+        // Reserved (plugin NOT capturing text).
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('c'), KeyModifiers::CONTROL),
+            false
+        ));
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('?'), KeyModifiers::NONE),
+            false
+        ));
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('H'), KeyModifiers::NONE),
+            false
+        ));
         // Esc is plugin-owned (overlay-panels redesign): the plugin pops
         // one internal level per press and publishes `ui.close_request`
         // at its root — see the doc on `is_host_reserved_key`.
-        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
+        assert!(!is_host_reserved_key(
+            &mk(CtKey::Esc, KeyModifiers::NONE),
+            false
+        ));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
@@ -1120,10 +1146,26 @@ mod tests {
             CtKey::BackTab,
         ] {
             assert!(
-                !is_host_reserved_key(&mk(k, KeyModifiers::NONE)),
+                !is_host_reserved_key(&mk(k, KeyModifiers::NONE), false),
                 "host must not reserve {k:?} — plugin owns it"
             );
         }
+
+        // 8hx: while the focused plugin surface captures text, `?`/`H` are typed
+        // content and must NOT be reserved — they get forwarded to the plugin's
+        // input. `Ctrl+C` (host quit) stays reserved even while capturing.
+        assert!(
+            !is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), true),
+            "H must reach the plugin input while it captures text"
+        );
+        assert!(
+            !is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE), true),
+            "? must reach the plugin input while it captures text"
+        );
+        assert!(
+            is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL), true),
+            "Ctrl+C stays reserved even while the plugin captures text"
+        );
     }
 
     #[test]
@@ -1186,6 +1228,78 @@ mod tests {
                 EventOutcome::Handled
             ),
             "undelivered non-nav keys stay claimed — no destructive fallthrough"
+        );
+
+        runtime.shutdown();
+    }
+
+    /// 8hx: while the focused plugin surface declares text-capture (stashed in
+    /// `plugin_captures_text`), the forwarder must FORWARD `?`/`H` to the plugin
+    /// (claiming the key) instead of treating them as host-reserved help keys
+    /// that fall through to the global help toggle. `Ctrl+C` (host quit) stays
+    /// reserved regardless. This is the second of the two host interception
+    /// points the fix closes — the first is `is_text_input_context` gating the
+    /// global shortcut handlers.
+    #[test]
+    fn capturing_plugin_forwards_help_keys_instead_of_reserving_them() {
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        // Runtime up, plugin not registered — send_key returns false but the
+        // forwarder still CLAIMS a non-nav key (returns Handled), so this
+        // isolates the reservation decision from live delivery.
+        let (runtime, handle) =
+            ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
+        let mut state = crate::app::state::AppState::default();
+        state.plugin_runtime = Some(handle);
+        state.current_screen = ids::HANGAR.to_string();
+
+        let mk = |code, mods| CtEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        // Forward a bare (unmodified) char key to the focused plugin.
+        let fwd = |state: &mut AppState, ch: char| {
+            forward_key_to_focused_plugin(state, &mk(CtKey::Char(ch), KeyModifiers::NONE))
+        };
+
+        // Not capturing → `?`/`H` are host-reserved (fall through to help toggle).
+        assert!(
+            matches!(fwd(&mut state, 'H'), EventOutcome::NotHandled),
+            "without capture, H is reserved for the host help toggle"
+        );
+        assert!(
+            matches!(fwd(&mut state, '?'), EventOutcome::NotHandled),
+            "without capture, ? is reserved for the host help toggle"
+        );
+
+        // Declare text-capture (as the plugin's `captures_text` frame would).
+        state.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
+        assert!(
+            focused_plugin_captures_text(&state),
+            "the stash drives focused_plugin_captures_text"
+        );
+        assert!(
+            matches!(fwd(&mut state, 'H'), EventOutcome::Handled),
+            "H must be forwarded to the plugin input while it captures text (8hx)"
+        );
+        assert!(
+            matches!(fwd(&mut state, '?'), EventOutcome::Handled),
+            "? must be forwarded to the plugin input while it captures text (8hx)"
+        );
+        // Ctrl+C stays host-reserved even while the plugin captures text.
+        assert!(
+            matches!(
+                forward_key_to_focused_plugin(
+                    &mut state,
+                    &mk(CtKey::Char('c'), KeyModifiers::CONTROL)
+                ),
+                EventOutcome::NotHandled
+            ),
+            "Ctrl+C (host quit) is never relaxed by text-capture"
         );
 
         runtime.shutdown();
