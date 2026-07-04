@@ -10516,6 +10516,8 @@ impl AppState {
         let workspace_path = session.workspace_path.clone();
         let skip_permissions = session.skip_permissions;
         let agent_type = session.agent_type;
+        let model = session.model;
+        let codex_model = session.codex_model;
 
         let provider = match agent_type {
             SessionAgentType::Claude => CliProvider::Claude,
@@ -10527,10 +10529,31 @@ impl AppState {
             }
         };
 
-        let mut cmd_parts = vec![provider.command().to_string()];
-        if skip_permissions {
-            cmd_parts.push(provider.skip_permissions_flag().to_string());
-        }
+        // Load persisted metadata once — used for both the resume-history probe
+        // (Claude, keyed off the worktree cwd) and the Headroom routing flag.
+        let store = crate::interactive::SessionStore::load();
+        let metadata = store.sessions.get(&tmux_session_name);
+
+        // Restart continues the existing conversation, for parity with the
+        // Stopped-session resume path: Claude `--continue`, Codex `resume
+        // --last`, Copilot `--continue`. `has_history` gates Claude's
+        // `--continue` (no prior transcript → fresh, avoids a dead pane).
+        let has_history = agent_type == SessionAgentType::Claude
+            && metadata
+                .map(|m| Self::find_latest_transcript(&m.worktree_path).is_some())
+                .unwrap_or(false);
+
+        let cmd_parts =
+            crate::interactive::session_manager::InteractiveSessionManager::build_cli_cmd_parts(
+                &provider,
+                agent_type,
+                skip_permissions,
+                model,
+                codex_model,
+                true, // resume_requested — restart continues the conversation
+                has_history,
+            );
+
         // Preserve per-session Headroom routing across restart. `send-keys`
         // bypasses build_env_setup_for_provider, so re-derive the proxy export
         // from the persisted SessionMetadata (keyed by tmux name) and prepend
@@ -10542,9 +10565,7 @@ impl AppState {
         // healthy. Injecting a dead-port URL would brick the restarted CLI on
         // connection-refused. Ensure the proxy first; degrade to direct on
         // failure rather than pointing the session at a closed port.
-        let mut headroom_active = crate::interactive::SessionStore::load()
-            .sessions
-            .get(&tmux_session_name)
+        let mut headroom_active = metadata
             .map(|m| m.headroom_enabled)
             .unwrap_or(false)
             && matches!(
