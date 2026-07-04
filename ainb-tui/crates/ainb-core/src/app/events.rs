@@ -4876,7 +4876,14 @@ impl EventHandler {
                         }
                     }
                 } else {
-                    match state.skill_manager_state.units.get(state.skill_manager_state.selected) {
+                    // Act on the unit the user SEES highlighted, not a stale
+                    // absolute `selected` that drifted out of the filter.
+                    let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                        state.add_warning_notification("sync: no unit selected".to_string());
+                        return;
+                    };
+                    state.skill_manager_state.selected = idx;
+                    match state.skill_manager_state.units.get(idx) {
                         Some(u) => (u.declared_uri.clone(), format!("unit {}", u.name)),
                         None => {
                             state.add_warning_notification("sync: no unit selected".to_string());
@@ -4893,7 +4900,10 @@ impl EventHandler {
                     to_home: false,
                     to_repo: false,
                 });
-                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                // Full output — the popup renders the WHOLE multi-line plan
+                // as a diff, and the "already in sync" marker is a `#` comment
+                // line that last_meaningful_line would strip.
+                let (ok, msg) = run_skill_cli_full(&ainb_home, cmd);
                 if !ok {
                     state.add_error_notification(format!("sync assess failed: {msg}"));
                     return;
@@ -4902,7 +4912,11 @@ impl EventHandler {
                     state.add_info_notification(format!("{label}: already in sync"));
                     return;
                 }
-                let plan: Vec<String> = msg.lines().map(|l| l.to_string()).collect();
+                let plan: Vec<String> = msg
+                    .lines()
+                    .map(|l| l.trim_end().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
                 state.skill_manager_state.sync_confirm =
                     Some(crate::components::skill_manager_screen::SyncConfirmState {
                         target,
@@ -4976,11 +4990,14 @@ impl EventHandler {
                 // `[y]` — copy the selected unit into my library (deploy to
                 // the claude tool home + register in library.yaml).
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let uri = state
-                    .skill_manager_state
-                    .units
-                    .get(state.skill_manager_state.selected)
-                    .map(|u| u.declared_uri.clone());
+                // Copy the unit the user SEES highlighted, not a stale
+                // absolute `selected` that drifted out of the filter.
+                let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                    state.add_warning_notification("copy: no unit selected".to_string());
+                    return;
+                };
+                state.skill_manager_state.selected = idx;
+                let uri = state.skill_manager_state.units.get(idx).map(|u| u.declared_uri.clone());
                 let Some(uri) = uri else {
                     state.add_warning_notification("copy: no unit selected".to_string());
                     return;
@@ -5305,6 +5322,18 @@ impl EventHandler {
                 // (resolve_editor → $EDITOR fallback chain). Open the parent
                 // dir when the deployed path is a file (e.g. SKILL.md) so the
                 // whole skill folder lands in the editor.
+                //
+                // Resolve the unit the user SEES highlighted and refresh the
+                // detail pane against it first — `detail` is keyed off
+                // `selected`, which can drift out of the active filter.
+                if let Some(idx) = state.skill_manager_state.highlighted_unit_index() {
+                    state.skill_manager_state.selected = idx;
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    crate::components::skill_manager_screen::recompute_detail(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    );
+                }
                 let deployed = state
                     .skill_manager_state
                     .detail
@@ -7524,6 +7553,20 @@ fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (b
     let mut buf: Vec<u8> = Vec::new();
     match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
         Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Like [`run_skill_cli`] but returns the FULL captured output, not just
+/// the last non-comment line. The assess-sync popup needs the whole
+/// multi-line plan (`# sync plan`, `+ uri`, content-sync rows, …) to
+/// render it as a diff — `last_meaningful_line` would collapse it to one
+/// meaningless row (and strip the `# already in sync` marker the caller
+/// keys on).
+fn run_skill_cli_full(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, String::from_utf8_lossy(&buf).into_owned()),
         Err(e) => (false, format!("{e}")),
     }
 }

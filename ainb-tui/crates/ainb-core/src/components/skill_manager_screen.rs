@@ -2447,6 +2447,23 @@ impl SkillsScreenData {
             .collect()
     }
 
+    /// The `units` index the user actually SEES highlighted under the
+    /// current filter. Render highlights `visible[position(selected) | 0]`,
+    /// so keystroke actions (`[s]` sync, `[y]` copy, `[o]` open) must map
+    /// `selected` through the same logic — a stale absolute `selected` that
+    /// drifted out of the filtered set would act on an off-screen unit
+    /// (the bug `[r]` remove already guards against). Returns `None` when
+    /// nothing is visible. Callers should also assign the result back to
+    /// `selected` so the detail pane + subsequent keys agree.
+    pub fn highlighted_unit_index(&self) -> Option<usize> {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            return None;
+        }
+        let pos = visible.iter().position(|&i| i == self.selected).unwrap_or(0);
+        Some(visible[pos])
+    }
+
     /// Toggle keyboard focus between the Sources and Units panels
     /// (`Tab` / `Shift-Tab`). Symmetric, so Shift-Tab routes here too.
     pub fn toggle_focus(&mut self) {
