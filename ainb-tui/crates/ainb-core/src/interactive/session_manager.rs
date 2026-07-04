@@ -1339,6 +1339,15 @@ impl InteractiveSessionManager {
             cmd_parts.push("--continue".to_string());
         }
 
+        // Copilot resume: `--continue` re-opens the most recent copilot session.
+        // Unguarded (no cheap cwd-history probe exists yet) — mirrors codex's
+        // tradeoff. NOTE: copilot's "most recent session" is not strictly
+        // cwd-scoped the way claude's is, so with several copilot worktrees this
+        // can resume the globally-newest session; acceptable for the first pass.
+        if agent_type == SessionAgentType::Copilot && resume_requested {
+            cmd_parts.push("--continue".to_string());
+        }
+
         cmd_parts
     }
 
@@ -1353,7 +1362,8 @@ impl InteractiveSessionManager {
     ///     is no longer used as an argument (the current claude CLI `--resume`
     ///     wants a session id, not a path); its presence is the history guard.
     ///   * Codex: emits the `resume --last` subcommand form.
-    ///   * Gemini / Copilot: no resume flag yet — always start fresh.
+    ///   * Copilot: emits `--continue` (most recent copilot session; unguarded).
+    ///   * Gemini: no resume flag wired — always starts fresh.
     ///
     /// **Model flag emission (2026-05 refresh):**
     ///   * Claude: `--model <id>` only when `claude_model` is a non-default
@@ -2188,8 +2198,8 @@ mod tests {
     }
 
     #[test]
-    fn copilot_resume_starts_fresh_no_continue_no_last() {
-        // Copilot has no resume wiring yet — resume_requested is a no-op.
+    fn copilot_resume_appends_continue() {
+        // Copilot resumes the most recent session via --continue (unguarded).
         let p = parts(
             CliProvider::Copilot,
             SessionAgentType::Copilot,
@@ -2197,7 +2207,21 @@ mod tests {
             None,
             None,
             true,
+            false, // has_history irrelevant for copilot (no cwd probe)
+        );
+        assert_eq!(p, vec!["copilot", "--yolo", "--continue"]);
+    }
+
+    #[test]
+    fn copilot_fresh_launch_has_no_continue() {
+        let p = parts(
+            CliProvider::Copilot,
+            SessionAgentType::Copilot,
             true,
+            None,
+            None,
+            false,
+            false,
         );
         assert_eq!(p, vec!["copilot", "--yolo"]);
     }
