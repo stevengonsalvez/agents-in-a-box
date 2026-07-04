@@ -192,6 +192,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);
@@ -209,6 +212,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, false);
@@ -226,6 +232,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let info = SessionInfo::from_metadata(&metadata, false, false);
@@ -258,6 +267,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);

@@ -141,6 +141,9 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         agent_type,
         headroom_enabled: false,
         rtk_enabled: false,
+        skip_permissions: Some(args.dangerously_skip_permissions),
+        model: Some(model),
+        codex_model: None,
     };
 
     let mut store = SessionStore::load();

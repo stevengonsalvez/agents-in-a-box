@@ -85,6 +85,17 @@ pub struct SessionMetadata {
     pub headroom_enabled: bool,
     #[serde(default)]
     pub rtk_enabled: bool,
+    /// Persisted launch settings so a Stopped session resumes with the SAME
+    /// flags it was created with. `skip_permissions` is `Option`: `None`
+    /// (legacy metadata written before this field existed) → default to yolo
+    /// (`--dangerously-skip-permissions`) on resume; `Some(v)` preserves the
+    /// exact value the session was started with.
+    #[serde(default)]
+    pub skip_permissions: Option<bool>,
+    #[serde(default)]
+    pub model: Option<ClaudeModel>,
+    #[serde(default)]
+    pub codex_model: Option<CodexModel>,
 }
 
 /// Storage for all persisted session metadata
@@ -339,6 +350,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    false, // resume_requested — fresh launch
                     headroom_enabled,
                 )
                 .await?;
@@ -376,6 +388,9 @@ impl InteractiveSessionManager {
             agent_type,
             headroom_enabled,
             rtk_enabled,
+            skip_permissions: Some(skip_permissions),
+            model,
+            codex_model,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -504,6 +519,7 @@ impl InteractiveSessionManager {
                     codex_model,
                     agent_type,
                     None,
+                    false, // resume_requested — fresh launch
                     headroom_enabled,
                 )
                 .await?;
@@ -542,6 +558,9 @@ impl InteractiveSessionManager {
             agent_type,
             headroom_enabled,
             rtk_enabled,
+            skip_permissions: Some(skip_permissions),
+            model,
+            codex_model,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -1249,11 +1268,92 @@ impl InteractiveSessionManager {
         Ok(())
     }
 
+    /// Assemble the provider CLI argv for a launch or resume. Pure (no I/O) so
+    /// the resume/model/skip-permissions branching is unit-testable.
+    ///
+    /// `has_history` is `true` when the caller found a prior conversation for
+    /// this cwd (gates Claude's `--continue`). See `start_cli_in_tmux` for the
+    /// full resume semantics.
+    pub(crate) fn build_cli_cmd_parts(
+        provider: &crate::config::CliProvider,
+        agent_type: SessionAgentType,
+        skip_permissions: bool,
+        claude_model: Option<ClaudeModel>,
+        codex_model: Option<CodexModel>,
+        resume_requested: bool,
+        has_history: bool,
+    ) -> Vec<String> {
+        let mut cmd_parts = vec![provider.command().to_string()];
+
+        // Codex resume is a subcommand form — `codex resume --last [opts]` — so
+        // the `resume --last` tokens must come right after the binary, BEFORE
+        // any --model / skip-permissions flags (codex accepts those as options
+        // of the `resume` subcommand). `--last` continues the most recent
+        // session in the current cwd (worktrees are 1-session-per-dir, so that
+        // is "the last session"). Codex owns the cwd filtering.
+        let codex_resume = agent_type == SessionAgentType::Codex && resume_requested;
+        if codex_resume {
+            cmd_parts.push("resume".to_string());
+            cmd_parts.push("--last".to_string());
+        }
+
+        // Add `--model` only when the provider's model resolves to a
+        // non-`SystemDefault` variant. SystemDefault → no flag (CLI default
+        // applies). Gemini / Copilot: never emit `--model` today. For codex
+        // resume these land after `resume --last`, a valid option position.
+        match agent_type {
+            SessionAgentType::Claude => {
+                if let Some(m) = claude_model {
+                    if let Some(id) = m.cli_value() {
+                        cmd_parts.push("--model".to_string());
+                        cmd_parts.push(id.to_string());
+                    }
+                }
+            }
+            SessionAgentType::Codex => {
+                if let Some(m) = codex_model {
+                    if let Some(id) = m.cli_value() {
+                        cmd_parts.push("--model".to_string());
+                        cmd_parts.push(id.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Add skip permissions flag if specified (provider-specific). Valid
+        // both for a fresh launch and after `codex resume --last`.
+        if skip_permissions {
+            cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+
+        // Claude resume: `--continue` re-opens the most recent conversation in
+        // the cwd (worktrees are 1-session-per-dir → "the last session"). Only
+        // add it when the caller found prior history, as `claude --continue`
+        // with no history errors and leaves a dead pane. NOTE: the current
+        // claude CLI `--resume` takes a *session id*, not a path, so the old
+        // `--resume <jsonl path>` silently fell through to the interactive
+        // picker instead of resuming — `--continue` is the correct "resume
+        // latest" for a cwd-scoped session.
+        if agent_type == SessionAgentType::Claude && resume_requested && has_history {
+            cmd_parts.push("--continue".to_string());
+        }
+
+        cmd_parts
+    }
+
     /// Start AI CLI in the tmux session (Claude, Codex, or Gemini)
     ///
-    /// `resume_transcript`, when supplied for `agent_type == Claude`, appends
-    /// `--resume <path>` to the CLI invocation. Mirrors `spawn-agent-lib.sh:508`.
-    /// Ignored for other agent types since they have no equivalent flag yet.
+    /// **Resume** (`resume_requested == true`): re-open the most recent
+    /// conversation in the session's cwd instead of starting fresh. Worktrees
+    /// are 1-session-per-dir, so "most recent in cwd" == "the last session".
+    ///   * Claude: emits `--continue`, but only when `resume_transcript.is_some()`
+    ///     (the caller found prior history) — `claude --continue` with no
+    ///     history errors and leaves a dead pane. `resume_transcript`'s *path*
+    ///     is no longer used as an argument (the current claude CLI `--resume`
+    ///     wants a session id, not a path); its presence is the history guard.
+    ///   * Codex: emits the `resume --last` subcommand form.
+    ///   * Gemini / Copilot: no resume flag yet — always start fresh.
     ///
     /// **Model flag emission (2026-05 refresh):**
     ///   * Claude: `--model <id>` only when `claude_model` is a non-default
@@ -1270,6 +1370,7 @@ impl InteractiveSessionManager {
         codex_model: Option<CodexModel>,
         agent_type: SessionAgentType,
         resume_transcript: Option<PathBuf>,
+        resume_requested: bool,
         headroom_enabled: bool,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
@@ -1328,53 +1429,18 @@ impl InteractiveSessionManager {
         // direct rather than a dead-port URL.
         let env_setup = Self::build_env_setup_for_provider(agent_type, headroom_active);
 
-        // Build the CLI command with appropriate flags
-        let mut cmd_parts = vec![provider.command().to_string()];
-
-        // Add `--model` only when the provider's model resolves to a
-        // non-`SystemDefault` variant. SystemDefault → no flag (CLI default
-        // applies). Gemini / Copilot: never emit `--model` today.
-        match agent_type {
-            SessionAgentType::Claude => {
-                if let Some(m) = claude_model {
-                    if let Some(id) = m.cli_value() {
-                        cmd_parts.push("--model".to_string());
-                        cmd_parts.push(id.to_string());
-                    }
-                }
-            }
-            SessionAgentType::Codex => {
-                if let Some(m) = codex_model {
-                    if let Some(id) = m.cli_value() {
-                        cmd_parts.push("--model".to_string());
-                        cmd_parts.push(id.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Add skip permissions flag if specified (provider-specific)
-        if skip_permissions {
-            cmd_parts.push(provider.skip_permissions_flag().to_string());
-        }
-
-        // Resume only supported by Claude today; other CLIs simply start fresh.
-        if agent_type == SessionAgentType::Claude {
-            if let Some(path) = resume_transcript.as_ref() {
-                cmd_parts.push("--resume".to_string());
-                cmd_parts.push(
-                    path.to_str()
-                        .ok_or_else(|| {
-                            InteractiveSessionError::Tmux(format!(
-                                "Resume transcript path is not valid UTF-8: {:?}",
-                                path
-                            ))
-                        })?
-                        .to_string(),
-                );
-            }
-        }
+        // Build the CLI command with appropriate flags. Pure assembly lives in
+        // `build_cli_cmd_parts` (unit-tested); `resume_transcript.is_some()` is
+        // the "has prior history" guard for Claude's `--continue`.
+        let cmd_parts = Self::build_cli_cmd_parts(
+            &provider,
+            agent_type,
+            skip_permissions,
+            claude_model,
+            codex_model,
+            resume_requested,
+            resume_transcript.is_some(),
+        );
 
         let cli_cmd = cmd_parts.join(" ");
         let full_cmd = format!("{}{}", env_setup, cli_cmd);
@@ -1849,6 +1915,9 @@ mod tests {
             agent_type: SessionAgentType::Claude,
             headroom_enabled: true,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         });
         store.save().expect("save");
 
@@ -1946,5 +2015,190 @@ mod tests {
             after, garbage,
             "unparseable settings must be left untouched"
         );
+    }
+
+    // ---- build_cli_cmd_parts: launch/resume argv assembly ------------------
+
+    use crate::config::CliProvider;
+    use crate::models::{ClaudeModel, CodexModel, SessionAgentType};
+
+    fn parts(
+        provider: CliProvider,
+        agent: SessionAgentType,
+        skip: bool,
+        claude_model: Option<ClaudeModel>,
+        codex_model: Option<CodexModel>,
+        resume: bool,
+        has_history: bool,
+    ) -> Vec<String> {
+        InteractiveSessionManager::build_cli_cmd_parts(
+            &provider,
+            agent,
+            skip,
+            claude_model,
+            codex_model,
+            resume,
+            has_history,
+        )
+    }
+
+    #[test]
+    fn claude_fresh_launch_has_no_continue() {
+        let p = parts(
+            CliProvider::Claude,
+            SessionAgentType::Claude,
+            true,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(p, vec!["claude", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn claude_resume_with_history_appends_continue() {
+        let p = parts(
+            CliProvider::Claude,
+            SessionAgentType::Claude,
+            true,
+            None,
+            None,
+            true,
+            true,
+        );
+        assert_eq!(
+            p,
+            vec!["claude", "--dangerously-skip-permissions", "--continue"]
+        );
+    }
+
+    #[test]
+    fn claude_resume_without_history_omits_continue() {
+        // `claude --continue` with no prior conversation errors and leaves a
+        // dead pane — the has_history guard must suppress it.
+        let p = parts(
+            CliProvider::Claude,
+            SessionAgentType::Claude,
+            true,
+            None,
+            None,
+            true,
+            false,
+        );
+        assert_eq!(p, vec!["claude", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn claude_non_yolo_resume_has_continue_but_no_skip_flag() {
+        let p = parts(
+            CliProvider::Claude,
+            SessionAgentType::Claude,
+            false,
+            None,
+            None,
+            true,
+            true,
+        );
+        assert_eq!(p, vec!["claude", "--continue"]);
+    }
+
+    #[test]
+    fn claude_resume_with_model_order() {
+        let p = parts(
+            CliProvider::Claude,
+            SessionAgentType::Claude,
+            true,
+            Some(ClaudeModel::Opus),
+            None,
+            true,
+            true,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "claude",
+                "--model",
+                "claude-opus-4-8",
+                "--dangerously-skip-permissions",
+                "--continue",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_resume_is_subcommand_before_flags() {
+        // `resume --last` must come right after the binary, before flags.
+        let p = parts(
+            CliProvider::Codex,
+            SessionAgentType::Codex,
+            true,
+            None,
+            None,
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "codex",
+                "resume",
+                "--last",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_resume_with_model_lands_after_subcommand() {
+        let p = parts(
+            CliProvider::Codex,
+            SessionAgentType::Codex,
+            true,
+            None,
+            Some(CodexModel::Gpt55),
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "codex",
+                "resume",
+                "--last",
+                "--model",
+                "gpt-5.5",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_fresh_launch_has_no_resume_subcommand() {
+        let p = parts(
+            CliProvider::Codex,
+            SessionAgentType::Codex,
+            true,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(p, vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]);
+    }
+
+    #[test]
+    fn copilot_resume_starts_fresh_no_continue_no_last() {
+        // Copilot has no resume wiring yet — resume_requested is a no-op.
+        let p = parts(
+            CliProvider::Copilot,
+            SessionAgentType::Copilot,
+            true,
+            None,
+            None,
+            true,
+            true,
+        );
+        assert_eq!(p, vec!["copilot", "--yolo"]);
     }
 }

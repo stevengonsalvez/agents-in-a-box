@@ -819,6 +819,9 @@ impl SessionRecoveryState {
             agent_type,
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let mut store = SessionStore::load();

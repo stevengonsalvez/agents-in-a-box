@@ -5421,12 +5421,14 @@ impl AppState {
         let mut session = Session::new_with_options(
             metadata.workspace_name.clone(),
             metadata.worktree_path.to_string_lossy().to_string(),
-            false, // skip_permissions — unknown when offline; safe default
+            // Recover the created-with yolo flag; None (legacy metadata) → yolo.
+            metadata.skip_permissions.unwrap_or(true),
             SessionMode::Interactive,
             None,
             metadata.agent_type,
-            None,
+            metadata.model,
         );
+        session.codex_model = metadata.codex_model;
         session.id = metadata.session_id;
         session.tmux_session_name = Some(metadata.tmux_session_name.clone());
         session.status = SessionStatus::Stopped;
@@ -8882,14 +8884,17 @@ impl AppState {
         let store = SessionStore::load();
         let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
-        // Pull skip_permissions, model, codex_model from the in-memory Session
-        // if available. Both per-agent model fields default to `None` (which
-        // is treated identically to `Some(SystemDefault)` at the CLI emission
-        // site — `--model` is omitted, CLI default applies).
-        let (skip_permissions, model, codex_model) = self
-            .find_session(session_id)
-            .map(|s| (s.skip_permissions, s.model, s.codex_model))
-            .unwrap_or((false, None, None));
+        // Recover the exact launch settings the session was CREATED with from
+        // persisted metadata (authoritative — survives stop + full TUI restart,
+        // unlike the in-memory Session which is rebuilt with defaults once a
+        // session goes Stopped). `skip_permissions` is `Option`: `None` (legacy
+        // metadata predating the field) → default to yolo
+        // (`--dangerously-skip-permissions`), per the "default dangerously-skip"
+        // requirement. `Some(v)` preserves the value the session was started with.
+        let (skip_permissions, model, codex_model) = metadata
+            .as_ref()
+            .map(|m| (m.skip_permissions.unwrap_or(true), m.model, m.codex_model))
+            .unwrap_or((true, None, None));
 
         // Capture audit context before any fallible step so we can record both
         // success and failure with the same fields.
@@ -8953,6 +8958,7 @@ impl AppState {
                     codex_model,
                     metadata.agent_type,
                     transcript.clone(),
+                    true, // resume_requested — Enter/r on a Stopped session
                     metadata.headroom_enabled,
                 )
                 .await?;
