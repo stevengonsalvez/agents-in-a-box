@@ -83,15 +83,38 @@ pub fn staged_plugin() -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// The staged plugin root (`<workspace-root>/dist/plugins`), discovered from the
-/// test binary location.
+/// The staged plugin root (`<workspace-root>/dist/plugins`).
 ///
-/// `build-plugins.sh` stages into `ainb-tui/dist/plugins/<id>/<id>` (the
-/// workspace root, NOT under `target/`). From the test binary at
-/// `<workspace-root>/target/<profile>/deps/<bin>` that is three levels up + `dist/plugins`.
+/// `build-plugins.sh` stages into `ainb-tui/dist/plugins/<id>/<id>` — a path
+/// relative to the *repo workspace root* (`cd "$(dirname "$0")/.."`), NOT under
+/// any `target/` dir. So the anchor MUST be the repo, not the build output dir.
+///
+/// Primary anchor: `CARGO_MANIFEST_DIR` (compile-time; `<root>/crates/
+/// ainb-hangar-daemon`). Its grandparent is the `ainb-tui` workspace root that
+/// holds `dist/`. This is stable regardless of `CARGO_TARGET_DIR`.
+///
+/// Why not the test-binary location: under a shared/overridden `CARGO_TARGET_DIR`
+/// (e.g. `~/.cache/ccc-shared-target`), `current_exe().parent×3` is that cache
+/// dir and its parent is `~/.cache` — so the old logic resolved
+/// `~/.cache/dist/plugins`, a path `build-plugins.sh` never writes to. The
+/// tripwire then silently loaded whatever ancient binary happened to sit there
+/// (a stale plugin with the pre-fix default hooks), passing or failing on dead
+/// code instead of the freshly staged plugin. The exe-derived path is kept only
+/// as a fallback for layouts where the repo-relative dist is absent.
 pub fn plugin_root() -> Option<PathBuf> {
+    // Primary: repo-relative dist, anchored on the compile-time manifest dir so
+    // it always points at the tree `build-plugins.sh` stages into.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // <root>/crates/ainb-hangar-daemon
+    if let Some(root) = manifest_dir.parent().and_then(Path::parent) {
+        // crates → ainb-tui workspace root
+        let p = root.join("dist").join("plugins");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Fallback: the historical build-output-relative path, for layouts that stage
+    // beside `target/` rather than in the repo.
     let exe = std::env::current_exe().ok()?;
-    // .../target/<profile>/deps/<bin> → up to the dir holding `target/`.
     let target_dir = exe.parent()?.parent()?.parent()?; // deps → profile → target
     let workspace_root = target_dir.parent()?; // target → workspace root
     let p = workspace_root.join("dist").join("plugins");
