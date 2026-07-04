@@ -344,6 +344,9 @@ async fn card_create_assigns_profile_then_run_enqueues() {
                 "column_id": todo_id,
                 "title": "Ship the boards",
                 "assignee_profile": "claude-agent",
+                // F2/F4: a card carries a repo (required to launch) + a chosen agent.
+                "repo_ref": "scratch",
+                "agent": "codex",
             }),
         )
         .await;
@@ -380,6 +383,16 @@ async fn card_create_assigns_profile_then_run_enqueues() {
     assert_eq!(row.2.as_deref(), Some(issue_id.as_str()));
     assert_eq!(row.3, "queued", "the run task starts queued for the claim loop");
 
+    // F2/F4: the card's repo + chosen agent flowed onto the dispatched task.
+    let parity: (Option<String>, String) =
+        sqlx::query_as("SELECT repo_ref, agent_kind FROM agent_task_queue WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("the run task carries the card's repo + agent");
+    assert_eq!(parity.0.as_deref(), Some("scratch"), "the card's repo flowed onto the task");
+    assert_eq!(parity.1, "codex", "the card's chosen agent flowed onto the task");
+
     // A card whose profile never resolves still runs — the workspace agent is the
     // fallback so a card is never a dead end.
     let orphan = c
@@ -391,6 +404,7 @@ async fn card_create_assigns_profile_then_run_enqueues() {
                 "column_id": todo_id,
                 "title": "No such profile",
                 "assignee_profile": "ghost-profile",
+                "repo_ref": "scratch",
             }),
         )
         .await;
@@ -465,6 +479,193 @@ async fn card_create_assigns_profile_then_run_enqueues() {
         .await
         .unwrap();
     assert_eq!(before, after, "a rejected card-create must not strand an orphan issue");
+}
+
+/// A shared helper: create a board + one Todo column, returning `(board_id,
+/// column_id)`.
+async fn board_with_todo(c: &mut Client, name: &str) -> (String, String) {
+    let created = c
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": name }),
+        )
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
+        .await;
+    let col_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (board_id, col_id)
+}
+
+/// Create a card and return its issue id.
+async fn create_card(c: &mut Client, board_id: &str, col_id: &str, body: serde_json::Value) -> String {
+    let mut params = serde_json::json!({
+        "workspace_id": WS_SLUG,
+        "board_id": board_id,
+        "column_id": col_id,
+    });
+    let map = params.as_object_mut().unwrap();
+    for (k, v) in body.as_object().unwrap() {
+        map.insert(k.clone(), v.clone());
+    }
+    let resp = c.call(methods::HANGAR_BOARD_CARD_CREATE, params).await;
+    assert!(resp["error"].is_null(), "card_create must ack: {resp}");
+    // The just-created card is the last one in the column.
+    let cards = only_board(&resp)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let want = body["title"].as_str().unwrap();
+    cards.iter().find(|c| c["title"] == want).unwrap()["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// F2 (repo REQUIRED): a card created without a repo cannot be launched — the
+/// run is refused (pointing at the scratch repo) rather than dispatching a
+/// "random" task. Adding the repo afterwards makes it runnable.
+#[tokio::test]
+async fn card_run_requires_a_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let (board_id, col_id) = board_with_todo(&mut c, "Repo Gate").await;
+    // A card with NO repo.
+    let issue_id = create_card(
+        &mut c,
+        &board_id,
+        &col_id,
+        serde_json::json!({ "title": "No repo yet" }),
+    )
+    .await;
+
+    let refused = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
+        )
+        .await;
+    assert!(
+        !refused["error"].is_null(),
+        "a card with no repo must refuse to launch (F2): {refused}"
+    );
+    assert!(
+        refused["error"]["message"].as_str().unwrap().contains("repo"),
+        "the refusal must name the missing repo: {refused}"
+    );
+
+    // A run-time repo override makes the same card launchable.
+    let ok = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless", "repo_ref": "scratch" }),
+        )
+        .await;
+    assert!(ok["error"].is_null(), "a repo override makes the card runnable (F2): {ok}");
+}
+
+/// F8: copilot is picker-visible but its runner is not wired — a dispatch on it
+/// is refused with a clear error rather than stranding the task.
+#[tokio::test]
+async fn card_run_rejects_copilot_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let (board_id, col_id) = board_with_todo(&mut c, "Copilot Gate").await;
+    let issue_id = create_card(
+        &mut c,
+        &board_id,
+        &col_id,
+        serde_json::json!({ "title": "Copilot please", "repo_ref": "scratch", "agent": "copilot" }),
+    )
+    .await;
+
+    let refused = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
+        )
+        .await;
+    assert!(!refused["error"].is_null(), "copilot dispatch must be refused (F8): {refused}");
+    let msg = refused["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("copilot") && msg.contains("F8"), "the refusal names copilot + F8: {refused}");
+}
+
+/// F4 cascade: a card with a repo but NO chosen agent resolves the run's agent
+/// from the workspace default (when set) rather than the hard `claude` default.
+#[tokio::test]
+async fn card_run_resolves_agent_via_cascade() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // Set the workspace-level default agent to codex (no last-used / board / global).
+    sqlx::query("UPDATE workspace SET default_agent = 'codex' WHERE slug = ?")
+        .bind(WS_SLUG)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let (board_id, col_id) = board_with_todo(&mut c, "Cascade").await;
+    let issue_id = create_card(
+        &mut c,
+        &board_id,
+        &col_id,
+        serde_json::json!({ "title": "Cascade me", "repo_ref": "scratch" }),
+    )
+    .await;
+
+    let run = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
+        )
+        .await;
+    assert!(run["error"].is_null(), "card_run must ack: {run}");
+    let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
+    let agent_kind: String = sqlx::query_scalar("SELECT agent_kind FROM agent_task_queue WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(agent_kind, "codex", "cascade resolved the workspace default (F4)");
+
+    // The run also recorded codex as the last-used agent (top of the cascade).
+    let last_used: Option<String> =
+        sqlx::query_scalar("SELECT value FROM daemon_config WHERE key = 'card_agent.last_used'")
+            .fetch_optional(store.pool())
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(last_used.as_deref(), Some("codex"), "last-used agent recorded (F4)");
+}
+
+/// F3: `hangar/repo_list` answers with a well-formed roster array (no error).
+/// Content depends on the host's favorites/cache, so this asserts the wire
+/// shape + method registration, not specific repos.
+#[tokio::test]
+async fn repo_list_answers_with_a_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c.call(methods::HANGAR_REPO_LIST, serde_json::json!({})).await;
+    assert!(resp["error"].is_null(), "repo_list must ack: {resp}");
+    assert!(resp["result"]["repos"].is_array(), "repo_list returns a repos array: {resp}");
 }
 
 /// Board mutations are workspace-scoped: a sibling tenant cannot see the board,

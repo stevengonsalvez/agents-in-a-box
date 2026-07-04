@@ -684,6 +684,7 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
         methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
+        methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -2232,6 +2233,21 @@ async fn handle_board_card_create(
     )
     .await
     .map_err(|e| board_repo_err(&e))?;
+
+    // F2/F3/F4: persist the card's repo + chosen agent onto the durable card
+    // (the issue) so a later run / rerun / reload provisions the right worktree
+    // and provider. Both are optional at create — the run enforces "repo
+    // required" (F2) and resolves the agent via the F4 cascade when unset. An
+    // unrecognised agent token is dropped (cascade decides), never a reject.
+    let repo_ref = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent = params.agent.as_deref().and_then(ainb_hangar_core::agent_kind::AgentKind::parse);
+    if repo_ref.is_some() || agent.is_some() {
+        ainb_hangar_store::repo::card_parity::CardParityRepo::set_issue_repo_agent(
+            pool, &issue_id, repo_ref, agent,
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
+    }
     boards_list_value(pool, &ws).await
 }
 
@@ -2283,16 +2299,54 @@ async fn handle_board_card_run(
         .filter(|i| i.workspace_id == ws.as_str())
         .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
 
-    // Resolve the run's agent: the issue's assignee agent (D16) when it is an
-    // in-workspace agent, else the workspace's agent — so a card whose profile
-    // never resolved still runs rather than dead-ending.
+    use ainb_hangar_core::agent_kind::AgentKind;
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+    // The card's persisted repo + agent (set at create, spec F2/F4).
+    let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .unwrap_or((None, None));
+
+    // F2 (repo REQUIRED): the run's repo is the run-time override, else the card's
+    // persisted repo. A card with NO repo cannot launch — refuse rather than
+    // silently running a "random" task, pointing the caller at the scratch repo.
+    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let repo_ref = run_override
+        .map(str::to_string)
+        .or(card_repo)
+        .ok_or_else(|| {
+            invalid_params(
+                "a repo is required to run this card — pick one, or use the scratch repo",
+            )
+        })?;
+
+    // F4 (agent cascade): the run-time agent override, else the card's chosen
+    // agent, else the F4 cascade (last-used → board → workspace → global →
+    // claude). F8: copilot is picker-visible but its runner is not wired yet — a
+    // dispatch on it is refused with a clear error rather than stranding the task.
+    let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
+    let agent_kind = match agent_override.or(card_agent) {
+        Some(k) => k,
+        None => CardParityRepo::resolve_agent_cascade(pool, &ws, Some(&params.board_id))
+            .await
+            .map_err(|e| store_err(&e))?,
+    };
+    if !agent_kind.is_dispatchable() {
+        return Err(invalid_params(&format!(
+            "the {agent_kind} provider is not yet wired for dispatch (F8) — pick claude or codex",
+        )));
+    }
+
+    // Resolve the run's assignee agent (D16 profile axis, distinct from the
+    // provider-kind above): the issue's assignee agent when in-workspace, else the
+    // workspace's agent — so a card whose profile never resolved still runs.
     let agent = resolve_run_agent(pool, &ws, issue.assignee.as_ref()).await?;
 
-    // Enqueue the task and stamp its launch mode in ONE transaction so the claim
-    // loop can never claim it between the insert and the mode write (the runner
-    // branches on `mode` at dispatch). `NewTask` carries only the enqueue columns;
-    // `mode` defaults to `headless` in the schema, so only an interactive launch
-    // needs the follow-up UPDATE — a headless run leaves the row at its default.
+    // Enqueue the task and stamp its launch mode + the card's repo + resolved
+    // agent-kind in ONE transaction, so the claim loop can never claim it between
+    // the insert and the dispatch-field writes (the runner branches on `mode`,
+    // provisions the worktree from `repo_ref`, and routes on `agent_kind`).
     let task_id = SystemIdGen.new_ulid();
     let mut tx = pool.begin().await.map_err(|e| store_err(&e))?;
     TaskRepo::insert_in_tx(
@@ -2318,7 +2372,16 @@ async fn handle_board_card_run(
             .await
             .map_err(|e| store_err(&e))?;
     }
+    CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
+        .await
+        .map_err(|e| store_err(&e))?;
     tx.commit().await.map_err(|e| store_err(&e))?;
+
+    // F4: record the just-run agent as the last-used default so the next overlay
+    // pre-selects it (best-effort — never fail a launched run on a config write).
+    if let Err(e) = CardParityRepo::set_last_used_agent(pool, agent_kind).await {
+        tracing::warn!(error = %e, "card_run: last-used agent write failed");
+    }
 
     to_value(&ainb_hangar_proto::snapshots::BoardCardRunResult {
         task_id,
@@ -2326,6 +2389,36 @@ async fn handle_board_card_run(
         runtime_id: agent.runtime_id,
         mode: mode.to_string(),
     })
+}
+
+/// `hangar/repo_list` (spec F3): the card-create `@` autocomplete roster.
+///
+/// Reads New Session's FavoritesStore (`~/.agents-in-a-box/favorites.yaml`) +
+/// RepositoryCache scan cache (`~/.agents-in-a-box/cache/repositories.json`) AS-IS
+/// via the fleet-core roster reader — favorites first (★, most-recent-first),
+/// then scanned repos in cache order, deduped. NEVER triggers a scan. Host-scoped
+/// (the roster is not workspace-partitioned); a cold / first-run install yields an
+/// empty roster. Reads the REAL user home (`dirs::home_dir()`, honouring `$HOME`),
+/// NOT the `$AINB_HANGAR_HOME` override — favorites/cache live under `~` regardless
+/// of where the daemon's db is redirected.
+fn handle_repo_list(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    // Params are `{}`; tolerate (and ignore) any body a caller sends.
+    let _ = req;
+    let Some(ainb_dir) = dirs::home_dir().map(|h| h.join(".agents-in-a-box")) else {
+        // No resolvable home → an empty roster (the picker still offers scratch).
+        return to_value(&ainb_hangar_proto::snapshots::RepoListResult { repos: Vec::new() });
+    };
+    let repos = ainb_fleet_core::repo_roster::read_roster(&ainb_dir)
+        .into_iter()
+        .map(|e| ainb_hangar_proto::snapshots::RepoWireRow {
+            name: e.name,
+            path: e.path,
+            remote: e.remote,
+            is_favorite: e.is_favorite,
+            last_used_ms: e.last_used_ms,
+        })
+        .collect();
+    to_value(&ainb_hangar_proto::snapshots::RepoListResult { repos })
 }
 
 /// Fetch board `board_id` in `ws`, or an `INVALID_PARAMS` rejection when no such
