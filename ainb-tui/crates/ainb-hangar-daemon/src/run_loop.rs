@@ -71,13 +71,14 @@ const TAIL_LINES: usize = 200;
 ///
 /// It names the hangar daemon as the owning orchestrator so the lifecycle hook
 /// (`ainb fleet atc hook`) resolves fleet membership and forwards the session's
-/// AskUserQuestion / lifecycle events into the attention pipeline — the fix for a
-/// daemon-spawned run showing "0 need you" while its picker is open (INV-3 / D11).
-/// A stable constant, not a per-task id: the spawner is the one daemon, and the
-/// attention ingest scopes hook rows host-wide regardless, so a finer key buys
-/// nothing. Completions the hook routes to `inbox/hangar-daemon.jsonl` are the
-/// daemon's own (the daemon detects completion via the run outcome, not the
-/// inbox); draining/sweeping that inbox is a follow-up, not part of visibility.
+/// AskUserQuestion / lifecycle events into the attention pipeline — the fix for
+/// a daemon-spawned run showing "0 need you" while its picker is open (INV-3 /
+/// D11). A stable constant, not a per-task id: the spawner is the one daemon,
+/// and the attention ingest scopes hook rows host-wide regardless, so a finer
+/// key buys nothing. Completions the hook routes to `inbox/hangar-daemon.jsonl`
+/// are the daemon's own (the daemon detects completion via the run outcome, not
+/// the inbox), so that inbox is pure exhaust — [`crate::inbox_sweep`] caps it
+/// on the sweeper tick (y0f) so it never grows without bound.
 const HANGAR_PARENT_SESSION: &str = "hangar-daemon";
 
 /// Resolved daemon configuration (identity + tunables).
@@ -283,6 +284,13 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
                 if let Err(e) = sweep_stale_running(&pool, &clock, &cfg).await {
                     tracing::error!(error = %e, kind = "running", "sweeper pass failed");
                 }
+                // y0f: cap the daemon's OWN parent inbox on the same tick. The
+                // hook routes every daemon-spawned run's completion there, but the
+                // daemon detects completion via the run outcome — so the file is
+                // pure exhaust that would grow forever. The cap is blocking file
+                // IO (an fs2 advisory lock + atomic rewrite), so it runs on the
+                // blocking pool; a fault is logged, never fatal.
+                cap_parent_inbox().await;
             }
         });
     }
@@ -302,24 +310,47 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
     });
 }
 
+/// Cap the daemon's own parent completion inbox to its most-recent-N records
+/// (y0f), on the blocking pool since it takes an `fs2` advisory lock + rewrites
+/// a file. Best-effort: a missing home / file is a no-op, an IO fault or a join
+/// error is logged and swallowed — inbox hygiene must never down a sweeper.
+async fn cap_parent_inbox() {
+    match tokio::task::spawn_blocking(|| {
+        crate::inbox_sweep::sweep_parent_inbox(crate::inbox_sweep::KEEP_LAST)
+    })
+    .await
+    {
+        Ok(Ok(report)) if report.evicted() > 0 => {
+            tracing::info!(
+                evicted = report.evicted(),
+                kept = report.kept,
+                "hangar-daemon inbox capped"
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "hangar-daemon inbox cap failed"),
+        Err(e) => tracing::warn!(error = %e, "hangar-daemon inbox cap task join failed"),
+    }
+}
+
 /// Spawn the periodic workspace-GC sweeper as a background task (e38.22).
 ///
 /// On every `interval` tick it walks the live workspace tree under `home`
 /// (`{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/`) via
 /// [`sweep_workspaces_gc`], reclaiming each orphaned per-task dir — no
 /// `.gc_meta.json` marker AND mtime older than the 72h grace relative to the
-/// injected clock's `now_ms()` — while leaving every live (marked) dir and every
-/// young orphan in place. This is the scheduled driver the bead is about: the
-/// orphan-scan code existed but nothing ticked it, so leaked dirs accumulated
-/// forever.
+/// injected clock's `now_ms()` — while leaving every live (marked) dir and
+/// every young orphan in place. This is the scheduled driver the bead is about:
+/// the orphan-scan code existed but nothing ticked it, so leaked dirs
+/// accumulated forever.
 ///
 /// The `clock` is injected so the 72h grace comparison is deterministic under
 /// test (production passes [`SystemClock`]). Each pass is independent and
-/// idempotent (a missing tree is a no-op, an already-removed dir is success), so
-/// a missed or overlapping tick is harmless. Returns the task's [`JoinHandle`]
-/// so a caller (the integration test, a future supervisor) can stop it; the
-/// production daemon drops it and relies on process exit to tear the task down,
-/// mirroring [`spawn_sweepers`].
+/// idempotent (a missing tree is a no-op, an already-removed dir is success),
+/// so a missed or overlapping tick is harmless. Returns the task's
+/// [`JoinHandle`] so a caller (the integration test, a future supervisor) can
+/// stop it; the production daemon drops it and relies on process exit to tear
+/// the task down, mirroring [`spawn_sweepers`].
 #[must_use]
 pub fn spawn_gc_sweeper(
     home: PathBuf,

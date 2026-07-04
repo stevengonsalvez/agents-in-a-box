@@ -94,6 +94,10 @@ pub mod health_stats;
 /// the `inbox_entry` table (migration 0021). This is the take-effect seam that
 /// makes the inbox a real aggregate instead of a schema with no writer.
 pub mod inbox_aggregator;
+/// y0f: periodic cap of the daemon's own parent completion inbox
+/// (`inbox/hangar-daemon.jsonl`) — pure exhaust the daemon never drains, bounded
+/// to its most-recent-N records on the sweeper tick. See [`inbox_sweep`].
+pub(crate) mod inbox_sweep;
 /// Dispatch-time materialisation of an agent's skills into its per-task env
 /// (P6.4).
 ///
