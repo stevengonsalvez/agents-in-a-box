@@ -163,8 +163,9 @@ pub enum BoardsAction {
         /// The new auto-move value.
         auto_move: bool,
     },
-    /// Create a card (issue) from the typed title + picked assignee profile and
-    /// place it in a column (`c`) — `hangar/board_card_create` (D8, D16).
+    /// Create a card (issue) from the typed title + picked repo + agent + assignee
+    /// profile and place it in a column (`c`) — `hangar/board_card_create`
+    /// (spec F1-F4, D16).
     CardCreate {
         /// The board to add the card to.
         board_id: String,
@@ -172,6 +173,10 @@ pub enum BoardsAction {
         column_id: String,
         /// The new issue's title.
         title: String,
+        /// The picked repo (an absolute checkout path or `scratch`) — REQUIRED (F2).
+        repo_ref: String,
+        /// The picked provider agent wire token (`claude`/`codex`/`copilot`, F4).
+        agent: String,
         /// The picked assignee profile slug, or `None` (unassigned).
         assignee_profile: Option<String>,
     },
@@ -490,6 +495,19 @@ impl ScreenStates {
     /// offers, from the cached `profile/list` (ccc / D16).
     pub fn set_boards_profiles(&mut self, profiles: Vec<String>) {
         self.boards.set_profiles(profiles);
+    }
+
+    /// Inject the `@`-autocomplete repo roster the Boards card-create picker offers
+    /// (spec F3), from the cached `hangar/repo_list` (favorites-first + recency
+    /// order preserved; the reducer prepends `scratch` always).
+    pub fn set_boards_repos(&mut self, repos: Vec<super::boards::RepoOption>) {
+        self.boards.set_repos(repos);
+    }
+
+    /// Inject the agent chip the Boards card-create picker pre-selects (spec F4
+    /// cascade).
+    pub const fn set_boards_default_agent(&mut self, agent: super::boards::AgentChip) {
+        self.boards.set_default_agent(agent);
     }
 
     /// Mark the Boards fetch as failed so the render shows the error rather than
@@ -1321,11 +1339,15 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             board_id,
             column_id,
             title,
+            repo_ref,
+            agent,
             assignee_profile,
         } => Some(BoardsAction::CardCreate {
             board_id,
             column_id,
             title,
+            repo_ref,
+            agent: agent.wire().to_string(),
             assignee_profile,
         }),
         BoardsIntent::RunCard {

@@ -162,6 +162,115 @@ impl RunMode {
     const ALL: [Self; 2] = [Self::Headless, Self::Interactive];
 }
 
+/// A provider agent the card-create overlay offers (spec F1/F4).
+///
+/// The three provider kinds the picker shows. `copilot` is SELECTABLE (F8) — the
+/// choice is persisted at create — but a *run* on it is refused by the daemon
+/// until its runner lands; the F8 gate fires at dispatch, not here. Defaults to
+/// [`AgentChip::Claude`], the terminal F4 cascade fallback, so a card created
+/// without touching the chips still routes to a dispatchable provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentChip {
+    /// The `claude` provider (the default / cascade fallback).
+    #[default]
+    Claude,
+    /// The `codex` provider.
+    Codex,
+    /// The `copilot` provider — picker-visible, dispatch-gated (F8).
+    Copilot,
+}
+
+impl AgentChip {
+    /// The `agent` wire token the card params carry (spec F1/F4).
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
+        }
+    }
+
+    /// The chip's picker label (copilot flags its F8 dispatch gate).
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot (dispatch gated — F8)",
+        }
+    }
+
+    /// The chips in picker order (claude first — the cascade's safe default).
+    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Copilot];
+
+    /// The chip at `idx`, clamped to [`AgentChip::Claude`].
+    fn at(idx: usize) -> Self {
+        Self::ALL.get(idx).copied().unwrap_or(Self::Claude)
+    }
+
+    /// This chip's index in [`AgentChip::ALL`] (the picker cursor it pre-selects).
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|a| *a == self).unwrap_or(0)
+    }
+}
+
+/// One pickable repo in the card-create `@` dropdown (spec F2/F3).
+///
+/// Its display `label` and the `repo_ref` a pick persists — an absolute checkout
+/// path, or the literal `scratch`. The glue builds the roster from
+/// `hangar/repo_list` (favorites pinned first + recency, then scanned); the
+/// reducer prepends [`RepoOption::scratch`] so scratch is ALWAYS the first,
+/// guaranteed-launchable choice (F2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoOption {
+    /// The display label (a favorite's alias / a scanned repo's name / `scratch`).
+    pub label: String,
+    /// The value persisted on the card: an absolute checkout path, or `scratch`.
+    pub repo_ref: String,
+    /// Whether this is a ★ favorite (rendered with a star, pinned ahead of scans).
+    pub is_favorite: bool,
+}
+
+impl RepoOption {
+    /// The always-first `scratch` option (F2): the guaranteed launchable repo the
+    /// picker points a repo-less user at.
+    #[must_use]
+    pub fn scratch() -> Self {
+        Self { label: "scratch".to_string(), repo_ref: "scratch".to_string(), is_favorite: false }
+    }
+}
+
+/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first
+/// (ALWAYS, the F2 guaranteed repo), then the injected roster
+/// (favorites-first + recency order preserved) fuzzy-filtered on `query`.
+fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
+    let mut out = vec![RepoOption::scratch()];
+    out.extend(
+        repos
+            .iter()
+            .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
+            .cloned(),
+    );
+    out
+}
+
+/// Case-insensitive subsequence match: every char of `query`, in order, appears
+/// somewhere in `candidate`. An empty query matches everything (the F3 fuzzy
+/// filter — the daemon's roster order is preserved by the caller).
+fn fuzzy_matches(candidate: &str, query: &str) -> bool {
+    let mut q = query.chars().flat_map(char::to_lowercase).peekable();
+    for c in candidate.chars().flat_map(char::to_lowercase) {
+        match q.peek() {
+            Some(&qc) if qc == c => {
+                q.next();
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    q.peek().is_none()
+}
+
 /// An interactive text/pick overlay open over the Boards body.
 ///
 /// The card-level keys open one of these instead of firing a bare intent, so a
@@ -172,20 +281,54 @@ impl RunMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardsOverlay {
     /// Typing a new card's title on `column_id` (`c`, stage 1). Enter advances to
-    /// the profile pick.
+    /// the repo pick (F1 overlay order: title → repo → agent → profile → column).
     CardTitle {
         /// The column the new card lands in.
         column_id: String,
         /// The title typed so far.
         title: String,
     },
-    /// Picking the new card's assignee profile (`c`, stage 2 — the title is set).
-    /// Enter commits the create; the cursor indexes the injected profile roster.
+    /// Picking the new card's repo (`c`, stage 2 — spec F2/F3). `@` opens the
+    /// fuzzy dropdown over the injected roster (scratch always first); Enter on a
+    /// highlighted repo advances to the agent chips. Repo is REQUIRED — Enter with
+    /// the dropdown closed re-opens it (the pointer at scratch) rather than
+    /// advancing repo-less.
+    CardRepo {
+        /// The column the new card lands in.
+        column_id: String,
+        /// The title typed in stage 1.
+        title: String,
+        /// The post-`@` fuzzy query (empty until `@` opens the dropdown).
+        query: String,
+        /// The dropdown state: `Some(cursor)` while open (after `@`), `None` while
+        /// the field is closed (the prompt is shown).
+        dropdown: Option<usize>,
+    },
+    /// Picking the new card's provider agent chip (`c`, stage 3 — spec F1/F4).
+    /// ↑↓ move over claude / codex / copilot; Enter advances to the profile pick.
+    /// Pre-selected to the cascade default. Copilot is selectable (F8).
+    CardAgent {
+        /// The column the new card lands in.
+        column_id: String,
+        /// The title typed in stage 1.
+        title: String,
+        /// The repo picked in stage 2.
+        repo_ref: String,
+        /// The highlighted chip (index into [`AgentChip::ALL`]).
+        cursor: usize,
+    },
+    /// Picking the new card's assignee profile (`c`, stage 4 — the title / repo /
+    /// agent are set). Enter commits the create; the cursor indexes the injected
+    /// profile roster.
     CardProfile {
         /// The column the new card lands in.
         column_id: String,
         /// The title typed in stage 1.
         title: String,
+        /// The repo picked in stage 2.
+        repo_ref: String,
+        /// The agent chosen in stage 3.
+        agent: AgentChip,
         /// The highlighted profile (index into the roster).
         cursor: usize,
     },
@@ -242,6 +385,13 @@ pub struct BoardsState {
     /// The assignee-profile roster (slugs) the card-create picker offers, injected
     /// by the glue from its cached `profile/list` and preserved across refreshes.
     profiles: Vec<String>,
+    /// The `@`-autocomplete repo roster (spec F3), injected by the glue from
+    /// `hangar/repo_list` (favorites-first + recency order preserved) and kept
+    /// across refreshes. `scratch` is NOT in here — the reducer prepends it always.
+    repos: Vec<RepoOption>,
+    /// The agent chip the card-create picker pre-selects (spec F4 cascade),
+    /// injected by the glue (defaults to [`AgentChip::Claude`]).
+    default_agent: AgentChip,
     /// The open interactive overlay (card create / column rename / run mode), or
     /// `None`. Preserved across a `boards_list` refresh so a background refresh
     /// while typing never drops the input.
@@ -284,6 +434,8 @@ impl BoardsState {
             focused_card: 0,
             status: BoardsStatus::Loaded,
             profiles: Vec::new(),
+            repos: Vec::new(),
+            default_agent: AgentChip::default(),
             overlay: None,
             note: None,
         };
@@ -316,6 +468,30 @@ impl BoardsState {
         &self.profiles
     }
 
+    /// Inject the `@`-autocomplete repo roster (spec F3), favorites-first order
+    /// preserved. Called by the glue whenever `hangar/repo_list` refreshes; kept
+    /// out of the wire snapshot so the pure reducer never depends on IO.
+    pub fn set_repos(&mut self, repos: Vec<RepoOption>) {
+        self.repos = repos;
+    }
+
+    /// The injected repo roster (without the always-prepended `scratch`).
+    #[must_use]
+    pub fn repos(&self) -> &[RepoOption] {
+        &self.repos
+    }
+
+    /// Inject the agent chip the card-create picker pre-selects (spec F4 cascade).
+    pub const fn set_default_agent(&mut self, agent: AgentChip) {
+        self.default_agent = agent;
+    }
+
+    /// The cascade-default agent chip the card-create picker pre-selects.
+    #[must_use]
+    pub const fn default_agent(&self) -> AgentChip {
+        self.default_agent
+    }
+
     /// The open interactive overlay, if any (the render paints it).
     #[must_use]
     pub const fn overlay(&self) -> Option<&BoardsOverlay> {
@@ -326,9 +502,11 @@ impl BoardsState {
     /// snapshot state, so a `boards_list` refresh never drops the injected roster
     /// or an in-flight input. The clamp re-runs so the carried focus stays valid.
     pub fn adopt_context(&mut self, prev: &Self) {
-        self.profiles = prev.profiles.clone();
-        self.overlay = prev.overlay.clone();
-        self.note = prev.note.clone();
+        self.profiles.clone_from(&prev.profiles);
+        self.repos.clone_from(&prev.repos);
+        self.default_agent = prev.default_agent;
+        self.overlay.clone_from(&prev.overlay);
+        self.note.clone_from(&prev.note);
         self.clamp();
     }
 
@@ -493,8 +671,9 @@ pub enum BoardsIntent {
         /// The column to delete.
         column_id: String,
     },
-    /// Create a new card (issue) from the typed title + picked assignee profile
-    /// and place it in the focused column (`hangar/board_card_create`).
+    /// Create a new card (issue) from the typed title + picked repo + agent +
+    /// assignee profile and place it in the focused column
+    /// (`hangar/board_card_create`, spec F1-F4).
     CreateCard {
         /// The board to add the card to.
         board_id: String,
@@ -502,6 +681,10 @@ pub enum BoardsIntent {
         column_id: String,
         /// The new issue's title (non-blank).
         title: String,
+        /// The picked repo (an absolute checkout path or `scratch`) — REQUIRED (F2).
+        repo_ref: String,
+        /// The picked provider agent (spec F1/F4).
+        agent: AgentChip,
         /// The picked assignee profile slug, or `None` (unassigned).
         assignee_profile: Option<String>,
     },
@@ -594,11 +777,25 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
         BoardsOverlay::CardTitle { column_id, title } => {
             card_title_key(state, &column_id, title, key)
         }
+        BoardsOverlay::CardRepo {
+            column_id,
+            title,
+            query,
+            dropdown,
+        } => card_repo_key(state, &column_id, title, query, dropdown, key),
+        BoardsOverlay::CardAgent {
+            column_id,
+            title,
+            repo_ref,
+            cursor,
+        } => card_agent_key(state, &column_id, title, repo_ref, cursor, key),
         BoardsOverlay::CardProfile {
             column_id,
             title,
+            repo_ref,
+            agent,
             cursor,
-        } => card_profile_key(state, &column_id, title, cursor, key),
+        } => card_profile_key(state, &column_id, title, repo_ref, agent, cursor, key),
         BoardsOverlay::ColumnRename { column_id, name } => {
             column_rename_key(state, &column_id, name, key)
         }
@@ -649,12 +846,14 @@ fn card_title_key(
                     },
                 );
             }
+            // Advance to the repo pick (F1 order: title → repo → agent → profile).
             set_overlay(
                 state,
-                BoardsOverlay::CardProfile {
+                BoardsOverlay::CardRepo {
                     column_id: column_id.to_string(),
                     title,
-                    cursor: 0,
+                    query: String::new(),
+                    dropdown: None,
                 },
             )
         }
@@ -668,41 +867,170 @@ fn card_title_key(
     }
 }
 
-/// Stage 2 of card create: pick the assignee profile. Up/Down move the cursor
-/// over the injected roster; Enter commits the create (with `None` when the
-/// roster is empty); Esc steps back to the title input.
-fn card_profile_key(
+/// Stage 2 of card create: pick the repo (spec F2/F3). `@` opens the fuzzy
+/// dropdown over the injected roster (scratch always first); ↑↓ move the
+/// highlight, Enter picks it and advances to the agent chips. Repo is REQUIRED —
+/// Enter with the dropdown closed re-opens it (the pointer at scratch) rather
+/// than advancing repo-less. Esc closes an open dropdown, else steps back to the
+/// title input.
+fn card_repo_key(
     state: &BoardsState,
     column_id: &str,
     title: String,
-    cursor: usize,
+    mut query: String,
+    dropdown: Option<usize>,
     key: BoardsKey,
 ) -> BoardsReduction {
-    let n = state.profiles.len();
-    match key {
-        BoardsKey::Esc => set_overlay(
+    let reopen = |state: &BoardsState, query: String, dropdown: Option<usize>| {
+        set_overlay(
+            state,
+            BoardsOverlay::CardRepo {
+                column_id: column_id.to_string(),
+                title: title.clone(),
+                query,
+                dropdown,
+            },
+        )
+    };
+    match (dropdown, key) {
+        // Field closed: `@` opens the dropdown; Esc steps back to the title.
+        (None, BoardsKey::Esc) => set_overlay(
             state,
             BoardsOverlay::CardTitle {
                 column_id: column_id.to_string(),
                 title,
             },
         ),
-        BoardsKey::Up => set_overlay(
+        (None, BoardsKey::Char('@')) => reopen(state, String::new(), Some(0)),
+        // Enter with no repo picked yet re-opens the dropdown (F2: repo REQUIRED,
+        // scratch always first) rather than advancing.
+        (None, BoardsKey::Enter) => reopen(state, String::new(), Some(0)),
+        (None, _) => reopen(state, query, None),
+        // Dropdown open: Esc closes it back to the field.
+        (Some(_), BoardsKey::Esc) => reopen(state, String::new(), None),
+        (Some(_), BoardsKey::Char(c)) => {
+            // A second `@` is a literal filter char, not a re-open. Any edit resets
+            // the highlight to the top of the (re-filtered) candidate list.
+            query.push(c);
+            reopen(state, query, Some(0))
+        }
+        (Some(_), BoardsKey::Backspace) => {
+            query.pop();
+            reopen(state, query, Some(0))
+        }
+        (Some(cursor), BoardsKey::Up) => {
+            reopen(state, query, Some(cursor.saturating_sub(1)))
+        }
+        (Some(cursor), BoardsKey::Down) => {
+            let n = repo_candidates(state.repos(), &query).len();
+            reopen(state, query, Some((cursor + 1).min(n.saturating_sub(1))))
+        }
+        (Some(cursor), BoardsKey::Enter) => {
+            let candidates = repo_candidates(state.repos(), &query);
+            let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
+                // Impossible (scratch is always present), but never advance repo-less.
+                return reopen(state, query, Some(0));
+            };
+            set_overlay(
+                state,
+                BoardsOverlay::CardAgent {
+                    column_id: column_id.to_string(),
+                    title,
+                    repo_ref: picked.repo_ref.clone(),
+                    cursor: state.default_agent().index(),
+                },
+            )
+        }
+    }
+}
+
+/// Stage 3 of card create: pick the provider agent chip (spec F1/F4). ↑↓ move
+/// over claude / codex / copilot; Enter advances to the profile pick. Copilot is
+/// selectable (F8 — the dispatch gate fires at run). Esc steps back to the repo
+/// pick.
+fn card_agent_key(
+    state: &BoardsState,
+    column_id: &str,
+    title: String,
+    repo_ref: String,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let reopen = |state: &BoardsState, cursor: usize| {
+        set_overlay(
+            state,
+            BoardsOverlay::CardAgent {
+                column_id: column_id.to_string(),
+                title: title.clone(),
+                repo_ref: repo_ref.clone(),
+                cursor,
+            },
+        )
+    };
+    match key {
+        BoardsKey::Esc => set_overlay(
+            state,
+            BoardsOverlay::CardRepo {
+                column_id: column_id.to_string(),
+                title,
+                query: String::new(),
+                dropdown: None,
+            },
+        ),
+        BoardsKey::Up => reopen(state, cursor.saturating_sub(1)),
+        BoardsKey::Down => reopen(state, (cursor + 1).min(AgentChip::ALL.len() - 1)),
+        BoardsKey::Enter => set_overlay(
             state,
             BoardsOverlay::CardProfile {
                 column_id: column_id.to_string(),
                 title,
-                cursor: cursor.saturating_sub(1),
+                repo_ref,
+                agent: AgentChip::at(cursor),
+                cursor: 0,
             },
         ),
-        BoardsKey::Down => set_overlay(
+        BoardsKey::Char(_) | BoardsKey::Backspace => reopen(state, cursor),
+    }
+}
+
+/// Stage 4 of card create: pick the assignee profile. Up/Down move the cursor
+/// over the injected roster; Enter commits the create carrying the title + repo +
+/// agent + profile (with a `None` profile when the roster is empty); Esc steps
+/// back to the agent chips.
+fn card_profile_key(
+    state: &BoardsState,
+    column_id: &str,
+    title: String,
+    repo_ref: String,
+    agent: AgentChip,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let n = state.profiles.len();
+    let reopen = |state: &BoardsState, cursor: usize| {
+        set_overlay(
             state,
             BoardsOverlay::CardProfile {
                 column_id: column_id.to_string(),
+                title: title.clone(),
+                repo_ref: repo_ref.clone(),
+                agent,
+                cursor,
+            },
+        )
+    };
+    match key {
+        BoardsKey::Esc => set_overlay(
+            state,
+            BoardsOverlay::CardAgent {
+                column_id: column_id.to_string(),
                 title,
-                cursor: (cursor + 1).min(n.saturating_sub(1)),
+                repo_ref,
+                cursor: agent.index(),
             },
         ),
+        BoardsKey::Up => reopen(state, cursor.saturating_sub(1)),
+        BoardsKey::Down => reopen(state, (cursor + 1).min(n.saturating_sub(1))),
         BoardsKey::Enter => {
             let Some(board) = state.focused_board() else {
                 return close_overlay(state);
@@ -716,18 +1044,13 @@ fn card_profile_key(
                     board_id: board.id.clone(),
                     column_id: column_id.to_string(),
                     title,
+                    repo_ref,
+                    agent,
                     assignee_profile,
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
-            state,
-            BoardsOverlay::CardProfile {
-                column_id: column_id.to_string(),
-                title,
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace => reopen(state, cursor),
     }
 }
 
@@ -1060,7 +1383,7 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
     // typed title / picked profile / run mode is visible (and greppable by the
     // e2e tripwire) without a full modal layer.
     if let Some(overlay) = state.overlay() {
-        render_overlay(buf, area_w, body_top, overlay, state.profiles());
+        render_overlay(buf, area_w, body_top, overlay, state.profiles(), state.repos());
     }
 }
 
@@ -1073,13 +1396,33 @@ fn render_overlay(
     row: u16,
     overlay: &BoardsOverlay,
     profiles: &[String],
+    repos: &[RepoOption],
 ) {
     let value_row = row.saturating_add(1);
     match overlay {
         BoardsOverlay::CardTitle { title, .. } => {
-            put_str(buf, 0, row, "New card title (Enter → profile, Esc cancel):", GOLD, area_w);
+            put_str(buf, 0, row, "New card title (Enter → repo, Esc cancel):", GOLD, area_w);
             let shown = format!("> {title}\u{2588}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
+        }
+        BoardsOverlay::CardRepo { title, query, dropdown, .. } => {
+            render_card_repo(buf, area_w, row, value_row, title, query, *dropdown, repos);
+        }
+        BoardsOverlay::CardAgent { title, cursor, .. } => {
+            let prompt = format!("Agent for \"{title}\" (↑↓ pick, Enter → profile):");
+            put_str(buf, 0, row, &prompt, GOLD, area_w);
+            let mut x = 0u16;
+            for (i, chip) in AgentChip::ALL.iter().enumerate() {
+                let sel = i == *cursor;
+                let colour = if sel { GREEN } else { MUTED };
+                let marker = if sel { "▶ " } else { "  " };
+                x = put_str(buf, x, value_row, marker, colour, area_w);
+                x = put_str(buf, x, value_row, chip.label(), colour, area_w);
+                x = put_str(buf, x, value_row, "   ", MUTED, area_w);
+                if x >= area_w {
+                    break;
+                }
+            }
         }
         BoardsOverlay::CardProfile { title, cursor, .. } => {
             let prompt = format!("Assignee profile for \"{title}\" (↑↓ pick, Enter run-ready):");
@@ -1122,6 +1465,54 @@ fn render_overlay(
                     break;
                 }
             }
+        }
+    }
+}
+
+/// Render the card-create repo stage (spec F2/F3): a prompt line plus either the
+/// closed-field hint (type `@` to search) or the open `@` dropdown — scratch
+/// always first (★ for favorites), the injected roster fuzzy-filtered on `query`,
+/// the highlighted candidate in green. Text-only so a tripwire can assert the
+/// label + the picked value on an 80-col pane.
+fn render_card_repo(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    value_row: u16,
+    title: &str,
+    query: &str,
+    dropdown: Option<usize>,
+    repos: &[RepoOption],
+) {
+    let prompt = format!("Repo for \"{title}\" (@ to search, Enter pick — REQUIRED):");
+    put_str(buf, 0, row, &prompt, GOLD, area_w);
+    let Some(cursor) = dropdown else {
+        // Field closed: point at scratch (the always-available F2 fallback).
+        put_str(
+            buf,
+            0,
+            value_row,
+            "> type @ to pick a repo (scratch always available)",
+            MUTED,
+            area_w,
+        );
+        return;
+    };
+    let candidates = repo_candidates(repos, query);
+    let mut x = put_str(buf, 0, value_row, &format!("@{query} "), GREEN, area_w);
+    for (i, repo) in candidates.iter().enumerate() {
+        let sel = i == cursor;
+        let colour = if sel { GREEN } else { MUTED };
+        let open = if sel { "[" } else { " " };
+        let close = if sel { "]" } else { " " };
+        let star = if repo.is_favorite { "★" } else { "" };
+        x = put_str(buf, x, value_row, open, colour, area_w);
+        x = put_str(buf, x, value_row, star, colour, area_w);
+        x = put_str(buf, x, value_row, &repo.label, colour, area_w);
+        x = put_str(buf, x, value_row, close, colour, area_w);
+        x = put_str(buf, x, value_row, " ", MUTED, area_w);
+        if x >= area_w {
+            break;
         }
     }
 }
@@ -1338,31 +1729,59 @@ mod tests {
         );
     }
 
-    /// `c` opens the title input; typing + Enter advances to the profile pick;
-    /// Enter on a picked profile raises CreateCard carrying the title + slug.
-    #[test]
-    fn add_card_types_title_picks_profile_and_commits() {
-        let mut state = BoardsState::from_snapshot(&one_board());
-        state.set_profiles(vec!["claude-agent".into(), "codex-agent".into()]);
-
-        // Open the title input on the focused (Todo) column.
-        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
-        assert!(matches!(
-            s.overlay(),
-            Some(BoardsOverlay::CardTitle { column_id, .. }) if column_id == "c1"
-        ));
-        // Type "Wire cards".
-        let mut s = s;
-        for ch in "Wire cards".chars() {
+    /// Type a title char-by-char, then drive the overlay to the given `key`.
+    fn typed_card(state: &BoardsState, title: &str) -> BoardsState {
+        let mut s = reduce_boards(state, BoardsEvent::AddCard).state;
+        for ch in title.chars() {
             s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
         }
-        // Enter → profile pick.
+        s
+    }
+
+    /// A repo roster with one ★ favorite and one scanned repo (favorites-first,
+    /// as the daemon returns them).
+    fn repo_roster() -> Vec<RepoOption> {
+        vec![
+            RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true },
+            RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false },
+        ]
+    }
+
+    /// The full F1-F4 card-create flow: title → repo (`@` → pick a favorite) →
+    /// agent chip → profile → commit, raising CreateCard carrying every field.
+    #[test]
+    fn add_card_full_flow_repo_agent_profile_commits() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_profiles(vec!["claude-agent".into(), "codex-agent".into()]);
+        state.set_repos(repo_roster());
+
+        // Title stage.
+        let s = typed_card(&state, "Wire cards");
+        // Enter → repo stage (field closed until `@`).
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
         assert!(matches!(
             s.overlay(),
-            Some(BoardsOverlay::CardProfile { title, cursor: 0, .. }) if title == "Wire cards"
+            Some(BoardsOverlay::CardRepo { title, dropdown: None, .. }) if title == "Wire cards"
         ));
-        // Down to the second profile, Enter commits.
+        // `@` opens the dropdown (scratch first, then the roster).
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        assert!(matches!(s.overlay(), Some(BoardsOverlay::CardRepo { dropdown: Some(0), .. })));
+        // Down to the ★ favorite (index 1 — scratch is 0), Enter picks it → agent.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardAgent { repo_ref, cursor: 0, .. }) if repo_ref == "/src/ainb"
+        ));
+        // Default agent is claude (cursor 0); Down selects codex, Enter → profile.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardProfile { agent: AgentChip::Codex, repo_ref, .. })
+                if repo_ref == "/src/ainb"
+        ));
+        // Down to the second profile, Enter commits with every picked field.
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
         let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(
@@ -1371,10 +1790,89 @@ mod tests {
                 board_id: "b1".into(),
                 column_id: "c1".into(),
                 title: "Wire cards".into(),
+                repo_ref: "/src/ainb".into(),
+                agent: AgentChip::Codex,
                 assignee_profile: Some("codex-agent".into()),
             })
         );
         assert!(out.state.overlay().is_none());
+    }
+
+    /// Typing after `@` fuzzy-filters the dropdown; Enter picks the highlighted
+    /// scanned repo. Scratch stays index 0 (always first).
+    #[test]
+    fn repo_dropdown_fuzzy_filters_on_query() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_repos(repo_roster());
+        let s = typed_card(&state, "T");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        // Type "wid" — only "widget" (and scratch, always-first) survive the filter.
+        let mut s = s;
+        for ch in "wid".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        // Candidates are [scratch, widget]; Down + Enter picks widget.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardAgent { repo_ref, .. }) if repo_ref == "/src/widget"
+        ));
+    }
+
+    /// F2 repo-REQUIRED: Enter with the dropdown closed re-opens it (pointing at
+    /// scratch) rather than advancing repo-less — no intent, still in the repo
+    /// stage.
+    #[test]
+    fn repo_required_enter_without_pick_reopens_dropdown() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = typed_card(&state, "x");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo (closed)
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None, "repo-less create never commits");
+        assert!(
+            matches!(out.state.overlay(), Some(BoardsOverlay::CardRepo { dropdown: Some(0), .. })),
+            "Enter with no repo re-opens the dropdown at scratch"
+        );
+    }
+
+    /// With no roster injected, the dropdown still offers scratch (always first),
+    /// so a repo-less workspace can always launch.
+    #[test]
+    fn repo_dropdown_offers_scratch_with_no_roster() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let s = typed_card(&state, "x");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        // Enter on the (only) candidate picks scratch → agent stage.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardAgent { repo_ref, .. }) if repo_ref == "scratch"
+        ));
+    }
+
+    /// The agent chips pre-select the injected F4 cascade default; ↑↓ move over
+    /// claude / codex / copilot (copilot is selectable — F8 gates at run).
+    #[test]
+    fn agent_chips_cascade_preselect_and_reach_copilot() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_default_agent(AgentChip::Codex);
+        // Drive to the agent stage via scratch.
+        let s = typed_card(&state, "x");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // scratch → agent
+        // Cascade default codex is pre-selected (index 1).
+        assert!(matches!(s.overlay(), Some(BoardsOverlay::CardAgent { cursor: 1, .. })));
+        // Down to copilot (index 2) — selectable, and Enter advances to profile.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardProfile { agent: AgentChip::Copilot, .. })
+        ));
     }
 
     /// A blank title never advances — Enter holds the title input open.
@@ -1387,13 +1885,16 @@ mod tests {
         assert!(matches!(out.state.overlay(), Some(BoardsOverlay::CardTitle { .. })));
     }
 
-    /// With no profiles cached, a card still commits with an unassigned profile.
+    /// With no profiles cached, a card still commits with an unassigned profile
+    /// (the full flow: title → scratch → default agent → empty profile).
     #[test]
     fn add_card_with_no_profiles_commits_unassigned() {
         let state = BoardsState::from_snapshot(&one_board());
-        let s = reduce_boards(&state, BoardsEvent::AddCard).state;
-        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('x'))).state;
-        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → profile pick
+        let s = typed_card(&state, "x");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // scratch → agent
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // claude → profile
         let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(
             out.intent,
@@ -1401,9 +1902,20 @@ mod tests {
                 board_id: "b1".into(),
                 column_id: "c1".into(),
                 title: "x".into(),
+                repo_ref: "scratch".into(),
+                agent: AgentChip::Claude,
                 assignee_profile: None,
             })
         );
+    }
+
+    /// The fuzzy matcher is a case-insensitive subsequence test.
+    #[test]
+    fn fuzzy_matches_is_case_insensitive_subsequence() {
+        assert!(fuzzy_matches("widget", "wid"));
+        assert!(fuzzy_matches("MyRepo", "mr"), "subsequence, case-insensitive");
+        assert!(fuzzy_matches("anything", ""), "empty query matches all");
+        assert!(!fuzzy_matches("ainb", "xyz"));
     }
 
     /// `r` opens the column-rename input seeded with the current name; edit +

@@ -189,6 +189,10 @@ const PROFILE_UPSERT_REQ_ID: i64 = 42;
 /// JSON-RPC id for a `hangar/board_card_run` request raised by the Boards `Run ▾`
 /// (ccc / D6). The reply carries the routed agent/runtime, surfaced as a note.
 const BOARD_CARD_RUN_REQ_ID: i64 = 43;
+/// JSON-RPC id for the `hangar/repo_list` snapshot request feeding the Boards
+/// card-create `@` autocomplete roster (spec F3). Host-scoped (a repo picker is
+/// not workspace-partitioned), fetched once alongside the other snapshots.
+const REPO_LIST_REQ_ID: i64 = 44;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -683,6 +687,8 @@ impl HangarPlugin {
             // P5: the profile-editor roster + the per-selection detail/previews.
             RpcId::Number(PROFILE_LIST_REQ_ID) => self.apply_profiles(resp),
             RpcId::Number(PROFILE_GET_REQ_ID) => self.apply_profile_detail(resp),
+            // F3: the card-create `@` autocomplete repo roster.
+            RpcId::Number(REPO_LIST_REQ_ID) => self.apply_repos(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition, issue assign, inbox mark-read) answer with
             // the changed row or `{}`; we re-fetch the relevant lists to refresh
@@ -794,6 +800,35 @@ impl HangarPlugin {
                     })
                     .collect();
                 self.screens.set_profiles(rows);
+            }
+        }
+    }
+
+    /// Populate the Boards card-create `@` autocomplete roster from a
+    /// `hangar/repo_list` result (spec F3).
+    ///
+    /// The daemon returns favorites-first + recency order already; the plugin
+    /// preserves it and keeps only rows with a resolvable local checkout path (a
+    /// worktree needs one — a remote-only favorite is not directly provisionable,
+    /// and `scratch` is prepended by the reducer regardless). Each row's `repo_ref`
+    /// is that path; a ★ favorite is flagged for the render.
+    fn apply_repos(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::RepoListResult>(
+                result.clone(),
+            ) {
+                let repos = r
+                    .repos
+                    .into_iter()
+                    .filter_map(|row| {
+                        row.path.map(|path| crate::screen::boards::RepoOption {
+                            label: row.name,
+                            repo_ref: path,
+                            is_favorite: row.is_favorite,
+                        })
+                    })
+                    .collect();
+                self.screens.set_boards_repos(repos);
             }
         }
     }
@@ -1318,6 +1353,13 @@ impl HangarPlugin {
                 daemon_methods::PROFILE_LIST,
                 serde_json::json!({}),
             ),
+            // F3: the card-create `@` autocomplete repo roster is host-scoped (a
+            // repo picker spans workspaces), so it is fetched unscoped once.
+            (
+                REPO_LIST_REQ_ID,
+                daemon_methods::HANGAR_REPO_LIST,
+                serde_json::json!({}),
+            ),
         ];
         for (id, method, params) in requests {
             let Ok(body) = encode_request(id, method, params) else {
@@ -1487,6 +1529,8 @@ impl HangarPlugin {
                 board_id,
                 column_id,
                 title,
+                repo_ref,
+                agent,
                 assignee_profile,
             } => (
                 BOARDS_REQ_ID,
@@ -1497,12 +1541,12 @@ impl HangarPlugin {
                     "column_id": column_id,
                     "title": title,
                     "assignee_profile": assignee_profile,
-                    // F2: a card always carries a repo. Until the overlay grows the
-                    // full `@` repo picker + agent chips, default to the always-
-                    // offered first-class `scratch` repo so a created card is
-                    // launchable (the run refuses a repo-less card) and never
-                    // silently random. The agent is left to the F4 cascade.
-                    "repo_ref": "scratch",
+                    // F1-F4: the card carries the repo + agent the overlay picked
+                    // (repo is REQUIRED, scratch always offered first). The daemon
+                    // persists both on the issue so a run / rerun provisions the
+                    // right worktree and routes to the chosen provider.
+                    "repo_ref": repo_ref,
+                    "agent": agent,
                 }),
             ),
             BoardsAction::ColumnRename {

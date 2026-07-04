@@ -33,8 +33,8 @@ pub use screen::issue_list::{
     IssueListReduction, IssueListState,
 };
 pub use screen::boards::{
-    reduce_boards, render_boards, BoardView, BoardsEvent, BoardsIntent, BoardsReduction,
-    BoardsState, BoardsStatus, CardView, ColumnView,
+    reduce_boards, render_boards, AgentChip, BoardView, BoardsEvent, BoardsIntent, BoardsKey,
+    BoardsOverlay, BoardsReduction, BoardsState, BoardsStatus, CardView, ColumnView, RepoOption,
 };
 pub use screen::kanban::{
     reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,

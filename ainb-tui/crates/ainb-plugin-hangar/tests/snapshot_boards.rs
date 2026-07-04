@@ -12,7 +12,9 @@
 use ainb_hangar_proto::snapshots::{
     BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult,
 };
-use ainb_plugin_hangar::{render_boards, BoardsState, BoardsStatus};
+use ainb_plugin_hangar::{
+    reduce_boards, render_boards, BoardsEvent, BoardsKey, BoardsState, BoardsStatus, RepoOption,
+};
 use ainb_plugin_sdk::WireBuffer;
 
 fn card(issue: &str, title: &str, state: Option<&str>) -> BoardCardWireRow {
@@ -167,5 +169,116 @@ fn render_narrow_board_snapshot() {
     }
     let map = glyph_map(&buf, W);
     assert!(map.contains("Board: Delivery"), "title at narrow width:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+// ---------------------------------------------------------------------------
+// Card-create parity overlay (spec F1-F4): title → repo (`@` autocomplete) →
+// agent chips → profile → column. Driven through the public reducer so each
+// snapshot pins the REAL rendered banner over the board body.
+// ---------------------------------------------------------------------------
+
+/// A repo roster (one ★ favorite + one scanned) for the card-create snapshots.
+fn repo_roster() -> Vec<RepoOption> {
+    vec![
+        RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true },
+        RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false },
+    ]
+}
+
+/// Open the card-create overlay on the focused column of a five-column board,
+/// type `title`, then apply each key in `keys`.
+fn card_overlay(title: &str, keys: &[BoardsKey]) -> BoardsState {
+    let mut state = BoardsState::from_snapshot(&five_column_board());
+    state.set_repos(repo_roster());
+    state.set_profiles(vec!["claude-agent".into(), "codex-agent".into()]);
+    state = reduce_boards(&state, BoardsEvent::AddCard).state;
+    for ch in title.chars() {
+        state = reduce_boards(&state, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+    }
+    for k in keys {
+        state = reduce_boards(&state, BoardsEvent::Key(*k)).state;
+    }
+    state
+}
+
+/// Stage 1 (title): the overlay banner renders the prompt + typed title over the
+/// board body, advancing to the repo pick on Enter.
+#[test]
+fn render_card_title_overlay_snapshot() {
+    let state = card_overlay("Refactor", &[]);
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("New card title"), "title prompt:\n{map}");
+    assert!(map.contains("Refactor"), "typed title:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// Stage 2, field CLOSED (the "empty" repo state): before `@`, the prompt points
+/// the user at scratch (the always-available F2 fallback).
+#[test]
+fn render_card_repo_closed_snapshot() {
+    let state = card_overlay("Refactor", &[BoardsKey::Enter]);
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("Repo for"), "repo prompt:\n{map}");
+    assert!(map.contains("scratch always available"), "closed-field scratch pointer:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// Stage 2, dropdown OPEN (`@`): scratch first, then the roster with the ★
+/// favorite pinned ahead of the scanned repo (spec F3).
+#[test]
+fn render_card_repo_at_open_snapshot() {
+    let state = card_overlay("Refactor", &[BoardsKey::Enter, BoardsKey::Char('@')]);
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("Repo for"), "repo prompt:\n{map}");
+    assert!(map.contains("scratch"), "scratch always first:\n{map}");
+    assert!(map.contains("ainb") && map.contains('★'), "★ favorite in the dropdown:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// Stage 3 (agent chips): claude / codex / copilot, copilot flagged with its F8
+/// dispatch gate; the cascade default (claude) is highlighted.
+#[test]
+fn render_card_agent_chips_snapshot() {
+    // title → repo (`@` → pick scratch at cursor 0) → agent.
+    let state = card_overlay(
+        "Refactor",
+        &[BoardsKey::Enter, BoardsKey::Char('@'), BoardsKey::Enter],
+    );
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains("Agent for"), "agent prompt:\n{map}");
+    assert!(
+        map.contains("claude") && map.contains("codex") && map.contains("copilot"),
+        "three chips:\n{map}"
+    );
+    assert!(map.contains("F8"), "copilot dispatch gate flagged:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// The repo dropdown at narrow width (60 cols) clips rather than overflowing.
+#[test]
+fn render_card_repo_narrow_snapshot() {
+    let state = card_overlay("Refactor", &[BoardsKey::Enter, BoardsKey::Char('@')]);
+    const W: u16 = 60;
+    const H: u16 = 24;
+    let mut buf = WireBuffer::new(W, H);
+    render_boards(&mut buf, W, 0, H, &state);
+    for (coord, _) in &buf.cells {
+        assert!(
+            coord.x < W && coord.y < H,
+            "overlay wrote out-of-bounds cell at ({}, {})",
+            coord.x,
+            coord.y
+        );
+    }
+    let map = glyph_map(&buf, W);
     insta::assert_snapshot!(map);
 }
