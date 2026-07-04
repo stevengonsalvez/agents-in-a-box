@@ -26,4 +26,4 @@
 
 pub mod fleet;
 
-pub use fleet::{discover, enrich_cache, read, send, types};
+pub use fleet::{discover, enrich_cache, read, send, session_registry, types};

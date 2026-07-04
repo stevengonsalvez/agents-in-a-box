@@ -41,6 +41,15 @@ lazy_static = { workspace = true }
 notify = { workspace = true }
 # HTTP client for the (opt-in / fallback) claude-peers broker send path.
 reqwest = { workspace = true }
+# Session-registry (`sessions.json`) identity + the advisory lock guarding its
+# read-modify-write, so the daemon can register a spawned session into the SAME
+# store `ainb list` reads without a crate cycle back into ainb-core.
+uuid = { workspace = true }
+fs2 = { workspace = true }
+
+[dev-dependencies]
+# Isolated tempdir for the session-registry writer's round-trip tests.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

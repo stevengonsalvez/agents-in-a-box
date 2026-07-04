@@ -12,6 +12,7 @@ pub mod discover;
 pub mod enrich_cache;
 pub mod read;
 pub mod send;
+pub mod session_registry;
 pub mod types;
 
 pub use types::{
