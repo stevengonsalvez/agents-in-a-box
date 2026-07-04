@@ -320,10 +320,19 @@ pub async fn run(
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("ainb-hangar-daemon shutting down");
                 // Reap every in-flight interactive tmux session by exact name so
-                // none orphans; the still-running `runs` are then aborted as the
-                // JoinSet drops on return (their headless child processes are
-                // torn down with the daemon process).
+                // no detached pane orphans (aborting its `wait` future below does
+                // NOT kill a detached session).
                 reap_interactive_sessions(&interactive).await;
+                // Then abort + drain every in-flight run. Each headless provider
+                // was spawned with `kill_on_drop(true)`, so dropping its aborted
+                // future SIGKILLs the child instead of leaving it reparented to
+                // init, mutating the workspace unsupervised. `shutdown()` awaits
+                // each aborted task so the kills are delivered BEFORE we return —
+                // it does NOT wait for a provider to finish (abort cancels the
+                // wait), so shutdown stays prompt. The DB rows stay `running` and
+                // are requeued by the next boot's crash-recovery reclaim (and
+                // backstopped by the stale-running sweeper).
+                runs.shutdown().await;
                 return Ok(());
             }
             // Reap a finished run so the JoinSet never accumulates completed
@@ -739,6 +748,15 @@ async fn run_interactive(
     )
     .await?;
 
+    // a54: register the now-live session for the shutdown reap IMMEDIATELY, before
+    // any `.await` — a detached tmux session survives the daemon exiting, and the
+    // JoinSet aborting this future does not kill it. Registering synchronously
+    // right after spawn (no await point in between) closes the spawn→register
+    // window: a Ctrl-C can only cancel this future at an await, so once we reach
+    // the first await below the session is already tracked and shutdown reaps it.
+    // Unregistered on every exit path (the abort branches below, and after `wait`).
+    interactive.register(&session_name);
+
     // Record the session name on the row NOW (the session is live) so the card's
     // `a` attach affordance can reach it before the run finishes. This handle IS
     // the interactive feature: a run whose name cannot be recorded is
@@ -751,12 +769,16 @@ async fn run_interactive(
         }
         Ok(false) => {
             tracing::warn!(task_id = %task.id, "interactive session name update matched no row; aborting");
+            // `abort` kills the session; unregister so shutdown does not re-reap a
+            // dead session and the tracking set stays bounded.
+            interactive.unregister(&session_name);
             return Ok(run
                 .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
                 .await);
         }
         Err(e) => {
             tracing::warn!(task_id = %task.id, error = %e, "interactive session name persist failed; aborting");
+            interactive.unregister(&session_name);
             return Ok(run
                 .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
                 .await);
@@ -780,12 +802,10 @@ async fn run_interactive(
         tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
     }
 
-    // a54: record this live session so a daemon shutdown reaps it by exact name
-    // (the JoinSet aborting the `wait` future below would otherwise orphan the
-    // detached tmux pane). Unregister once `wait` returns — a naturally reaped
-    // session needs no shutdown kill, and the set stays bounded. `wait` errors
-    // only on an unexpected IO fault; unregister on that path too.
-    interactive.register(&session_name);
+    // a54: the session was registered for the shutdown reap right after spawn
+    // (above). Unregister once `wait` returns — a naturally reaped session needs
+    // no shutdown kill, and the set stays bounded. `wait` errors only on an
+    // unexpected IO fault; unregister on that path too.
     let outcome = run.wait().await;
     interactive.unregister(&session_name);
     Ok(outcome?)

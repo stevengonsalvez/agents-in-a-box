@@ -561,6 +561,19 @@ impl Runner {
             // stdout pipe; killing only the parent would leave the reader
             // blocked on EOF until the grandchild exits.
             .process_group(0)
+            // a54 shutdown: SIGKILL the provider if its owning future is dropped
+            // (the daemon's `runs` JoinSet aborts every in-flight run on Ctrl-C).
+            // WITHOUT this, dropping the aborted future leaves the child alive:
+            // it is its own process-group leader (never saw the terminal SIGINT)
+            // and would be reparented to init, mutating the workspace unsupervised
+            // while its DB row is stuck `running` until the next boot's
+            // crash-recovery reclaim. `kill_on_drop` sends SIGKILL to the immediate
+            // provider pid synchronously in `Child::drop`, so the run stops even
+            // when the drop happens during runtime teardown. It does NOT reach a
+            // shelled-out grandchild in the same group (the group leader dying does
+            // not kill members) — that residual is backstopped by the workspace GC
+            // sweeper, same as any orphaned dir.
+            .kill_on_drop(true)
             .spawn()?;
 
         // The child is its own process-group leader (pgid == its pid), captured
