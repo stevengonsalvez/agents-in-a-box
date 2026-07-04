@@ -8986,10 +8986,14 @@ impl AppState {
                         encoded
                     )
                 }
-                (other, _) => format!(
-                    "Resumed (fresh session - {} doesn't support --resume)",
-                    other.name()
-                ),
+                // Codex resumes via `codex resume --last`, Copilot via `--continue` —
+                // both continue the most recent session in the worktree cwd.
+                (SessionAgentType::Codex, _) | (SessionAgentType::Copilot, _) => {
+                    "Resuming most recent session".to_string()
+                }
+                (other, _) => {
+                    format!("Started fresh ({} has no resume support)", other.name())
+                }
             };
             self.add_info_notification(banner);
 
